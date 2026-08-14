@@ -1,6 +1,6 @@
 import { isTauri, system } from '@/lib/tauri-bindings';
+import { STORAGE_PREFIXES } from '@/lib/database/storage-keys';
 
-const STORAGE_PREFIX = 'qor:v1';
 const FALLBACK_INSTANCE_ID = 'browser';
 
 let cachedInstanceId: string | null = null;
@@ -40,11 +40,6 @@ function cacheInstanceId(value: string): string {
   return sanitized;
 }
 
-export function getCachedInstanceId(): string {
-  if (cachedInstanceId) return cachedInstanceId;
-  return cacheInstanceId(readInstanceIdFromWindow() || readInstanceIdFromUrl() || FALLBACK_INSTANCE_ID);
-}
-
 export async function getAppInstanceId(): Promise<string> {
   if (cachedInstanceId) return cachedInstanceId;
   if (!instanceIdPromise) {
@@ -67,7 +62,7 @@ export async function getAppInstanceId(): Promise<string> {
 }
 
 export async function instanceLocalStorageKey(key: string): Promise<string> {
-  return `${STORAGE_PREFIX}:instance:${await getAppInstanceId()}:${key}`;
+  return `${STORAGE_PREFIXES.INSTANCE}:instance:${await getAppInstanceId()}:${key}`;
 }
 
 export async function getInstanceLocalStorageItem(key: string): Promise<string | null> {
@@ -77,4 +72,3 @@ export async function getInstanceLocalStorageItem(key: string): Promise<string |
 export async function setInstanceLocalStorageItem(key: string, value: string): Promise<void> {
   localStorage.setItem(await instanceLocalStorageKey(key), value);
 }
-

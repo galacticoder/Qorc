@@ -3,6 +3,7 @@ import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeEventText } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
+import { generateDefaultAvatar } from '../../lib/utils/avatar-utils';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
@@ -33,53 +34,35 @@ export const UserAvatar = memo(function UserAvatar({
     className = '',
     showFallback = true
 }: UserAvatarProps) {
+    const fallbackAvatarUrl = React.useMemo(() => generateDefaultAvatar(username), [username]);
     const [avatarUrl, setAvatarUrl] = useState<string | null>(() => {
         if (isCurrentUser) {
-            return profilePictureSystem.getOwnAvatar();
+            return profilePictureSystem.getOwnAvatar() || fallbackAvatarUrl;
         } else {
-            return profilePictureSystem.getPeerAvatar(username);
+            return profilePictureSystem.getPeerAvatar(username) || fallbackAvatarUrl;
         }
     });
     const [isLoaded, setIsLoaded] = useState(false);
     const currentUrlRef = React.useRef<string | null>(avatarUrl);
     const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
-    const loadAvatar = useCallback(() => {
-        if (isCurrentUser) {
-            const own = profilePictureSystem.getOwnAvatar();
-            if (own !== currentUrlRef.current) {
-                currentUrlRef.current = own;
-                setAvatarUrl(own);
-                setIsLoaded(false);
-            }
-
-        } else {
-            const peer = profilePictureSystem.getPeerAvatar(username);
-            if (peer !== currentUrlRef.current) {
-                if (peer === null && currentUrlRef.current !== null) {
-                } else {
-                    currentUrlRef.current = peer;
-                    setAvatarUrl(peer);
-                    setIsLoaded(false);
-                }
-            }
+    const applyAvatarUrl = useCallback((nextUrl: string | null) => {
+        if (nextUrl !== currentUrlRef.current) {
+            currentUrlRef.current = nextUrl;
+            setAvatarUrl(nextUrl);
+            setIsLoaded(false);
         }
-    }, [username, isCurrentUser]);
+    }, []);
 
-    const requestPeerAvatar = useCallback(() => {
-        if (isCurrentUser) return;
-        try {
-            const cached = profilePictureSystem.getPeerAvatar(username);
-            const stale = profilePictureSystem.isPeerAvatarStale(username);
-            if (!cached || stale) {
-                void profilePictureSystem.requestPeerAvatar(username);
-            }
-        } catch { }
-    }, [username, isCurrentUser]);
+    const loadAvatar = useCallback(() => {
+        const stored = isCurrentUser
+            ? profilePictureSystem.getOwnAvatar()
+            : profilePictureSystem.getPeerAvatar(username);
+        applyAvatarUrl(stored || fallbackAvatarUrl);
+    }, [username, isCurrentUser, fallbackAvatarUrl, applyAvatarUrl]);
 
     useEffect(() => {
         loadAvatar();
-        requestPeerAvatar();
 
         const handleUpdate = (event: Event) => {
             try {
@@ -107,7 +90,7 @@ export const UserAvatar = memo(function UserAvatar({
                 if (!type) return;
 
                 if (type === 'all') {
-                    setAvatarUrl(profilePictureSystem.getPeerAvatar(username));
+                    applyAvatarUrl(profilePictureSystem.getPeerAvatar(username) || fallbackAvatarUrl);
                 } else if (type === 'single' || type === 'peer') {
                     const updatedUser = sanitizeEventText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
                     if (!updatedUser) return;
@@ -115,6 +98,7 @@ export const UserAvatar = memo(function UserAvatar({
 
                     if (updatedUser === username) {
                         if (notFound) {
+                            applyAvatarUrl(fallbackAvatarUrl);
                         } else {
                             loadAvatar();
                         }
@@ -131,22 +115,7 @@ export const UserAvatar = memo(function UserAvatar({
             window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleUpdate as EventListener);
             window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleUpdate as EventListener);
         };
-    }, [loadAvatar, requestPeerAvatar, username, isCurrentUser]);
-
-    // Periodic refresh for peer avatars
-    useEffect(() => {
-        if (isCurrentUser) return;
-
-        const refreshInterval = setInterval(() => {
-            const isStale = profilePictureSystem.isPeerAvatarStale(username);
-            if (isStale) {
-                loadAvatar();
-                requestPeerAvatar();
-            }
-        }, 30000);
-
-        return () => clearInterval(refreshInterval);
-    }, [username, isCurrentUser, loadAvatar, requestPeerAvatar]);
+    }, [loadAvatar, username, isCurrentUser, fallbackAvatarUrl, applyAvatarUrl]);
 
     const pixelSize = SIZE_MAP[size];
     const skeletonColor = 'var(--color-secondary)';
@@ -172,7 +141,9 @@ export const UserAvatar = memo(function UserAvatar({
                     loading="lazy"
                     onLoad={() => setIsLoaded(true)}
                     onError={() => {
-                        setAvatarUrl(null);
+                        const replacement = avatarUrl === fallbackAvatarUrl ? null : fallbackAvatarUrl;
+                        currentUrlRef.current = replacement;
+                        setAvatarUrl(replacement);
                         setIsLoaded(true);
                     }}
                     draggable={false}
@@ -191,5 +162,3 @@ export const UserAvatar = memo(function UserAvatar({
         </div>
     );
 });
-
-export default UserAvatar;

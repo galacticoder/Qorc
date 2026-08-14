@@ -2,8 +2,8 @@ import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
-import { stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
-import { power } from '../../lib/tauri-bindings';
+import { clearCallMediaState, stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
+import { notifications, power, tray } from '../../lib/tauri-bindings';
 import { toast } from 'sonner';
 
 export interface CallbackRefs {
@@ -26,11 +26,17 @@ export interface CallbackSetters {
 export const setupIncomingCallCallback = (
   service: SecureCallingService,
   refs: CallbackRefs,
-  setters: CallbackSetters
+  setters: CallbackSetters,
+  account: string
 ) => {
   service.onIncomingCall((call) => {
     setters.setCurrentCall({ ...call });
+    if (document.hidden || !document.hasFocus()) {
+      void notifications.show().catch(() => { });
+      void tray.incrementUnread().catch(() => { });
+    }
     refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+      account,
       type: 'incoming',
       peer: call.peer,
       at: Date.now(),
@@ -45,7 +51,8 @@ export const setupIncomingCallCallback = (
 export const setupCallStateChangeCallback = (
   service: SecureCallingService,
   refs: CallbackRefs,
-  setters: CallbackSetters
+  setters: CallbackSetters,
+  account: string
 ) => {
   service.onCallStateChange((call) => {
     const previousType = refs.lastCallTypeRef.current.get(call.id);
@@ -57,6 +64,7 @@ export const setupCallStateChangeCallback = (
     refs.lastCallTypeRef.current.set(call.id, call.type);
 
     const statusDetail = {
+      account,
       peer: call.peer,
       status: call.status,
       type: call.type,
@@ -72,6 +80,7 @@ export const setupCallStateChangeCallback = (
     if (call.status === 'connecting') {
       power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+        account,
         type: 'started',
         peer: call.peer,
         at: Date.now(),
@@ -83,6 +92,7 @@ export const setupCallStateChangeCallback = (
       try { refs.everConnectedRef.current.add(call.id); } catch { }
       power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+        account,
         type: 'connected',
         peer: call.peer,
         at: Date.now(),
@@ -93,7 +103,7 @@ export const setupCallStateChangeCallback = (
     }
 
     if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
-      power.stop(0).catch(() => { });
+      power.stop().catch(() => { });
 
       refs.lastCallTypeRef.current.delete(call.id);
 
@@ -101,6 +111,7 @@ export const setupCallStateChangeCallback = (
         if (!wasConnected) {
           if (call.direction === 'incoming') {
             refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+              account,
               type: 'missed',
               peer: call.peer,
               at: Date.now(),
@@ -110,6 +121,7 @@ export const setupCallStateChangeCallback = (
             });
           } else {
             refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+              account,
               type: 'ended',
               peer: call.peer,
               at: Date.now(),
@@ -122,6 +134,7 @@ export const setupCallStateChangeCallback = (
         } else {
           const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
           refs.eventDebouncer.current.enqueue(EventType.UI_CALL_ENDED, {
+            account,
             peer: call.peer,
             type: call.type,
             startTime: call.startTime,
@@ -129,6 +142,7 @@ export const setupCallStateChangeCallback = (
             durationMs
           });
           refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+            account,
             type: 'ended',
             peer: call.peer,
             at: Date.now(),
@@ -142,6 +156,7 @@ export const setupCallStateChangeCallback = (
 
       if (call.status === 'declined') {
         refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+          account,
           type: 'declined',
           peer: call.peer,
           at: Date.now(),
@@ -153,6 +168,7 @@ export const setupCallStateChangeCallback = (
 
       if (call.status === 'missed') {
         refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+          account,
           type: 'missed',
           peer: call.peer,
           at: Date.now(),
@@ -164,15 +180,7 @@ export const setupCallStateChangeCallback = (
 
       unstable_batchedUpdates(() => {
         setters.setCurrentCall(null);
-        stopMediaStream(refs.localStreamRef.current);
-        stopMediaStream(refs.remoteStreamRef.current);
-        stopMediaStream(refs.remoteScreenStreamRef.current);
-        refs.localStreamRef.current = null;
-        refs.remoteStreamRef.current = null;
-        refs.remoteScreenStreamRef.current = null;
-        setters.setLocalStream(null);
-        setters.setRemoteStream(null);
-        setters.setRemoteScreenStream(null);
+        clearCallMediaState(refs, setters);
       });
       try { refs.everConnectedRef.current.delete(call.id); } catch { }
     } else {
@@ -190,7 +198,8 @@ export const setupStreamCallbacks = (
   setters: CallbackSetters
 ) => {
   service.onLocalStream((stream) => {
-    stopMediaStream(refs.localStreamRef.current);
+    const previous = refs.localStreamRef.current;
+    if (previous && previous !== stream) stopMediaStream(previous);
     unstable_batchedUpdates(() => {
       refs.localStreamRef.current = stream;
       setters.setLocalStream(stream);
@@ -198,7 +207,8 @@ export const setupStreamCallbacks = (
   });
 
   service.onRemoteStream((stream) => {
-    stopMediaStream(refs.remoteStreamRef.current);
+    const previous = refs.remoteStreamRef.current;
+    if (previous && previous !== stream) stopMediaStream(previous);
     unstable_batchedUpdates(() => {
       refs.remoteStreamRef.current = stream;
       setters.setRemoteStream(stream);
@@ -206,7 +216,8 @@ export const setupStreamCallbacks = (
   });
 
   service.onRemoteScreenStream((stream) => {
-    stopMediaStream(refs.remoteScreenStreamRef.current);
+    const previous = refs.remoteScreenStreamRef.current;
+    if (previous && previous !== stream) stopMediaStream(previous);
     unstable_batchedUpdates(() => {
       refs.remoteScreenStreamRef.current = stream;
       setters.setRemoteScreenStream(stream);

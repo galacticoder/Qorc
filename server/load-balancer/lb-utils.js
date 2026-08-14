@@ -19,7 +19,3 @@ export function findInPath(binName) {
     }
     return null;
 }
-
-export async function sleep(ms) {
-    await new Promise((resolve) => setTimeout(resolve, ms));
-}

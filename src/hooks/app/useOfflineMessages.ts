@@ -1,71 +1,63 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { EventType } from '../../lib/types/event-types';
-import { globalSpoolPirQueue } from '../../lib/websocket/global-spool-pir-handler';
+import { keyTransparencyClient } from '../../lib/key-transparency/client';
+import { taggedLaneRetriever } from '../../lib/spool/tagged-lane-retriever';
 
+// Offline retrieval
 interface OfflineMessagesProps {
-  encryptedHandlerRef: React.RefObject<(msg: any) => Promise<void>>;
+  encryptedHandlerRef: React.RefObject<(msg: any) => Promise<boolean>>;
   hybridKeysRef: React.RefObject<any>;
   isReady: boolean;
+  username?: string | null;
 }
 
 export function useOfflineMessages({
   encryptedHandlerRef,
-  hybridKeysRef: _hybridKeysRef,
+  hybridKeysRef,
   isReady,
+  username,
 }: OfflineMessagesProps) {
-  const offlineCallbackSetRef = useRef(false);
   const isReadyRef = useRef(isReady);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     isReadyRef.current = isReady;
   }, [isReady]);
 
   useEffect(() => {
-    if (offlineCallbackSetRef.current) return;
-    offlineCallbackSetRef.current = true;
-
-    try {
-      globalSpoolPirQueue.setIncomingCandidateCallback(async (msg: any) => {
-        if (!isReadyRef.current) {
-          console.warn('[SPOOL] candidate dropped: app not ready');
-          return;
-        }
-        await encryptedHandlerRef.current(msg);
-      });
-    } catch { }
-  }, []);
-
-  useEffect(() => {
-    const startLoop = () => {
-      if (!isReadyRef.current) {
-        console.log('[SPOOL] startLoop skipped: app not ready');
-        try {
-          globalSpoolPirQueue.stopDeliveryLoop();
-        } catch { }
+    const startTaggedLane = () => {
+      if (
+        !username ||
+        !isReadyRef.current ||
+        keyTransparencyClient.isSecurityIncidentActive()
+      ) {
+        try { taggedLaneRetriever.stop(); } catch { }
         return;
       }
-      console.log('[SPOOL] startLoop: (re)arming delivery loop');
       try {
-        globalSpoolPirQueue.stopDeliveryLoop();
-        globalSpoolPirQueue.startDeliveryLoop();
+        taggedLaneRetriever.configure(
+          username,
+          async (msg) => {
+            if (hybridKeysRef.current?.native !== true) return false;
+            return (await encryptedHandlerRef.current(msg)) !== false;
+          }
+        );
+        taggedLaneRetriever.start();
       } catch { }
     };
 
     if (isReady) {
-      startLoop();
+      startTaggedLane();
     } else {
-      try {
-        globalSpoolPirQueue.stopDeliveryLoop();
-      } catch { }
+      try { taggedLaneRetriever.stop(); } catch { }
     }
-    window.addEventListener(EventType.WS_RECONNECTED, startLoop);
-    window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, startLoop);
+    window.addEventListener(EventType.WS_RECONNECTED, startTaggedLane);
+    window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, startTaggedLane);
+    window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, startTaggedLane);
     return () => {
-      try {
-        globalSpoolPirQueue.stopDeliveryLoop();
-      } catch { }
-      window.removeEventListener(EventType.WS_RECONNECTED, startLoop);
-      window.removeEventListener(EventType.PQ_SESSION_ESTABLISHED, startLoop);
+      try { taggedLaneRetriever.stop(); } catch { }
+      window.removeEventListener(EventType.WS_RECONNECTED, startTaggedLane);
+      window.removeEventListener(EventType.PQ_SESSION_ESTABLISHED, startTaggedLane);
+      window.removeEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, startTaggedLane);
     };
-  }, [isReady]);
+  }, [isReady, username, encryptedHandlerRef, hybridKeysRef]);
 }

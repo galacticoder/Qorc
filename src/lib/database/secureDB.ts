@@ -1,75 +1,156 @@
 import { SQLiteKV } from './sqlite-kv';
-import { PostQuantumAEAD } from '../cryptography/aead';
-import { validateFileData, getFilesStorageUsage } from '../utils/database-utils';
+import { blake3 } from '@noble/hashes/blake3.js';
+import { hasValidMessageControlState } from '../messages/message-controls';
+import type { Message } from '../../components/chat/messaging/types';
+import { validateFileData, mergeReceipts } from '../utils/database-utils';
+import { isCanonicalAuthUsername as isCanonicalUsername, sanitizeMessageId } from '../sanitizers';
+import { normalizeKnownUsers } from './known-users';
+import { bytesToHex } from '../utils/byte-utils';
 import { EphemeralConfig,
    EphemeralData,
-   PostQuantumAEADLike,
    StoredMessage,
    StoredUser,
    ConversationMetadata
   } from '../types/database-types';
 import {
    SECURE_DB_MAX_VALUE_SIZE,
+   SECURE_DB_MAX_FILE_SIZE,
    SECURE_DB_MIN_CLEANUP_INTERVAL,
    SECURE_DB_MAX_EPHEMERAL_BATCH,
-   SECURE_DB_EPHEMERAL_PREFIX,
-   SECURE_DB_MAX_TOTAL_FILE_STORAGE
+   HYBRID_ENVELOPE_MAX_AGE_MS,
+   MAX_KNOWN_PEERS,
+  CONVERSATION_SEGMENT_SIZE
  } from '../constants';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { STORAGE_KEYS, STORAGE_PREFIXES, STORAGE_STORES } from './storage-keys';
 
-const FILE_B64_FIELD = '__qfb64';
+export const MAX_CONVERSATION_STORED_MESSAGES = 10_000;
+const MAX_CONVERSATION_INPUT_MESSAGES = MAX_CONVERSATION_STORED_MESSAGES + 500;
+const MAX_CONVERSATION_BATCH_WRITES = 511;
+const MAX_EPHEMERAL_LIST_ITEMS = 500;
+const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const CONVERSATION_METADATA_KEYS = new Set([
+  'firstSegment',
+  'isPinned',
+  'lastMessage',
+  'lastReadTimestamp',
+  'lastSegment',
+  'peerUsername',
+  'pinnedAt',
+]);
 
-function u8ToBase64(u8: Uint8Array): string {
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < u8.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + chunk)));
-  }
-  return btoa(binary);
+const MAX_SEGMENT_INDEX = 2 ** 40;
+const SEGMENT_INDEX_DIGITS = 13;
+
+function isValidTimestamp(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_DATE_TIMESTAMP
+  );
 }
 
-function base64ToU8(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const u8 = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) u8[i] = binary.charCodeAt(i);
-  return u8;
+interface PreparedConversationWrite {
+  peer: string;
+  grantsIncomingCallPermission: boolean;
+  segments: Array<{ index: number; encrypted: Uint8Array; signature: string }>;
+  deletedSegments: number[];
+  firstSegment: number;
+  lastSegment: number;
+  last: StoredMessage;
+  evictedFileIds: string[];
+}
+
+const MAX_CONVERSATION_MUTATION_DELETIONS = 2_048;
+
+function isFileMessage(message: StoredMessage): boolean {
+  return (
+    message.type === 'file' ||
+    message.type === 'file-message' ||
+    typeof message.filename === 'string'
+  );
 }
 
 export class SecureDB {
   private static readonly encoder = new TextEncoder();
-  private static readonly decoder = new TextDecoder();
+  private static readonly decoder = new TextDecoder('utf-8', { fatal: true });
 
   private username: string;
-  private encryptionKey: CryptoKey | null = null;
+  private accountScope: string;
+  private nativeReady = false;
   private ephemeralConfig: EphemeralConfig;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
-  private postQuantumAEAD: PostQuantumAEADLike | null = null;
   private lastCleanup = 0;
+  private disposed = false;
+  private lifecycleGeneration = 0;
+  private cleanupRunning = false;
+  private kvViewPromise: Promise<SQLiteKV> | null = null;
 
-  constructor(username: string, ephemeralConfig?: Partial<EphemeralConfig>) {
-    if (!username || username.length > 255) {
-      throw new Error('Invalid username');
-    }
+  constructor(username: string, accountScope: string, ephemeralConfig?: Partial<EphemeralConfig>) {
+    if (!isCanonicalUsername(username)) throw new Error('Invalid username');
+    if (!/^[a-f0-9]{64}$/.test(accountScope)) throw new Error('Invalid database account scope');
     this.username = username;
-    this.ephemeralConfig = {
+    this.accountScope = accountScope;
+    const config: EphemeralConfig = {
       enabled: true,
       defaultTTL: 24 * 60 * 60 * 1000,
-      maxTTL: 7 * 24 * 60 * 60 * 1000,
+      maxTTL: HYBRID_ENVELOPE_MAX_AGE_MS,
       cleanupInterval: 60 * 60 * 1000,
       ...ephemeralConfig
     };
+    if (
+      typeof config.enabled !== 'boolean' ||
+      !Number.isSafeInteger(config.defaultTTL) || config.defaultTTL <= 0 ||
+      !Number.isSafeInteger(config.maxTTL) || config.maxTTL < config.defaultTTL ||
+      config.maxTTL > MAX_DATE_TIMESTAMP ||
+      !Number.isSafeInteger(config.cleanupInterval) ||
+      config.cleanupInterval < SECURE_DB_MIN_CLEANUP_INTERVAL ||
+      config.cleanupInterval > MAX_TIMER_DELAY_MS
+    ) {
+      throw new Error('Invalid ephemeral database configuration');
+    }
+    this.ephemeralConfig = config;
   }
 
-  private async kv() { return SQLiteKV.forUser(this.username); }
+  private assertCurrentLifecycle(generation: number): void {
+    if (
+      this.disposed ||
+      generation !== this.lifecycleGeneration ||
+      !this.nativeReady
+    ) {
+      throw new Error('Secure database lifecycle changed');
+    }
+  }
+
+  private async kv() {
+    const generation = this.lifecycleGeneration;
+    this.assertCurrentLifecycle(generation);
+    let pending = this.kvViewPromise;
+    if (!pending) {
+      pending = SQLiteKV.forUser(
+        this.accountScope,
+        () => this.assertCurrentLifecycle(generation),
+      );
+      this.kvViewPromise = pending;
+    }
+    try {
+      const view = await pending;
+      this.assertCurrentLifecycle(generation);
+      return view;
+    } catch (error) {
+      if (this.kvViewPromise === pending) this.kvViewPromise = null;
+      throw error;
+    }
+  }
 
   // Initialize database
-  async initializeWithKey(key: CryptoKey): Promise<void> {
+  async initializeNative(): Promise<void> {
     try {
-      const alg = key.algorithm as Partial<AesKeyAlgorithm> | undefined;
-      const name = alg?.name;
-      const length = alg && 'length' in alg ? (alg.length as number | undefined) : undefined;
-      if (name !== 'AES-GCM' && name !== 'AES-CBC') throw new Error('Invalid key algorithm - must be AES');
-      if (length !== 256) throw new Error('Invalid key length - must be 256 bits');
-      this.encryptionKey = key;
+      if (this.disposed) throw new Error('Secure database has been disposed');
+      if (this.nativeReady) return;
+      this.nativeReady = true;
       if (this.ephemeralConfig.enabled) this.startEphemeralCleanup();
     } catch (_error) {
       if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
@@ -78,554 +159,1371 @@ export class SecureDB {
   }
 
   isInitialized(): boolean {
-    return this.encryptionKey !== null;
+    return !this.disposed && this.nativeReady;
   }
 
-  // Encrypt data for storage
-  private async encryptData(data: unknown): Promise<Uint8Array> {
-    if (!this.encryptionKey) {
-      throw new Error('Encryption key not initialized');
+  getAccountScope(): string {
+    return this.accountScope;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.lifecycleGeneration += 1;
+    this.disposed = true;
+    if (this.cleanupInterval !== null) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
     }
+    this.nativeReady = false;
+    this.kvViewPromise = null;
+    this.lastCleanup = 0;
+    this.convSig.clear();
+  }
 
-    const keyBytes = await crypto.subtle.exportKey('raw', this.encryptionKey);
-    const key = new Uint8Array(keyBytes);
+  private storageAad(
+    store: string,
+    key: string,
+    domain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+  ): Uint8Array {
+    const storeBytes = SecureDB.encoder.encode(store);
+    const keyBytes = SecureDB.encoder.encode(key);
+    try {
+      if (
+        !store || !key ||
+        storeBytes.length > 256 || keyBytes.length > 256 ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(store) ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(key)
+      ) {
+        throw new Error('Invalid secure database selector');
+      }
+      return SecureDB.encoder.encode(JSON.stringify([
+        domain,
+        this.username,
+        store,
+        key,
+      ]));
+    } finally {
+      storeBytes.fill(0);
+      keyBytes.fill(0);
+    }
+  }
 
-    const dataBuffer = SecureDB.encoder.encode(JSON.stringify(data));
-    if (dataBuffer.length > SECURE_DB_MAX_VALUE_SIZE) {
+  private async encryptBytes(
+    dataBuffer: Uint8Array,
+    store: string,
+    storageKey: string,
+    aadDomain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+  ): Promise<Uint8Array> {
+    const generation = this.lifecycleGeneration;
+    this.assertCurrentLifecycle(generation);
+    if (dataBuffer.length === 0 || dataBuffer.length > SECURE_DB_MAX_VALUE_SIZE) {
       throw new Error(`Data too large: ${dataBuffer.length} bytes`);
     }
-
-    const PostQuantumAEAD = await this.getPostQuantumAEAD();
-    const aad = SecureDB.encoder.encode(`securedb-aead-v2-${this.username}`);
-
-    let encResult;
-    try {
-      encResult = PostQuantumAEAD.encrypt(dataBuffer, key, aad);
-      if (!encResult || !encResult.nonce || !encResult.ciphertext || !encResult.tag) {
-        throw new Error('Invalid encryption result');
-      }
-    } catch (encryptError) {
-      throw new Error('Failed to encrypt data: ' + encryptError);
-    }
-
-    const aadLengthBytes = new Uint8Array(2);
-    new DataView(aadLengthBytes.buffer).setUint16(
-      0,
-      Math.min(aad.length, 0xffff),
-      false
-    );
-
-    const combined = new Uint8Array(
-      aadLengthBytes.length +
-        aad.length +
-        encResult.nonce.length +
-        encResult.ciphertext.length +
-        encResult.tag.length
-    );
-
-    let offset = 0;
-    combined.set(aadLengthBytes, offset);
-    offset += aadLengthBytes.length;
-
-    combined.set(aad, offset);
-    offset += aad.length;
-
-    combined.set(encResult.nonce, offset);
-    offset += encResult.nonce.length;
-
-    combined.set(encResult.ciphertext, offset);
-    offset += encResult.ciphertext.length;
-
-    combined.set(encResult.tag, offset);
-
-    key.fill(0);
-    return combined;
+    this.storageAad(store, storageKey, aadDomain).fill(0);
+    const prepared = dataBuffer.slice();
+    this.assertCurrentLifecycle(generation);
+    return prepared;
   }
 
-  // Decrypt data from storage
-  private async decryptData(encryptedData: Uint8Array): Promise<unknown> {
-    if (!this.encryptionKey) {
-      throw new Error('Encryption key not initialized');
-    }
-
-    const keyBytes = await crypto.subtle.exportKey('raw', this.encryptionKey);
-    const key = new Uint8Array(keyBytes);
-    const nonceLength = 36;
-    const tagLength = 32;
-    const minLength = nonceLength + tagLength + 1;
-
-    if (encryptedData.length < minLength) {
-      key.fill(0);
-      throw new Error('Encrypted data too short');
-    }
-
-    let offset = 0;
-    let aad: Uint8Array | undefined;
-
-    if (encryptedData.length >= 2) {
-      const view = new DataView(
-        encryptedData.buffer,
-        encryptedData.byteOffset,
-        encryptedData.byteLength
-      );
-      const possibleAadLength = view.getUint16(0, false);
-      const expectedLength = 2 + possibleAadLength + nonceLength + tagLength + 1;
-
-      if (
-        possibleAadLength > 0 &&
-        possibleAadLength < 4096 &&
-        encryptedData.length >= expectedLength
-      ) {
-        offset = 2;
-        aad = encryptedData.slice(offset, offset + possibleAadLength);
-        offset += possibleAadLength;
-      }
-    }
-
-    const remainingLength = encryptedData.length - offset;
-    if (remainingLength < minLength) {
-      key.fill(0);
-      throw new Error('Encrypted data malformed');
-    }
-
-    const nonce = encryptedData.slice(offset, offset + nonceLength);
-    offset += nonceLength;
-    const ciphertext = encryptedData.slice(offset, encryptedData.length - tagLength);
-    const tag = encryptedData.slice(encryptedData.length - tagLength);
-
-    const PostQuantumAEAD = await this.getPostQuantumAEAD();
-
+  // Encrypt JSON data for one exact storage row
+  private async encryptData(data: unknown, store: string, storageKey: string): Promise<Uint8Array> {
+    let dataBuffer: Uint8Array | null = null;
     try {
-      const decrypted = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, aad);
-      key.fill(0);
-      const decoded = SecureDB.decoder.decode(decrypted);
-      return JSON.parse(decoded);
-    } catch (decryptError: any) {
-      key.fill(0);
-      const errorMessage = decryptError?.message || String(decryptError);
+      const serialized = JSON.stringify(data);
+      if (serialized === undefined) throw new Error('Data is not JSON serializable');
+      dataBuffer = SecureDB.encoder.encode(serialized);
+      return await this.encryptBytes(dataBuffer, store, storageKey);
+    } finally {
+      dataBuffer?.fill(0);
+    }
+  }
 
-      if (
-        errorMessage.includes('MAC verification failed') ||
-        /BLAKE3/i.test(errorMessage)
-      )
+  private async decryptBytes(
+    encryptedData: Uint8Array,
+    store: string,
+    storageKey: string,
+    aadDomain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+  ): Promise<Uint8Array> {
+    const generation = this.lifecycleGeneration;
+    this.assertCurrentLifecycle(generation);
+    if (encryptedData.length === 0 || encryptedData.length > SECURE_DB_MAX_VALUE_SIZE) {
+      throw new Error('Native database value size is invalid');
+    }
+    this.storageAad(store, storageKey, aadDomain).fill(0);
+    const plaintext = encryptedData.slice();
+    this.assertCurrentLifecycle(generation);
+    return plaintext;
+  }
 
+  // Decrypt JSON data only in the row for which it was authenticated
+  private async decryptData(
+    encryptedData: Uint8Array,
+    store: string,
+    storageKey: string,
+  ): Promise<unknown> {
+    const generation = this.lifecycleGeneration;
+    let decrypted: Uint8Array | null = null;
+    try {
+      decrypted = await this.decryptBytes(encryptedData, store, storageKey);
+      this.assertCurrentLifecycle(generation);
+      const parsed = JSON.parse(SecureDB.decoder.decode(decrypted));
+      this.assertCurrentLifecycle(generation);
+      return parsed;
+    } catch {
       throw new Error('Failed to decrypt data');
+    } finally {
+      decrypted?.fill(0);
     }
   }
 
-  // Get post-quantum AEAD implementation
-  private async getPostQuantumAEAD(): Promise<PostQuantumAEADLike> {
-    if (!this.postQuantumAEAD) {
-      if (!PostQuantumAEAD) {
-        throw new Error('Encryption module unavailable');
+  private messageOpChain: Promise<unknown> = Promise.resolve();
+  private ephemeralOpChain: Promise<unknown> = Promise.resolve();
+
+  private withMessageLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.messageOpChain.then(fn, fn);
+    this.messageOpChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private withEphemeralLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.ephemeralOpChain.then(fn, fn);
+    this.ephemeralOpChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private convSig = new Map<string, string>();
+
+  private static segmentKey(peer: string, index: number): string {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_SEGMENT_INDEX) {
+      throw new Error('Invalid conversation segment index');
+    }
+    return `${peer}:${String(index).padStart(SEGMENT_INDEX_DIGITS, '0')}`;
+  }
+
+  private static parseSegmentKey(key: string): { peer: string; index: number } | null {
+    const separator = key.indexOf(':');
+    if (separator <= 0) return null;
+    const peer = key.slice(0, separator);
+    const rawIndex = key.slice(separator + 1);
+    if (rawIndex.length !== SEGMENT_INDEX_DIGITS || !/^[0-9]+$/.test(rawIndex)) return null;
+    if (!isCanonicalUsername(peer)) return null;
+    const index = Number(rawIndex);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_SEGMENT_INDEX) return null;
+    return { peer, index };
+  }
+
+  // The conversation partner for a message from this accounts perspective
+  private peerOf(msg: StoredMessage, currentUser: string): string | null {
+    const sender = typeof msg?.sender === 'string' ? msg.sender : '';
+    const recipient = typeof msg?.recipient === 'string' ? msg.recipient : '';
+    if (
+      !isCanonicalUsername(sender) ||
+      !isCanonicalUsername(recipient) ||
+      sender === recipient
+    ) return null;
+    if (sender === currentUser) return recipient;
+    if (recipient === currentUser) return sender;
+    return null;
+  }
+
+  private normalizeConversationMessage(message: StoredMessage, expectedPeer: string): StoredMessage {
+    if (!message || typeof message !== 'object') throw new Error('Invalid stored message');
+    const id = typeof message.id === 'string' ? message.id : '';
+    if (sanitizeMessageId(id) !== id) {
+      throw new Error('Invalid stored message ID');
+    }
+    if (this.peerOf(message, this.username) !== expectedPeer) {
+      throw new Error('Stored message does not belong to its conversation');
+    }
+    const rawTimestamp = (message as { timestamp?: unknown }).timestamp;
+    const timestamp = rawTimestamp instanceof Date ? rawTimestamp.getTime() : rawTimestamp;
+    if (!isValidTimestamp(timestamp)) {
+      throw new Error('Invalid stored message timestamp');
+    }
+    if (
+      message.wireMessageId !== undefined &&
+      sanitizeMessageId(message.wireMessageId) !== message.wireMessageId
+    ) {
+      throw new Error('Invalid stored wire message ID');
+    }
+    if (
+      message.secureContentId !== undefined &&
+      sanitizeMessageId(message.secureContentId) !== message.secureContentId
+    ) {
+      throw new Error('Invalid stored secure content ID');
+    }
+    if (message.replyTo !== undefined) {
+      if (
+        !message.replyTo ||
+        typeof message.replyTo !== 'object' ||
+        sanitizeMessageId(message.replyTo.id) !== message.replyTo.id ||
+        (message.replyTo.secureContentId !== undefined &&
+          sanitizeMessageId(message.replyTo.secureContentId) !== message.replyTo.secureContentId)
+      ) {
+        throw new Error('Invalid stored reply identifiers');
       }
-      this.postQuantumAEAD = PostQuantumAEAD;
     }
-
-    return this.postQuantumAEAD;
+    if (
+      message.isDeliberateUserAction !== undefined &&
+      (
+        message.isDeliberateUserAction !== true ||
+        message.sender !== this.username ||
+        message.recipient !== expectedPeer ||
+        message.isSystemMessage === true ||
+        (message.type !== 'text' && !isFileMessage(message))
+      )
+    ) {
+      throw new Error('Invalid deliberate-contact message provenance');
+    }
+    const isPrivateText = !message.isSystemMessage && !message.isDeleted && !isFileMessage(message);
+    if (
+      isPrivateText &&
+      (message.content !== '' || !message.secureContentId)
+    ) {
+      throw new Error('Private message content must remain native-only');
+    }
+    if (message.replyTo?.content !== undefined && message.replyTo.content !== '') {
+      throw new Error('Private reply content must remain native-only');
+    }
+    if (!hasValidMessageControlState(message as unknown as Message)) {
+      throw new Error('Invalid stored message control state');
+    }
+    return { ...message, timestamp };
   }
 
-  // Decrypt data with yield to not block event loop
-  private async decryptDataWithYield(encryptedData: Uint8Array): Promise<any> {
-    await new Promise(r => setTimeout(r, 0));
-    const decrypted = await this.decryptData(encryptedData);
-    await new Promise(r => setTimeout(r, 0));
+  private conversationSignature(messages: StoredMessage[]): string {
+    const bytes = SecureDB.encoder.encode(JSON.stringify(messages));
+    const digest = blake3(bytes, { dkLen: 32 });
+    try {
+      return bytesToHex(digest);
+    } finally {
+      bytes.fill(0);
+      digest.fill(0);
+    }
+  }
 
-    return decrypted;
+  private assertUniqueMessageSelectors(messages: StoredMessage[]): void {
+    const owners = new Map<string, string>();
+    for (const message of messages) {
+      const localId = message.id!;
+      const selectors = message.wireMessageId && message.wireMessageId !== localId
+        ? [localId, message.wireMessageId]
+        : [localId];
+      for (const selector of selectors) {
+        const owner = owners.get(selector);
+        if (owner && owner !== localId) {
+          throw new Error('Conversation contains colliding message identifiers');
+        }
+        owners.set(selector, localId);
+      }
+    }
+  }
+
+  // Validate ownership, dedupe by ID, sort ascending, and cap history
+  private prepareConversation(
+    msgs: StoredMessage[],
+    peer: string,
+    activePeer?: string,
+  ): { messages: StoredMessage[]; droppedSegments: number } {
+    if (!isCanonicalUsername(peer) || peer === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    if (!Array.isArray(msgs) || msgs.length > MAX_CONVERSATION_INPUT_MESSAGES) {
+      throw new Error('Conversation input limit exceeded');
+    }
+    if (activePeer !== undefined && (!isCanonicalUsername(activePeer) || activePeer === this.username)) {
+      throw new Error('Invalid active conversation peer');
+    }
+    const dedup = new Map<string, StoredMessage>();
+    for (const message of msgs) {
+      const normalized = this.normalizeConversationMessage(message, peer);
+      dedup.set(normalized.id!, normalized);
+    }
+    const unique = Array.from(dedup.values());
+    this.assertUniqueMessageSelectors(unique);
+    const sorted = unique
+      .sort((a, b) => (a.timestamp as number) - (b.timestamp as number));
+      
+    if (sorted.length <= MAX_CONVERSATION_STORED_MESSAGES) {
+      return { messages: sorted, droppedSegments: 0 };
+    }
+    
+    const excess = sorted.length - MAX_CONVERSATION_STORED_MESSAGES;
+    const droppedSegments = Math.ceil(excess / CONVERSATION_SEGMENT_SIZE);
+    return {
+      messages: sorted.slice(droppedSegments * CONVERSATION_SEGMENT_SIZE),
+      droppedSegments,
+    };
+  }
+
+  // Inclusive segment range for a conversation, or null when it has none stored.
+  private async conversationLayout(
+    peer: string,
+  ): Promise<{ firstSegment: number; lastSegment: number } | null> {
+    const metadata = await this.loadConversationMetadataUnlocked();
+    const entry = metadata?.find((candidate) => candidate.peerUsername === peer);
+    if (!entry) return null;
+    return { firstSegment: entry.firstSegment, lastSegment: entry.lastSegment };
+  }
+
+  // Decrypt one segment
+  private async readSegment(peer: string, index: number): Promise<StoredMessage[] | null> {
+    const storageKey = SecureDB.segmentKey(peer, index);
+    const encrypted = await (await this.kv()).getBinary(STORAGE_STORES.MESSAGE_CONVERSATIONS, storageKey);
+    if (!encrypted) {
+      this.convSig.delete(storageKey);
+      return null;
+    }
+    try {
+      const data = await this.decryptData(encrypted, STORAGE_STORES.MESSAGE_CONVERSATIONS, storageKey);
+      if (!Array.isArray(data) || data.length === 0 || data.length > CONVERSATION_SEGMENT_SIZE) {
+        throw new Error('Stored conversation segment has an invalid shape');
+      }
+      const arr = data.map((message) =>
+        this.normalizeConversationMessage(message as StoredMessage, peer));
+      for (let i = 1; i < arr.length; i += 1) {
+        if ((arr[i - 1].timestamp as number) > (arr[i].timestamp as number)) {
+          throw new Error('Stored conversation segment is not in canonical order');
+        }
+      }
+      this.convSig.set(storageKey, this.conversationSignature(arr));
+      return arr;
+    } finally {
+      encrypted.fill(0);
+    }
+  }
+
+  private async loadConversationTail(peer: string, needed: number): Promise<StoredMessage[]> {
+    if (!isCanonicalUsername(peer) || peer === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    const layout = await this.conversationLayout(peer);
+    if (!layout || needed <= 0) return [];
+    const collected: StoredMessage[][] = [];
+    let total = 0;
+    for (let index = layout.lastSegment; index >= layout.firstSegment && total < needed; index -= 1) {
+      const segment = await this.readSegment(peer, index);
+      if (!segment) continue;
+      collected.push(segment);
+      total += segment.length;
+    }
+    collected.reverse();
+    const flat = collected.flat();
+    const arr = flat.length > needed ? flat.slice(flat.length - needed) : flat;
+    this.assertUniqueMessageSelectors(arr);
+    return arr;
+  }
+
+  private async loadConversation(peer: string): Promise<StoredMessage[]> {
+    if (!isCanonicalUsername(peer) || peer === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    const layout = await this.conversationLayout(peer);
+    if (!layout) return [];
+    const segments: StoredMessage[][] = [];
+    for (let index = layout.firstSegment; index <= layout.lastSegment; index += 1) {
+      const segment = await this.readSegment(peer, index);
+      if (segment) segments.push(segment);
+    }
+    const arr = segments.flat();
+    if (arr.length > MAX_CONVERSATION_STORED_MESSAGES) {
+      throw new Error('Stored conversation has an invalid shape');
+    }
+    const ids = new Set(arr.map((message) => message.id));
+    if (ids.size !== arr.length) throw new Error('Stored conversation has duplicate message IDs');
+    this.assertUniqueMessageSelectors(arr);
+    return arr;
+  }
+
+  private static chunkConversation(messages: StoredMessage[]): StoredMessage[][] {
+    const chunks: StoredMessage[][] = [];
+    for (let offset = 0; offset < messages.length; offset += CONVERSATION_SEGMENT_SIZE) {
+      chunks.push(messages.slice(offset, offset + CONVERSATION_SEGMENT_SIZE));
+    }
+    return chunks;
+  }
+
+  private async prepareConversationWrite(
+    peer: string,
+    msgs: StoredMessage[],
+    activePeer?: string,
+  ): Promise<PreparedConversationWrite | null> {
+    const { messages: prepared, droppedSegments } = this.prepareConversation(msgs, peer, activePeer);
+    if (prepared.length === 0) throw new Error('Cannot persist an empty conversation');
+
+    const previous = await this.conversationLayout(peer);
+    const firstSegment = (previous?.firstSegment ?? 0) + droppedSegments;
+    const chunks = SecureDB.chunkConversation(prepared);
+    const lastSegment = firstSegment + chunks.length - 1;
+    if (lastSegment >= MAX_SEGMENT_INDEX) {
+      throw new Error('Conversation segment index exhausted');
+    }
+
+    const segments: Array<{ index: number; encrypted: Uint8Array; signature: string }> = [];
+    for (let position = 0; position < chunks.length; position += 1) {
+      const index = firstSegment + position;
+      const storageKey = SecureDB.segmentKey(peer, index);
+      const signature = this.conversationSignature(chunks[position]);
+      if (this.convSig.get(storageKey) === signature) continue;
+      segments.push({
+        index,
+        encrypted: await this.encryptData(chunks[position], STORAGE_STORES.MESSAGE_CONVERSATIONS, storageKey),
+        signature,
+      });
+    }
+
+    const deletedSegments: number[] = [];
+    if (previous) {
+      for (let index = previous.firstSegment; index < firstSegment; index += 1) {
+        deletedSegments.push(index);
+      }
+      for (let index = lastSegment + 1; index <= previous.lastSegment; index += 1) {
+        deletedSegments.push(index);
+      }
+    }
+
+    if (segments.length === 0 && deletedSegments.length === 0 &&
+      previous?.firstSegment === firstSegment && previous?.lastSegment === lastSegment) {
+      return null;
+    }
+
+    const retainedIds = new Set(prepared.map((message) => message.id!));
+    const evictedFileIds = Array.from(new Set(
+      msgs
+        .filter((message) => isFileMessage(message) && !retainedIds.has(message.id!))
+        .map((message) => message.id!)
+    ));
+    return {
+      peer,
+      grantsIncomingCallPermission: prepared.some((message) => (
+        message.sender === this.username &&
+        message.recipient === peer &&
+        message.isSystemMessage !== true &&
+        (message.type === 'text' || isFileMessage(message)) &&
+        message.isDeliberateUserAction === true
+      )),
+      segments,
+      deletedSegments,
+      firstSegment,
+      lastSegment,
+      last: prepared[prepared.length - 1],
+      evictedFileIds,
+    };
+  }
+
+  private async persistConversationWrites(
+    writes: PreparedConversationWrite[],
+    additionalWrites: Array<{ store: string; key: string; value: Uint8Array }> = [],
+  ): Promise<void> {
+    if (writes.length === 0) return;
+    const relationshipPeers = writes
+      .filter(({ grantsIncomingCallPermission }) => grantsIncomingCallPermission)
+      .map(({ peer }) => peer);
+    if (
+      writes.length > MAX_CONVERSATION_BATCH_WRITES ||
+      writes.length + relationshipPeers.length + additionalWrites.length + 1 > 512
+    ) {
+      throw new Error('Conversation write batch limit exceeded');
+    }
+    if (new Set(writes.map(({ peer }) => peer)).size !== writes.length) {
+      throw new Error('Duplicate conversation write');
+    }
+    const additionalTargets = new Set(additionalWrites.map(({ store, key }) => `${store}\0${key}`));
+    if (additionalTargets.size !== additionalWrites.length) {
+      throw new Error('Duplicate additional conversation write');
+    }
+    if (relationshipPeers.some((peer) => (
+      additionalTargets.has(`${STORAGE_KEYS.DELIBERATE_CALL_ADMISSION}\0${peer}`)
+    ))) {
+      throw new Error('Conversation relationship marker collision');
+    }
+    const evictedFileIds = Array.from(new Set(writes.flatMap(({ evictedFileIds: ids }) => ids)));
+    if (
+      evictedFileIds.length > MAX_CONVERSATION_MUTATION_DELETIONS ||
+      evictedFileIds.some((fileId) => additionalTargets.has(`files\0${fileId}`))
+    ) {
+      throw new Error('Conversation file cleanup limit exceeded');
+    }
+
+    let encryptedMetadata: Uint8Array | null = null;
+    const encryptedRelationshipMarkers: Array<{ peer: string; value: Uint8Array }> = [];
+    try {
+      for (const peer of relationshipPeers) {
+        encryptedRelationshipMarkers.push({
+          peer,
+          value: await this.encryptData(true, STORAGE_KEYS.DELIBERATE_CALL_ADMISSION, peer),
+        });
+      }
+      let metadata = await this.loadConversationMetadataUnlocked();
+      if (metadata === null) {
+        const existingPeers = await (await this.kv()).keysForStore(STORAGE_STORES.MESSAGE_CONVERSATIONS);
+        if (existingPeers.length !== 0) {
+          throw new Error('Conversation metadata is missing for existing rows');
+        }
+        metadata = [];
+      }
+      const nextMetadata = metadata.map((entry) => ({ ...entry }));
+
+      for (const write of writes) {
+        const index = nextMetadata.findIndex((entry) => entry.peerUsername === write.peer);
+        if (index === -1) {
+          nextMetadata.push({
+            peerUsername: write.peer,
+            lastMessage: write.last,
+            lastReadTimestamp: 0,
+            firstSegment: write.firstSegment,
+            lastSegment: write.lastSegment,
+          });
+        } else {
+          nextMetadata[index] = {
+            ...nextMetadata[index],
+            lastMessage: write.last,
+            firstSegment: write.firstSegment,
+            lastSegment: write.lastSegment,
+          };
+        }
+      }
+
+      const validatedMetadata = this.validateConversationMetadata(nextMetadata);
+      encryptedMetadata = await this.encryptData(validatedMetadata, STORAGE_STORES.DATA, STORAGE_KEYS.CONVERSATIONS_METADATA);
+      
+      await (await this.kv()).mutate(
+        [
+          ...writes.flatMap(({ peer, segments }) => segments.map(({ index, encrypted }) => ({
+            store: STORAGE_STORES.MESSAGE_CONVERSATIONS,
+            key: SecureDB.segmentKey(peer, index),
+            value: encrypted,
+          }))),
+          ...additionalWrites,
+          ...encryptedRelationshipMarkers.map(({ peer, value }) => ({
+            store: STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+            key: peer,
+            value,
+          })),
+          { store: STORAGE_STORES.DATA, key: STORAGE_KEYS.CONVERSATIONS_METADATA, value: encryptedMetadata },
+        ],
+        [
+          ...writes.flatMap(({ peer, deletedSegments }) => deletedSegments.map((index) => ({
+            store: STORAGE_STORES.MESSAGE_CONVERSATIONS,
+            key: SecureDB.segmentKey(peer, index),
+          }))),
+          ...evictedFileIds.map((key) => ({ store: STORAGE_STORES.FILES, key })),
+        ],
+      );
+      for (const { peer, segments, deletedSegments } of writes) {
+        for (const { index, signature } of segments) {
+          this.convSig.set(SecureDB.segmentKey(peer, index), signature);
+        }
+        for (const index of deletedSegments) {
+          this.convSig.delete(SecureDB.segmentKey(peer, index));
+        }
+      }
+    } finally {
+      encryptedMetadata?.fill(0);
+      for (const { value } of encryptedRelationshipMarkers) value.fill(0);
+      for (const { segments } of writes) {
+        for (const { encrypted } of segments) encrypted.fill(0);
+      }
+    }
   }
 
   // Store a message
   async storeMessage(message: StoredMessage): Promise<void> {
-    const existingMessages = await this.loadMessages();
-    await this.saveMessages([...existingMessages, message]);
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    await this.withMessageLock(async () => {
+      const peer = this.peerOf(message, this.username);
+      if (!peer) throw new Error('Message conversation is required');
+      const existing = await this.loadConversation(peer);
+      const write = await this.prepareConversationWrite(peer, [...existing, message]);
+      if (write) await this.persistConversationWrites([write]);
+    });
   }
 
-  // Save conversation metadata
-  async saveConversationMetadata(metadata: ConversationMetadata[]): Promise<void> {
-    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-    const encrypted = await this.encryptData(metadata);
-    await (await this.kv()).setBinary('data', 'conversations_metadata', encrypted);
+  async storeOutgoingMessageWithRetryState(
+    message: StoredMessage,
+    retryState: unknown,
+  ): Promise<void> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    await this.withMessageLock(async () => {
+      const peer = this.peerOf(message, this.username);
+      if (!peer) throw new Error('Message conversation is required');
+      const existing = await this.loadConversation(peer);
+      if (existing.some((candidate) => (
+        candidate.id === message.id ||
+        candidate.wireMessageId === message.id ||
+        (message.wireMessageId !== undefined && (
+          candidate.id === message.wireMessageId ||
+          candidate.wireMessageId === message.wireMessageId
+        ))
+      ))) {
+        throw new Error('Outgoing message identifier already exists');
+      }
+
+      const write = await this.prepareConversationWrite(peer, [...existing, message], peer);
+      if (!write) throw new Error('Outgoing message produced no conversation write');
+
+      let encryptedRetryState: Uint8Array | null = null;
+      try {
+        encryptedRetryState = await this.encryptData(retryState, STORAGE_STORES.PENDING_RETRY, STORAGE_KEYS.PENDING_RETRY_ALL);
+        await this.persistConversationWrites([write], [{
+          store: STORAGE_STORES.PENDING_RETRY,
+          key: STORAGE_KEYS.PENDING_RETRY_ALL,
+          value: encryptedRetryState,
+        }]);
+      } finally {
+        encryptedRetryState?.fill(0);
+      }
+    });
   }
 
-  // Load conversation metadata
-  async loadConversationMetadata(): Promise<ConversationMetadata[]> {
-    return this.loadEncryptedArray<ConversationMetadata>('conversations_metadata', 'load-metadata');
+  async storeMessageIfAbsent(message: StoredMessage, activeConversationPeer?: string): Promise<{
+    stored: boolean;
+    existing: StoredMessage | null;
+  }> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    const messageId = typeof message?.id === 'string' ? message.id : '';
+    if (sanitizeMessageId(messageId) !== messageId) throw new Error('Message ID is required');
+
+    return this.withMessageLock(async () => {
+      const peer = this.peerOf(message, this.username);
+      if (!peer) throw new Error('Message conversation is required');
+      const existing = await this.loadConversation(peer);
+      const incomingSelectors = new Set([
+        messageId,
+        ...(typeof message.wireMessageId === 'string' ? [message.wireMessageId] : []),
+      ]);
+      const collision = existing.find(candidate => (
+        incomingSelectors.has(candidate?.id) ||
+        (typeof candidate?.wireMessageId === 'string' && incomingSelectors.has(candidate.wireMessageId))
+      )) || null;
+      if (collision) return { stored: false, existing: collision };
+
+      const write = await this.prepareConversationWrite(
+        peer,
+        [...existing, message],
+        activeConversationPeer,
+      );
+      if (write) await this.persistConversationWrites([write]);
+      return { stored: true, existing: null };
+    });
   }
 
-  // Rebuild conversation metadata from messages
-  async rebuildConversationMetadata(): Promise<ConversationMetadata[]> {
-    let existingPins = new Map<string, { isPinned?: boolean; pinnedAt?: number }>();
-    try {
-        const existingMetadata = await this.loadConversationMetadata();
-        if (existingMetadata) {
-            for (const m of existingMetadata) {
-                if (m.isPinned) {
-                    existingPins.set(m.peerUsername, { isPinned: m.isPinned, pinnedAt: m.pinnedAt });
-                }
-            }
-        }
-    } catch {}
-
-    const allMessages = await this.loadMessages();
-    const map = new Map<string, StoredMessage[]>();
-    const currentUser = this.username;
-
-    for (const msg of allMessages) {
-      if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
-      const peer = currentUser ? ((msg as any).sender === currentUser ? (msg as any).recipient : (msg as any).sender) : (msg as any).sender;
-      if (!map.has(peer)) map.set(peer, []);
-      map.get(peer)!.push(msg);
+  async updateConversationMessage(
+    peerUsername: string,
+    messageId: string,
+    mutator: (message: StoredMessage) => StoredMessage | null | Promise<StoredMessage | null>,
+    options?: { grantIncomingCallPermission?: boolean },
+  ): Promise<StoredMessage | null> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      sanitizeMessageId(messageId) !== messageId
+    ) {
+      throw new Error('Invalid conversation message selector');
     }
 
-    const metadata: ConversationMetadata[] = [];
-    for (const [peer, msgs] of map.entries()) {
-      const sorted = msgs.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-      const lastMsg = sorted[0];
-      if (lastMsg) {
-        const lastMsgLight = { ...lastMsg };
-        delete (lastMsgLight as any).originalBase64Data;
+    return this.withMessageLock(async () => {
+      const existing = await this.loadConversation(peerUsername);
+      const index = existing.findIndex(message => (
+        message?.id === messageId || message?.wireMessageId === messageId
+      ));
+      if (index === -1) return null;
 
-        metadata.push({
-          peerUsername: peer,
-          lastMessage: lastMsgLight,
-          unreadCount: 0,
-          lastReadTimestamp: 0,
-          isPinned: existingPins.get(peer)?.isPinned,
-          pinnedAt: existingPins.get(peer)?.pinnedAt
-        });
+      const current = existing[index];
+      const updated = await mutator(current);
+      if (updated === null) return null;
+      if (
+        updated.id !== current.id ||
+        updated.wireMessageId !== current.wireMessageId ||
+        this.peerOf(updated, this.username) !== peerUsername
+      ) {
+        throw new Error('Conversation mutation changed message ownership');
+      }
+
+      const next = existing.slice();
+      next[index] = updated;
+      
+      const write = await this.prepareConversationWrite(peerUsername, next, peerUsername);
+      if (write) {
+        if (options?.grantIncomingCallPermission === true) {
+          write.grantsIncomingCallPermission = true;
+        }
+        await this.persistConversationWrites([write]);
+      } else if (options?.grantIncomingCallPermission === true) {
+        throw new Error('Deliberate contact did not change local state');
+      }
+      return updated;
+    });
+  }
+
+  async updateConversationMessages(
+    peerUsername: string,
+    mutations: ReadonlyMap<
+      string,
+      (message: StoredMessage) => StoredMessage | null | Promise<StoredMessage | null>
+    >
+  ): Promise<Set<string>> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      mutations.size > MAX_CONVERSATION_STORED_MESSAGES
+    ) {
+      throw new Error('Invalid conversation mutation batch');
+    }
+    for (const messageId of mutations.keys()) {
+      if (sanitizeMessageId(messageId) !== messageId) {
+        throw new Error('Invalid conversation message selector');
       }
     }
+    if (mutations.size === 0) return new Set();
 
-    await this.saveConversationMetadata(metadata);
+    return this.withMessageLock(async () => {
+      const existing = await this.loadConversation(peerUsername);
+      const found = new Set<string>();
+      let next: StoredMessage[] | null = null;
+
+      for (let index = 0; index < existing.length; index += 1) {
+        const current = existing[index];
+        const selector = mutations.has(current.id)
+          ? current.id
+          : typeof current.wireMessageId === 'string' && mutations.has(current.wireMessageId)
+            ? current.wireMessageId
+            : null;
+        const mutator = selector ? mutations.get(selector) : undefined;
+        if (!mutator) continue;
+        found.add(selector!);
+
+        const updated = await mutator(current);
+        if (updated === null || updated === current) continue;
+        if (updated.id !== current.id || this.peerOf(updated, this.username) !== peerUsername) {
+          throw new Error('Conversation mutation changed message ownership');
+        }
+        if (!next) next = existing.slice();
+        next[index] = updated;
+      }
+
+      if (next) {
+        const write = await this.prepareConversationWrite(peerUsername, next, peerUsername);
+        if (write) await this.persistConversationWrites([write]);
+      }
+      return found;
+    });
+  }
+
+  async loadConversationMessageById(
+    peerUsername: string,
+    messageId: string
+  ): Promise<StoredMessage | null> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      sanitizeMessageId(messageId) !== messageId
+    ) {
+      throw new Error('Invalid conversation message selector');
+    }
+
+    return this.withMessageLock(async () => {
+      const layout = await this.conversationLayout(peerUsername);
+      if (!layout) return null;
+      for (let index = layout.lastSegment; index >= layout.firstSegment; index -= 1) {
+        const segment = await this.readSegment(peerUsername, index);
+        if (!segment) continue;
+        const found = segment.find(message => (
+          message?.id === messageId || message?.wireMessageId === messageId
+        ));
+        if (found) return found;
+      }
+      return null;
+    });
+  }
+
+  async hasCompleteFileMessage(peerUsername: string, messageId: string): Promise<boolean> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      sanitizeMessageId(messageId) !== messageId
+    ) {
+      throw new Error('Invalid file message selector');
+    }
+
+    return this.withMessageLock(async () => {
+      const existing = await this.loadConversation(peerUsername);
+      if (!existing.some(message => message?.id === messageId && isFileMessage(message))) return false;
+      return (await this.kv()).has(STORAGE_STORES.FILES, messageId);
+    });
+  }
+
+  async upsertMessages(messages: StoredMessage[], activeConversationPeer?: string): Promise<void> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    if (messages.length > MAX_CONVERSATION_INPUT_MESSAGES) {
+      throw new Error('Message upsert batch limit exceeded');
+    }
+    if (
+      activeConversationPeer !== undefined &&
+      (!isCanonicalUsername(activeConversationPeer) || activeConversationPeer === this.username)
+    ) {
+      throw new Error('Invalid active conversation peer');
+    }
+
+    await this.withMessageLock(async () => {
+      const grouped = new Map<string, StoredMessage[]>();
+      for (const message of messages) {
+        if (!message?.id) continue;
+        const peer = this.peerOf(message, this.username);
+        if (!peer) continue;
+        const group = grouped.get(peer) || [];
+        group.push(message);
+        grouped.set(peer, group);
+      }
+      if (grouped.size > MAX_CONVERSATION_BATCH_WRITES) {
+        throw new Error('Conversation write batch limit exceeded');
+      }
+
+      const writes: PreparedConversationWrite[] = [];
+      try {
+        for (const [peer, pending] of grouped) {
+          const existing = await this.loadConversation(peer);
+          const byId = new Map(existing.map(message => [message.id, message]));
+
+          for (const incoming of pending) {
+            const previous = byId.get(incoming.id);
+            if (!previous) {
+              byId.set(incoming.id, incoming);
+              continue;
+            }
+
+            byId.set(incoming.id, {
+              ...previous,
+              ...incoming,
+              ...(incoming.replyTo
+                ? {
+                    replyTo: {
+                      ...previous.replyTo,
+                      ...incoming.replyTo,
+                    },
+                  }
+                : {}),
+              receipt: mergeReceipts(previous.receipt, incoming.receipt),
+            });
+          }
+
+          const write = await this.prepareConversationWrite(
+            peer,
+            Array.from(byId.values()),
+            activeConversationPeer,
+          );
+          if (write) writes.push(write);
+        }
+
+        await this.persistConversationWrites(writes);
+      } finally {
+        for (const { segments } of writes) {
+          for (const { encrypted } of segments) encrypted.fill(0);
+        }
+      }
+    });
+  }
+
+  private async prepareFileCiphertext(fileId: string, data: ArrayBuffer | Blob): Promise<Uint8Array> {
+    if (sanitizeMessageId(fileId) !== fileId) throw new Error('Invalid file ID');
+    validateFileData(data, fileId);
+
+    const source = new Uint8Array(data instanceof Blob ? await data.arrayBuffer() : data);
+    
+    const ownedBytes = data instanceof Blob ? source : new Uint8Array(source);
+    try {
+      return await this.encryptBytes(ownedBytes, STORAGE_STORES.FILES, fileId, PROTOCOL_KEYS.SECURE_DB_FILE_AAD);
+    } finally {
+      ownedBytes.fill(0);
+    }
+  }
+
+  // Commit a file, its message, and the compact index in one native transaction
+  async storeFileMessage(
+    message: StoredMessage,
+    data: ArrayBuffer | Blob,
+    activeConversationPeer?: string,
+  ): Promise<{ success: boolean; duplicate?: boolean; quotaExceeded?: boolean }> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    const messageId = typeof message?.id === 'string' ? message.id : '';
+    if (sanitizeMessageId(messageId) !== messageId) throw new Error('File message ID is required');
+
+    return this.withMessageLock(async () => {
+      const peer = this.peerOf(message, this.username);
+      if (!peer) throw new Error('File message peer is required');
+      const existing = await this.loadConversation(peer);
+      const existingMessage = existing.find((entry) => entry?.id === messageId) || null;
+      const kv = await this.kv();
+      const existingFile = await kv.getBinary(STORAGE_STORES.FILES, messageId);
+      const hasExistingFile = existingFile !== null;
+      existingFile?.fill(0);
+
+      const sameFileIdentity = !!existingMessage &&
+        isFileMessage(existingMessage) &&
+        existingMessage.type === message.type &&
+        existingMessage.sender === message.sender &&
+        existingMessage.recipient === message.recipient &&
+        existingMessage.wireMessageId === message.wireMessageId &&
+        existingMessage.filename === message.filename &&
+        existingMessage.fileSize === message.fileSize &&
+        existingMessage.mimeType === message.mimeType;
+
+      if (existingMessage && !sameFileIdentity) {
+        return { success: false, duplicate: true };
+      }
+      if (sameFileIdentity && hasExistingFile) {
+        return { success: true, duplicate: true };
+      }
+      if (!existingMessage && hasExistingFile) {
+        return { success: false, duplicate: true };
+      }
+
+      let encryptedFile: Uint8Array | null = null;
+      try {
+        encryptedFile = await this.prepareFileCiphertext(messageId, data);
+        if (sameFileIdentity) {
+          await kv.mutate([{ store: STORAGE_STORES.FILES, key: messageId, value: encryptedFile }], []);
+          return { success: true, duplicate: true };
+        }
+
+        const write = await this.prepareConversationWrite(
+          peer,
+          [...existing, message],
+          activeConversationPeer,
+        );
+        if (!write) throw new Error('File message did not change its conversation');
+        await this.persistConversationWrites(
+          [write],
+          [{ store: STORAGE_STORES.FILES, key: messageId, value: encryptedFile }],
+        );
+        return { success: true };
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Database quota exceeded') {
+          return { success: false, quotaExceeded: true };
+        }
+        throw error;
+      } finally {
+        encryptedFile?.fill(0);
+      }
+    });
+  }
+
+  private validateConversationMetadata(metadata: ConversationMetadata[]): ConversationMetadata[] {
+    if (!Array.isArray(metadata) || metadata.length > MAX_KNOWN_PEERS) {
+      throw new Error('Conversation metadata limit exceeded');
+    }
+    const peers = new Set<string>();
+    return metadata.map((entry) => {
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        Object.keys(entry).some((key) => !CONVERSATION_METADATA_KEYS.has(key)) ||
+        !isCanonicalUsername(entry.peerUsername)
+      ) {
+        throw new Error('Invalid conversation metadata');
+      }
+      if (entry.peerUsername === this.username || peers.has(entry.peerUsername)) {
+        throw new Error('Duplicate conversation metadata');
+      }
+      peers.add(entry.peerUsername);
+      const lastReadTimestamp = entry.lastReadTimestamp;
+      const isPinned = entry.isPinned === true;
+      if (
+        !isValidTimestamp(lastReadTimestamp) ||
+        (entry.isPinned !== undefined && typeof entry.isPinned !== 'boolean') ||
+        isPinned !== (entry.pinnedAt !== undefined) ||
+        (entry.pinnedAt !== undefined && !isValidTimestamp(entry.pinnedAt))
+      ) {
+        throw new Error('Invalid conversation metadata');
+      }
+      const { firstSegment, lastSegment } = entry;
+      if (
+        !Number.isSafeInteger(firstSegment) || firstSegment < 0 ||
+        !Number.isSafeInteger(lastSegment) || lastSegment < firstSegment ||
+        lastSegment >= MAX_SEGMENT_INDEX ||
+        (lastSegment - firstSegment + 1) >
+          Math.ceil(MAX_CONVERSATION_STORED_MESSAGES / CONVERSATION_SEGMENT_SIZE)
+      ) {
+        throw new Error('Invalid conversation segment range');
+      }
+      return {
+        peerUsername: entry.peerUsername,
+        lastMessage: this.normalizeConversationMessage(entry.lastMessage, entry.peerUsername),
+        lastReadTimestamp,
+        firstSegment,
+        lastSegment,
+        ...(isPinned ? { isPinned: true, pinnedAt: entry.pinnedAt } : {}),
+      };
+    });
+  }
+
+  private async saveConversationMetadataUnlocked(metadata: ConversationMetadata[]): Promise<void> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    const validated = this.validateConversationMetadata(metadata);
+    const encrypted = await this.encryptData(validated, STORAGE_STORES.DATA, STORAGE_KEYS.CONVERSATIONS_METADATA);
+    try {
+      await (await this.kv()).setBinary(STORAGE_STORES.DATA, STORAGE_KEYS.CONVERSATIONS_METADATA, encrypted);
+    } finally {
+      encrypted.fill(0);
+    }
+  }
+
+  private async loadConversationMetadataUnlocked(): Promise<ConversationMetadata[] | null> {
+    const metadata = await this.loadEncryptedArray<ConversationMetadata>(
+      STORAGE_KEYS.CONVERSATIONS_METADATA,
+      'load-metadata',
+    );
+    return metadata === null ? null : this.validateConversationMetadata(metadata);
+  }
+
+  private async loadIndexedConversationMetadataUnlocked(): Promise<ConversationMetadata[]> {
+    const metadata = await this.loadConversationMetadataUnlocked();
+    const rowKeys = await (await this.kv()).keysForStore(STORAGE_STORES.MESSAGE_CONVERSATIONS);
+    const segmentsByPeer = new Map<string, Set<number>>();
+    for (const key of rowKeys) {
+      const parsed = SecureDB.parseSegmentKey(key);
+      if (!parsed || parsed.peer === this.username) {
+        throw new Error('Invalid conversation key index');
+      }
+      const indices = segmentsByPeer.get(parsed.peer) || new Set<number>();
+      if (indices.has(parsed.index)) throw new Error('Invalid conversation key index');
+      indices.add(parsed.index);
+      segmentsByPeer.set(parsed.peer, indices);
+    }
+    if (metadata === null) {
+      if (segmentsByPeer.size !== 0) {
+        throw new Error('Conversation metadata is missing for existing rows');
+      }
+      return [];
+    }
+    if (metadata.length !== segmentsByPeer.size) {
+      throw new Error('Conversation metadata does not match stored rows');
+    }
+    for (const entry of metadata) {
+      const indices = segmentsByPeer.get(entry.peerUsername);
+      if (!indices || indices.size !== entry.lastSegment - entry.firstSegment + 1) {
+        throw new Error('Conversation metadata does not match stored rows');
+      }
+      for (let index = entry.firstSegment; index <= entry.lastSegment; index += 1) {
+        if (!indices.has(index)) {
+          throw new Error('Conversation metadata does not match stored rows');
+        }
+      }
+    }
     return metadata;
+  }
+
+  async loadConversationMetadata(): Promise<ConversationMetadata[]> {
+    return this.withMessageLock(() => this.loadIndexedConversationMetadataUnlocked());
+  }
+
+  async markConversationRead(peerUsername: string, readTimestamp: number): Promise<void> {
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isValidTimestamp(readTimestamp) || readTimestamp <= 0
+    ) throw new Error('Invalid conversation read state');
+
+    await this.withMessageLock(async () => {
+      const metadata = await this.loadConversationMetadataUnlocked();
+      if (metadata === null) {
+        const peers = await (await this.kv()).keysForStore(STORAGE_STORES.MESSAGE_CONVERSATIONS);
+        if (peers.length !== 0) throw new Error('Conversation metadata is missing for existing rows');
+        return;
+      }
+      const index = metadata.findIndex((entry) => entry.peerUsername === peerUsername);
+      if (index === -1) return;
+      const nextReadTimestamp = Math.max(metadata[index].lastReadTimestamp, readTimestamp);
+      if (nextReadTimestamp === metadata[index].lastReadTimestamp) return;
+      const next = metadata.slice();
+      next[index] = { ...next[index], lastReadTimestamp: nextReadTimestamp };
+      await this.saveConversationMetadataUnlocked(next);
+    });
   }
 
   // Toggle conversation pin status
   async toggleConversationPin(peerUsername: string, isPinned: boolean): Promise<void> {
-    try {
-      let metadata = await this.loadConversationMetadata();
-      if (!metadata || metadata.length === 0) {
-        metadata = await this.rebuildConversationMetadata();
+    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    await this.withMessageLock(async () => {
+      const metadata = await this.loadConversationMetadataUnlocked();
+      if (metadata === null) {
+        const peers = await (await this.kv()).keysForStore(STORAGE_STORES.MESSAGE_CONVERSATIONS);
+        if (peers.length !== 0) throw new Error('Conversation metadata is missing for existing rows');
+        return;
       }
-      
       const idx = metadata.findIndex(m => m.peerUsername === peerUsername);
-      if (idx !== -1) {
-        metadata[idx].isPinned = isPinned;
-        metadata[idx].pinnedAt = isPinned ? Date.now() : undefined;
-        await this.saveConversationMetadata(metadata);
-      } else if (isPinned) {
-        metadata.push({
-            peerUsername,
-            lastMessage: {} as any,
-            unreadCount: 0,
-            lastReadTimestamp: 0,
-            isPinned: true,
-            pinnedAt: Date.now()
-        });
-        await this.saveConversationMetadata(metadata);
-      }
-    } catch (err) {
-      console.error('[SecureDB] Failed to toggle conversation pin', err);
-      throw err;
-    }
-  }
-
-  // Save messages
-  async saveMessages(messages: StoredMessage[], activeConversationPeer?: string): Promise<void> {
-    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-
-    const uniqueMap = new Map<string, StoredMessage>();
-    for (const msg of messages) {
-      if (msg && msg.id) {
-        uniqueMap.set(msg.id, msg);
-      }
-    }
-
-    const conversationMap = new Map<string, StoredMessage[]>();
-    const currentUser = this.username;
-
-    for (const msg of uniqueMap.values()) {
-      const m = msg as any;
-      
-      if (m?.sender && !m?.recipient && m.sender !== currentUser) {
-        m.recipient = currentUser;
-      }
-      if (!m?.sender || !m?.recipient) continue;
-      const peer = m.sender === currentUser ? m.recipient : m.sender;
-
-      let list = conversationMap.get(peer);
-      if (!list) {
-        list = [];
-        conversationMap.set(peer, list);
-      }
-      list.push(msg);
-    }
-
-    const capped: StoredMessage[] = [];
-    const metadataUpdates = new Map<string, StoredMessage>();
-
-    for (const [peer, msgs] of conversationMap.entries()) {
-      msgs.sort((a, b) => new Date(a.timestamp as any).getTime() - new Date(b.timestamp as any).getTime());
-
-      if (msgs.length > 0) {
-        metadataUpdates.set(peer, msgs[msgs.length - 1]);
-      }
-
-      const limit = peer === activeConversationPeer ? 1000 : 500;
-
-      if (msgs.length > limit) {
-        const start = msgs.length - limit;
-        for (let i = start; i < msgs.length; i++) {
-          capped.push(msgs[i]);
-        }
-      } else {
-        for (const m of msgs) {
-          capped.push(m);
-        }
-      }
-    }
-
-    const lightweightMessages = capped.map(msg => {
-      if ((msg as any).originalBase64Data) {
-        const copy = { ...msg };
-        delete (copy as any).originalBase64Data;
-        return copy;
-      }
-      return msg;
+      if (idx === -1) return;
+      const next = metadata.slice();
+      next[idx] = {
+        ...next[idx],
+        isPinned,
+        pinnedAt: isPinned ? Date.now() : undefined,
+      };
+      await this.saveConversationMetadataUnlocked(next);
     });
-
-    const encrypted = await this.encryptData(lightweightMessages);
-    await (await this.kv()).setBinary('data', 'messages', encrypted);
-
-    // Update Metadata Index
-    try {
-      let metadata = await this.loadConversationMetadata();
-      if (!metadata || metadata.length === 0) {
-        this.rebuildConversationMetadata().catch(e => console.error(e));
-      } else {
-        let changed = false;
-        for (const [peer, lastMsg] of metadataUpdates.entries()) {
-          const idx = metadata.findIndex(m => m.peerUsername === peer);
-
-          const lastMsgLight = { ...lastMsg };
-          delete (lastMsgLight as any).originalBase64Data;
-
-          if (idx !== -1) {
-            if (new Date(lastMsgLight.timestamp as any).getTime() >= new Date(metadata[idx].lastMessage.timestamp as any).getTime()) {
-              metadata[idx].lastMessage = lastMsgLight;
-              changed = true;
-            }
-          } else {
-            metadata.push({
-              peerUsername: peer,
-              lastMessage: lastMsgLight,
-              unreadCount: 0,
-              lastReadTimestamp: 0
-            });
-            changed = true;
-          }
-        }
-        if (changed) {
-          await this.saveConversationMetadata(metadata);
-        }
-      }
-    } catch (err) {
-      console.error('[SecureDB] Failed to update metadata index', err);
-    }
-  }
-
-  // Load messages
-  async loadMessages(): Promise<StoredMessage[]> {
-    return this.loadEncryptedArray<StoredMessage>('messages', 'load-messages');
   }
 
   // Load encrypted array
-  private async loadEncryptedArray<T>(key: string, logContext: string): Promise<T[]> {
-    const encrypted = await (await this.kv()).getBinary('data', key);
-    if (!encrypted) return [];
+  private async loadEncryptedArray<T>(key: string, logContext: string): Promise<T[] | null> {
+    const encrypted = await (await this.kv()).getBinary(STORAGE_STORES.DATA, key);
+    if (!encrypted) return null;
 
     try {
-      const data = await this.decryptData(encrypted);
-      return Array.isArray(data) ? (data as T[]) : [];
+      const data = await this.decryptData(encrypted, STORAGE_STORES.DATA, key);
+      if (!Array.isArray(data)) throw new Error('Stored array has an invalid shape');
+      return data as T[];
     } catch (err: any) {
       const msg = err?.message || String(err);
 
-      if (/(decrypt|MAC|BLAKE3)/i.test(msg)) {
-        return [];
-      }
-      throw err;
+      console.error(`[SecureDB] Integrity failure in ${logContext}; refusing to treat it as empty`, msg);
+      throw new Error(`SecureDB integrity failure in ${logContext}: ${msg}`);
+    } finally {
+      encrypted.fill(0);
     }
-  }
-
-  // Load messages paginated
-  async loadMessagesPaginated(limit = 50, offset = 0): Promise<StoredMessage[]> {
-    const all = await this.loadMessages();
-    const sorted = all.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-
-    return sorted.slice(offset, offset + limit);
   }
 
   // Load conversation messages
-  async loadConversationMessages(peerUsername: string, currentUsername: string, limit = 50, offset = 0): Promise<StoredMessage[]> {
-    const all = await this.loadMessages();
-
-    const filtered = all.filter(m => ((m as any).sender === peerUsername && (m as any).recipient === currentUsername) || ((m as any).sender === currentUsername && (m as any).recipient === peerUsername));
-    const sorted = filtered.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-
-    return sorted.slice(offset, offset + limit);
+  async loadConversationMessages(peerUsername: string, limit = 50, offset = 0): Promise<StoredMessage[]> {
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !Number.isSafeInteger(limit) || limit <= 0 || limit > CONVERSATION_SEGMENT_SIZE ||
+      !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_CONVERSATION_STORED_MESSAGES
+    ) {
+      throw new Error('Invalid conversation page');
+    }
+    return this.withMessageLock(async () => {
+      const tail = await this.loadConversationTail(peerUsername, offset + limit);
+      return tail.slice().reverse().slice(offset, offset + limit);
+    });
   }
 
-  // Get conversation message count
-  async getConversationMessageCount(peerUsername: string, currentUsername: string): Promise<number> {
-    const all = await this.loadMessages();
+  async recordDeliberateContact(peerUsername: string): Promise<void> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    return this.withMessageLock(async () => {
+      const marker = await this.encryptData(
+        true,
+        STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+        peerUsername,
+      );
+      try {
+        await (await this.kv()).mutate([{
+          store: STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+          key: peerUsername,
+          value: marker,
+        }], []);
+      } finally {
+        marker.fill(0);
+      }
+    });
+  }
 
-    return all.filter(m => ((m as any).sender === peerUsername && (m as any).recipient === currentUsername) || ((m as any).sender === currentUsername && (m as any).recipient === peerUsername)).length;
+  async hasDeliberateContact(peerUsername: string): Promise<boolean> {
+    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    return this.withMessageLock(async () => {
+      const kv = await this.kv();
+      const encryptedMarker = await kv.getBinary(
+        STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+        peerUsername,
+      );
+      if (encryptedMarker) {
+        try {
+          const marker = await this.decryptData(
+            encryptedMarker,
+            STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+            peerUsername,
+          );
+          if (marker !== true) throw new Error('Invalid call-admission relationship marker');
+          return true;
+        } finally {
+          encryptedMarker.fill(0);
+        }
+      }
+
+      const layout = await this.conversationLayout(peerUsername);
+      if (!layout) return false;
+      for (let index = layout.lastSegment; index >= layout.firstSegment; index -= 1) {
+        const segment = await this.readSegment(peerUsername, index);
+        if (!segment) continue;
+        for (let position = segment.length - 1; position >= 0; position -= 1) {
+          const message = segment[position];
+          if (
+            message.sender === this.username &&
+            message.recipient === peerUsername &&
+            message.isSystemMessage !== true &&
+            (message.type === 'text' || isFileMessage(message)) &&
+            message.isDeliberateUserAction === true
+          ) {
+            const marker = await this.encryptData(
+              true,
+              STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+              peerUsername,
+            );
+            try {
+              await kv.mutate([{
+                store: STORAGE_KEYS.DELIBERATE_CALL_ADMISSION,
+                key: peerUsername,
+                value: marker,
+              }], []);
+            } finally {
+              marker.fill(0);
+            }
+            return true;
+          }
+        }
+      }
+      return false;
+    });
   }
 
   // Load recent messages by conversation
-  async loadRecentMessagesByConversation(messagesPerConversation = 50, currentUsername: string): Promise<StoredMessage[]> {
-    try {
-      const metadata = await this.loadConversationMetadata();
-      if (metadata && metadata.length > 0) {
-        const result: StoredMessage[] = [];
-
-        for (const meta of metadata) {
-          result.push(meta.lastMessage);
-        }
-
-        return result.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-      } else {
-        const rebuilt = await this.rebuildConversationMetadata();
-
-        if (rebuilt.length > 0) {
-          return rebuilt.map(m => m.lastMessage).sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-        }
-      }
-    } catch (err) {
-      console.warn('[SecureDB] Metadata load failed, falling back to full scan', err);
-    }
-
-    if (!currentUsername) return [];
-    const encrypted = await (await this.kv()).getBinary('data', 'messages');
-    if (!encrypted) return [];
-
-    let allMessages: any[];
-
-    try {
-      allMessages = await this.decryptDataWithYield(encrypted);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-
-      if (/(decrypt|MAC|BLAKE3)/i.test(msg)) {
-        return [];
-      }
-      throw err;
-    }
-
-    if (!Array.isArray(allMessages)) return [];
-
-    setTimeout(() => this.rebuildConversationMetadata().catch(e => console.error(e)), 100);
-
-    const map = new Map<string, StoredMessage[]>();
-    const CHUNK = 100;
-    for (let i = 0; i < allMessages.length; i += CHUNK) {
-      const chunk = allMessages.slice(i, i + CHUNK);
-
-      for (const msg of chunk) {
-        if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
-        const peer = currentUsername ? ((msg as any).sender === currentUsername ? (msg as any).recipient : (msg as any).sender) : (msg as any).sender;
-
-        if (!map.has(peer)) map.set(peer, []);
-        map.get(peer)!.push(msg);
-      }
-
-      if (i + CHUNK < allMessages.length) await new Promise(r => setTimeout(r, 0));
-    }
-
-    const result: StoredMessage[] = [];
-    const entries = Array.from(map.entries());
-
-    for (let i = 0; i < entries.length; i++) {
-      const [, messages] = entries[i];
-      const sorted = messages.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
-      result.push(...sorted.slice(0, messagesPerConversation));
-
-      if (i > 0 && i % 5 === 0 && i < entries.length - 1) await new Promise(r => setTimeout(r, 0));
-    }
-
-    return result;
+  async loadRecentMessagesByConversation(): Promise<StoredMessage[]> {
+    return this.withMessageLock(async () => {
+      const metadata = await this.loadIndexedConversationMetadataUnlocked();
+      return metadata
+        .map((entry) => entry.lastMessage)
+        .sort((a, b) => (b.timestamp as number) - (a.timestamp as number));
+    });
   }
 
   // Save users to storage
   async saveUsers(users: StoredUser[]): Promise<void> {
-    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-    const encrypted = await this.encryptData(users);
-
-    await (await this.kv()).setBinary('data', 'users', encrypted);
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    const normalized = normalizeKnownUsers(users, this.username);
+    const encrypted = await this.encryptData(normalized, STORAGE_STORES.DATA, STORAGE_KEYS.USERS);
+    try {
+      await (await this.kv()).setBinary(STORAGE_STORES.DATA, STORAGE_KEYS.USERS, encrypted);
+    } finally {
+      encrypted.fill(0);
+    }
   }
 
-  // Delete all messages in a conversation between two users
-  async deleteConversationMessages(peerUsername: string, currentUsername: string): Promise<number> {
-    if (!peerUsername || !currentUsername) return 0;
-    const all = await this.loadMessages().catch(() => [] as StoredMessage[]);
-
-    if (!Array.isArray(all) || all.length === 0) return 0;
-    
-    const before = all.length;
-    const remaining = all.filter((msg) => {
-      const s = (msg as any).sender; const r = (msg as any).recipient; if (!s || !r) return true;
-      return !((s === peerUsername && r === currentUsername) || (s === currentUsername && r === peerUsername));
+  // Delete the conversation, its compact index entry, and locally retained file payloads
+  async deleteConversationMessages(peerUsername: string): Promise<number> {
+    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+      throw new Error('Invalid conversation peer');
+    }
+    return this.withMessageLock(async () => {
+      const conv = await this.loadConversation(peerUsername);
+      let metadata = await this.loadConversationMetadataUnlocked();
+      if (metadata === null) {
+        if (conv.length !== 0) throw new Error('Conversation metadata is missing for existing rows');
+        metadata = [];
+      }
+      const filteredMetadata = metadata.filter((entry) => entry.peerUsername !== peerUsername);
+      const encryptedMetadata = await this.encryptData(filteredMetadata, STORAGE_STORES.DATA, STORAGE_KEYS.CONVERSATIONS_METADATA);
+      const fileIds = conv
+        .filter(isFileMessage)
+        .map((message) => message.id!);
+      const layout = await this.conversationLayout(peerUsername);
+      const segmentKeys: string[] = [];
+      if (layout) {
+        for (let index = layout.firstSegment; index <= layout.lastSegment; index += 1) {
+          segmentKeys.push(SecureDB.segmentKey(peerUsername, index));
+        }
+      }
+      try {
+        await (await this.kv()).mutate(
+          [{ store: STORAGE_STORES.DATA, key: STORAGE_KEYS.CONVERSATIONS_METADATA, value: encryptedMetadata }],
+          [
+            ...segmentKeys.map((key) => ({ store: STORAGE_STORES.MESSAGE_CONVERSATIONS, key })),
+            ...fileIds.map((key) => ({ store: STORAGE_STORES.FILES, key })),
+          ],
+        );
+      } finally {
+        encryptedMetadata.fill(0);
+      }
+      
+      for (const key of segmentKeys) this.convSig.delete(key);
+      return conv.length;
     });
-    
-    if (remaining.length === before) return 0;
-    const encrypted = await this.encryptData(remaining);
-    
-    await (await this.kv()).setBinary('data', 'messages', encrypted);
-
-    return before - remaining.length;
   }
 
   // Load users from storage
   async loadUsers(): Promise<StoredUser[]> {
-    return this.loadEncryptedArray<StoredUser>('users', 'load-users');
+    const users = (await this.loadEncryptedArray<StoredUser>(STORAGE_KEYS.USERS, 'load-users')) ?? [];
+    return normalizeKnownUsers(users, this.username);
   }
 
   // Store ephemeral data
   async storeEphemeral(storeName: string, keyOrData: any, maybeData?: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, key: string, data: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, a: any, b?: any, ttl?: number, autoDelete = true): Promise<void> {
+    return this.withEphemeralLock(() => this.storeEphemeralUnlocked(storeName, a, b, ttl, autoDelete));
+  }
+
+  private async storeEphemeralUnlocked(
+    storeName: string,
+    a: unknown,
+    b?: unknown,
+    ttl?: number,
+    autoDelete = true,
+  ): Promise<void> {
     if (!this.ephemeralConfig.enabled) {
       if (typeof a === 'string') return this.store(storeName, a, b);
 
-      return this.store(storeName, '__singleton__', a);
+      return this.store(storeName, STORAGE_KEYS.SINGLETON, a);
     }
+    if (typeof autoDelete !== 'boolean') throw new Error('Invalid ephemeral deletion policy');
 
     let key: string; let data: unknown;
-    if (typeof a === 'string') { key = a; data = b; } else { key = '__singleton__'; data = a; }
+    if (typeof a === 'string') { key = a; data = b; } else { key = STORAGE_KEYS.SINGLETON; data = a; }
 
-    let validatedTTL = ttl || this.ephemeralConfig.defaultTTL;
-    if (typeof validatedTTL !== 'number' || isNaN(validatedTTL) || validatedTTL <= 0) {
-      validatedTTL = this.ephemeralConfig.defaultTTL;
+    const validatedTTL = ttl === undefined ? this.ephemeralConfig.defaultTTL : ttl;
+    if (!Number.isSafeInteger(validatedTTL) || validatedTTL <= 0) {
+      throw new Error('Invalid ephemeral TTL');
     }
 
     const now = Date.now(); const expiresAt = now + Math.min(validatedTTL, this.ephemeralConfig.maxTTL);
-    if (expiresAt <= now || !Number.isFinite(expiresAt)) throw new Error('Invalid expiration time calculated');
+    if (!isValidTimestamp(expiresAt) || expiresAt <= now) throw new Error('Invalid expiration time calculated');
     const payload: EphemeralData = { data, createdAt: now, expiresAt, ttl: expiresAt - now, autoDelete };
-    
-    await this.storeWithPrefix(`${SECURE_DB_EPHEMERAL_PREFIX}${storeName}`, key, payload);
+
+    await this.storeWithPrefix(`${STORAGE_PREFIXES.EPHEMERAL}${storeName}`, key, payload);
+  }
+
+  private validateEphemeralData(value: unknown): EphemeralData {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Invalid ephemeral record');
+    }
+    const candidate = value as Partial<EphemeralData>;
+    if (
+      !isValidTimestamp(candidate.createdAt) ||
+      !isValidTimestamp(candidate.expiresAt) ||
+      !Number.isSafeInteger(candidate.ttl) || candidate.ttl <= 0 ||
+      candidate.ttl > this.ephemeralConfig.maxTTL ||
+      candidate.expiresAt <= candidate.createdAt ||
+      candidate.expiresAt - candidate.createdAt !== candidate.ttl ||
+      typeof candidate.autoDelete !== 'boolean'
+    ) {
+      throw new Error('Invalid ephemeral record');
+    }
+    return candidate as EphemeralData;
   }
 
   // Retrieve ephemeral data
   async retrieveEphemeral(storeName: string, keyOrUndefined?: string): Promise<unknown | null> {
-    const key = keyOrUndefined ?? '__singleton__';
+    return this.withEphemeralLock(() => this.retrieveEphemeralUnlocked(storeName, keyOrUndefined));
+  }
+
+  private async retrieveEphemeralUnlocked(
+    storeName: string,
+    keyOrUndefined?: string,
+  ): Promise<unknown | null> {
+    const key = keyOrUndefined ?? STORAGE_KEYS.SINGLETON;
     if (!this.ephemeralConfig.enabled) return this.retrieve(storeName, key);
 
-    const ephe = await this.retrieveWithPrefix(`${SECURE_DB_EPHEMERAL_PREFIX}${storeName}`, key) as EphemeralData | null;
-    if (!ephe) return null;
-    if (!ephe.expiresAt) return null;
+    const stored = await this.retrieveWithPrefix(`${STORAGE_PREFIXES.EPHEMERAL}${storeName}`, key);
+    if (stored === null) return null;
+    const ephe = this.validateEphemeralData(stored);
 
-    if (Date.now() > ephe.expiresAt) {
-      if (ephe.autoDelete) await this.deleteWithPrefix(`${SECURE_DB_EPHEMERAL_PREFIX}${storeName}`, key);
+    if (Date.now() >= ephe.expiresAt) {
+      if (ephe.autoDelete) await this.deleteWithPrefix(`${STORAGE_PREFIXES.EPHEMERAL}${storeName}`, key);
       return null;
     }
 
@@ -634,70 +1532,147 @@ export class SecureDB {
 
   // Append to ephemeral list
   async appendEphemeralList(storeName: string, listKey: string, entry: number | string, maxCount = 500, ttl?: number): Promise<(number | string)[]> {
-    const existing = await this.retrieveEphemeral(storeName, listKey);
+    if (!Number.isSafeInteger(maxCount) || maxCount <= 0 || maxCount > MAX_EPHEMERAL_LIST_ITEMS) {
+      throw new Error('Invalid ephemeral list limit');
+    }
+    const validEntry = (
+      (typeof entry === 'string' && entry.length > 0 && entry.length <= 256 && !/[\u0000-\u001f\u007f]/.test(entry)) ||
+      (typeof entry === 'number' && Number.isSafeInteger(entry))
+    );
+    if (!validEntry) throw new Error('Invalid ephemeral list entry');
 
-    const list = Array.isArray(existing) ? existing.slice(0, maxCount) : [];
-    const normalized = (typeof entry === 'number' || typeof entry === 'string') ? entry : String(entry);
+    return this.withEphemeralLock(async () => {
+      const existing = await this.retrieveEphemeralUnlocked(storeName, listKey);
+      if (existing !== null && !Array.isArray(existing)) {
+        throw new Error('Invalid ephemeral list');
+      }
+      const list = (existing ?? []) as unknown[];
+      if (list.length > maxCount || list.some((value) => (
+        !(
+          (typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)) ||
+          (typeof value === 'number' && Number.isSafeInteger(value))
+        )
+      ))) {
+        throw new Error('Invalid ephemeral list');
+      }
 
-    const deduped = list.filter((v) => v !== normalized);
-    deduped.push(normalized);
-    const trimmed = deduped.length > maxCount ? deduped.slice(deduped.length - maxCount) : deduped;
+      const deduped = (list as (number | string)[]).filter((value) => value !== entry);
+      deduped.push(entry);
+      const trimmed = deduped.length > maxCount ? deduped.slice(deduped.length - maxCount) : deduped;
+      await this.storeEphemeralUnlocked(storeName, listKey, trimmed, ttl, true);
+      return trimmed;
+    });
+  }
 
-    await this.storeEphemeral(storeName, listKey, trimmed, ttl, true);
+  async clearUnacknowledgedMessages(peerUsername: string, operationIds: string[]): Promise<void> {
+    if (
+      !this.ephemeralConfig.enabled ||
+      !isCanonicalUsername(peerUsername) ||
+      peerUsername === this.username ||
+      !Array.isArray(operationIds) ||
+      operationIds.length > MAX_EPHEMERAL_LIST_ITEMS
+    ) {
+      throw new Error('Invalid unacknowledged-message cleanup');
+    }
+    const uniqueIds = Array.from(new Set(operationIds));
+    if (uniqueIds.some((operationId) => sanitizeMessageId(operationId) !== operationId)) {
+      throw new Error('Invalid unacknowledged-message operation ID');
+    }
+    if (uniqueIds.length === 0) return;
 
-    return trimmed;
+    await this.withEphemeralLock(async () => {
+      await (await this.kv()).mutate(
+        [],
+        uniqueIds.map((operationId) => ({
+          store: `${STORAGE_PREFIXES.EPHEMERAL}unacknowledged-messages`,
+          key: `${peerUsername}:${operationId}`,
+        })),
+      );
+    });
+  }
+
+  async clearAllUnacknowledgedMessagesForPeer(peerUsername: string): Promise<void> {
+    if (
+      !this.ephemeralConfig.enabled ||
+      !isCanonicalUsername(peerUsername) ||
+      peerUsername === this.username
+    ) {
+      throw new Error('Invalid peer recovery cleanup');
+    }
+
+    await this.withEphemeralLock(async () => {
+      const kv = await this.kv();
+      const store = `${STORAGE_PREFIXES.EPHEMERAL}unacknowledged-messages`;
+      const prefix = `${peerUsername}:`;
+      const keys = await kv.keysForStore(store);
+      const deletions = keys
+        .filter((key) => key.startsWith(prefix))
+        .map((key) => ({ store, key }));
+      if (deletions.length > 0) await kv.mutate([], deletions);
+    });
   }
 
   // Start ephemeral cleanup
   private startEphemeralCleanup(): void {
+    if (this.disposed) throw new Error('Secure database has been disposed');
     if (this.cleanupInterval) clearInterval(this.cleanupInterval);
-    this.cleanupInterval = setInterval(async () => { await this.cleanupExpiredData(); }, this.ephemeralConfig.cleanupInterval);
+    this.cleanupInterval = setInterval(() => { void this.cleanupExpiredData(); }, this.ephemeralConfig.cleanupInterval);
   }
 
   // Cleanup expired ephemeral data
   private async cleanupExpiredData(): Promise<void> {
+    if (this.cleanupRunning) return;
+    this.cleanupRunning = true;
     try {
-      const now = Date.now(); if (now - this.lastCleanup < SECURE_DB_MIN_CLEANUP_INTERVAL) return; this.lastCleanup = now;
-      const kv = await this.kv();
-      const candidates = await kv.scanByStorePrefix(SECURE_DB_EPHEMERAL_PREFIX);
-      const toDeleteByStore = new Map<string, string[]>();
-      let totalDeleted = 0;
+      await this.withEphemeralLock(async () => {
+        if (this.disposed) return;
+        const now = Date.now();
+        if (now - this.lastCleanup < SECURE_DB_MIN_CLEANUP_INTERVAL) return;
+        this.lastCleanup = now;
+        const kv = await this.kv();
+        const candidates = await kv.selectorsByStorePrefix(STORAGE_PREFIXES.EPHEMERAL);
+        const toDeleteByStore = new Map<string, string[]>();
 
-      for (const { store, key, value } of candidates) {
-        try {
-          const data = await this.decryptData(value) as EphemeralData;
-
-          if (data?.expiresAt && now > data.expiresAt && data.autoDelete) {
-            const arr = toDeleteByStore.get(store) || []; arr.push(key); toDeleteByStore.set(store, arr);
-            totalDeleted++;
-            if (arr.length >= SECURE_DB_MAX_EPHEMERAL_BATCH) { await kv.deleteMany(store, arr.splice(0, arr.length)); }
+        for (const { store, key } of candidates) {
+          const value = await kv.getBinary(store, key);
+          if (!value) continue;
+          try {
+            const data = this.validateEphemeralData(await this.decryptData(value, store, key));
+            if (now >= data.expiresAt && data.autoDelete) {
+              const arr = toDeleteByStore.get(store) || [];
+              arr.push(key);
+              toDeleteByStore.set(store, arr);
+              if (arr.length >= SECURE_DB_MAX_EPHEMERAL_BATCH) {
+                await kv.deleteMany(store, arr.splice(0, arr.length));
+              }
+            }
+          } catch {
+          } finally {
+            value.fill(0);
           }
-        } catch { }
-      }
+        }
 
-      for (const [store, keys] of toDeleteByStore.entries()) {
-        if (keys.length) {
+        for (const [store, keys] of toDeleteByStore.entries()) {
+          if (keys.length) {
             await kv.deleteMany(store, keys);
+          }
         }
-      }
-
-      if (totalDeleted > 20) {
-        try {
-          await kv.compact();
-          console.log('[SecureDB] Automatically compacted database after background cleanup');
-        } catch (e) {
-          console.error('[SecureDB] Automatic compaction failed', e);
-        }
-      }
-    } catch { }
+      });
+    } catch {
+    } finally {
+      this.cleanupRunning = false;
+    }
   }
 
   // Store data with prefix
   private async storeWithPrefix(storeName: string, key: string, data: unknown): Promise<void> {
-    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-    const encrypted = await this.encryptData(data);
-
-    await (await this.kv()).setBinary(storeName, key, encrypted);
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    const encrypted = await this.encryptData(data, storeName, key);
+    try {
+      await (await this.kv()).setBinary(storeName, key, encrypted);
+    } finally {
+      encrypted.fill(0);
+    }
   }
 
   // Store data
@@ -710,8 +1685,10 @@ export class SecureDB {
     const encrypted = await (await this.kv()).getBinary(storeName, key);
     if (!encrypted) return null;
 
-    try { return await this.decryptData(encrypted); } catch (err) {
-      throw err;
+    try {
+      return await this.decryptData(encrypted, storeName, key);
+    } finally {
+      encrypted.fill(0);
     }
   }
 
@@ -728,87 +1705,39 @@ export class SecureDB {
   // Delete data
   async delete(storeName: string, key: string): Promise<void> { return this.deleteWithPrefix(storeName, key); }
 
-  // Cache username hash
-  async cacheUsernameHash(originalUsername: string, hashedUsername: string): Promise<void> {
-    await this.store('username_hashes', originalUsername, hashedUsername);
-  }
-
-  // Get cached username hash
-  async getCachedUsernameHash(originalUsername: string): Promise<string | null> {
-    const result = await this.retrieve('username_hashes', originalUsername);
-
-    return typeof result === 'string' ? result : null;
-  }
-
-  // Check if username hash is cached
-  async hasUsernameHash(originalUsername: string): Promise<boolean> {
-    return (await this.getCachedUsernameHash(originalUsername)) !== null;
-  }
-
-  // Append messages to existing messages
-  async appendMessages(newMessages: StoredMessage[]): Promise<void> {
-    const existing = await this.loadMessages();
-    const all = [...existing, ...newMessages].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-
-    await this.saveMessages(all);
-  }
-
-  // Clear all data
-  async clearAllData(): Promise<void> { await (await this.kv()).clearAll(); }
-
   // Clear a specific store
-  async clearStore(storeName: string): Promise<number> { return (await this.kv()).clearStore(storeName); }
-
-  // Compact database
-  async compactDatabase(): Promise<void> {
-    await (await this.kv()).compact();
-  }
-
-  // Save a file
-  async saveFile(fileId: string, data: ArrayBuffer | Blob): Promise<{ success: boolean; quotaExceeded?: boolean }> {
-    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-
-    validateFileData(data, fileId);
-
-    const arrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
-    const uint8Array = new Uint8Array(arrayBuffer);
-    const fileSize = uint8Array.byteLength;
-
-    // Check if adding this file would exceed the total storage limit
-    const { available } = await getFilesStorageUsage(await this.kv());
-    const estimatedEncryptedSize = Math.ceil(fileSize * 1.1);
-
-    if (estimatedEncryptedSize > available) {
-      console.warn('securedb', 'file-save', 'quota-exceeded', {
-        fileSize,
-        available,
-        limit: SECURE_DB_MAX_TOTAL_FILE_STORAGE
-      });
-      return { success: false, quotaExceeded: true };
-    }
-
-    const encrypted = await this.encryptData({ [FILE_B64_FIELD]: u8ToBase64(uint8Array) });
-    await (await this.kv()).setBinary('files', fileId, encrypted);
-    return { success: true };
-  }
+  async clearStore(storeName: string): Promise<number> { if (storeName === STORAGE_STORES.MESSAGE_CONVERSATIONS) this.convSig.clear(); return (await this.kv()).clearStore(storeName); }
 
   // Get a file from storage
   async getFile(fileId: string): Promise<Blob | null> {
-    if (!fileId || typeof fileId !== 'string') return null;
+    if (sanitizeMessageId(fileId) !== fileId) return null;
 
-    const encrypted = await (await this.kv()).getBinary('files', fileId);
+    const encrypted = await (await this.kv()).getBinary(STORAGE_STORES.FILES, fileId);
     if (!encrypted) return null;
 
     try {
-      const decrypted = await this.decryptData(encrypted);
-      const b64 = (decrypted as any)?.[FILE_B64_FIELD];
-      if (typeof b64 !== 'string') return null;
-      const arr = base64ToU8(b64);
-      const out = new Uint8Array(new ArrayBuffer(arr.byteLength));
-      out.set(arr);
-      return new Blob([out]);
-    } catch {
-      return null;
+      const decrypted = await this.decryptBytes(
+        encrypted,
+        STORAGE_STORES.FILES,
+        fileId,
+        PROTOCOL_KEYS.SECURE_DB_FILE_AAD,
+      );
+      let out: Uint8Array | null = null;
+      try {
+        if (decrypted.length === 0 || decrypted.length > SECURE_DB_MAX_FILE_SIZE) {
+          throw new Error('Stored file has an invalid size');
+        }
+        const outBuffer = new ArrayBuffer(decrypted.byteLength);
+        out = new Uint8Array(outBuffer);
+        out.set(decrypted);
+        return new Blob([outBuffer]);
+      } finally {
+        decrypted.fill(0);
+        out?.fill(0);
+      }
+    } finally {
+      encrypted.fill(0);
     }
   }
+
 }

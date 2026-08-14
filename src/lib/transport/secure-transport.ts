@@ -1,58 +1,53 @@
 // Transport Abstraction Layer
 
 import { SignalType } from '../types/signal-types';
+import { PQ_AEAD_CIPHERTEXT_OVERHEAD } from '../constants';
 
 // Connection states
 export type ConnectionState =
-    | 'disconnected'    // No connection
-    | 'connecting'      // Transport-level connection in progress
-    | 'handshaking'     // PQ Noise handshake in progress
-    | 'connected'       // Fully established and encrypted
-    | 'reconnecting'    // Temporarily disconnected, attempting recovery
-    | 'failed';         // Unrecoverable error
+    | 'disconnected'
+    | 'connecting'
+    | 'handshaking'
+    | 'connected'
+    | 'failed';
 
 // Stream types
 export type StreamType =
-    | SignalType.MESSAGE     // 'message'
-    | SignalType.CALL_SIGNAL // 'call-signal'
-    | SignalType.CHAT        // 'chat'
-    | SignalType.SIGNAL      // 'signal'
-    | 'call-audio'           // in audio
-    | 'call-video'           // in video
-    | 'call-screen'          // Screen sharing stream
-    | 'file';                // Large file transfer
+    | SignalType.MESSAGE
+    | 'call-audio'
+    | 'call-video'
+    | 'call-screen';
 
 // Encrypted frame format
 export interface EncryptedFrame {
-    readonly length: number;       // Total frame length
-    readonly sequence: bigint;     // Message sequence number for replay protection
+    readonly length: number;
+    readonly sequence: bigint;
     readonly ciphertext: Uint8Array;
-    readonly tag: Uint8Array;      // 32-byte BLAKE3 MAC
+    readonly tag: Uint8Array;
 }
 
 // Peer identity
 export interface PeerIdentity {
     readonly username: string;
-    readonly kyberPublicKey: Uint8Array;      // ML-KEM-1024 public key (1568 bytes)
-    readonly dilithiumPublicKey: Uint8Array;  // ML-DSA-87 public key (2592 bytes)
-    readonly x25519PublicKey: Uint8Array;     // X25519 public key (32 bytes)
-    readonly endpointUrl?: string;            // libp2p dial endpoint (tcp://host:port)
+    readonly kyberPublicKey: Uint8Array;
+    readonly dilithiumPublicKey: Uint8Array;
+    readonly x25519PublicKey: Uint8Array;
+    readonly endpointUrl?: string;
+    readonly certificateExpiresAt: number;
+    readonly certVerified: true;
 }
 
 // Connection options
 export interface ConnectOptions {
-    readonly peerIdentity: PeerIdentity;
-    readonly timeout?: number;              // Connection timeout in ms (default: 30000)
-    readonly preferDirect?: boolean;        // Prefer direct peer path (default: true)
+    readonly timeout?: number;
     readonly onStateChange?: (state: ConnectionState) => void;
 }
 
 // Stream options
 export interface StreamOptions {
     readonly type: StreamType;
-    readonly lossy?: boolean;               // Allow packet loss for real-time (default: false)
-    readonly priority?: 'high' | 'normal' | 'low';  // Stream priority
-    readonly maxRetransmits?: number;       // For partially reliable streams
+    readonly id?: string;
+    readonly lossy?: boolean;
 }
 
 // Bidirectional stream
@@ -64,9 +59,6 @@ export interface SecureStream {
 
     // Write encrypted data
     write(data: Uint8Array): Promise<void>;
-
-    // Write with backpressure
-    writeWithBackpressure(data: Uint8Array): Promise<void>;
 
     // Read decrypted data
     read(): Promise<Uint8Array | null>;
@@ -101,11 +93,14 @@ export interface SecureConnection {
     // Get stream by type
     getStream(type: StreamType): SecureStream | null;
 
+    // Get a specific stream announced by an authenticated higher-level protocol
+    getStreamById(id: string): SecureStream | null;
+
+    // Public, per-handshake binding used to domain-separate application replay state.
+    getSessionBinding(): string | null;
+
     // Close streams and disconnect
     close(reason?: string): Promise<void>;
-
-    // Force session key rotation
-    rotateSessionKeys(): Promise<void>;
 
     // Handler for incoming streams
     onStream(handler: (stream: SecureStream) => void): () => void;
@@ -134,13 +129,6 @@ export interface SecureTransport {
     // Check if connected to a peer
     isConnected(peerId: string): boolean;
 
-    // Send a message to a peer
-    sendMessage(
-        peerId: string,
-        message: unknown,
-        type?: SignalType
-    ): Promise<void>;
-
     // Register incoming message handler
     onMessage(handler: MessageHandler): () => void;
 
@@ -152,13 +140,16 @@ export interface SecureTransport {
 }
 
 // Supporting Types
-// Options for initializing the transport
 export interface TransportInitOptions {
     readonly localUsername: string;
-    readonly localPeerId?: string;
-    readonly kyberKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
-    readonly dilithiumKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
-    readonly x25519KeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
+    readonly kyberPublicKey: Uint8Array;
+    readonly dilithiumPublicKey: Uint8Array;
+    readonly x25519PublicKey: Uint8Array;
+    readonly signTranscript: (message: Uint8Array) => Promise<Uint8Array>;
+    readonly respondToHandshake: (
+        kemCiphertext: Uint8Array,
+        peerX25519Public: Uint8Array
+    ) => Promise<{ pqSecret: Uint8Array; x25519Secret: Uint8Array }>;
 }
 
 // Incoming message with metadata
@@ -172,35 +163,35 @@ export interface IncomingMessage {
     readonly verified: boolean;
     readonly routeProof?: any;
     readonly signature?: string;
+    readonly wireBytes?: number;
 }
 
 // Message handler function
 export type MessageHandler = (message: IncomingMessage) => void | Promise<void>;
 
 // Session status info
-export interface SessionStatus {
-    readonly established: boolean;
-    readonly inProgress: boolean;
-    readonly sendKey: Uint8Array | null;
-    readonly receiveKey: Uint8Array | null;
-    readonly role: 'initiator' | 'responder' | null;
-    readonly lastRotation: number | null;
-}
-
 // Encode an encrypted frame
 export function encodeFrame(
     sequence: bigint,
     ciphertext: Uint8Array,
     tag: Uint8Array
 ): Uint8Array {
+    if (sequence < 0n || sequence > 0xffffffffffffffffn) {
+        throw new Error('Frame sequence outside uint64 range');
+    }
+    if (!(ciphertext instanceof Uint8Array) || ciphertext.length <= PQ_AEAD_CIPHERTEXT_OVERHEAD ||
+        ciphertext.length > MAX_MESSAGE_FRAME_SIZE - FRAME_OVERHEAD ||
+        !(tag instanceof Uint8Array) || tag.length !== FRAME_TAG_SIZE) {
+        throw new Error('Invalid encrypted frame material');
+    }
     const totalLength = 4 + 8 + ciphertext.length + tag.length;
     const frame = new Uint8Array(totalLength);
     const view = new DataView(frame.buffer);
 
-    // Length (4 bytes, big-endian)
+    // Length
     view.setUint32(0, totalLength, false);
 
-    // Sequence (8 bytes, big-endian)
+    // Sequence
     view.setBigUint64(4, sequence, false);
 
     // Ciphertext
@@ -214,7 +205,8 @@ export function encodeFrame(
 
 // Decode a frame
 export function decodeFrame(frame: Uint8Array): EncryptedFrame {
-    if (frame.length < 44) {
+    if (!(frame instanceof Uint8Array) || frame.length < NOISE_FRAME_OVERHEAD + 1 ||
+        frame.length > MAX_MESSAGE_FRAME_SIZE) {
         throw new Error('Frame too short');
     }
 
@@ -233,10 +225,11 @@ export function decodeFrame(frame: Uint8Array): EncryptedFrame {
 }
 
 // Frame constants
-export const FRAME_HEADER_SIZE = 12;
+export const TRANSPORT_FRAME_HEADER_SIZE = 12;
 export const FRAME_TAG_SIZE = 32;
-export const FRAME_OVERHEAD = FRAME_HEADER_SIZE + FRAME_TAG_SIZE;
+export const FRAME_OVERHEAD = TRANSPORT_FRAME_HEADER_SIZE + FRAME_TAG_SIZE;
+export const NOISE_FRAME_OVERHEAD = FRAME_OVERHEAD + PQ_AEAD_CIPHERTEXT_OVERHEAD;
 
 // Maximum frame sizes
-export const MAX_MESSAGE_FRAME_SIZE = 16 * 1024 * 1024;
-export const MAX_CALL_FRAME_SIZE = 64 * 1024;
+export const MAX_MESSAGE_FRAME_SIZE = 4 * 1024 * 1024;
+export const MAX_CALL_FRAME_SIZE = 2 * 1024 * 1024;

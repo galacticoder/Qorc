@@ -1,5 +1,12 @@
 import { format, isToday, isYesterday, isThisYear } from 'date-fns';
 
+export const formatClockDurationSeconds = (seconds: number): string => {
+  const normalized = Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : 0;
+  const minutes = Math.floor(normalized / 60);
+  const remainder = normalized % 60;
+  return `${minutes}:${remainder.toString().padStart(2, '0')}`;
+};
+
 // Format a date as relative age string (now, Xm, Xh, Xd, or MM/DD/YY)
 export const formatRelativeAge = (date: Date | number | undefined): string => {
   if (date === undefined || date === null) return '';

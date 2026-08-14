@@ -12,19 +12,13 @@ use tauri::{
 
 use crate::error::QorResult;
 
-/// Unread message count
 static UNREAD_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Initialize system tray
 pub async fn init(app_handle: &AppHandle) -> QorResult<()> {
     let app = app_handle.clone();
-
-    // Build context menu
     let menu = build_tray_menu(&app)?;
-
     let icon = load_tray_icon();
 
-    // Build tray icon
     let app_clone = app.clone();
     let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
@@ -33,18 +27,17 @@ pub async fn init(app_handle: &AppHandle) -> QorResult<()> {
         .show_menu_on_left_click(false)
         .on_tray_icon_event(move |_tray, event| match event {
             TrayIconEvent::Click {
-                button,
-                button_state,
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
                 ..
             } => {
-                if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                    show_main_window(&app_clone);
-                }
+                show_main_window(&app_clone);
             }
-            TrayIconEvent::DoubleClick { button, .. } => {
-                if button == MouseButton::Left {
-                    show_main_window(&app_clone);
-                }
+            TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                show_main_window(&app_clone);
             }
             _ => {}
         })
@@ -69,7 +62,6 @@ fn load_tray_icon() -> Image<'static> {
         .unwrap_or_else(|_| Image::new_owned(vec![0, 0, 0, 255], 1, 1))
 }
 
-/// Build the tray context menu
 fn build_tray_menu(app: &AppHandle) -> QorResult<Menu<tauri::Wry>> {
     let unread = UNREAD_COUNT.load(Ordering::Relaxed);
     let unread_label = if unread > 0 {
@@ -96,14 +88,11 @@ fn build_tray_menu(app: &AppHandle) -> QorResult<Menu<tauri::Wry>> {
     Ok(menu)
 }
 
-/// Show the main window
 fn show_main_window(app: &AppHandle) {
-    // Try to get existing window
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
     } else {
-        // Create new window
         match tauri::WebviewWindowBuilder::new(
             app,
             "main",
@@ -128,25 +117,17 @@ fn show_main_window(app: &AppHandle) {
         }
     }
 
-    // Clear background mode when window is shown
-    let state = app.state::<crate::state::AppState>();
-    state.set_background_mode(false);
-
-    // Clear unread count when window is shown
     clear_unread(app);
 }
 
-/// Set unread count and update tray menu
 pub fn set_unread_count(app: &AppHandle, count: u32) {
     let count = count.min(9999);
     let previous = UNREAD_COUNT.swap(count, Ordering::Relaxed);
 
-    // Update menu if count changed
     if previous == count {
         return;
     }
 
-    // Update the tray menu
     match app.tray_by_id("main") {
         Some(tray) => match build_tray_menu(app) {
             Ok(menu) => {
@@ -162,13 +143,11 @@ pub fn set_unread_count(app: &AppHandle, count: u32) {
     }
 }
 
-/// Increment unread count
 pub fn increment_unread(app: &AppHandle) {
     let current = UNREAD_COUNT.load(Ordering::Relaxed);
     set_unread_count(app, current + 1);
 }
 
-/// Clear unread count
 pub fn clear_unread(app: &AppHandle) {
     set_unread_count(app, 0);
 }

@@ -1,59 +1,102 @@
 /**
- * Unlinkable avatar content store (server side).
- *
- * Stores uniform-size, E2E-encrypted avatar PURBs keyed only by an opaque client chosen random
- * blobId. There is intentionally no owner/token/identity column. the server must not be able to
- * link a stored avatar to a user. Uploads are anonymous(Privacy Pass gated at the route. the
- * {blobId, key} pointer lives only inside the discovery keys blob ciphertext the server cannot read
+ * Unlinkable avatar content store
  */
 
 import crypto from 'crypto';
-import { getPgPool, cryptoLogger } from './core.js';
+import { getPgPool, withTransaction } from './core.js';
+import { selectRandomRankEvictionIds } from './random-rank-eviction.js';
+import {
+  AES_256_CTR,
+  AES_256_CTR_IV_BYTES,
+  AVATAR_MISS_SECRET_BYTES,
+  BASE64_ALPHABET,
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+  POST_QUANTUM_AEAD_TAG_BYTES,
+  SHA_256_ALGORITHM
+} from '../utils/crypto-consts.js';
+import { CANONICAL_BASE64_RE, HEX_64_RE } from '../utils/patterns.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 
 // Expected base64 length of a PURB
-export const AVATAR_PURB_WIRE_BYTES = 36 + 32 + (256 * 1024 + 32);
+export const AVATAR_PURB_WIRE_BYTES =
+  POST_QUANTUM_AEAD_NONCE_BYTES +
+  POST_QUANTUM_AEAD_TAG_BYTES +
+  (256 * 1024 + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES);
 export const AVATAR_BLOB_B64_CHARS = 4 * Math.ceil(AVATAR_PURB_WIRE_BYTES / 3);
-const B64_TOLERANCE = 4;
-
-const BLOB_ID_RE = /^[a-f0-9]{64}$/;
 
 export function isValidAvatarBlobId(blobId) {
-  return typeof blobId === 'string' && BLOB_ID_RE.test(blobId);
+  return typeof blobId === 'string' && HEX_64_RE.test(blobId);
 }
 
 export function isValidAvatarBlobData(data) {
-  return typeof data === 'string'
-    && Math.abs(data.length - AVATAR_BLOB_B64_CHARS) <= B64_TOLERANCE;
+  if (
+    typeof data !== 'string' ||
+    data.length !== AVATAR_BLOB_B64_CHARS ||
+    !CANONICAL_BASE64_RE.test(data)
+  ) return false;
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  const decodedBytes = (data.length / 4) * 3 - padding;
+  if (decodedBytes !== AVATAR_PURB_WIRE_BYTES) return false;
+  if (padding === 2) return (BASE64_ALPHABET.indexOf(data[data.length - 3]) & 0x0f) === 0;
+  if (padding === 1) return (BASE64_ALPHABET.indexOf(data[data.length - 2]) & 0x03) === 0;
+  return true;
 }
 
 /**
  * Deterministic unpredictable miss response identical size to a real blob
  */
 export function syntheticMissBlob(blobId, missSecret) {
-  const want = AVATAR_PURB_WIRE_BYTES;
-  const out = Buffer.allocUnsafe(want);
-  let off = 0;
-  let counter = 0;
-  const secret = missSecret || 'qor-avatar-miss-v1';
-  while (off < want) {
-    const chunk = crypto.createHmac('sha256', secret)
-      .update(String(blobId))
-      .update('\0')
-      .update(Buffer.from([counter & 0xff, (counter >> 8) & 0xff, (counter >> 16) & 0xff, (counter >> 24) & 0xff]))
-      .digest();
-    const n = Math.min(chunk.length, want - off);
-    chunk.copy(out, off, 0, n);
-    off += n;
-    counter += 1;
+  if (!isValidAvatarBlobId(blobId)) {
+    throw new Error('Invalid avatar blob id');
   }
-  return out.toString('base64');
+  if (!Buffer.isBuffer(missSecret) || missSecret.length !== AVATAR_MISS_SECRET_BYTES) {
+    throw new Error('Avatar miss secret must be a 32-byte Buffer');
+  }
+
+  const want = AVATAR_PURB_WIRE_BYTES;
+  const streamKey = crypto.createHmac(SHA_256_ALGORITHM, missSecret)
+    .update(PROTOCOL_KEYS.AVATAR_MISS_KEY)
+    .update(blobId, 'ascii')
+    .digest();
+  const streamIvMaterial = crypto.createHmac(SHA_256_ALGORITHM, missSecret)
+    .update(PROTOCOL_KEYS.AVATAR_MISS_IV)
+    .update(blobId, 'ascii')
+    .digest();
+  const streamIv = streamIvMaterial.subarray(0, AES_256_CTR_IV_BYTES);
+  const zeroes = Buffer.alloc(want);
+  let output = null;
+  let tail = null;
+  let combined = null;
+
+  try {
+    const cipher = crypto.createCipheriv(AES_256_CTR, streamKey, streamIv);
+    output = cipher.update(zeroes);
+    tail = cipher.final();
+    if (tail.length === 0) return output.toString('base64');
+    combined = Buffer.concat([output, tail], want);
+    return combined.toString('base64');
+  } finally {
+    zeroes.fill(0);
+    output?.fill(0);
+    tail?.fill(0);
+    combined?.fill(0);
+    streamKey.fill(0);
+    streamIvMaterial.fill(0);
+  }
 }
 
 export class AvatarBlobDB {
   // Store or refresh one PURB
-  static async store(blobId, data, expiresAt, publishedAt = Date.now()) {
-    if (!isValidAvatarBlobId(blobId) || !isValidAvatarBlobData(data)) {
-      cryptoLogger.warn('[DB][AVATAR] store rejected - bad blobId/data', {
+  static async store(blobId, data, expiresAt) {
+    const now = Date.now();
+    if (
+      !isValidAvatarBlobId(blobId) ||
+      !isValidAvatarBlobData(data) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= now
+    ) {
+      console.warn('[DB][AVATAR] store rejected - bad blobId/data', {
         hasBlobId: isValidAvatarBlobId(blobId),
         dataLen: typeof data === 'string' ? data.length : null
       });
@@ -62,49 +105,79 @@ export class AvatarBlobDB {
     try {
       const pool = await getPgPool();
       const res = await pool.query(
-        `INSERT INTO avatar_blobs ("blobId", "data", "expiresAt", "publishedAt")
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO avatar_blobs ("blobId", "data", "expiresAt")
+         VALUES ($1, $2, $3)
          ON CONFLICT ("blobId") DO UPDATE SET
-           "data" = EXCLUDED."data",
-           "expiresAt" = EXCLUDED."expiresAt",
-           "publishedAt" = EXCLUDED."publishedAt"`,
-        [blobId, data, expiresAt, publishedAt]
+           "expiresAt" = GREATEST(avatar_blobs."expiresAt", EXCLUDED."expiresAt")
+         WHERE avatar_blobs."data" = EXCLUDED."data"`,
+        [blobId, data, expiresAt]
       );
       return (res?.rowCount ?? 0) > 0;
     } catch (error) {
-      cryptoLogger.error('[DB][AVATAR] store failed', { error: error?.message || String(error) });
+      console.error('[DB][AVATAR] store failed', { error: error?.message || String(error) });
       return false;
     }
   }
 
-  // Fetch one PURB by id
-  static async get(blobId, now = Date.now()) {
-    if (!isValidAvatarBlobId(blobId)) return null;
+  static async getMany(blobIds, now = Date.now()) {
+    const valid = Array.from(new Set((Array.isArray(blobIds) ? blobIds : []).filter(isValidAvatarBlobId)));
+    const out = new Map();
+    if (valid.length === 0) return out;
     try {
       const pool = await getPgPool();
       const { rows } = await pool.query(
-        'SELECT "data" FROM avatar_blobs WHERE "blobId" = $1 AND "expiresAt" > $2 LIMIT 1',
-        [blobId, now]
+        'SELECT "blobId", "data" FROM avatar_blobs WHERE "blobId" = ANY($1) AND "expiresAt" > $2',
+        [valid, now]
       );
-      return rows.length > 0 ? rows[0].data : null;
+      for (const row of rows) {
+        if (
+          !isValidAvatarBlobId(row?.blobId) ||
+          !valid.includes(row.blobId) ||
+          out.has(row.blobId) ||
+          !isValidAvatarBlobData(row?.data)
+        ) {
+          throw new Error('invalid_avatar_blob_row');
+        }
+        out.set(row.blobId, row.data);
+      }
+      return out;
     } catch (error) {
-      cryptoLogger.error('[DB][AVATAR] get failed', { error: error?.message || String(error) });
-      return null;
+      console.error('[DB][AVATAR] getMany failed', { error: error?.message || String(error) });
+      throw error;
     }
   }
 
-  // A random sample of currently valid blobIds for clients to draw cover traffic decoys from
+  // random sample of currently valid blobIds for clients to draw cover traffic decoys from
   static async samplePool(limit = 256, now = Date.now()) {
-    const capped = Math.min(Math.max(Number(limit) || 256, 1), 1024);
+    const capped = Math.min(Math.max(Math.trunc(Number(limit) || 256), 1), 1024);
+    const pivotBytes = crypto.randomBytes(32);
+    let pivot;
+    try {
+      pivot = pivotBytes.toString('hex');
+    } finally {
+      pivotBytes.fill(0);
+    }
     try {
       const pool = await getPgPool();
-      const { rows } = await pool.query(
-        'SELECT "blobId" FROM avatar_blobs WHERE "expiresAt" > $1 ORDER BY random() LIMIT $2',
-        [now, capped]
+      const first = await pool.query(
+        `SELECT "blobId" FROM avatar_blobs
+         WHERE "expiresAt" > $1 AND "blobId" >= $2
+         ORDER BY "blobId" ASC LIMIT $3`,
+        [now, pivot, capped]
       );
-      return rows.map((r) => r.blobId);
+      const ids = first.rows.map((row) => row.blobId);
+      if (ids.length < capped) {
+        const wrapped = await pool.query(
+          `SELECT "blobId" FROM avatar_blobs
+           WHERE "expiresAt" > $1 AND "blobId" < $2
+           ORDER BY "blobId" ASC LIMIT $3`,
+          [now, pivot, capped - ids.length]
+        );
+        ids.push(...wrapped.rows.map((row) => row.blobId));
+      }
+      return ids.filter(isValidAvatarBlobId);
     } catch (error) {
-      cryptoLogger.error('[DB][AVATAR] samplePool failed', { error: error?.message || String(error) });
+      console.error('[DB][AVATAR] samplePool failed', { error: error?.message || String(error) });
       return [];
     }
   }
@@ -115,8 +188,46 @@ export class AvatarBlobDB {
       const res = await pool.query('DELETE FROM avatar_blobs WHERE "expiresAt" < $1', [now]);
       return res?.rowCount ?? 0;
     } catch (error) {
-      cryptoLogger.error('[DB][AVATAR] pruneExpired failed', { error: error?.message || String(error) });
+      console.error('[DB][AVATAR] pruneExpired failed', { error: error?.message || String(error) });
       return 0;
+    }
+  }
+
+  // Bound total disk usage
+  static async enforceCap(maxRows) {
+    const cap = Math.max(0, Math.trunc(Number(maxRows) || 0));
+    if (cap <= 0) return 0;
+    let client;
+    try {
+      const pool = await getPgPool();
+      client = await pool.connect();
+      return await withTransaction(client, async () => {
+        await client.query('SELECT pg_advisory_xact_lock(1364156997)');
+        await client.query('LOCK TABLE avatar_blobs IN SHARE ROW EXCLUSIVE MODE');
+        const now = Date.now();
+        const expired = await client.query(
+          'DELETE FROM avatar_blobs WHERE "expiresAt" <= $1',
+          [now]
+        );
+        const { rows } = await client.query('SELECT "blobId" FROM avatar_blobs');
+        if (rows.length <= cap) return expired?.rowCount ?? 0;
+
+        const evictedIds = selectRandomRankEvictionIds(
+          rows.map((row) => row?.blobId),
+          cap,
+          isValidAvatarBlobId
+        );
+        const evicted = await client.query(
+          'DELETE FROM avatar_blobs WHERE "blobId" = ANY($1)',
+          [evictedIds]
+        );
+        return (expired?.rowCount ?? 0) + (evicted?.rowCount ?? 0);
+      });
+    } catch (error) {
+      console.error('[DB][AVATAR] enforceCap failed', { error: error?.message || String(error) });
+      return 0;
+    } finally {
+      client?.release();
     }
   }
 }

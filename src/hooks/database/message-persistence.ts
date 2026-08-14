@@ -1,42 +1,46 @@
 import type { Message } from '../../components/chat/messaging/types';
 import type { SecureDB } from '../../lib/database/secureDB';
-import { DB_MAX_PENDING_MESSAGES, DB_MAX_MESSAGES } from '../../lib/constants';
-import { messageVault } from '../../lib/security/message-vault';
+import { DB_MAX_PENDING_MESSAGES, MAX_UI_MESSAGES_TOTAL } from '../../lib/constants';
 import { mergeReceipts } from '../../lib/utils/database-utils';
 
+const isVaultedTextMessage = (msg: Message): boolean => (
+  !msg.isSystemMessage &&
+  !msg.isDeleted &&
+  msg.type !== 'file' &&
+  msg.type !== 'file-message' &&
+  !msg.filename &&
+  !msg.fileInfo
+);
+
+export const projectMessageForUi = (msg: Message): Message => {
+  const shouldVaultContent = isVaultedTextMessage(msg);
+  const replyTo = msg.replyTo
+    ? {
+        ...msg.replyTo,
+        content: '',
+      }
+    : undefined;
+
+  return {
+    ...msg,
+    ...(shouldVaultContent
+      ? { content: '', secureContentId: msg.secureContentId || msg.id }
+      : {}),
+    ...(replyTo ? { replyTo } : {}),
+  };
+};
+
 // Process message from DB format to UI format
-export const processMessageFromDB = (msg: any, currentUser: string): Message => ({
+export const processMessageFromDB = (msg: any, currentUser: string): Message => projectMessageForUi({
   ...msg,
   timestamp: new Date(msg.timestamp),
   isCurrentUser: msg.sender === currentUser,
-  secureContentId: msg.id,
   receipt: msg.receipt ? {
     ...msg.receipt,
     deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
     readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
   } : undefined,
 });
-
-// Populate vault with message content
-const populateVaultFromMessages = async (messages: any[]): Promise<void> => {
-  const entries: { id: string; content: string }[] = [];
-
-  for (const msg of messages) {
-    if (msg.id && msg.content) {
-      entries.push({ id: msg.id, content: msg.content });
-
-      // Store reply content if present
-      if (msg.replyTo?.id && msg.replyTo?.content) {
-        const replyId = msg.replyTo.secureContentId || `reply-${msg.replyTo.id}-${msg.id}`;
-        entries.push({ id: replyId, content: msg.replyTo.content });
-      }
-    }
-  }
-
-  if (entries.length > 0) {
-    await messageVault.storeBatch(entries);
-  }
-};
 
 // Merge messages with existing state
 export const mergeMessages = (
@@ -67,30 +71,13 @@ export const mergeMessages = (
 // Load recent messages by conversation
 export const loadRecentMessages = async (
   secureDB: SecureDB,
-  currentUser: string,
-  limit: number = 50
-): Promise<Message[]> => {
-  const savedMessages = await secureDB.loadRecentMessagesByConversation(limit, currentUser);
-  if (!savedMessages || savedMessages.length === 0) return [];
-
-  // Populate vault with content from DB
-  await populateVaultFromMessages(savedMessages);
-
-  return savedMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
-};
-
-// Load all messages in background
-export const loadAllMessages = async (
-  secureDB: SecureDB,
   currentUser: string
 ): Promise<Message[]> => {
-  const allMessages = await secureDB.loadMessages();
-  if (!allMessages || allMessages.length === 0) return [];
+  const savedMessages = await secureDB.loadRecentMessagesByConversation();
+  if (!savedMessages || savedMessages.length === 0) return [];
+  const retainedMessages = savedMessages.slice(0, MAX_UI_MESSAGES_TOTAL);
 
-  // Populate vault with content from DB
-  await populateVaultFromMessages(allMessages);
-
-  return allMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
+  return retainedMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
 };
 
 // Load conversation messages with pagination
@@ -101,11 +88,8 @@ export const loadConversationMessages = async (
   limit: number = 50,
   offset: number = 0
 ): Promise<Message[]> => {
-  const messages = await secureDB.loadConversationMessages(peerUsername, currentUser, limit, offset);
+  const messages = await secureDB.loadConversationMessages(peerUsername, limit, offset);
   if (!messages || messages.length === 0) return [];
-
-  // Populate vault with content from DB
-  await populateVaultFromMessages(messages);
 
   const processed = messages.map((msg: any) => processMessageFromDB(msg, currentUser));
   processed.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -119,20 +103,11 @@ export const flushPendingMessages = async (
 ): Promise<void> => {
   if (pendingMessages.length === 0) return;
 
-  const currentMessages = (await secureDB.loadMessages()) || [];
-  const mergedMap = new Map<string, Message>();
-
-  [...currentMessages, ...pendingMessages].forEach((msg: Message) => {
-    mergedMap.set(msg.id!, msg);
-  });
-
-  const limited = Array.from(mergedMap.values()).slice(-DB_MAX_MESSAGES);
-  const storedMessages = limited.map(m => ({
-    ...m,
-    timestamp: m.timestamp instanceof Date ? m.timestamp.getTime() : m.timestamp,
+  const storedMessages = pendingMessages.map(message => ({
+    ...message,
+    timestamp: message.timestamp instanceof Date ? message.timestamp.getTime() : message.timestamp,
   }));
-
-  await secureDB.saveMessages(storedMessages as any);
+  await secureDB.upsertMessages(storedMessages as any);
 };
 
 // Save message
@@ -143,21 +118,10 @@ export const saveMessageBatch = async (
 ): Promise<void> => {
   if (pendingMessages.size === 0) return;
 
-  const msgs = (await secureDB.loadMessages().catch(() => [])) || [];
-
-  for (const [msgId, pendingMsg] of pendingMessages.entries()) {
-    const idx = msgs.findIndex((m: Message) => m.id === msgId);
-    if (idx !== -1) {
-      msgs[idx] = {
-        ...pendingMsg,
-        receipt: mergeReceipts(msgs[idx].receipt, pendingMsg.receipt)
-      };
-    } else {
-      msgs.push(pendingMsg);
-    }
-  }
-
-  await secureDB.saveMessages(msgs, activeConversationPeer);
+  await secureDB.upsertMessages(
+    Array.from(pendingMessages.values()) as any,
+    activeConversationPeer
+  );
 };
 
 // Add message to pending queue

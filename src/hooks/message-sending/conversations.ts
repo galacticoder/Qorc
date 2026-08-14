@@ -3,6 +3,7 @@ import { Conversation } from '../../components/chat/messaging/ConversationList';
 import { SignalType } from '../../lib/types/signal-types';
 import { sanitizeEventPayload, sanitizeTextInput } from '../../lib/sanitizers';
 import { MAX_PREVIEW_LENGTH, CONVERSATION_MIN_USERNAME_LENGTH, CONVERSATION_MAX_USERNAME_LENGTH, CONVERSATION_USERNAME_PATTERN, HEX_PATTERN, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS } from '../../lib/constants';
+import { hasExtension } from '../../lib/utils/file-utils';
 
 // Dispatch sanitized events only
 export const dispatchSafeEvent = (name: string, detail: Record<string, unknown>, allowedKeys?: string[]): void => {
@@ -14,14 +15,12 @@ export const dispatchSafeEvent = (name: string, detail: Record<string, unknown>,
   }
 };
 
-// Sanitize preview text for display
 export const sanitizePreviewText = (input: string | undefined | null): string => {
   if (!input || typeof input !== 'string') {
     return '';
   }
 
-  const clean = sanitizeTextInput(input, { maxLength: MAX_PREVIEW_LENGTH, allowNewlines: false });
-  return clean.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  return sanitizeTextInput(input, { maxLength: MAX_PREVIEW_LENGTH, allowNewlines: false });
 };
 
 // Generate safe preview text from message
@@ -52,19 +51,16 @@ export const getConversationPreview = (message: Message, currentUsername: string
 
   if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || filename) {
     const normalizedFilename = filename?.toLowerCase() || '';
-    const hasExtension = (extensions: readonly string[]) =>
-      extensions.some(ext => normalizedFilename.endsWith(`.${ext}`));
-
     if (filename && normalizedFilename.includes('voice-note')) {
       return `${prefix} sent a voice message`;
     }
-    if (filename && hasExtension(IMAGE_EXTENSIONS)) {
+    if (filename && hasExtension(filename, IMAGE_EXTENSIONS)) {
       return `${prefix} sent an image`;
     }
-    if (filename && hasExtension(VIDEO_EXTENSIONS)) {
+    if (filename && hasExtension(filename, VIDEO_EXTENSIONS)) {
       return `${prefix} sent a video`;
     }
-    if (filename && hasExtension(AUDIO_EXTENSIONS)) {
+    if (filename && hasExtension(filename, AUDIO_EXTENSIONS)) {
       return `${prefix} sent a voice message`;
     }
     return `${prefix} sent a file`;
@@ -74,7 +70,7 @@ export const getConversationPreview = (message: Message, currentUsername: string
     return '';
   }
 
-  return sanitizePreviewText(message.content);
+  return 'Message';
 };
 
 // Validate username format
@@ -90,10 +86,9 @@ export const isPseudonymHash = (value: string): boolean => {
 };
 
 // Create a new conversation object
-export const createConversation = (username: string, inboxId?: string): Conversation => ({
+export const createConversation = (username: string): Conversation => ({
   id: crypto.randomUUID(),
   username,
-  inboxId,
   lastMessage: undefined,
   lastMessageTime: undefined,
   unreadCount: 0

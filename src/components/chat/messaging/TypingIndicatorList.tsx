@@ -8,7 +8,7 @@ interface TypingIndicatorListProps {
     onUpdate?: () => void;
 }
 
-export const TypingIndicatorList = React.memo(({ selectedConversation, getDisplayUsername, onUpdate }: TypingIndicatorListProps) => {
+export const TypingIndicatorList = React.memo(({ selectedConversation, getDisplayUsername: _getDisplayUsername, onUpdate }: TypingIndicatorListProps) => {
     const { typingUsers: allTypingUsers } = useTypingIndicatorContext();
 
     const typingUsers = useMemo(() => {
@@ -33,7 +33,6 @@ export const TypingIndicatorList = React.memo(({ selectedConversation, getDispla
                 <TypingIndicator
                     key={username}
                     username={username}
-                    getDisplayUsername={getDisplayUsername}
                 />
             ))}
         </div>

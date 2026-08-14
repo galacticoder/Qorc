@@ -1,0 +1,114 @@
+[package]
+name = "libcrux-ml-kem"
+version = "0.0.8"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+edition.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Libcrux ML-KEM & Kyber implementations"
+exclude = [
+    "/tests",
+    "*.pdf",
+    "/extracts",
+    "/proofs",
+    "/hax.py",
+    "C-CODE.md",
+    "TOOLS.md",
+]
+
+[lib]
+bench = false # so libtest doesn't eat the arguments to criterion
+
+[dependencies]
+rand = { version = "0.9", optional = true, default-features = false }
+libcrux-platform.workspace = true
+libcrux-sha3.workspace = true
+libcrux-intrinsics.workspace = true
+libcrux-secrets.workspace = true
+libcrux-traits.workspace = true
+hax-lib.workspace = true
+tls_codec = { version = "0.4.2", features = [
+    "derive",
+], default-features = false, optional = true }
+
+[features]
+# By default all variants and std are enabled.
+default = ["default-no-std", "std"]
+default-no-std = ["mlkem512", "mlkem768", "mlkem1024", "rand"]
+
+# Serialization & Deserialization using tls_codec
+codec = ["dep:tls_codec"]
+
+# Hardware features can be force enabled.
+# It is not recommended to use these. This crate performs CPU feature detection
+# and enables the features when they are available.
+simd128 = ["libcrux-sha3/simd128", "libcrux-intrinsics/simd128"]
+simd256 = ["libcrux-sha3/simd256", "libcrux-intrinsics/simd256"]
+
+# Features for the different key sizes of ML-KEM
+mlkem512 = []
+mlkem768 = []
+mlkem1024 = []
+
+# Enable Round 3 Kyber in addition to ML-KEM
+kyber = []
+
+# APIs that sample their own randomness
+rand = ["dep:rand"]
+
+# std support
+std = ["alloc", "rand/std", "tls_codec/std"]
+alloc = []
+
+# Incremental encapsulation API
+incremental = []
+
+# Checking secret independence
+check-secret-independence = [
+    "libcrux-secrets/check-secret-independence",
+    "libcrux-traits/check-secret-independence",
+]
+
+
+# PQCP Common APIs
+pqcp = []
+
+[dev-dependencies]
+rand = { version = "0.9", features = ["thread_rng"] }
+serde_json = { version = "1.0" }
+serde = { version = "1.0", features = ["derive"] }
+hex = { version = "0.4.3", features = ["serde"] }
+criterion = "0.8"
+libcrux-traits = { workspace = true, features = [
+    "generic-tests",
+] }
+libcrux-kats = { path = "../crates/testing/kats", features = ["mlkem"] }
+
+[[bench]]
+name = "ml-kem"
+harness = false
+
+[[example]]
+name = "encapsulate"
+required-features = ["mlkem768"]
+
+[[example]]
+name = "decapsulate"
+required-features = ["mlkem768"]
+
+[[example]]
+name = "keygen"
+required-features = ["mlkem768"]
+
+[package.metadata."docs.rs"]
+features = ["kyber", "pqcp", "codec"]
+rustdoc-args = ["--cfg", "doc_cfg"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(hax)',
+    'cfg(eurydice)',
+    'cfg(doc_cfg)',
+] }

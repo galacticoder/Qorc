@@ -1,4 +1,3 @@
-import React from 'react';
 import ChatApp from './pages/Index.tsx';
 
 import { CallHistoryProvider } from './contexts/CallHistoryContext';

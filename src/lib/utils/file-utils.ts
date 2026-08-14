@@ -1,27 +1,31 @@
 import { sanitizeTextInput } from '../sanitizers';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { EventType } from '../types/event-types';
-import type { IncomingFileChunks } from '../../pages/types';
-import type { ExtendedFileState } from '../types/file-types';
+import type { ExtendedFileState, FilePreviewKind } from '../types/file-types';
+import { validateWebpContainer } from './image-container-validation';
 import {
   BASE64_STANDARD_REGEX,
-  BASE64_URLSAFE_REGEX,
   MAX_BASE64_CHARS,
   MAX_CONCURRENT_TRANSFERS,
-  MAX_TOTAL_CHUNKS,
+  MAX_CONCURRENT_TRANSFERS_PER_PEER,
   FILE_SIZE_UNITS,
   FILE_SIZE_BASE,
   MAX_FILENAME_LENGTH,
   FILENAME_SANITIZE_REGEX,
   IMAGE_EXTENSIONS,
-  VIDEO_EXTENSIONS,
-  AUDIO_EXTENSIONS,
-  BASE64_SAFE_REGEX,
-  MAX_INLINE_BYTES,
+  MAX_FILE_SIZE,
+  MAX_VOICE_NOTE_BYTES,
 } from '../constants';
+import { asciiMatchesAt, bytesMatchAt, readUint32BE } from './byte-utils';
+import { tryDecodeCanonicalBase64 } from '../cryptography/base64';
+
+const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_DIMENSION = 8192;
+const MAX_IMAGE_PREVIEW_PIXELS = 16 * 1024 * 1024;
+const MEDIA_HEADER_BYTES = 64;
 
 // Sanitize event detail for file transfer events
-export const sanitizeEventDetail = (detail: Record<string, unknown>): Record<string, unknown> => {
+const sanitizeFileEventDetail = (detail: Record<string, unknown>): Record<string, unknown> => {
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(detail)) {
     if (typeof value === 'string') {
@@ -38,15 +42,7 @@ export const sanitizeEventDetail = (detail: Record<string, unknown>): Record<str
 // Dispatch file transfer progress event
 export const dispatchProgressEvent = (detail: Record<string, unknown>): void => {
   try {
-    const evt = new CustomEvent(EventType.FILE_TRANSFER_PROGRESS, { detail: sanitizeEventDetail(detail) });
-    window.dispatchEvent(evt);
-  } catch { }
-};
-
-// Dispatch file transfer complete event
-export const dispatchCompleteEvent = (detail: Record<string, unknown>): void => {
-  try {
-    const evt = new CustomEvent(EventType.FILE_TRANSFER_COMPLETE, { detail: sanitizeEventDetail(detail) });
+    const evt = new CustomEvent(EventType.FILE_TRANSFER_PROGRESS, { detail: sanitizeFileEventDetail(detail) });
     window.dispatchEvent(evt);
   } catch { }
 };
@@ -54,42 +50,23 @@ export const dispatchCompleteEvent = (detail: Record<string, unknown>): void => 
 // Dispatch file transfer canceled event
 export const dispatchCanceledEvent = (detail: Record<string, unknown>): void => {
   try {
-    const evt = new CustomEvent(EventType.FILE_TRANSFER_CANCELED, { detail: sanitizeEventDetail(detail) });
+    const evt = new CustomEvent(EventType.FILE_TRANSFER_CANCELED, { detail: sanitizeFileEventDetail(detail) });
     window.dispatchEvent(evt);
   } catch { }
 };
 
-// Normalize base64 string
-export const normalizeBase64 = (input: string): string => input.replace(/\s+/g, '');
-
 // Decode base64 chunk to Uint8Array
 export const decodeBase64Chunk = (data: string): Uint8Array | null => {
-  if (typeof data !== 'string' || data.length === 0 || data.length > MAX_BASE64_CHARS) {
+  if (
+    typeof data !== 'string' ||
+    data.length === 0 ||
+    data.length > MAX_BASE64_CHARS ||
+    data.length % 4 !== 0 ||
+    !BASE64_STANDARD_REGEX.test(data)
+  ) {
     return null;
   }
-  const normalized = normalizeBase64(data);
-  const isUrlSafe = BASE64_URLSAFE_REGEX.test(normalized.replace(/=*$/, ''));
-  const pattern = isUrlSafe ? BASE64_URLSAFE_REGEX : BASE64_STANDARD_REGEX;
-  if (!pattern.test(normalized)) {
-    return null;
-  }
-  let working = isUrlSafe ? normalized.replace(/-/g, '+').replace(/_/g, '/') : normalized;
-  while (working.length % 4 !== 0) {
-    working += '=';
-  }
-  try {
-    if (typeof Buffer !== 'undefined') {
-      return Uint8Array.from(Buffer.from(working, 'base64'));
-    }
-    const binary = atob(working);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  } catch {
-    return null;
-  }
+  return tryDecodeCanonicalBase64(data, 'base64 chunk');
 };
 
 // Validate envelope structure
@@ -101,37 +78,39 @@ export const validateEnvelope = (envelope: unknown): envelope is Record<string, 
 };
 
 // Check concurrent transfer limit
-export const enforceConcurrentLimit = (store: IncomingFileChunks): boolean => {
-  const active = Object.keys(store as Record<string, unknown>).length;
-  return active < MAX_CONCURRENT_TRANSFERS;
+export const enforceConcurrentLimit = (
+  store: Record<string, ExtendedFileState>,
+  sender: string,
+): boolean => {
+  const keys = Object.keys(store as Record<string, unknown>);
+  if (keys.length >= MAX_CONCURRENT_TRANSFERS) return false;
+  const senderPrefix = `${sender}\0`;
+  let senderTransfers = 0;
+  for (const key of keys) {
+    if (key.startsWith(senderPrefix)) senderTransfers += 1;
+  }
+  return senderTransfers < MAX_CONCURRENT_TRANSFERS_PER_PEER;
 };
 
-// Create blob cache with LRU eviction
-export const createBlobCache = () => {
-  const entries: Array<{ url: string; source: string }> = [];
-  const enqueue = (url: string, source: string) => {
-    entries.push({ url, source });
-    if (entries.length > MAX_TOTAL_CHUNKS) {
-      const stale = entries.shift();
-      if (stale) {
-        try { URL.revokeObjectURL(stale.url); } catch { }
-      }
-    }
-  };
-  const clear = () => {
-    while (entries.length) {
-      const stale = entries.shift();
-      if (stale) {
-        try { URL.revokeObjectURL(stale.url); } catch { }
-      }
-    }
-  };
-  return { enqueue, clear };
+export const totalInboundFileBytes = (store: Record<string, ExtendedFileState>): number => {
+  const map = store as Record<string, ExtendedFileState>;
+  let total = 0;
+  for (const key of Object.keys(map)) {
+    total += map[key]?.bytesReceivedApprox || 0;
+  }
+  return total;
 };
 
 // Release file entry resources
 export const releaseFileEntry = (entry?: ExtendedFileState): void => {
   if (!entry) return;
+  if (!entry.transportAckDurablyCommitted) {
+    entry.transportAckCanceled = true;
+    entry.transportAckPending?.clear();
+    entry.transportAckedIndices?.clear();
+    entry.transportAckInFlight = undefined;
+  }
+  for (const chunk of entry.decryptedChunks) chunk?.fill(0);
   entry.decryptedChunks.length = 0;
   entry.receivedSet?.clear();
   entry.bytesReceivedApprox = 0;
@@ -167,12 +146,89 @@ export const isSafeFileUrl = (url: string | null | undefined): string | null => 
   try {
     const parsed = new URL(url, 'http://localhost');
     const protocol = parsed.protocol.toLowerCase();
-    if (protocol === 'blob:' || protocol === 'http:' || protocol === 'https:') {
+    if (protocol === 'blob:') {
       return url;
     }
     return null;
   } catch {
     return null;
+  }
+};
+
+const sniffAudioMime = (bytes: Uint8Array, fileSize: number): string | null => {
+  if (bytesMatchAt(bytes, 0, [0x1a, 0x45, 0xdf, 0xa3])) return 'audio/webm';
+  if (asciiMatchesAt(bytes, 0, 'OggS')) return 'audio/ogg';
+  if (asciiMatchesAt(bytes, 0, 'fLaC')) return 'audio/flac';
+  if (asciiMatchesAt(bytes, 0, 'RIFF') && asciiMatchesAt(bytes, 8, 'WAVE')) return 'audio/wav';
+  if (asciiMatchesAt(bytes, 0, 'ID3')) return 'audio/mpeg';
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0xff &&
+    (bytes[1] & 0xe0) === 0xe0 &&
+    (bytes[1] & 0x18) !== 0x08 &&
+    (bytes[1] & 0x06) !== 0 &&
+    (bytes[2] & 0xf0) !== 0xf0 &&
+    (bytes[2] & 0x0c) !== 0x0c
+  ) {
+    return 'audio/mpeg';
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return 'audio/aac';
+  if (bytes.length >= 12 && asciiMatchesAt(bytes, 4, 'ftyp')) {
+    const boxSize = readUint32BE(bytes, 0);
+    if (boxSize >= 8 && boxSize <= fileSize) return 'audio/mp4';
+  }
+  return null;
+};
+
+const sniffVideoMime = (bytes: Uint8Array, fileSize: number): string | null => {
+  if (bytesMatchAt(bytes, 0, [0x1a, 0x45, 0xdf, 0xa3])) return 'video/webm';
+  if (asciiMatchesAt(bytes, 0, 'OggS')) return 'video/ogg';
+  if (asciiMatchesAt(bytes, 0, 'FLV') && bytes[3] === 1) return 'video/x-flv';
+  if (asciiMatchesAt(bytes, 0, 'RIFF') && asciiMatchesAt(bytes, 8, 'AVI ')) return 'video/x-msvideo';
+  if (
+    bytesMatchAt(bytes, 0, [0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11, 0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c])
+  ) {
+    return 'video/x-ms-wmv';
+  }
+  if (bytes.length >= 12 && asciiMatchesAt(bytes, 4, 'ftyp')) {
+    const boxSize = readUint32BE(bytes, 0);
+    if (boxSize >= 8 && boxSize <= fileSize) return 'video/mp4';
+  }
+  return null;
+};
+
+export const validateFilePreview = async (
+  blob: Blob,
+  previewKind: FilePreviewKind,
+): Promise<string | null> => {
+  if (!(blob instanceof Blob) || !Number.isSafeInteger(blob.size) || blob.size <= 0) return null;
+  const maxBytes = previewKind === 'image'
+    ? MAX_IMAGE_PREVIEW_BYTES
+    : previewKind === 'voice'
+      ? MAX_VOICE_NOTE_BYTES
+      : MAX_FILE_SIZE;
+  if (blob.size > maxBytes) return null;
+
+  let header: Uint8Array | null = null;
+  let imageBytes: Uint8Array | null = null;
+  try {
+    if (previewKind === 'image') {
+      imageBytes = new Uint8Array(await blob.arrayBuffer());
+      validateWebpContainer(imageBytes, {
+        maxWidth: MAX_IMAGE_PREVIEW_DIMENSION,
+        maxHeight: MAX_IMAGE_PREVIEW_DIMENSION,
+        maxPixels: MAX_IMAGE_PREVIEW_PIXELS,
+      });
+      return 'image/webp';
+    }
+    header = new Uint8Array(await blob.slice(0, MEDIA_HEADER_BYTES).arrayBuffer());
+    if (previewKind === 'video') return sniffVideoMime(header, blob.size);
+    return sniffAudioMime(header, blob.size);
+  } catch {
+    return null;
+  } finally {
+    header?.fill(0);
+    imageBytes?.fill(0);
   }
 };
 
@@ -191,7 +247,9 @@ export const createDownloadLink = (href: string, filename: string): void => {
 // Detect MIME type from filename
 export const detectMimeType = (filename: string): string => {
   const lowerName = filename.toLowerCase();
-  if (lowerName.endsWith('.webm')) return 'audio/webm';
+  if (lowerName.endsWith('.webm')) {
+    return lowerName.includes('voice-note') ? 'audio/webm' : 'video/webm';
+  }
   if (lowerName.endsWith('.mp3')) return 'audio/mpeg';
   if (lowerName.endsWith('.wav')) return 'audio/wav';
   if (lowerName.endsWith('.ogg')) return 'audio/ogg';
@@ -205,61 +263,62 @@ export const detectMimeType = (filename: string): string => {
   return 'application/octet-stream';
 };
 
-// Check if file is voice note
-export const isVoiceNote = (filename: string): boolean => {
-  return (filename || '').toLowerCase().includes('voice-note');
-};
-
-// Validate and decode base64 for file URL
-export const validateAndDecodeBase64 = (input: string | null | undefined): Uint8Array | null => {
-  if (!input || typeof input !== 'string') return null;
-  let cleanBase64 = input.trim();
-
-  const inlinePrefixIndex = cleanBase64.indexOf(',');
-  if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
-    cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
-  }
-
-  if (!BASE64_SAFE_REGEX.test(cleanBase64.replace(/=+$/, ''))) {
-    return null;
-  }
-
-  const estimatedBytes = Math.floor((cleanBase64.length * 3) / 4) - (cleanBase64.endsWith('==') ? 2 : cleanBase64.endsWith('=') ? 1 : 0);
-  if (estimatedBytes <= 0 || estimatedBytes > MAX_INLINE_BYTES) {
-    return null;
-  }
-
-  try {
-    return Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
-  } catch {
-    return null;
-  }
-};
-
-// Strips EXIF and other metadata from image by redrawing on canvas. converts image to WebP format
 export async function stripImageMetadata(file: File): Promise<File> {
-  if (!file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') {
+  const extension = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+  if (file.type === 'image/svg+xml' || extension === 'svg') {
+    throw new Error('SVG files cannot be metadata-sanitized safely');
+  }
+  const isImage = file.type.startsWith('image/') ||
+    IMAGE_EXTENSIONS.some((candidate) => candidate === extension) ||
+    /^(avif|heic|heif|jxl)$/.test(extension);
+  if (!isImage) {
     return file;
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     const objectUrl = URL.createObjectURL(file);
+    let settled = false;
+    const finish = (result?: File, error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      img.onload = null;
+      img.onerror = null;
+      try { URL.revokeObjectURL(objectUrl); } catch { }
+      if (result) resolve(result);
+      else reject(error || new Error('Image metadata removal failed'));
+    };
+    const timeout = setTimeout(() => {
+      try { img.src = ''; } catch { }
+      finish(undefined, new Error('Image metadata removal timed out'));
+    }, 30_000);
 
     img.onload = () => {
       try {
         const MAX_CANVAS_DIMENSION = 8192;
+        const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
         let width = img.width;
         let height = img.height;
 
+        if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+          finish(undefined, new Error('Image dimensions are invalid'));
+          return;
+        }
+
         if (width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION) {
-            if (width > height) {
-                height = Math.round((height * MAX_CANVAS_DIMENSION) / width);
-                width = MAX_CANVAS_DIMENSION;
-            } else {
-                width = Math.round((width * MAX_CANVAS_DIMENSION) / height);
-                height = MAX_CANVAS_DIMENSION;
-            }
+          if (width > height) {
+            height = Math.max(1, Math.round((height * MAX_CANVAS_DIMENSION) / width));
+            width = MAX_CANVAS_DIMENSION;
+          } else {
+            width = Math.max(1, Math.round((width * MAX_CANVAS_DIMENSION) / height));
+            height = MAX_CANVAS_DIMENSION;
+          }
+        }
+        if (width * height > MAX_CANVAS_PIXELS) {
+          const scale = Math.sqrt(MAX_CANVAS_PIXELS / (width * height));
+          width = Math.max(1, Math.floor(width * scale));
+          height = Math.max(1, Math.floor(height * scale));
         }
 
         const canvas = document.createElement('canvas');
@@ -268,36 +327,31 @@ export async function stripImageMetadata(file: File): Promise<File> {
 
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          URL.revokeObjectURL(objectUrl);
-          resolve(file); 
+          finish(undefined, new Error('Image metadata removal is unavailable'));
           return;
         }
 
         ctx.drawImage(img, 0, 0, width, height);
 
         canvas.toBlob((blob) => {
-          URL.revokeObjectURL(objectUrl);
           if (blob) {
             const newFilename = file.name.replace(/\.[^/.]+$/, "") + ".webp";
             const newFile = new File([blob], newFilename, {
               type: 'image/webp',
               lastModified: Date.now(),
             });
-            resolve(newFile);
+            finish(newFile);
           } else {
-            resolve(file); 
+            finish(undefined, new Error('Image metadata removal produced no output'));
           }
         }, 'image/webp', 0.92);
-      } catch (e) {
-        console.error('Failed to strip EXIF data:', e);
-        URL.revokeObjectURL(objectUrl);
-        resolve(file); 
+      } catch {
+        finish(undefined, new Error('Image metadata removal failed'));
       }
     };
 
     img.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      resolve(file); 
+      finish(undefined, new Error('Image could not be decoded safely'));
     };
 
     img.src = objectUrl;

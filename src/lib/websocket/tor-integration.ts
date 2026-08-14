@@ -2,7 +2,6 @@
  * WebSocket Tor Integration
  */
 
-import { SecurityAuditLogger } from '../cryptography/audit-logger';
 import { torNetworkManager } from '../transport/tor-network';
 
 export class WebSocketTorIntegration {
@@ -12,7 +11,7 @@ export class WebSocketTorIntegration {
   private torCircuitListener?: () => void;
   private torCircuitInterval?: ReturnType<typeof setInterval>;
 
-  constructor(private onTorDisconnect: () => void) {}
+  constructor(private onTorConnectionChange: (connected: boolean) => void) {}
 
   // Ensure Tor connection listener is attached
   ensureTorListener(): void {
@@ -22,18 +21,13 @@ export class WebSocketTorIntegration {
 
     const listener = (connected: boolean) => {
       this.torReady = connected;
-      if (!connected) {
-        SecurityAuditLogger.log('warn', 'ws-tor-disconnected', {});
-        this.onTorDisconnect();
-      }
+      this.onTorConnectionChange(connected);
     };
 
     try {
       torNetworkManager.onConnectionChange(listener);
       this.torListener = listener;
-    } catch {
-      SecurityAuditLogger.log('warn', 'ws-tor-listener-attach-failed', {});
-    }
+    } catch { }
   }
 
   // Check if Tor is ready
@@ -154,10 +148,6 @@ export class WebSocketTorIntegration {
       }
 
       if (stats.circuitHealth === 'poor') {
-        SecurityAuditLogger.log('warn', 'ws-tor-circuit-unhealthy', {
-          health: stats.circuitHealth,
-          avgLatency: stats.averageLatency
-        });
         return false;
       }
 
@@ -170,6 +160,10 @@ export class WebSocketTorIntegration {
   // Check if Tor is ready
   isTorReady(): boolean {
     return this.torReady;
+  }
+
+  markTorNotReady(): void {
+    this.torReady = false;
   }
 
   // Get current Tor circuit health
@@ -186,6 +180,8 @@ export class WebSocketTorIntegration {
       clearInterval(this.torCircuitInterval);
       this.torCircuitInterval = undefined;
     }
+    this.torCircuitListener = undefined;
+    this.lastTorCircuitRotation = null;
 
     if (this.torListener) {
       try {
@@ -193,5 +189,6 @@ export class WebSocketTorIntegration {
       } catch { }
       this.torListener = undefined;
     }
+    this.torReady = false;
   }
 }

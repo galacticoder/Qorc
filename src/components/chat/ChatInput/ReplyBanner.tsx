@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Cross2Icon } from "../assets/icons";
 import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
 import { SignalType } from '@/lib/types/signal-types';
 import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, HEX_PATTERN } from '@/lib/constants';
 import { hasExtension } from '@/lib/utils/file-utils';
+import { SecureCanvasText } from '../messaging/SecureCanvasText';
 
 interface ReplyBannerProps {
   readonly replyTo: Message;
@@ -51,12 +52,6 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
     [replyTo]
   );
 
-  const contentPreview = useMemo(() => {
-    if (!replyTo.content) return "";
-    return replyTo.content.length > 100
-      ? `${replyTo.content.slice(0, 100)}...`
-      : replyTo.content;
-  }, [replyTo.content]);
   return (
     <div
       className="flex items-center gap-2 px-4 py-2 text-muted-foreground border-b border-border/50 rounded-t-xl relative select-none"
@@ -105,7 +100,16 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
               <span className="text-xs truncate">{replyTo.filename || 'File'}</span>
             </>
           ) : (
-            <span className="text-xs truncate">{contentPreview}</span>
+            replyTo.secureContentId ? (
+              <SecureCanvasText
+                messageId={replyTo.secureContentId}
+                maxWidth={240}
+                fontSize={12}
+                color="inherit"
+              />
+            ) : (
+              <span className="text-xs truncate">Message</span>
+            )
           )}
         </div>
       </div>

@@ -1,13 +1,31 @@
 import React from 'react';
 import { Message } from '../../components/chat/messaging/types';
 import { RECEIPT_RETENTION_MS } from '../../lib/constants';
-import type { ReceiptEventDetail, ReceiptUpdater } from '../../lib/types/message-sending-types';
+import type { ReceiptEventDetail, ReceiptUpdater, DbQueuedReceipt } from '../../lib/types/message-sending-types';
+import { setMessagesWithResult } from '../../lib/utils/set-messages-result';
+import {
+  hasPrototypePollutionKeys,
+  isCanonicalAuthUsername,
+  isPlainObject,
+  sanitizeMessageId,
+} from '../../lib/sanitizers';
+
+export const MAX_PENDING_RECEIPTS = 512;
+export const IN_MEMORY_PENDING_RECEIPT_TTL_MS = 10 * 60 * 1000;
+export const MAX_SENT_RECEIPT_HISTORY = 4096;
+
+export const receiptScopeKey = (peer: string, messageId: string): string => (
+  `${peer.length}:${peer}${messageId}`
+);
 
 // Type guard for receipt event detail
 export const isReceiptEventDetail = (value: unknown): value is ReceiptEventDetail => {
-  if (!value || typeof value !== 'object') return false;
-  const detail = value as Record<string, unknown>;
-  return typeof detail.messageId === 'string' && typeof detail.from === 'string';
+  if (!isPlainObject(value) || hasPrototypePollutionKeys(value)) return false;
+  if (Object.keys(value).sort().join(',') !== 'account,from,messageId') return false;
+  return isCanonicalAuthUsername(value.account) &&
+    isCanonicalAuthUsername(value.from) &&
+    value.account !== value.from &&
+    sanitizeMessageId(value.messageId) === value.messageId;
 };
 
 // Build smart status map showing only the latest read/delivered per peer
@@ -58,16 +76,27 @@ export const buildSmartStatusMap = (messages: Message[], currentUsername: string
 };
 
 // Mark receipt as sent
-export const markReceiptSent = (store: Map<string, number>, messageId: string) => {
-  store.set(messageId, Date.now());
+export const markReceiptSent = (store: Map<string, number>, peer: string, messageId: string) => {
+  const key = receiptScopeKey(peer, messageId);
+  if (!store.has(key)) {
+    while (store.size >= MAX_SENT_RECEIPT_HISTORY) {
+      const oldest = store.keys().next().value;
+      if (typeof oldest !== 'string') break;
+      store.delete(oldest);
+    }
+  } else {
+    store.delete(key);
+  }
+  store.set(key, Date.now());
 };
 
 // Check if receipt was recently sent
-export const hasRecentReceipt = (store: Map<string, number>, messageId: string) => {
-  const timestamp = store.get(messageId);
+export const hasRecentReceipt = (store: Map<string, number>, peer: string, messageId: string) => {
+  const key = receiptScopeKey(peer, messageId);
+  const timestamp = store.get(key);
   if (!timestamp) return false;
   if (Date.now() - timestamp > RECEIPT_RETENTION_MS) {
-    store.delete(messageId);
+    store.delete(key);
     return false;
   }
   return true;
@@ -84,53 +113,98 @@ export const pruneOldReceipts = (store: Map<string, number>) => {
 };
 
 // Update message receipt in state and optionally queue for DB flush
+export const receiptOwnershipOk = (
+  target: Message,
+  from?: string,
+  selfUsername?: string,
+): boolean => {
+  if (!from || !selfUsername) return true; // no identity to check against
+  return target.sender === selfUsername && target.recipient === from;
+};
+
 export const updateMessageReceipt = async (
   messageIndexRef: React.RefObject<Map<string, number>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   messageId: string,
   updater: ReceiptUpdater,
-  messagesRef: React.RefObject<Message[]>,
-  dbReceiptQueueRef?: React.RefObject<Map<string, ReceiptUpdater>>,
+  dbReceiptQueueRef?: React.RefObject<Map<string, DbQueuedReceipt>>,
   dbFlushTimeoutRef?: React.RefObject<ReturnType<typeof setTimeout> | null>,
   flushDBReceiptsRef?: React.RefObject<(() => Promise<void>) | null>,
-): Promise<Message | null> => {
-  const index = messageIndexRef.current.get(messageId);
-  let updatedMessage: Message | null = null;
-
-  if (index !== undefined) {
-    const currentMessages = messagesRef.current;
-    if (index >= 0 && index < currentMessages.length) {
-      const target = currentMessages[index];
-      const nextReceipt = updater(target.receipt);
-      if (nextReceipt !== target.receipt) {
-        updatedMessage = { ...target, receipt: nextReceipt };
-      }
+  from?: string,
+  selfUsername?: string,
+  queueKind?: 'delivered' | 'read',
+): Promise<{
+  message: Message | null;
+  status: 'updated' | 'unchanged' | 'missing' | 'rejected';
+}> => {
+  const stateResult = await setMessagesWithResult<{
+    message: Message | null;
+    status: 'updated' | 'unchanged' | 'missing' | 'rejected';
+  }>(setMessages, (prev) => {
+    let index = messageIndexRef.current.get(messageId);
+    const indexedTarget = index === undefined ? undefined : prev[index];
+    if (
+      !indexedTarget ||
+      indexedTarget.id !== messageId ||
+      !receiptOwnershipOk(indexedTarget, from, selfUsername)
+    ) {
+      const liveIndex = prev.findIndex((message) => (
+        message.id === messageId && receiptOwnershipOk(message, from, selfUsername)
+      ));
+      index = liveIndex === -1 ? undefined : liveIndex;
+    }
+    if (index === undefined) {
+      const hasCollidingId = prev.some((message) => message.id === messageId);
+      return {
+        next: prev,
+        result: { message: null, status: hasCollidingId ? 'rejected' : 'missing' },
+      };
     }
 
-    if (updatedMessage) {
-      const msgToSet = updatedMessage;
-      setMessages((prev) => {
-        if (index < 0 || index >= prev.length) {
-          return prev;
-        }
-        const next = [...prev];
-        next[index] = msgToSet;
-        return next;
+    const target = prev[index];
+    if (!receiptOwnershipOk(target, from, selfUsername)) {
+      return { next: prev, result: { message: null, status: 'rejected' } };
+    }
+    const nextReceipt = updater(target.receipt);
+    if (nextReceipt === target.receipt) {
+      return { next: prev, result: { message: null, status: 'unchanged' } };
+    }
+
+    const updatedMessage = { ...target, receipt: nextReceipt };
+    const next = [...prev];
+    next[index] = updatedMessage;
+    return { next, result: { message: updatedMessage, status: 'updated' } };
+  });
+  if (stateResult.status !== 'missing') return stateResult;
+
+  {
+    if (
+      dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef &&
+      queueKind && from && selfUsername
+    ) {
+      const queueKey = receiptScopeKey(from || '', messageId);
+      if (!dbReceiptQueueRef.current.has(queueKey) &&
+        dbReceiptQueueRef.current.size >= MAX_PENDING_RECEIPTS) {
+        return { message: null, status: 'missing' };
+      }
+      const existing = dbReceiptQueueRef.current.get(queueKey);
+      dbReceiptQueueRef.current.set(queueKey, {
+        messageId,
+        kind: existing?.kind === 'read' || queueKind === 'read' ? 'read' : 'delivered',
+        from,
+        addedAt: existing?.addedAt || Date.now(),
+        attempts: existing?.attempts || 0,
       });
-    }
-  } else {
-    if (dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef) {
-      dbReceiptQueueRef.current.set(messageId, updater);
-
-      if (dbFlushTimeoutRef.current) {
-        clearTimeout(dbFlushTimeoutRef.current);
+      
+      if (!dbFlushTimeoutRef.current) {
+        dbFlushTimeoutRef.current = setTimeout(() => {
+          dbFlushTimeoutRef.current = null;
+          const flushFn = flushDBReceiptsRef.current;
+          if (flushFn) void flushFn();
+        }, 500);
       }
-      dbFlushTimeoutRef.current = setTimeout(() => {
-        const flushFn = flushDBReceiptsRef.current;
-        if (flushFn) void flushFn();
-      }, 500);
     }
   }
 
-  return updatedMessage;
+  return stateResult;
 };

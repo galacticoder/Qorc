@@ -1,60 +1,53 @@
 import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import { safeJsonParse } from '../../lib/utils/message-handler-utils';
-import { getCachedDisplayName } from '../../lib/utils/database-utils';
+import { sanitizeNonEmptyText, isUnsafeObjectKey, sanitizeMessageId } from '../../lib/sanitizers';
+import { MAX_LOCAL_EMOJI_LENGTH } from '../../lib/constants';
 import type { Message } from '../../components/chat/messaging/types';
-import { notifications, tray } from '../../lib/tauri-bindings';
-import { messageVault } from '../../lib/security/message-vault';
+import { nativeMessageContent, notifications, tray } from '../../lib/tauri-bindings';
+import {
+  applyDeleteControl,
+  applyEditControl,
+  applyReactionControl,
+  hasWireMessageId,
+  type MessageControlOutcome,
+} from '../../lib/messages/message-controls';
+
+type PersistedMessageMutator = (
+  peerUsername: string,
+  messageId: string,
+  mutator: (message: Message) => Message | null
+) => Promise<Message | null>;
 
 // Dispatch read receipt event
-export const dispatchReadReceiptEvent = (messageId: string, from: string): void => {
+export const dispatchReadReceiptEvent = (messageId: string, from: string, account: string): void => {
   const event = new CustomEvent(EventType.MESSAGE_READ, {
-    detail: { messageId, from }
+    detail: { account, messageId, from }
   });
   window.dispatchEvent(event);
 };
 
 // Dispatch delivery receipt event
-export const dispatchDeliveryReceiptEvent = (messageId: string, from: string): void => {
+export const dispatchDeliveryReceiptEvent = (messageId: string, from: string, account: string): void => {
   const event = new CustomEvent(EventType.MESSAGE_DELIVERED, {
-    detail: { messageId, from }
+    detail: { account, messageId, from }
   });
   window.dispatchEvent(event);
 };
 
 // Dispatch typing indicator event
-export const dispatchTypingIndicatorEvent = async (
-  payload: { from: string; type: string; content?: string }
-): Promise<void> => {
-  let indicatorType = payload.type;
-  if (payload.type === SignalType.TYPING_INDICATOR && payload.content) {
-    const contentData = safeJsonParse(payload.content);
-    if (contentData && contentData.type) {
-      indicatorType = contentData.type;
-    } else {
-      indicatorType = SignalType.TYPING_START;
-    }
-  }
-
+export const dispatchTypingIndicatorEvent = (
+  payload: { from: string; type: string }
+): void => {
   try {
-    const username = String(payload.from || '');
-    const action = indicatorType === SignalType.TYPING_STOP ? 'stop' : 'start';
-    const timestamp = Date.now();
-    const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
-    const nonce = btoa(String.fromCharCode(...nonceBytes));
-    const encoder = new TextEncoder();
-    const macKey = await CryptoUtils.Hash.generateBlake3Mac(encoder.encode(nonce), encoder.encode(String(timestamp)));
-    const typedPayload = { username, action };
-    const payloadBytes = encoder.encode(JSON.stringify(typedPayload));
-    const macBytes = await CryptoUtils.Hash.generateBlake3Mac(payloadBytes, macKey);
-    const signature = CryptoUtils.Base64.arrayBufferToBase64(macBytes);
-    const secureEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
-      detail: { signature, timestamp, nonce, payload: typedPayload }
+    const event = new CustomEvent(EventType.TYPING_INDICATOR, {
+      detail: {
+        username: String(payload.from || ''),
+        action: payload.type === SignalType.TYPING_STOP ? 'stop' : 'start'
+      }
     });
-    window.dispatchEvent(secureEvent);
+    window.dispatchEvent(event);
   } catch (_e) {
-    console.error('[EncryptedMessageHandler] Failed to dispatch secure typing indicator:', _e);
+    console.error('[EncryptedMessageHandler] Failed to dispatch typing indicator:', _e);
   }
 };
 
@@ -62,136 +55,164 @@ export const dispatchTypingIndicatorEvent = async (
 export const clearTypingIndicator = (from: string): void => {
   try {
     const typingClearEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
-      detail: { from, indicatorType: SignalType.TYPING_STOP }
+      detail: { username: from, action: 'stop' }
     });
     window.dispatchEvent(typingClearEvent);
   } catch { }
 };
 
-// Handle message deletion
 export const handleMessageDeletion = async (
-  payload: { deleteMessageId?: string; messageId?: string; content?: string },
+  payload: { deleteMessageId?: string; from?: string; messageId?: string },
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  saveMessageToLocalDB: (msg: Message) => Promise<void>
-): Promise<void> => {
-  const messageIdToDelete = payload.deleteMessageId || payload.messageId || payload.content;
-  if (!messageIdToDelete) return;
+  isCurrentAccount: () => boolean,
+  account: string,
+  mutatePersistedMessage?: PersistedMessageMutator,
+): Promise<boolean> => {
+  if (!isCurrentAccount()) return false;
+  const messageIdToDelete = sanitizeMessageId(payload.deleteMessageId);
+  if (!messageIdToDelete) return false;
+  const from = payload.from;
+  const operationId = sanitizeMessageId(payload.messageId);
+  if (!from || !operationId || !mutatePersistedMessage) return false;
 
-  let messageToPersist: Message | null = null;
-  setMessages(prev => {
-    const updatedMessages = prev.map(msg => {
-      if (msg.id === messageIdToDelete) {
-        const updated = { ...msg, isDeleted: true, content: 'This message was deleted' } as Message;
-        messageToPersist = updated;
-        return updated;
-      }
-      return msg;
-    });
-    return updatedMessages;
+  let outcome: MessageControlOutcome | null = null;
+  const persisted = await mutatePersistedMessage(from, messageIdToDelete, (message) => {
+    outcome = applyDeleteControl(message, from, operationId);
+    return outcome?.message ?? null;
   });
+  if (!persisted || !outcome || !isCurrentAccount()) return false;
+  if (!outcome.changed) return true;
 
-  if (messageToPersist) {
-    try { await saveMessageToLocalDB(messageToPersist); } catch { }
-  }
+  setMessages((prev) => !isCurrentAccount() ? prev : prev.map((message) => (
+    hasWireMessageId(message, messageIdToDelete) && message.sender === from
+      ? {
+          ...message,
+          isDeleted: true,
+          content: 'This message was deleted',
+          controlState: persisted.controlState,
+        }
+      : message
+  )));
+  await nativeMessageContent.delete(persisted.secureContentId || messageIdToDelete).catch(() => false);
 
   try {
     const deleteEvent = new CustomEvent(EventType.REMOTE_MESSAGE_DELETE, {
-      detail: { messageId: messageIdToDelete }
+      detail: { account, messageId: messageIdToDelete }
     });
     window.dispatchEvent(deleteEvent);
   } catch (_error) {
     console.error('[EncryptedMessageHandler] Failed to dispatch remote delete event:', _error);
   }
+  return true;
 };
 
 // Handle message editing
 export const handleMessageEdit = async (
-  payload: { messageId?: string; content?: string; from?: string },
+  payload: { editMessageId?: string; content?: string; nativeContentRef?: string; from?: string; messageId?: string },
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  saveMessageToLocalDB: (msg: Message) => Promise<void>
-): Promise<void> => {
-  const messageIdToEdit = payload.messageId;
-  const newContent = payload.content;
-  await messageVault.store(messageIdToEdit, newContent);
+  isCurrentAccount: () => boolean,
+  account: string,
+  mutatePersistedMessage?: PersistedMessageMutator,
+): Promise<boolean> => {
+  if (!isCurrentAccount()) return false;
+  const messageIdToEdit = sanitizeMessageId(payload.editMessageId);
+  const nativeContentRef = sanitizeMessageId(payload.nativeContentRef);
+  const from = payload.from;
+  const operationId = sanitizeMessageId(payload.messageId);
+  if (
+    !messageIdToEdit || !nativeContentRef || payload.content !== '' ||
+    !from || !operationId || !mutatePersistedMessage
+  ) return false;
 
-  let messageToPersist: Message | null = null;
-  setMessages(prev => {
-    const updatedMessages = prev.map(msg => {
-      if (msg.id === messageIdToEdit) {
-        const updated = {
-          ...msg,
+  let outcome: MessageControlOutcome | null = null;
+  const persisted = await mutatePersistedMessage(from, messageIdToEdit, (message) => {
+    outcome = applyEditControl(message, from, operationId);
+    return outcome?.changed
+      ? {
+          ...outcome.message,
           content: '',
-          secureContentId: messageIdToEdit,
-          isEdited: true
-        } as Message;
-        messageToPersist = updated;
-        return updated;
-      }
-      return msg;
-    });
-    return updatedMessages;
+          secureContentId: message.secureContentId || messageIdToEdit,
+        }
+      : outcome?.message ?? null;
   });
+  if (!persisted || !outcome || !isCurrentAccount()) return false;
+  
+  if (persisted.isDeleted) return true;
+  const editApplied = outcome.changed;
+  const secureContentId = persisted.secureContentId || messageIdToEdit;
+  const isExactRetry = persisted.controlState?.editOperationId === operationId;
+  if (!editApplied && !isExactRetry) return true;
+  const contentCommit = await nativeMessageContent.commitPending(
+    account,
+    nativeContentRef,
+    messageIdToEdit,
+    secureContentId,
+    true,
+  );
+  if (!contentCommit.stored && !contentCommit.duplicate) return false;
+  if (!isCurrentAccount()) return false;
+  setMessages((prev) => !isCurrentAccount() ? prev : prev.map((message) => (
+    hasWireMessageId(message, messageIdToEdit) && message.sender === from
+      ? {
+          ...message,
+          content: '',
+          secureContentId,
+          isEdited: persisted.isEdited === true,
+          controlState: persisted.controlState,
+        }
+      : message
+  )));
 
-  if (messageToPersist) {
-    try { await saveMessageToLocalDB({ ...messageToPersist, content: newContent }); } catch { }
-  }
+  if (!editApplied) return true;
 
   try {
     const editEvent = new CustomEvent(EventType.REMOTE_MESSAGE_EDIT, {
-      detail: { messageId: messageIdToEdit, newContent }
+      detail: { account, messageId: messageIdToEdit, contentVaultId: secureContentId }
     });
     window.dispatchEvent(editEvent);
   } catch (_error) {
     console.error('[EncryptedMessageHandler] Failed to dispatch remote edit event:', _error);
   }
 
-  try {
-    const typingStopEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
-      detail: { from: payload.from, indicatorType: SignalType.TYPING_STOP }
-    });
-    window.dispatchEvent(typingStopEvent);
-  } catch (_error) {
-    console.error('[EncryptedMessageHandler] Failed to dispatch typing stop for edit:', _error);
-  }
+  if (payload.from) clearTypingIndicator(payload.from);
+  return true;
 };
 
-// Handle reactions
-export const handleReaction = (
-  payload: { type: string; reactTo?: string; emoji?: string; from: string },
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>
-): void => {
-  const reactTo = payload.reactTo;
-  const emoji = payload.emoji;
-  if (!reactTo || typeof emoji !== 'string' || emoji.length === 0) return;
+export const handleReaction = async (
+  payload: { type: string; reactTo?: string; emoji?: string; from: string; messageId?: string },
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  isCurrentAccount: () => boolean,
+  mutatePersistedMessage?: PersistedMessageMutator,
+): Promise<boolean> => {
+  if (!isCurrentAccount()) return false;
+  const reactTo = sanitizeMessageId(payload.reactTo);
+  const actor = payload.from;
+  
+  const emoji = sanitizeNonEmptyText(payload.emoji, MAX_LOCAL_EMOJI_LENGTH, false);
+  const operationId = sanitizeMessageId(payload.messageId);
+  if (!reactTo || !emoji || !actor || !operationId || isUnsafeObjectKey(emoji) || !mutatePersistedMessage) return false;
+  const isAdd = (payload.type === SignalType.REACTION_ADD);
 
-  setMessages(prev => prev.map(msg => {
-    if (msg.id !== reactTo) return msg;
-    const reactions = { ...(msg.reactions || {}) } as Record<string, string[]>;
-    const arr = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
-    const actor = payload.from;
-    const has = arr.includes(actor);
-    const isAdd = (payload.type === SignalType.REACTION_ADD);
+  let outcome: MessageControlOutcome | null = null;
+  const persisted = await mutatePersistedMessage(actor, reactTo, (message) => {
+    outcome = applyReactionControl(message, actor, operationId, emoji, isAdd);
+    return outcome?.message ?? null;
+  });
+  if (!persisted || !outcome || !isCurrentAccount()) return false;
+  if (!outcome.changed) return true;
 
-    for (const key of Object.keys(reactions)) {
-      if (key !== emoji) {
-        reactions[key] = (reactions[key] || []).filter(u => u !== actor);
-        if (reactions[key].length === 0) delete reactions[key];
-      }
-    }
-    if (isAdd && !has) arr.push(actor);
-    if (!isAdd && has) reactions[emoji] = arr.filter(u => u !== actor);
-    else reactions[emoji] = arr;
-    if (reactions[emoji].length === 0) delete reactions[emoji];
-    return { ...msg, reactions };
-  }));
+  setMessages((prev) => !isCurrentAccount() ? prev : prev.map((message) => (
+    hasWireMessageId(message, reactTo) && (actor === message.sender || actor === message.recipient)
+      ? { ...message, reactions: persisted.reactions, controlState: persisted.controlState }
+      : message
+  )));
+  return true;
 };
 
 // Show notification when window is unfocused or hidden
 export const showNotification = (
-  payload: { from: string; type?: string; content?: string; fileName?: string },
-  loginUsername: string,
-  isCallSignal: boolean,
-  isFileMessage: boolean
+  payload: { from: string },
+  loginUsername: string
 ): void => {
   if (payload.from === loginUsername) return;
 
@@ -202,16 +223,8 @@ export const showNotification = (
     const shouldNotify = isHidden || !isFocused;
 
     if (shouldNotify) {
-      const cachedName = getCachedDisplayName(payload.from);
-      const senderName = cachedName || payload.from || 'Someone';
-      const title = isCallSignal ? 'Incoming Call' : (isFileMessage ? 'New File' : 'New Message');
-      const body = isCallSignal
-        ? `${senderName} is calling you`
-        : isFileMessage
-          ? `${senderName} sent you a file`
-          : `${senderName} sent you a message`;
-
-      notifications.show(title, body).catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
+      notifications.show()
+        .catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
 
       tray.incrementUnread().catch(() => { });
     } else {

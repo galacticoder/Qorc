@@ -7,14 +7,36 @@
 import crypto from 'crypto';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { SignalType } from '../signals.js';
-import { storePQSession, getPQSession, incrementPQSessionCounter, deleteCachedPQSession } from '../session/pq-session-storage.js';
-import { SERVER_CONSTANTS } from '../config/constants.js';
-import { validatePqHandshakePolicy } from '../security/layer-agreement-policy.js';
-import { recordWsEgress, recordWsInnerMessage } from '../diagnostics/runtime-monitor.js';
 
-// Server signing key for envelope authentication
+import { SignalType } from '../signals.js';
+import { SERVER_CONSTANTS } from '../config/constants.js';
+import { PQ_SESSION_REQUIRED } from '../config/error-codes.js';
+import { REQUIRED_WS_PQ_HANDSHAKE, validatePqHandshakePolicy } from '../security/layer-agreement-policy.js';
+import {
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES
+} from '../../shared/crypto-sizes.js';
+import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
+import {
+  createAuthChannelBinding,
+} from '../../shared/auth-channel-binding.js';
+import { encodeBase64AndWipeCopy, UTF8_ENCODER } from '../utils/encoding.js';
+import { envInt } from '../utils/env.js';
+import { HEX_32_RE, HEX_64_RE } from '../utils/patterns.js';
+import { isSafeJsonTree } from '../utils/validation.js';
+import { computeHybridPublicKeyFingerprint } from '../crypto/hybrid-key-fingerprint.js';
+import { createAbortableAdmissionGate } from '../utils/admission-gate.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import {
+  AUTH_CHANNEL_BINDING_BYTES,
+  HASH_OUTPUT_BYTES,
+  POST_QUANTUM_AEAD_KEY_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES as WS_ENVELOPE_NONCE_BYTES,
+  POST_QUANTUM_AEAD_TAG_BYTES as WS_ENVELOPE_TAG_BYTES,
+  X25519_KEY_BYTES
+} from '../utils/crypto-consts.js';
+
+// Server signing key for authenticated handshake acknowledgements.
 let serverDilithiumSigningKey = null;
 const WS_MAX_REPLAY_WINDOW_MS = 5 * 60 * 1000;
 const WS_MAX_ENCRYPTED_RESPONSE_BYTES = envInt(
@@ -23,9 +45,50 @@ const WS_MAX_ENCRYPTED_RESPONSE_BYTES = envInt(
   1024 * 1024,
   64 * 1024 * 1024
 );
+const WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES = envInt(
+  'WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES',
+  8 * 1024 * 1024,
+  1024 * 1024,
+  16 * 1024 * 1024
+);
+const WS_ENVELOPE_MAX_AAD_BYTES = 512;
+const WS_ENVELOPE_MAX_JSON_DEPTH = 32;
+const WS_ENVELOPE_MAX_JSON_NODES = 20_000;
+const WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT = envInt('WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT', 64, 4, 1024);
+const WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES = envInt(
+  'WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES',
+  24 * 1024 * 1024,
+  4 * 1024 * 1024,
+  256 * 1024 * 1024
+);
+const WS_DELIVERY_TIMEOUT_MS = envInt('WS_DELIVERY_TIMEOUT_MS', 30_000, 1_000, 120_000);
 const WS_OPEN = 1;
 const WS_CLOSING = 2;
 const WS_CLOSED = 3;
+const UNPADDED_CONTROL_TYPES = new Set([
+  SignalType.PQ_HEARTBEAT_PING,
+  SignalType.PQ_HEARTBEAT_PONG,
+  SignalType.SECURE_CHUNK,
+]);
+const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map([
+  [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
+  [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
+]);
+const VERIFIED_AUTH_CHANNEL_BINDING = Symbol('qor.verified-auth-channel-binding');
+
+export function consumeVerifiedAuthChannelBinding(payload) {
+  const binding = payload?.[VERIFIED_AUTH_CHANNEL_BINDING];
+  if (!(binding instanceof Uint8Array) || binding.length !== AUTH_CHANNEL_BINDING_BYTES) {
+    return null;
+  }
+  try {
+    delete payload[VERIFIED_AUTH_CHANNEL_BINDING];
+  } catch {
+    binding.fill(0);
+    return null;
+  }
+  return binding;
+}
 
 class WebSocketDeliveryClosedError extends Error {
   constructor(readyState, payloadType) {
@@ -37,10 +100,50 @@ class WebSocketDeliveryClosedError extends Error {
   }
 }
 
-function envInt(name, fallback, min, max) {
-  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
+export function validateIncomingEnvelopeShape(envelope) {
+  if (
+    !envelope ||
+    typeof envelope !== 'object' ||
+    Array.isArray(envelope) ||
+    Object.getPrototypeOf(envelope) !== Object.prototype
+  ) return false;
+
+  const requiredKeys = [
+    'aad', 'ciphertext', 'counter', 'messageId', 'nonce', 'sessionFingerprint',
+    'sessionId', 'tag', 'timestamp', 'type', 'version'
+  ];
+  const actualKeys = Object.keys(envelope).sort();
+  const unpaddedShape = requiredKeys.join(',');
+  const paddedShape = [...requiredKeys, '_pad'].sort().join(',');
+  const actualShape = actualKeys.join(',');
+  if (actualShape !== unpaddedShape && actualShape !== paddedShape) return false;
+  if (
+    envelope.type !== SignalType.PQ_ENVELOPE ||
+    envelope.version !== REQUIRED_WS_PQ_HANDSHAKE.version ||
+    typeof envelope.sessionId !== 'string' ||
+    !HEX_32_RE.test(envelope.sessionId) ||
+    typeof envelope.sessionFingerprint !== 'string' ||
+    !HEX_64_RE.test(envelope.sessionFingerprint) ||
+    typeof envelope.messageId !== 'string' ||
+    !HEX_32_RE.test(envelope.messageId) ||
+    !Number.isSafeInteger(envelope.counter) ||
+    envelope.counter <= 0 ||
+    !Number.isSafeInteger(envelope.timestamp)
+  ) return false;
+  if (
+    Object.hasOwn(envelope, '_pad') &&
+    (typeof envelope._pad !== 'string' ||
+      envelope._pad.length > SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES ||
+      !/^[A-Za-z0-9+/_-]*$/.test(envelope._pad))
+  ) return false;
+
+  return canonicalBase64Shape(envelope.ciphertext, {
+    minBytes: 32,
+    maxBytes: WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES
+  }) &&
+    canonicalBase64Shape(envelope.nonce, { exactBytes: WS_ENVELOPE_NONCE_BYTES }) &&
+    canonicalBase64Shape(envelope.tag, { exactBytes: WS_ENVELOPE_TAG_BYTES }) &&
+    canonicalBase64Shape(envelope.aad, { maxBytes: WS_ENVELOPE_MAX_AAD_BYTES });
 }
 
 function byteSizeClass(bytes) {
@@ -71,26 +174,265 @@ function isWebSocketDeliveryClosedError(error) {
     || /WebSocket (?:is )?(?:not open|closed|closing|CLOSED)/i.test(String(error?.message || ''));
 }
 
-export function encryptedResponseSizeClass(bytes) {
-  return byteSizeClass(bytes);
+function sendWebSocketTextWithDeadline(ws, text, timeoutMs = WS_DELIVERY_TIMEOUT_MS) {
+  const boundedTimeoutMs = Number.isSafeInteger(timeoutMs)
+    ? Math.min(WS_DELIVERY_TIMEOUT_MS, Math.max(1, timeoutMs))
+    : WS_DELIVERY_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof ws?.terminate === 'function') {
+          ws.terminate();
+        } else if (isWebSocketOpen(ws)) {
+          ws.close?.(1013, 'Delivery timeout');
+        }
+      } catch { }
+      resolve(false);
+    }, boundedTimeoutMs);
+    timer.unref?.();
+
+    try {
+      ws.send(text, (error) => {
+        if (!error) {
+          finish(resolve, true);
+          return;
+        }
+        if (isWebSocketDeliveryClosedError(error) || isClosedWebSocketState(wsReadyState(ws))) {
+          finish(resolve, false);
+          return;
+        }
+        finish(reject, error);
+      });
+    } catch (error) {
+      finish(reject, error);
+    }
+  });
 }
 
-export function getMaxEncryptedResponseBytes() {
-  return WS_MAX_ENCRYPTED_RESPONSE_BYTES;
+function wipeSession(session) {
+  if (session) session.invalidated = true;
+  if (session?.confirmationTimer) clearTimeout(session.confirmationTimer);
+  if (session) session.confirmationTimer = null;
+  try { session?.recvKey?.fill(0); } catch { }
+  try { session?.sendKey?.fill(0); } catch { }
 }
 
-export function getEncryptedResponsePlaintextBudgetBytes() {
-  const signatureAndEnvelopeSlackBytes = 16 * 1024;
+export function clearSocketPQSession(ws) {
+  if (!ws) return false;
+  const session = ws._pqSessionData;
+  const pendingSession = ws._pqPendingSessionData;
+  wipeSession(session);
+  if (pendingSession !== session) wipeSession(pendingSession);
+  ws._pqSessionData = undefined;
+  ws._pqSessionId = undefined;
+  ws._pqPendingSessionData = undefined;
+  ws._pqPendingSessionId = undefined;
+  ws._pqRekeyResolve?.();
+  ws._pqRekeyResolve = undefined;
+  ws._pqRekeyGate = undefined;
+  return Boolean(session || pendingSession);
+}
+
+function armSocketPQConfirmationTimer(ws, session) {
+  session.invalidated = false;
+  session.confirmationTimer = setTimeout(() => {
+    if (getSocketPQSession(ws, session.sessionId) !== session || session.confirmed === true) return;
+    clearSocketPQSession(ws);
+    if (isWebSocketOpen(ws)) ws.close(1008, 'PQ key confirmation required');
+  }, PQ_HS_CONFIRM_TIMEOUT_MS);
+  session.confirmationTimer.unref?.();
+}
+
+function createSocketPQActivationGate(ws) {
+  if (ws._pqRekeyGate) throw new Error('PQ activation gate already exists');
+  ws._pqRekeyGate = new Promise((resolve) => {
+    ws._pqRekeyResolve = resolve;
+  });
+}
+
+function resolveSocketPQActivationGate(ws) {
+  ws._pqRekeyResolve?.();
+  ws._pqRekeyResolve = undefined;
+  ws._pqRekeyGate = undefined;
+}
+
+async function waitForSocketPQActivation(ws, payload) {
+  const activationGate = ws?._pqRekeyGate;
+  if (!activationGate) return true;
+
+  let payloadBytes;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (typeof serialized !== 'string') throw new Error('invalid payload');
+    payloadBytes = Buffer.byteLength(serialized, 'utf8');
+  } catch {
+    throw new Error('Invalid secure payload during PQ activation');
+  }
+
+  const waitingCount = Number(ws._pqActivationWaitCount || 0);
+  const waitingBytes = Number(ws._pqActivationWaitBytes || 0);
+  if (
+    waitingCount >= WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT ||
+    waitingBytes + payloadBytes > WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES
+  ) {
+    clearSocketPQSession(ws);
+    if (isWebSocketOpen(ws)) ws.close(1013, 'PQ activation queue saturated');
+    return false;
+  }
+
+  ws._pqActivationWaitCount = waitingCount + 1;
+  ws._pqActivationWaitBytes = waitingBytes + payloadBytes;
+  try {
+    await activationGate;
+    return isWebSocketOpen(ws);
+  } finally {
+    ws._pqActivationWaitCount = Math.max(0, Number(ws._pqActivationWaitCount || 0) - 1);
+    ws._pqActivationWaitBytes = Math.max(
+      0,
+      Number(ws._pqActivationWaitBytes || 0) - payloadBytes
+    );
+  }
+}
+
+function installSocketPQSession(ws, session) {
+  clearSocketPQSession(ws);
+  armSocketPQConfirmationTimer(ws, session);
+  ws._pqSessionData = session;
+  ws._pqSessionId = session.sessionId;
+  createSocketPQActivationGate(ws);
+}
+
+function stageSocketPQSession(ws, session) {
+  const current = ws?._pqSessionData;
+  if (!current || current.confirmed !== true || ws._pqPendingSessionData) {
+    throw new Error('PQ rekey cannot be staged in the current socket state');
+  }
+  armSocketPQConfirmationTimer(ws, session);
+  ws._pqPendingSessionData = session;
+  ws._pqPendingSessionId = session.sessionId;
+  createSocketPQActivationGate(ws);
+}
+
+function discardStagedSocketPQSession(ws, expectedSession) {
+  const pending = ws?._pqPendingSessionData;
+  if (!pending || (expectedSession && pending !== expectedSession)) return false;
+  wipeSession(pending);
+  ws._pqPendingSessionData = undefined;
+  ws._pqPendingSessionId = undefined;
+  resolveSocketPQActivationGate(ws);
+  return true;
+}
+
+function promoteStagedSocketPQSession(ws, session) {
+  if (ws?._pqPendingSessionData !== session || ws._pqPendingSessionId !== session.sessionId) {
+    throw new Error('PQ rekey session is no longer staged');
+  }
+  const previous = ws._pqSessionData;
+  ws._pqSessionData = session;
+  ws._pqSessionId = session.sessionId;
+  ws._pqPendingSessionData = undefined;
+  ws._pqPendingSessionId = undefined;
+  resolveSocketPQActivationGate(ws);
+  if (previous && previous !== session) wipeSession(previous);
+}
+
+function getSocketPQSession(ws, sessionId = ws?._pqSessionId) {
+  const session = ws?._pqSessionId === sessionId
+    ? ws?._pqSessionData
+    : ws?._pqPendingSessionId === sessionId
+      ? ws?._pqPendingSessionData
+      : null;
+  if (
+    !session ||
+    typeof sessionId !== 'string' ||
+    session.sessionId !== sessionId ||
+    session.invalidated === true
+  ) {
+    return null;
+  }
+  return session;
+}
+
+function consumeSocketRemoteCounter(session, counter) {
+  if (!Number.isSafeInteger(counter) || counter <= Number(session.remoteCounter || 0)) {
+    return false;
+  }
+  session.remoteCounter = counter;
+  return true;
+}
+
+function isSocketRemoteCounterFresh(session, counter) {
+  return Number.isSafeInteger(counter) && counter > Number(session.remoteCounter || 0);
+}
+
+function incrementSocketSendCounter(session) {
+  const current = Number(session.sendCounter || 0);
+  if (!Number.isSafeInteger(current) || current >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('PQ session send counter exhausted');
+  }
+  session.sendCounter = current + 1;
+  return session.sendCounter;
+}
+
+async function acquireSocketSendTurn(ws, session, plaintextBytes) {
+  const queuedCount = Number(session.sendQueueCount || 0);
+  const queuedBytes = Number(session.sendQueueBytes || 0);
+  if (
+    session.invalidated === true ||
+    queuedCount >= WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT ||
+    queuedBytes + plaintextBytes > WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES
+  ) {
+    session.invalidated = true;
+    if (isWebSocketOpen(ws)) ws.close(1013, 'Encrypted send queue saturated');
+    throw new Error('Encrypted send queue saturated');
+  }
+
+  let unlock;
+  const gate = new Promise((resolve) => { unlock = resolve; });
+  const previous = session.sendTail || Promise.resolve();
+  session.sendTail = previous.catch(() => { }).then(() => gate);
+  session.sendQueueCount = queuedCount + 1;
+  session.sendQueueBytes = queuedBytes + plaintextBytes;
+
+  await previous.catch(() => { });
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    session.sendQueueCount = Math.max(0, Number(session.sendQueueCount || 0) - 1);
+    session.sendQueueBytes = Math.max(0, Number(session.sendQueueBytes || 0) - plaintextBytes);
+    unlock();
+  };
+
+  if (session.invalidated === true || getSocketPQSession(ws, session.sessionId) !== session) {
+    release();
+    throw new Error('PQ session changed while response was queued');
+  }
+  return release;
+}
+
+function getEncryptedResponsePlaintextBudgetBytes() {
+  const envelopeSlackBytes = 8 * 1024;
   return Math.max(
     1024,
-    Math.floor((WS_MAX_ENCRYPTED_RESPONSE_BYTES - signatureAndEnvelopeSlackBytes) * 0.7)
+    Math.floor((WS_MAX_ENCRYPTED_RESPONSE_BYTES - envelopeSlackBytes) * 0.7)
   );
 }
 
 // Chunked secure transport for messages too large for a single PQ envelope
 const SECURE_CHUNK_BYTES = envInt('SECURE_CHUNK_BYTES', 1024 * 1024, 256 * 1024, 6 * 1024 * 1024);
 const SECURE_CHUNK_SINGLE_MAX_BYTES = envInt('SECURE_CHUNK_SINGLE_MAX_BYTES', 4 * 1024 * 1024, 64 * 1024, 8 * 1024 * 1024);
-const SECURE_CHUNK_MAX_TOTAL = envInt('SECURE_CHUNK_MAX_TOTAL', 64, 1, 1024);
+const SECURE_CHUNK_MAX_TOTAL = 128;
+const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
 const SECURE_CHUNK_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 async function waitForWsDrain(ws, maxBufferedBytes, timeoutMs = 30000) {
@@ -100,20 +442,23 @@ async function waitForWsDrain(ws, maxBufferedBytes, timeoutMs = 30000) {
     typeof ws.bufferedAmount === 'number' &&
     ws.bufferedAmount > maxBufferedBytes
   ) {
-    if (Date.now() - start > timeoutMs) break;
+    if (Date.now() - start > timeoutMs) return false;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  return isWebSocketOpen(ws) && Number(ws.bufferedAmount || 0) <= maxBufferedBytes;
 }
 
 /**
- * Send a secure message splitting it into reassemblable chunks if it is too large for a single PQ envelope
+ * Send message splitting it into reassemblable chunks if it is too large for a single PQ envelope
  */
-export async function sendSecureMessageChunked(ws, payload) {
+export async function sendSecureAuthResponse(ws, payload) {
+  if (payload?.type !== SignalType.AUTH_OT_RESPONSE) return false;
+
   let json;
   try {
     json = JSON.stringify(payload);
   } catch (e) {
-    cryptoLogger.error('[SECURE-CHUNK] Failed to serialize payload', { error: e?.message });
+    console.error('[SECURE-CHUNK] Failed to serialize payload', { error: e?.message });
     return false;
   }
   if (typeof json !== 'string') return false;
@@ -123,29 +468,44 @@ export async function sendSecureMessageChunked(ws, payload) {
     return sendSecureMessage(ws, payload);
   }
 
-  const payloadType = typeof payload?.type === 'string' ? payload.type : 'unknown';
+  const payloadType = SignalType.AUTH_OT_RESPONSE;
   
   const totalLength = json.length;
+  if (totalBytes > SECURE_CHUNK_MAX_TOTAL_LENGTH || totalLength > SECURE_CHUNK_MAX_TOTAL_LENGTH) {
+    console.error('[SECURE-CHUNK] Refusing oversized secure response', {
+      payloadType,
+      totalBytesClass: byteSizeClass(totalBytes)
+    });
+    return false;
+  }
   const totalChunks = Math.ceil(totalLength / SECURE_CHUNK_BYTES);
 
   if (totalChunks < 1 || totalChunks > SECURE_CHUNK_MAX_TOTAL) {
-    cryptoLogger.error('[SECURE-CHUNK] Refusing - chunk count out of range', {
+    console.error('[SECURE-CHUNK] Refusing chunk count out of range', {
       totalChunks, max: SECURE_CHUNK_MAX_TOTAL, payloadType
     });
     return false;
   }
 
   const messageId = crypto.randomBytes(16).toString('base64url');
-  cryptoLogger.info('[SECURE-CHUNK] Sending chunked secure message', {
+  console.log('[SECURE-CHUNK] Sending chunked secure message', {
     payloadType, totalChunks, totalBytesClass: byteSizeClass(totalBytes)
   });
 
   for (let i = 0; i < totalChunks; i++) {
     if (!isWebSocketOpen(ws)) {
-      cryptoLogger.warn('[SECURE-CHUNK] Aborting - socket closed mid-send', { sent: i, totalChunks, payloadType });
+      console.warn('[SECURE-CHUNK] Aborting socket closed mid-send', { sent: i, totalChunks, payloadType });
       return false;
     }
-    await waitForWsDrain(ws, SECURE_CHUNK_MAX_BUFFERED_BYTES);
+    if (!await waitForWsDrain(ws, SECURE_CHUNK_MAX_BUFFERED_BYTES)) {
+      console.warn('[SECURE-CHUNK] Aborting socket remained backpressured', {
+        sent: i,
+        totalChunks,
+        payloadType
+      });
+      if (isWebSocketOpen(ws)) ws.close(1013, 'Secure response backpressure');
+      return false;
+    }
 
     const data = json.slice(i * SECURE_CHUNK_BYTES, (i + 1) * SECURE_CHUNK_BYTES);
     const delivered = await sendSecureMessage(ws, {
@@ -158,39 +518,52 @@ export async function sendSecureMessageChunked(ws, payload) {
       data
     });
     if (delivered === false) {
-      cryptoLogger.warn('[SECURE-CHUNK] Chunk send failed; aborting', { chunkIndex: i, totalChunks, payloadType });
+      console.warn('[SECURE-CHUNK] Chunk send failed', { chunkIndex: i, totalChunks, payloadType });
       return false;
     }
   }
   return true;
 }
 
-function buildEnvelopeSignaturePayload(envelope) {
+function buildHandshakeAckSignaturePayload(ack) {
   return [
-    String(envelope?.version || ''),
-    String(envelope?.sessionId || ''),
-    String(envelope?.sessionFingerprint || ''),
-    String(envelope?.messageId || ''),
-    String(envelope?.timestamp || ''),
-    String(envelope?.counter || ''),
-    String(envelope?.aad || '')
+    PROTOCOL_KEYS.WS_PQ_HANDSHAKE_ACK,
+    String(ack?.version || ''),
+    String(ack?.sessionId || ''),
+    String(ack?.fingerprint || ''),
+    String(ack?.clientNonce || ''),
+    String(ack?.requestTimestamp || ''),
+    String(ack?.requestDigest || ''),
+    String(ack?.responseKemCiphertext || ''),
+    String(ack?.timestamp || '')
   ].join('|');
 }
 
-function computeServerFingerprint(serverHybridKeyPair) {
-  const kyber = CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey);
-  const dilithium = CryptoUtils.Hybrid.exportDilithiumPublicBase64(serverHybridKeyPair.dilithium.publicKey);
-  const x25519 = CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey);
-  const encoded = JSON.stringify({
-    kyberPublicBase64: kyber,
-    dilithiumPublicBase64: dilithium,
-    x25519PublicBase64: x25519
-  });
-  return Buffer.from(PostQuantumHash.blake3(new TextEncoder().encode(encoded))).toString('hex');
-}
-
-function validateEnvelopeTimestamp(timestamp) {
-  return getEnvelopeTimestampValidation(timestamp).valid;
+function computeHandshakeRequestDigest(payload) {
+  const algorithms = payload?.algorithms || {};
+  const encoded = UTF8_ENCODER.encode([
+    PROTOCOL_KEYS.WS_PQ_HANDSHAKE_REQUEST,
+    String(payload?.version || ''),
+    String(algorithms.kem || ''),
+    String(algorithms.signature || ''),
+    String(algorithms.classicalKeyAgreement || ''),
+    String(algorithms.kdf || ''),
+    String(algorithms.aead || ''),
+    String(payload?.sessionId || ''),
+    String(payload?.timestamp || ''),
+    String(payload?.clientNonce || ''),
+    String(payload?.kemCiphertext || ''),
+    String(payload?.clientKemPublicKey || ''),
+    String(payload?.clientX25519PublicKey || ''),
+    String(payload?.fingerprint || '')
+  ].join('|'));
+  const digest = PostQuantumHash.blake3(encoded);
+  try {
+    return Buffer.from(digest.buffer, digest.byteOffset, digest.byteLength).toString('hex');
+  } finally {
+    encoded.fill(0);
+    digest.fill(0);
+  }
 }
 
 function getEnvelopeTimestampValidation(timestamp) {
@@ -234,200 +607,67 @@ function timestampInvalidPayload(validation, code, message) {
   };
 }
 
-async function verifyClientEnvelopeSignature(session, envelope) {
-  if (!envelope?.signature || typeof envelope.signature !== 'string') {
-    return false;
-  }
-  const publicKey = session?.clientSigningPublicKey;
-  if (!publicKey || !publicKey.length) {
-    return false;
-  }
-
-  try {
-    const signaturePayload = buildEnvelopeSignaturePayload(envelope);
-    const signatureMessage = new TextEncoder().encode(signaturePayload);
-    const signatureBytes = CryptoUtils.Hash.base64ToUint8Array(envelope.signature);
-    return await CryptoUtils.Dilithium.verify(signatureBytes, signatureMessage, publicKey);
-  } catch {
-    return false;
-  }
-}
-
-function consumeRemoteCounter(ws, envelope) {
-  if (typeof envelope?.counter !== 'number' || !Number.isFinite(envelope.counter)) {
-    return false;
-  }
-  const lastRemoteCounter = Number.isFinite(ws?._pqLastRemoteCounter)
-    ? ws._pqLastRemoteCounter
-    : 0;
-  if (envelope.counter <= lastRemoteCounter) {
-    return false;
-  }
-  ws._pqLastRemoteCounter = envelope.counter;
-  return true;
-}
-
-function padEnvelopeToFixedSize(envelope) {
+function applyEnvelopeFixedPadding(envelope) {
   const targetBytes = SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
   if (!targetBytes || targetBytes <= 0) {
-    return JSON.stringify(envelope);
+    return false;
   }
 
   const base = { ...envelope, _pad: '' };
   const baseJson = JSON.stringify(base);
   const baseSize = Buffer.byteLength(baseJson);
   if (baseSize > targetBytes) {
-    cryptoLogger.info('[PQ-ENCRYPT] Fixed-size response exceeded target. sending unpadded', {
+    console.log('[PQ-ENCRYPT] Fixed-size response exceeded target. sending unpadded', {
       baseSize,
       targetBytes
     });
-    return JSON.stringify(envelope);
+    return false;
   }
 
   const padNeeded = targetBytes - baseSize;
   if (padNeeded === 0) {
-    return baseJson;
+    envelope._pad = '';
+    return true;
   }
 
-  base._pad = crypto.randomBytes(Math.ceil(padNeeded * 0.75)).toString('base64url').slice(0, padNeeded);
-  const finalJson = JSON.stringify(base);
+  const paddingBytes = crypto.randomBytes(Math.ceil(padNeeded * 0.75));
+  try {
+    envelope._pad = paddingBytes.toString('base64url').slice(0, padNeeded);
+  } finally {
+    paddingBytes.fill(0);
+  }
+  const finalJson = JSON.stringify(envelope);
   const finalSize = Buffer.byteLength(finalJson);
   if (finalSize !== targetBytes) {
-    cryptoLogger.warn('[PQ-ENCRYPT] Fixed-size response padding mismatch', {
-      finalSize,
-      targetBytes
-    });
-    return JSON.stringify(envelope);
+    delete envelope._pad;
+    throw new Error(`Fixed-size response padding mismatch: ${finalSize} !== ${targetBytes}`);
   }
-  return finalJson;
+  return true;
 }
 
 function shouldPadEnvelopePayload(payload) {
   const type = payload?.type || 'unknown';
-  const unpaddedControlTypes = new Set([
-    SignalType.PQ_HEARTBEAT_PING,
-    SignalType.PQ_HEARTBEAT_PONG,
-    SignalType.SERVER_ENTRY_REQUEST,
-    SignalType.SERVER_ENTRY_CHALLENGE,
-    SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
-    SignalType.PRIVACY_PASS_REDEMPTION,
-    SignalType.PRIVACY_PASS_ISSUANCE,
-    SignalType.TOKEN_VALIDATION,
-    SignalType.TOKEN_VALIDATION_RESPONSE,
-    SignalType.AUTH_OT_REGISTER_REQUEST,
-    SignalType.AUTH_OT_REGISTER_RESPONSE,
-    SignalType.AUTH_OT_REGISTER_FINALIZE,
-    SignalType.AUTH_OT_REQUEST,
-    SignalType.AUTH_OT_RESPONSE,
-    SignalType.AUTH_OT_FINALIZE,
-    SignalType.SECURE_CHUNK,
-    SignalType.AUTH_FULL_SUCCESS,
-    SignalType.BLIND_SIGNATURE_REQUEST,
-    SignalType.BLIND_SIGNATURE_RESPONSE,
-    SignalType.ZK_REFRESH_CHALLENGE,
-    SignalType.ZK_REFRESH_RESPONSE,
-    SignalType.ZK_DEVICE_REGISTER,
-    SignalType.ZK_DEVICE_REGISTER_RESPONSE,
-    SignalType.OPRF_DISCOVERY_PUBLIC_KEY,
-    SignalType.OPRF_BLIND_EVALUATE,
-    SignalType.OPRF_BLIND_EVALUATE_RESPONSE,
-    SignalType.PUBLISH_DISCOVERY,
-    SignalType.DISCOVERY_SNAPSHOT_REQUEST,
-    SignalType.DISCOVERY_SNAPSHOT,
-    SignalType.PIR_MANIFEST_REQUEST,
-    SignalType.PIR_MANIFEST,
-    SignalType.PIR_QUERY,
-    SignalType.PIR_RESPONSE,
-    SignalType.AUTH_ERROR,
-    SignalType.ERROR,
-    SignalType.OK,
-    SignalType.CLAIM_INBOX,
-    SignalType.CLAIM_INBOX_RESPONSE,
-    SignalType.ROTATE_INBOX,
-    SignalType.ROTATE_INBOX_RESPONSE
-  ]);
-
-  return !unpaddedControlTypes.has(type);
+  return !UNPADDED_CONTROL_TYPES.has(type);
 }
 
-function shouldTraceEnvelopePayload(payload) {
-  const type = payload?.type || 'unknown';
-  return new Set([
-    SignalType.SERVER_ENTRY_REQUEST,
-    SignalType.SERVER_ENTRY_CHALLENGE,
-    SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
-    SignalType.PRIVACY_PASS_REDEMPTION,
-    SignalType.PRIVACY_PASS_ISSUANCE,
-    SignalType.AUTH_OT_REGISTER_REQUEST,
-    SignalType.AUTH_OT_REGISTER_RESPONSE,
-    SignalType.AUTH_OT_REGISTER_FINALIZE,
-    SignalType.AUTH_OT_REQUEST,
-    SignalType.AUTH_OT_RESPONSE,
-    SignalType.AUTH_OT_FINALIZE,
-    SignalType.AUTH_FULL_SUCCESS,
-    SignalType.PIR_MANIFEST,
-    SignalType.PIR_RESPONSE,
-    SignalType.AUTH_ERROR,
-    SignalType.ERROR,
-    SignalType.OK
-  ]).has(type);
+function hasValidEnvelopePadding(envelope, payload) {
+  const hasPadding = Object.hasOwn(envelope, '_pad');
+  const shouldPad = shouldPadEnvelopePayload(payload);
+  if (hasPadding) {
+    return shouldPad && Buffer.byteLength(JSON.stringify(envelope)) === SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
+  }
+  if (!shouldPad) return true;
+  return Buffer.byteLength(JSON.stringify({ ...envelope, _pad: '' })) > SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
 }
 
-function oversizedResponseErrorPayload(payload, messageType) {
-  if (messageType === SignalType.PIR_RESPONSE) {
-    return {
-      type: SignalType.PIR_RESPONSE,
-      requestId: payload?.requestId,
-      success: false,
-      kind: payload?.kind,
-      epochId: payload?.epochId,
-      manifestDigest: payload?.manifestDigest,
-      error: 'pir_response_too_large'
-    };
-  }
-
-  if (messageType === SignalType.DISCOVERY_SNAPSHOT) {
-    return {
-      type: SignalType.DISCOVERY_SNAPSHOT,
-      requestId: payload?.requestId,
-      success: false,
-      error: 'discovery_snapshot_too_large'
-    };
-  }
-
-  return null;
-}
-
-function dominantResponseStringBytes(payload, messageType) {
-  if (messageType === SignalType.PIR_RESPONSE && typeof payload?.response === 'string') {
-    return Buffer.byteLength(payload.response, 'utf8');
-  }
-
-  if (messageType === SignalType.DISCOVERY_SNAPSHOT && typeof payload?.snapshot?.compressed === 'string') {
-    return Buffer.byteLength(payload.snapshot.compressed, 'utf8');
-  }
-
-  if (messageType === SignalType.ENCRYPTED_MESSAGE && typeof payload?.encryptedPayload === 'string') {
-    return Buffer.byteLength(payload.encryptedPayload, 'utf8');
-  }
-
-  return 0;
-}
-
-async function sendOversizedResponseError(ws, session, innerMessage, messageType, sizeBytes, stage) {
-  cryptoLogger.warn('[PQ-ENCRYPT] Refusing oversized plaintext response before encryption', {
+async function sendOversizedResponseError(ws, session, messageType, sizeBytes) {
+  console.warn('[PQ-ENCRYPT] Refusing oversized plaintext response before encryption', {
     messageKind: messageType,
     payloadType: messageType,
-    stage,
     plainSizeClass: byteSizeClass(sizeBytes),
     plainLimitClass: byteSizeClass(getEncryptedResponsePlaintextBudgetBytes()),
     encryptedLimitClass: byteSizeClass(WS_MAX_ENCRYPTED_RESPONSE_BYTES)
   });
-
-  const errorPayload = oversizedResponseErrorPayload(innerMessage, messageType);
-  if (errorPayload) {
-    return sendPQEncryptedResponse(ws, session, errorPayload);
-  }
 
   if (messageType !== SignalType.ERROR) {
     return sendPQEncryptedResponse(ws, session, {
@@ -445,23 +685,116 @@ async function sendOversizedResponseError(ws, session, innerMessage, messageType
 export function initializeEnvelopeHandler(serverHybridKeyPair) {
   if (serverHybridKeyPair?.dilithium?.secretKey) {
     serverDilithiumSigningKey = serverHybridKeyPair.dilithium.secretKey;
-    cryptoLogger.info('[PQ-ENVELOPE] Signing key initialized');
+    console.log('[PQ-ENVELOPE] Signing key initialized');
   } else {
-    cryptoLogger.warn('[PQ-ENVELOPE] No signing key provided');
+    console.warn('[PQ-ENVELOPE] No signing key provided');
   }
 }
 
+export function destroyEnvelopeHandler() {
+  serverDilithiumSigningKey = null;
+}
+
 // Handle PQ handshake initialization from client
-export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKeyPair }) {
+const PQ_HS_FIELD_SIZES = {
+  kemCiphertext: ML_KEM_1024_CIPHERTEXT_BYTES,
+  clientKemPublicKey: ML_KEM_1024_PUBLIC_KEY_BYTES,
+  clientNonce: HASH_OUTPUT_BYTES,
+  clientX25519PublicKey: X25519_KEY_BYTES
+};
+const PQ_HS_MAX_B64_CHARS = 8192;
+const PQ_HS_MAX_PER_MIN = envInt('PQ_HANDSHAKE_MAX_PER_MIN', 20, 1, 600);
+const PQ_HS_MAX_CONCURRENCY = envInt('PQ_HANDSHAKE_MAX_CONCURRENCY', 2, 1, 16);
+const PQ_HS_MAX_QUEUE = envInt('PQ_HANDSHAKE_MAX_QUEUE', 16, 0, 64);
+const PQ_HS_QUEUE_TIMEOUT_MS = envInt('PQ_HANDSHAKE_QUEUE_TIMEOUT_MS', 15_000, 1_000, 60_000);
+const PQ_HS_CONFIRM_TIMEOUT_MS = envInt('PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS', 45_000, 5_000, 120_000);
+function pqHandshakeAdmissionError(message, code = 'PQ_HANDSHAKE_BUSY') {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+const pqHandshakeAdmissionGate = createAbortableAdmissionGate({
+  maxConcurrent: PQ_HS_MAX_CONCURRENCY,
+  maxQueued: PQ_HS_MAX_QUEUE,
+  queueTimeoutMs: PQ_HS_QUEUE_TIMEOUT_MS,
+  abortedError: () => pqHandshakeAdmissionError(
+    'PQ handshake connection closed',
+    'PQ_HANDSHAKE_ABORTED'
+  ),
+  fullError: () => pqHandshakeAdmissionError('PQ handshake queue is full'),
+  timeoutError: () => pqHandshakeAdmissionError('PQ handshake queue timed out')
+});
+
+function pqHandshakeFieldSizesValid(payload) {
+  if (
+    typeof payload.sessionId !== 'string' ||
+    !HEX_32_RE.test(payload.sessionId) ||
+    !Number.isSafeInteger(payload.timestamp) ||
+    payload.timestamp < 0
+  ) {
+    return { valid: false, reason: 'sessionId' };
+  }
+  for (const [field, expectedLen] of Object.entries(PQ_HS_FIELD_SIZES)) {
+    const value = payload[field];
+    const expectedChars = 4 * Math.ceil(expectedLen / 3);
+    if (
+      typeof value !== 'string' ||
+      value.length !== expectedChars ||
+      value.length > PQ_HS_MAX_B64_CHARS
+    ) {
+      return { valid: false, reason: field };
+    }
+    let decoded = null;
+    let canonical = null;
+    try {
+      decoded = CryptoUtils.Hash.base64ToUint8Array(value);
+      canonical = Buffer.from(decoded);
+      if (decoded.length !== expectedLen || canonical.toString('base64') !== value) {
+        return { valid: false, reason: field };
+      }
+    } catch {
+      return { valid: false, reason: field };
+    } finally {
+      decoded?.fill(0);
+      canonical?.fill(0);
+    }
+  }
+  return { valid: true };
+}
+
+export async function handlePQHandshake({ ws, parsed, serverHybridKeyPair }) {
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    Object.getPrototypeOf(parsed) !== Object.prototype ||
+    Object.keys(parsed).sort().join(',') !== 'payload,type' ||
+    parsed.type !== SignalType.PQ_HANDSHAKE_INIT
+  ) {
+    return await sendSecureMessage(ws, {
+      type: SignalType.ERROR,
+      message: 'Invalid handshake payload'
+    });
+  }
+  if (
+    ws?._pqPendingSessionData ||
+    (ws?._pqSessionData && ws._pqSessionData.confirmed !== true) ||
+    ws?._pqHandshakeInFlight === true
+  ) {
+    clearSocketPQSession(ws);
+    if (isWebSocketOpen(ws)) ws.close(1008, 'Concurrent PQ handshake');
+    return;
+  }
   const payload = parsed?.payload;
-  if (!payload || !payload.kemCiphertext || !payload.sessionId || !payload.clientNonce || !payload.clientX25519PublicKey || !payload.clientSigningPublicKey) {
-    cryptoLogger.warn('[PQ-HANDSHAKE] Invalid handshake payload', {
+  if (!payload || !payload.kemCiphertext || !payload.clientKemPublicKey || !payload.sessionId || !payload.clientNonce || !payload.clientX25519PublicKey) {
+    console.warn('[PQ-HANDSHAKE] Invalid handshake payload', {
       hasPayload: !!payload,
       hasKemCiphertext: !!payload?.kemCiphertext,
+      hasClientKemPublicKey: !!payload?.clientKemPublicKey,
       hasSessionId: !!payload?.sessionId,
       hasClientNonce: !!payload?.clientNonce,
-      hasClientX25519: !!payload?.clientX25519PublicKey,
-      hasClientSigningPublicKey: !!payload?.clientSigningPublicKey
+      hasClientX25519: !!payload?.clientX25519PublicKey
     }); 
     return await sendSecureMessage(ws, {
       type: SignalType.ERROR,
@@ -469,10 +802,48 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     });
   }
 
+  // Per connection handshake rate limit
+  {
+    const now = Date.now();
+    if (!ws._pqHsWindowStart || now - ws._pqHsWindowStart > 60_000) {
+      ws._pqHsWindowStart = now;
+      ws._pqHsCount = 0;
+    }
+    ws._pqHsCount = (ws._pqHsCount || 0) + 1;
+    if (ws._pqHsCount > PQ_HS_MAX_PER_MIN) {
+      return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Handshake rate exceeded' });
+    }
+  }
+
+  // Reject malformed/oversized fields
+  const sizeCheck = pqHandshakeFieldSizesValid(payload);
+  if (!sizeCheck.valid) {
+    console.warn('[PQ-HANDSHAKE] Rejected handshake field shape', { field: sizeCheck.reason });
+    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid handshake payload' });
+  }
+  ws._pqHandshakeInFlight = true;
+
+  let pendingSession = null;
+  let kemCiphertextBytes = null;
+  let pqSharedSecret = null;
+  let clientKemPublic = null;
+  let responseKemCiphertext = null;
+  let responderPqSharedSecret = null;
+  let clientX25519Public = null;
+  let classicalSharedSecret = null;
+  let baseSalt = null;
+  let baseHandshakeSecret = null;
+  let sendSalt = null;
+  let recvSalt = null;
+  let combinedSecret = null;
+  let clientSendKey = null;
+  let clientRecvKey = null;
+  let stagedSession = null;
+  let releaseHandshakeSlot = null;
   try {
     const policy = validatePqHandshakePolicy(payload);
     if (!policy.valid) {
-      cryptoLogger.warn('[PQ-HANDSHAKE] Handshake policy rejected', {
+      console.warn('[PQ-HANDSHAKE] Handshake policy rejected', {
         reason: policy.reason
       });
       return await sendSecureMessage(ws, {
@@ -489,9 +860,9 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       );
     }
 
-    const expectedFingerprint = computeServerFingerprint(serverHybridKeyPair);
+    const expectedFingerprint = computeHybridPublicKeyFingerprint(serverHybridKeyPair);
     if (typeof payload.fingerprint !== 'string' || payload.fingerprint !== expectedFingerprint) {
-      cryptoLogger.warn('[PQ-HANDSHAKE] Fingerprint mismatch', {
+      console.warn('[PQ-HANDSHAKE] Fingerprint mismatch', {
         hasReceivedFingerprint: typeof payload.fingerprint === 'string'
       });
       return await sendSecureMessage(ws, {
@@ -499,131 +870,238 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
         message: 'Handshake fingerprint mismatch'
       });
     }
+    const requestDigest = computeHandshakeRequestDigest(payload);
 
-    const oldSessionId = ws._pqSessionId;
-    ws._pqSessionId = undefined;
+    releaseHandshakeSlot = await pqHandshakeAdmissionGate.acquire(ws._connectionAbortSignal);
 
-    if (oldSessionId) {
-      deleteCachedPQSession(oldSessionId);
-      cryptoLogger.info('[PQ-HANDSHAKE] Clearing old session for rehandshake');
-    }
-
-    const kemCiphertextBytes = CryptoUtils.Hash.base64ToUint8Array(payload.kemCiphertext);
-    const pqSharedSecret = await CryptoUtils.Kyber.decapsulate(
+    kemCiphertextBytes = CryptoUtils.Hash.base64ToUint8Array(payload.kemCiphertext);
+    pqSharedSecret = await CryptoUtils.Kyber.decapsulate(
       kemCiphertextBytes,
       serverHybridKeyPair.kyber.secretKey,
       serverHybridKeyPair.kyber.publicKey
     );
 
-    const clientX25519Public = CryptoUtils.Hash.base64ToUint8Array(payload.clientX25519PublicKey);
-    const clientSigningPublicKey = CryptoUtils.Hash.base64ToUint8Array(payload.clientSigningPublicKey);
-    const classicalSharedSecret = CryptoUtils.Hybrid.computeClassicalSharedSecret(
+    clientX25519Public = CryptoUtils.Hash.base64ToUint8Array(payload.clientX25519PublicKey);
+    classicalSharedSecret = CryptoUtils.Hybrid.computeClassicalSharedSecret(
       serverHybridKeyPair.x25519.secretKey,
       clientX25519Public
     );
 
-    const encoder = new TextEncoder();
-    const baseInfo = `${expectedFingerprint}:${payload.sessionId}`;
-    const sendSalt = encoder.encode(`${baseInfo}:send-${payload.timestamp}`);
-    const recvSalt = encoder.encode(`${baseInfo}:recv-${payload.timestamp}`);
+    clientKemPublic = CryptoUtils.Hash.base64ToUint8Array(payload.clientKemPublicKey);
+    const responderEncapsulation = await CryptoUtils.Kyber.encapsulate(clientKemPublic);
+    responseKemCiphertext = responderEncapsulation.ciphertext;
+    responderPqSharedSecret = responderEncapsulation.sharedSecret;
+    const responseKemCiphertextBase64 = encodeBase64AndWipeCopy(responseKemCiphertext);
 
-    const combinedSecret = new Uint8Array(pqSharedSecret.length + classicalSharedSecret.length);
+    const encoder = UTF8_ENCODER;
+    const baseInfo = `${REQUIRED_WS_PQ_HANDSHAKE.version}:${expectedFingerprint}:${payload.sessionId}:${payload.clientNonce}:${payload.timestamp}:${requestDigest}`;
+    baseSalt = encoder.encode(`${baseInfo}${PROTOCOL_KEYS.WS_PQ_BASE_SALT_SUFFIX}`);
+
+    combinedSecret = new Uint8Array(pqSharedSecret.length + classicalSharedSecret.length);
     combinedSecret.set(pqSharedSecret, 0);
     combinedSecret.set(classicalSharedSecret, pqSharedSecret.length);
+    baseHandshakeSecret = PostQuantumHash.deriveKey(
+      combinedSecret,
+      baseSalt,
+      PROTOCOL_KEYS.WS_PQ_TWO_WAY_EPHEMERAL_BASE,
+      POST_QUANTUM_AEAD_KEY_BYTES
+    );
+    combinedSecret.fill(0);
+    combinedSecret = new Uint8Array(baseHandshakeSecret.length + responderPqSharedSecret.length);
+    combinedSecret.set(baseHandshakeSecret, 0);
+    combinedSecret.set(responderPqSharedSecret, baseHandshakeSecret.length);
+    const finalContext = `${baseInfo}:${responseKemCiphertextBase64}${PROTOCOL_KEYS.WS_PQ_FINAL_SALT_SUFFIX}`;
+    sendSalt = encoder.encode(`${finalContext}${PROTOCOL_KEYS.WS_PQ_CLIENT_SEND_SALT_SUFFIX}`);
+    recvSalt = encoder.encode(`${finalContext}${PROTOCOL_KEYS.WS_PQ_CLIENT_RECV_SALT_SUFFIX}`);
 
-    const clientSendKey = PostQuantumHash.deriveKey(combinedSecret, sendSalt, 'ws-pq-hybrid-send', 32);
-    const clientRecvKey = PostQuantumHash.deriveKey(combinedSecret, recvSalt, 'ws-pq-hybrid-recv', 32);
+    clientSendKey = PostQuantumHash.deriveKey(
+      combinedSecret,
+      sendSalt,
+      PROTOCOL_KEYS.WS_PQ_CLIENT_SEND,
+      POST_QUANTUM_AEAD_KEY_BYTES
+    );
+    clientRecvKey = PostQuantumHash.deriveKey(
+      combinedSecret,
+      recvSalt,
+      PROTOCOL_KEYS.WS_PQ_CLIENT_RECV,
+      POST_QUANTUM_AEAD_KEY_BYTES
+    );
 
-    try {
-      pqSharedSecret.fill(0);
-      classicalSharedSecret.fill(0);
-      combinedSecret.fill(0);
-    } catch { }
-
-    const sessionData = {
+    pendingSession = {
       sessionId: payload.sessionId,
       recvKey: clientSendKey,
       sendKey: clientRecvKey,
       fingerprint: expectedFingerprint,
       establishedAt: Date.now(),
-      counter: 0,
-      clientSigningPublicKey
+      sendCounter: 0,
+      remoteCounter: 0,
+      confirmed: false,
+      confirmationDigest: requestDigest
     };
+    clientSendKey = null;
+    clientRecvKey = null;
 
-    await storePQSession(payload.sessionId, sessionData);
+    console.log('[PQ-HANDSHAKE] Session established');
 
-    cryptoLogger.info('[PQ-HANDSHAKE] Session established');
-
-    cryptoLogger.info('[PQ-HANDSHAKE] Sending ack in plaintext', {
+    console.log('[PQ-HANDSHAKE] Sending authenticated acknowledgement', {
       wsReady: ws.readyState === 1,
-      hasPqSessionId: !!ws._pqSessionId
+      protectedByCurrentSession: !!ws._pqSessionId
     });
 
-    await sendSecureMessage(ws, {
+    if (!serverDilithiumSigningKey) {
+      throw new Error('Server signing key unavailable for handshake acknowledgement');
+    }
+    const ackTimestamp = Date.now();
+    const ack = {
       type: SignalType.PQ_HANDSHAKE_ACK,
+      version: REQUIRED_WS_PQ_HANDSHAKE.version,
       sessionId: payload.sessionId,
-      timestamp: Date.now(),
-      serverTime: Date.now()
-    });
-    
-    ws._pqSessionId = payload.sessionId;
-    ws._pqLastRemoteCounter = 0;
-
-    // Update ConnectionStateManager with pqSessionId
-    if (ws._sessionId) {
-      const { ConnectionStateManager } = await import('../session/connection-state.js');
+      fingerprint: expectedFingerprint,
+      clientNonce: payload.clientNonce,
+      requestTimestamp: payload.timestamp,
+      requestDigest,
+      responseKemCiphertext: responseKemCiphertextBase64,
+      timestamp: ackTimestamp,
+      serverTime: ackTimestamp
+    };
+    const ackSignatureMessage = UTF8_ENCODER.encode(buildHandshakeAckSignaturePayload(ack));
+    let ackSignature = null;
+    try {
+      ackSignature = await CryptoUtils.Dilithium.sign(
+        ackSignatureMessage,
+        serverDilithiumSigningKey
+      );
+      const encodedSignature = Buffer.from(ackSignature);
       try {
-        await ConnectionStateManager.updateState(ws._sessionId, {
-          pqSessionId: payload.sessionId
-        });
-      } catch (stateError) {
-        cryptoLogger.warn('[PQ-HANDSHAKE] Failed to update connection state', {
-          error: stateError?.message
-        });
+        ack.signature = encodedSignature.toString('base64');
+      } finally {
+        encodedSignature.fill(0);
       }
+    } finally {
+      ackSignatureMessage.fill(0);
+      ackSignature?.fill(0);
+    }
+
+    // Admission protects expensive key agreement/signing only. Never let a slow
+    // socket hold a global crypto slot while its acknowledgement drains.
+    releaseHandshakeSlot?.();
+    releaseHandshakeSlot = null;
+
+    const previousSession = ws._pqSessionData;
+    if (previousSession) {
+      stagedSession = pendingSession;
+      stageSocketPQSession(ws, stagedSession);
+      pendingSession = null;
+      const ackDelivered = await sendSecureMessage(ws, ack, {
+        sessionOverride: previousSession
+      });
+      if (!ackDelivered) {
+        discardStagedSocketPQSession(ws, stagedSession);
+        throw new Error('PQ rekey acknowledgement was not delivered');
+      }
+      stagedSession = null;
+    } else {
+      const ackDelivered = await sendSecureMessage(ws, ack);
+      if (!ackDelivered) throw new Error('PQ handshake acknowledgement was not delivered');
+      installSocketPQSession(ws, pendingSession);
+      pendingSession = null;
     }
 
   } catch (error) {
-    cryptoLogger.error('[PQ-HANDSHAKE] Handshake failed', {
+    if (stagedSession) discardStagedSocketPQSession(ws, stagedSession);
+    wipeSession(pendingSession);
+    console.error('[PQ-HANDSHAKE] Handshake failed', {
       error: error.message
     });
     await sendSecureMessage(ws, {
       type: SignalType.ERROR,
       message: 'Handshake failed'
     });
+  } finally {
+    ws._pqHandshakeInFlight = false;
+    kemCiphertextBytes?.fill(0);
+    pqSharedSecret?.fill(0);
+    clientKemPublic?.fill(0);
+    responseKemCiphertext?.fill(0);
+    responderPqSharedSecret?.fill(0);
+    clientX25519Public?.fill(0);
+    classicalSharedSecret?.fill(0);
+    baseSalt?.fill(0);
+    baseHandshakeSecret?.fill(0);
+    sendSalt?.fill(0);
+    recvSalt?.fill(0);
+    combinedSecret?.fill(0);
+    clientSendKey?.fill(0);
+    clientRecvKey?.fill(0);
+    releaseHandshakeSlot?.();
   }
 }
 
 // Handle incoming PQ-encrypted envelope
-export async function handlePQEnvelope({ ws, sessionId, envelope, context, handleInnerMessage }) {
+export async function handlePQEnvelope({ ws, envelope, context, handleInnerMessage }) {
+  const rejectUnboundEnvelope = async (payload) => {
+    if (ws?._pqRekeyGate) {
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1008, 'Invalid PQ activation envelope');
+      return false;
+    }
+    return await sendSecureMessage(ws, payload);
+  };
+  if (!validateIncomingEnvelopeShape(envelope)) {
+    console.warn('[PQ-ENVELOPE] Invalid envelope schema');
+    return await rejectUnboundEnvelope({
+      type: SignalType.ERROR,
+      message: 'Invalid PQ envelope'
+    });
+  }
   const pqSessionId = envelope.sessionId;
   if (!pqSessionId) {
-    cryptoLogger.warn('[PQ-ENVELOPE] No session ID provided');
-    return await sendSecureMessage(ws, {
+    console.warn('[PQ-ENVELOPE] No session ID provided');
+    return await rejectUnboundEnvelope({
       type: SignalType.ERROR,
       message: 'No PQ session ID provided'
     });
   }
 
-  const session = await getPQSession(pqSessionId);
-  if (!session) {
-    cryptoLogger.warn('[PQ-ENVELOPE] Unknown PQ session');
-    return await sendSecureMessage(ws, {
+  if (ws._pqSessionId !== pqSessionId && ws._pqPendingSessionId !== pqSessionId) {
+    console.warn('[PQ-ENVELOPE] Session is not bound to this socket');
+    return await rejectUnboundEnvelope({
       type: SignalType.ERROR,
       message: 'Unknown PQ session'
     });
   }
 
-  if (!ws._pqSessionId) {
-    ws._pqSessionId = pqSessionId;
-    if (!Number.isFinite(ws._pqLastRemoteCounter)) {
-      ws._pqLastRemoteCounter = 0;
-    }
+  const session = getSocketPQSession(ws, pqSessionId);
+  if (!session) {
+    console.warn('[PQ-ENVELOPE] Unknown PQ session');
+    return await rejectUnboundEnvelope({
+      type: SignalType.ERROR,
+      message: 'Unknown PQ session'
+    });
   }
 
+  if (ws._pqPendingSessionData && session === ws._pqSessionData) {
+    try {
+      await sendPQEncryptedResponse(ws, session, {
+        type: SignalType.ERROR,
+        message: 'PQ rekey confirmation required'
+      });
+    } finally {
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1008, 'PQ rekey confirmation required');
+    }
+    return false;
+  }
+
+  const sendForEnvelopeSession = (payload) => (
+    ws._pqPendingSessionData === session || session.confirmed !== true
+      ? sendPQEncryptedResponse(ws, session, payload)
+      : sendSecureMessage(ws, payload)
+  );
+
   if (envelope.sessionFingerprint !== session.fingerprint) {
-    cryptoLogger.error('[PQ-ENVELOPE] Session fingerprint mismatch');
-    return await sendSecureMessage(ws, {
+    console.error('[PQ-ENVELOPE] Session fingerprint mismatch');
+    return await sendForEnvelopeSession({
       type: SignalType.ERROR,
       message: 'Session fingerprint mismatch'
     });
@@ -631,100 +1109,218 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
 
   const envelopeTimestamp = getEnvelopeTimestampValidation(envelope.timestamp);
   if (!envelopeTimestamp.valid) {
-    cryptoLogger.warn('[PQ-ENVELOPE] Timestamp outside replay window', {
+    console.warn('[PQ-ENVELOPE] Timestamp outside replay window', {
       skewClass: skewSizeClass(envelopeTimestamp.skewMs),
       direction: envelopeTimestamp.direction
     });
-    return await sendSecureMessage(
-      ws,
+    return await sendForEnvelopeSession(
       timestampInvalidPayload(envelopeTimestamp, 'ENVELOPE_TIMESTAMP_INVALID', 'Envelope timestamp invalid')
     );
   }
 
-  const signatureValid = await verifyClientEnvelopeSignature(session, envelope);
-  if (!signatureValid) {
-    cryptoLogger.warn('[PQ-ENVELOPE] Client signature verification failed');
-    return await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Envelope signature invalid'
+  if (!isSocketRemoteCounterFresh(session, envelope.counter)) {
+    console.warn('[PQ-ENVELOPE] Remote counter rejected', {
+      receivedCounter: envelope?.counter
     });
-  }
-
-  if (!consumeRemoteCounter(ws, envelope)) {
-    cryptoLogger.warn('[PQ-ENVELOPE] Remote counter rejected', {
-      receivedCounter: envelope?.counter,
-      lastCounter: ws?._pqLastRemoteCounter
-    });
-    return await sendSecureMessage(ws, {
+    return await sendForEnvelopeSession({
       type: SignalType.ERROR,
       message: 'Envelope counter invalid'
     });
   }
 
+  let ciphertext = null;
+  let nonce = null;
+  let tag = null;
+  let aad = null;
+  let plaintext = null;
   try {
     // Decode envelope components
-    const ciphertext = CryptoUtils.Hash.base64ToUint8Array(envelope.ciphertext);
-    const nonce = CryptoUtils.Hash.base64ToUint8Array(envelope.nonce);
-    const tag = CryptoUtils.Hash.base64ToUint8Array(envelope.tag);
-    const aad = CryptoUtils.Hash.base64ToUint8Array(envelope.aad);
+    ciphertext = CryptoUtils.Hash.base64ToUint8Array(envelope.ciphertext);
+    nonce = CryptoUtils.Hash.base64ToUint8Array(envelope.nonce);
+    tag = CryptoUtils.Hash.base64ToUint8Array(envelope.tag);
+    aad = CryptoUtils.Hash.base64ToUint8Array(envelope.aad);
 
     // Decrypt
     const pqAead = new CryptoUtils.PostQuantumAEAD(session.recvKey);
-    const plaintext = pqAead.decrypt(ciphertext, nonce, tag, aad);
-    const decrypted = JSON.parse(new TextDecoder().decode(plaintext));
+    plaintext = pqAead.decrypt(ciphertext, nonce, tag, aad);
+    if (!consumeSocketRemoteCounter(session, envelope.counter)) {
+      throw new Error('Envelope counter changed during authentication');
+    }
+    const decrypted = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    if (
+      !decrypted ||
+      typeof decrypted !== 'object' ||
+      Array.isArray(decrypted) ||
+      typeof decrypted.type !== 'string' ||
+      decrypted.type.length === 0 ||
+      decrypted.type.length > 64 ||
+      !isSafeJsonTree(decrypted, {
+        maxDepth: WS_ENVELOPE_MAX_JSON_DEPTH,
+        maxNodes: WS_ENVELOPE_MAX_JSON_NODES,
+        maxKeyLength: 256
+      })
+    ) {
+      throw new Error('Invalid encrypted payload schema');
+    }
 
     const innerPayload = decrypted;
 
     const innerType = innerPayload?.type || decrypted?.type || 'unknown';
-    recordWsInnerMessage(innerType, plaintext.length);
-    if (shouldTraceEnvelopePayload(innerPayload)) {
-      cryptoLogger.info('[PQ-ENVELOPE] Decrypted client payload', {
-        innerType,
-        sessionMatchesSocket: pqSessionId === ws._pqSessionId,
-        counter: envelope.counter
-      });
-    }
-    const expectedAad = `${innerType}|${envelope.messageId}|${envelope.timestamp}|${envelope.counter}`;
+    const expectedAad = `${PROTOCOL_KEYS.WS_PQ_AAD}|${envelope.messageId}|${envelope.timestamp}|${envelope.counter}`;
     const aadString = new TextDecoder().decode(aad);
     if (aadString !== expectedAad) {
-      cryptoLogger.warn('[PQ-ENVELOPE] AAD mismatch after decrypt', {
+      console.warn('[PQ-ENVELOPE] AAD mismatch after decrypt', {
         expectedType: innerType,
         messageId: envelope.messageId
       });
-      return await sendSecureMessage(ws, {
+      return await sendForEnvelopeSession({
         type: SignalType.ERROR,
         message: 'Envelope AAD invalid'
       });
     }
+    if (!hasValidEnvelopePadding(envelope, innerPayload)) {
+      return await sendForEnvelopeSession({
+        type: SignalType.ERROR,
+        message: 'Envelope padding invalid'
+      });
+    }
+
+    if (session.confirmed !== true) {
+      if (
+        Object.keys(innerPayload).sort().join(',') !== 'requestDigest,sessionId,type,version' ||
+        innerPayload.type !== SignalType.PQ_HANDSHAKE_CONFIRM ||
+        innerPayload.version !== REQUIRED_WS_PQ_HANDSHAKE.version ||
+        innerPayload.sessionId !== session.sessionId ||
+        innerPayload.requestDigest !== session.confirmationDigest
+      ) {
+        console.warn('[PQ-HANDSHAKE] Application data arrived before key confirmation');
+        await sendForEnvelopeSession({
+          type: SignalType.ERROR,
+          message: 'PQ key confirmation required'
+        });
+        clearSocketPQSession(ws);
+        if (isWebSocketOpen(ws)) ws.close(1008, 'PQ key confirmation required');
+        return;
+      }
+      if (session.confirmationInFlight === true) {
+        clearSocketPQSession(ws);
+        if (isWebSocketOpen(ws)) ws.close(1008, 'Concurrent PQ key confirmation');
+        return;
+      }
+      session.confirmationInFlight = true;
+      let confirmationDelivered = false;
+      try {
+        confirmationDelivered = await sendPQEncryptedResponse(ws, session, {
+          type: SignalType.PQ_HANDSHAKE_CONFIRMED,
+          version: REQUIRED_WS_PQ_HANDSHAKE.version,
+          sessionId: session.sessionId,
+          requestDigest: innerPayload.requestDigest
+        });
+      } catch {
+        confirmationDelivered = false;
+      } finally {
+        if (getSocketPQSession(ws, session.sessionId) === session) {
+          session.confirmationInFlight = false;
+        }
+      }
+      if (!confirmationDelivered) {
+        console.warn('[PQ-HANDSHAKE] Encrypted key confirmation delivery failed');
+        clearSocketPQSession(ws);
+        if (isWebSocketOpen(ws)) ws.close(1011, 'PQ key confirmation delivery failed');
+        return;
+      }
+      session.confirmed = true;
+      session.confirmationDigest = null;
+      if (session.confirmationTimer) clearTimeout(session.confirmationTimer);
+      session.confirmationTimer = null;
+      if (ws._pqPendingSessionData === session) {
+        promoteStagedSocketPQSession(ws, session);
+      } else {
+        resolveSocketPQActivationGate(ws);
+      }
+      return;
+    }
+    if (innerPayload.type === SignalType.PQ_HANDSHAKE_CONFIRM) {
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1008, 'Repeated PQ key confirmation');
+      return;
+    }
+
+    const authRequestField = AUTH_CHANNEL_BOUND_REQUEST_FIELDS.get(innerPayload.type);
+    if (authRequestField) {
+      let expectedBinding = null;
+      let suppliedBinding = null;
+      try {
+        const requestId = innerPayload[authRequestField];
+        if (!canonicalBase64Shape(innerPayload.authChannelBinding, {
+          exactBytes: AUTH_CHANNEL_BINDING_BYTES
+        })) {
+          throw new Error('Authentication channel binding is malformed');
+        }
+        expectedBinding = createAuthChannelBinding({
+          sessionId: session.sessionId,
+          sessionFingerprint: session.fingerprint,
+          requestId,
+        });
+        suppliedBinding = CryptoUtils.Hash.base64ToUint8Array(innerPayload.authChannelBinding);
+        if (
+          suppliedBinding.length !== AUTH_CHANNEL_BINDING_BYTES ||
+          !crypto.timingSafeEqual(expectedBinding, suppliedBinding)
+        ) {
+          throw new Error('Authentication channel binding does not match the PQ session');
+        }
+        Object.defineProperty(innerPayload, VERIFIED_AUTH_CHANNEL_BINDING, {
+          configurable: true,
+          enumerable: false,
+          value: expectedBinding,
+          writable: false,
+        });
+        expectedBinding = null;
+      } catch {
+        await sendForEnvelopeSession({
+          type: SignalType.AUTH_ERROR,
+          code: 'AUTH_CHANNEL_BINDING_INVALID',
+          message: 'Authentication channel binding invalid',
+          [authRequestField]: innerPayload[authRequestField],
+        });
+        if (isWebSocketOpen(ws)) ws.close(1008, 'Authentication channel binding invalid');
+        return;
+      } finally {
+        expectedBinding?.fill(0);
+        suppliedBinding?.fill(0);
+      }
+    }
 
     await handleInnerMessage({
       ws,
-      sessionId,
-      message: null,
       parsed: innerPayload,
-      context
+      context,
+      isPqProtected: true
     });
   } catch (error) {
-    if (Number.isFinite(envelope?.counter) && ws?._pqLastRemoteCounter === envelope.counter) {
-      ws._pqLastRemoteCounter = Math.max(0, envelope.counter - 1);
-    }
-    cryptoLogger.error('[PQ-ENVELOPE] Decryption failed', {
+    console.error('[PQ-ENVELOPE] Decryption failed', {
       error: error.message
     });
-    await sendSecureMessage(ws, {
+    await sendForEnvelopeSession({
       type: SignalType.ERROR,
       message: 'Failed to decrypt envelope'
     });
+  } finally {
+    ciphertext?.fill(0);
+    nonce?.fill(0);
+    tag?.fill(0);
+    aad?.fill(0);
+    plaintext?.fill(0);
   }
 }
 
 // Send PQ-encrypted response to client
-export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
+export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, options = {}) {
   const payloadTypeForClosedSocket = payload?.type || 'unknown';
   if (!isWebSocketOpen(ws)) {
     const readyState = wsReadyState(ws);
     if (isClosedWebSocketState(readyState)) {
-      cryptoLogger.info('[PQ-ENCRYPT] Skipping encrypted response for closed socket', {
+      console.log('[PQ-ENCRYPT] Skipping encrypted response for closed socket', {
         payloadType: payloadTypeForClosedSocket,
         readyState
       });
@@ -733,36 +1329,16 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
   }
 
   try {
-    let session;
-    if (typeof pqSessionIdOrData === 'string') {
-      session = await getPQSession(pqSessionIdOrData);
-      if (!session) {
-        throw new Error('PQ session not found');
-      }
-    } else {
-      session = pqSessionIdOrData;
-    }
+    const requestedSessionId = typeof pqSessionIdOrData === 'string'
+      ? pqSessionIdOrData
+      : pqSessionIdOrData?.sessionId;
+    const session = getSocketPQSession(ws, requestedSessionId);
+    if (!session) throw new Error('PQ session is not bound to this socket');
 
-    const innerMessage = payload?.type === SignalType.ENCRYPTED_MESSAGE
-      ? {
-        type: SignalType.ENCRYPTED_MESSAGE,
-        encryptedPayload: payload.encryptedPayload
-      }
-      : payload;
+    const innerMessage = payload;
 
     const messageType = innerMessage?.type || payload?.type || 'unknown';
     const plaintextBudgetBytes = getEncryptedResponsePlaintextBudgetBytes();
-    const dominantBytes = dominantResponseStringBytes(innerMessage, messageType);
-    if (dominantBytes > plaintextBudgetBytes) {
-      return sendOversizedResponseError(
-        ws,
-        session,
-        innerMessage,
-        messageType,
-        dominantBytes,
-        'dominant-string-field'
-      );
-    }
 
     const innerJson = JSON.stringify(innerMessage);
     if (typeof innerJson !== 'string') {
@@ -774,191 +1350,151 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
       return sendOversizedResponseError(
         ws,
         session,
-        innerMessage,
         messageType,
-        plaintextBytes,
-        'json-plaintext'
+        plaintextBytes
       );
     }
 
-    const messageId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-    const counter = await incrementPQSessionCounter(session.sessionId);
-    if (!counter) {
-      throw new Error('Failed to update PQ session counter');
-    }
+    const releaseSendTurn = await acquireSocketSendTurn(ws, session, plaintextBytes);
+    let aad = null;
+    let plaintext = null;
+    let nonce = null;
+    let ciphertext = null;
+    let tag = null;
+    try {
+      const messageIdBytes = crypto.randomBytes(16);
+      const messageId = messageIdBytes.toString('base64url');
+      messageIdBytes.fill(0);
+      const counter = incrementSocketSendCounter(session);
 
-    const timestamp = Date.now();
-    const aadString = `${messageType}|${messageId}|${timestamp}|${counter}`;
-    const aad = new TextEncoder().encode(aadString);
+      const timestamp = Date.now();
+      const aadString = `${PROTOCOL_KEYS.WS_PQ_AAD}|${messageId}|${timestamp}|${counter}`;
+      aad = UTF8_ENCODER.encode(aadString);
 
-    const plaintext = new TextEncoder().encode(innerJson);
+      plaintext = UTF8_ENCODER.encode(innerJson);
 
-    const pqAead = new CryptoUtils.PostQuantumAEAD(session.sendKey);
-    const nonce = crypto.randomBytes(36);
-    const { ciphertext, tag } = pqAead.encrypt(plaintext, nonce, aad);
+      const pqAead = new CryptoUtils.PostQuantumAEAD(session.sendKey);
+      nonce = crypto.randomBytes(WS_ENVELOPE_NONCE_BYTES);
+      const encrypted = pqAead.encrypt(plaintext, nonce, aad);
+      ciphertext = encrypted.ciphertext;
+      tag = encrypted.tag;
 
-    const envelope = {
-      type: SignalType.PQ_ENVELOPE,
-      version: 'pq-ws-1',
-      sessionId: session.sessionId,
-      sessionFingerprint: session.fingerprint,
-      messageId,
-      counter,
-      timestamp,
-      ciphertext: Buffer.from(ciphertext).toString('base64'),
-      nonce: Buffer.from(nonce).toString('base64'),
-      tag: Buffer.from(tag).toString('base64'),
-      aad: Buffer.from(aad).toString('base64')
-    };
+      const envelope = {
+        type: SignalType.PQ_ENVELOPE,
+        version: REQUIRED_WS_PQ_HANDSHAKE.version,
+        sessionId: session.sessionId,
+        sessionFingerprint: session.fingerprint,
+        messageId,
+        counter,
+        timestamp,
+        ciphertext: encodeBase64AndWipeCopy(ciphertext),
+        nonce: encodeBase64AndWipeCopy(nonce),
+        tag: encodeBase64AndWipeCopy(tag),
+        aad: encodeBase64AndWipeCopy(aad)
+      };
 
-    if (serverDilithiumSigningKey) {
-      try {
-        const signaturePayload = buildEnvelopeSignaturePayload(envelope);
-        cryptoLogger.info('[PQ-SIGN] Signing envelope', {
-          hasMessageId: !!envelope.messageId,
-          hasSigningKey: !!serverDilithiumSigningKey
-        });
-        const signatureMessage = new TextEncoder().encode(signaturePayload);
-        const signatureBytes = await CryptoUtils.Dilithium.sign(signatureMessage, serverDilithiumSigningKey);
-        envelope.signature = Buffer.from(signatureBytes).toString('base64');
-      } catch (signError) {
-        cryptoLogger.error('[PQ-ENCRYPT] FATAL: Failed to sign envelope', {
-          error: signError.message
-        });
-        throw new Error(`Envelope signing failed: ${signError.message}`);
-      }
-    } else {
-      cryptoLogger.error('[PQ-ENCRYPT] FATAL: No signing key available');
-      throw new Error('Server signing key not initialized - cannot send secure messages');
-    }
-
-    const padded = shouldPadEnvelopePayload(innerMessage);
-    const serialized = padded
-      ? padEnvelopeToFixedSize(envelope)
-      : JSON.stringify(envelope);
-    const serializedBytes = Buffer.byteLength(serialized);
-
-    if (serializedBytes > WS_MAX_ENCRYPTED_RESPONSE_BYTES) {
-      cryptoLogger.warn('[PQ-ENCRYPT] Refusing oversized encrypted response', {
-        payloadType: messageType,
-        responseSizeClass: byteSizeClass(serializedBytes),
-        limitClass: byteSizeClass(WS_MAX_ENCRYPTED_RESPONSE_BYTES)
-      });
-
-      const errorPayload = oversizedResponseErrorPayload(innerMessage, messageType);
-      if (errorPayload) {
-        return sendPQEncryptedResponse(ws, session, errorPayload);
+      if (shouldPadEnvelopePayload(innerMessage)) {
+        applyEnvelopeFixedPadding(envelope);
       }
 
-      if (messageType !== SignalType.ERROR) {
-        return sendPQEncryptedResponse(ws, session, {
-          type: SignalType.ERROR,
-          code: 'RESPONSE_TOO_LARGE',
-          message: 'Server response exceeded transport limit',
-          originalType: messageType
-        });
-      }
+      const serialized = JSON.stringify(envelope);
+      const serializedBytes = Buffer.byteLength(serialized);
 
-      throw new Error('encrypted_response_too_large');
-    }
-
-    if (shouldTraceEnvelopePayload(innerMessage)) {
-      cryptoLogger.info('[PQ-ENCRYPT] Sending encrypted response', {
-        payloadType: messageType,
-        serializedBytes,
-        padded,
-        wsReady: isWebSocketOpen(ws),
-        bufferedAmount: ws.bufferedAmount
-      });
-    }
-    recordWsEgress(serializedBytes, messageType);
-
-    if (!isWebSocketOpen(ws)) {
-      const readyState = wsReadyState(ws);
-      if (isClosedWebSocketState(readyState)) {
-        cryptoLogger.info('[PQ-ENCRYPT] Skipping encrypted response for closed socket', {
+      if (serializedBytes > WS_MAX_ENCRYPTED_RESPONSE_BYTES) {
+        console.warn('[PQ-ENCRYPT] Refusing oversized encrypted response', {
           payloadType: messageType,
-          readyState
+          responseSizeClass: byteSizeClass(serializedBytes),
+          limitClass: byteSizeClass(WS_MAX_ENCRYPTED_RESPONSE_BYTES)
         });
-        return false;
+        throw new Error('encrypted_response_too_large');
       }
-      throw new WebSocketDeliveryClosedError(readyState, messageType);
-    }
 
-    const delivered = await new Promise((resolve, reject) => {
-      ws.send(serialized, (error) => {
-        if (error) {
-          if (isWebSocketDeliveryClosedError(error) || isClosedWebSocketState(wsReadyState(ws))) {
-            resolve(false);
-            return;
-          }
-          reject(error);
-          return;
+      if (getSocketPQSession(ws, session.sessionId) !== session || !isWebSocketOpen(ws)) {
+        const readyState = wsReadyState(ws);
+        if (isClosedWebSocketState(readyState) || session.invalidated === true) {
+          console.log('[PQ-ENCRYPT] Skipping encrypted response for closed or replaced session', {
+            payloadType: messageType,
+            readyState
+          });
+          return false;
         }
-        resolve(true);
-      });
-    });
+        throw new WebSocketDeliveryClosedError(readyState, messageType);
+      }
 
-    if (!delivered) {
-      cryptoLogger.info('[PQ-ENCRYPT] Encrypted response dropped because socket closed during send', {
-        payloadType: messageType,
-        readyState: wsReadyState(ws)
-      });
+      const delivered = await sendWebSocketTextWithDeadline(
+        ws,
+        serialized,
+        options.deliveryTimeoutMs
+      );
+
+      if (!delivered) {
+        console.log('[PQ-ENCRYPT] Encrypted response dropped because socket closed during send', {
+          payloadType: messageType,
+          readyState: wsReadyState(ws)
+        });
+      }
+
+      return delivered;
+    } finally {
+      aad?.fill(0);
+      plaintext?.fill(0);
+      nonce?.fill(0);
+      ciphertext?.fill(0);
+      tag?.fill(0);
+      releaseSendTurn();
     }
-
-    return delivered;
   } catch (error) {
     if (isWebSocketDeliveryClosedError(error)) {
-      cryptoLogger.info('[PQ-ENCRYPT] Encrypted response skipped after socket closed', {
+      console.log('[PQ-ENCRYPT] Encrypted response skipped after socket closed', {
         payloadType: payloadTypeForClosedSocket,
         readyState: wsReadyState(ws)
       });
       return false;
     }
 
-    cryptoLogger.error('[PQ-ENCRYPT] Failed to send encrypted response', {
+    console.error('[PQ-ENCRYPT] Failed to send encrypted response', {
       error: error.message
     });
     throw error;
   }
 }
 
-// Send secure message with automatic PQ encryption when session is available
-export async function sendSecureMessage(ws, payload) {
-  const pqSessionId = ws._pqSessionId;
+export async function sendSecureMessage(ws, payload, options = {}) {
+  if (!options.sessionOverride && !await waitForSocketPQActivation(ws, payload)) {
+    return false;
+  }
+  const pqSessionId = options.sessionOverride?.sessionId || ws._pqSessionId;
 
   // Whitelist: Only these message types are allowed without PQ encryption
   const allowedPlaintextTypes = [
     SignalType.PQ_HANDSHAKE_ACK,
-    SignalType.PQ_HANDSHAKE_INIT,
     SignalType.ERROR,
-    SignalType.AUTH_ERROR,
     SignalType.SERVER_PUBLIC_KEY
   ];
 
   if (pqSessionId) {
     try {
-      const session = await getPQSession(pqSessionId);
+      const session = getSocketPQSession(ws, pqSessionId);
       if (!session) {
-        cryptoLogger.error('[SECURE-MSG] FATAL: PQ session ID exists but session not found', {
+        console.error('[SECURE-MSG] FATAL: PQ session ID exists but session not found', {
           payloadType: payload?.type
         });
-        ws.close(1008, 'PQ session lost - security violation');
-        throw new Error('PQ session not found in storage');
+        ws.close(1008, 'PQ session lost');
+        throw new Error('PQ session not bound to socket');
       }
 
       const delivered = await sendPQEncryptedResponse(ws, session, payload);
       return delivered;
     } catch (error) {
       if (isWebSocketDeliveryClosedError(error)) {
-        cryptoLogger.info('[SECURE-MSG] Secure response not delivered because socket closed', {
+        console.log('[SECURE-MSG] Secure response not delivered because socket closed', {
           payloadType: payload?.type,
           readyState: wsReadyState(ws)
         });
         return false;
       }
 
-      cryptoLogger.error('[SECURE-MSG] FATAL: PQ encryption failed', {
+      console.error('[SECURE-MSG] FATAL: PQ encryption failed', {
         error: error.message,
         payloadType: payload?.type,
         stack: error.stack
@@ -973,7 +1509,7 @@ export async function sendSecureMessage(ws, payload) {
   const isAllowedPlaintext = payload?.type && allowedPlaintextTypes.includes(payload.type);
 
   if (!isAllowedPlaintext) {
-    cryptoLogger.warn('[SECURE-MSG] Blocked secure payload without PQ session', {
+    console.warn('[SECURE-MSG] Blocked payload without PQ session', {
       payloadType: payload?.type
     });
 
@@ -981,12 +1517,12 @@ export async function sendSecureMessage(ws, payload) {
       try {
         ws.send(JSON.stringify({
           type: SignalType.ERROR,
-          code: 'PQ_SESSION_REQUIRED',
+          code: PQ_SESSION_REQUIRED,
           message: 'PQ handshake required before sending secure messages',
           requiresHandshake: true
         }));
       } catch (error) {
-        cryptoLogger.warn('[SECURE-MSG] Failed to send PQ-required error', {
+        console.warn('[SECURE-MSG] Failed to send PQ-required error', {
           error: error?.message
         });
       }
@@ -995,8 +1531,7 @@ export async function sendSecureMessage(ws, payload) {
   }
 
   const payloadString = JSON.stringify(payload);
-  recordWsEgress(Buffer.byteLength(payloadString, 'utf8'), payload?.type || 'plaintext');
-  cryptoLogger.info('[SECURE-MSG] Sending whitelisted plaintext message', {
+  console.log('[SECURE-MSG] Sending whitelisted plaintext message', {
     payloadType: payload?.type,
     wsReady: isWebSocketOpen(ws),
     readyState: ws.readyState,
@@ -1005,7 +1540,7 @@ export async function sendSecureMessage(ws, payload) {
   });
 
   if (!isWebSocketOpen(ws)) {
-    cryptoLogger.info('[SECURE-MSG] Skipping plaintext message for closed socket', {
+    console.log('[SECURE-MSG] Skipping plaintext message for closed socket', {
       payloadType: payload?.type,
       readyState: wsReadyState(ws)
     });
@@ -1013,62 +1548,34 @@ export async function sendSecureMessage(ws, payload) {
   }
 
   try {
-    ws.send(payloadString, (error) => {
-      if (error) {
-        if (isWebSocketDeliveryClosedError(error) || isClosedWebSocketState(wsReadyState(ws))) {
-          cryptoLogger.info('[SECURE-MSG] Plaintext message dropped because socket closed', {
-            payloadType: payload?.type,
-            readyState: wsReadyState(ws)
-          });
-          return;
-        }
-        cryptoLogger.error('[SECURE-MSG] Failed to send plaintext message', {
-          payloadType: payload?.type,
-          error: error.message,
-          readyState: ws.readyState
-        });
-      } else {
-        cryptoLogger.info('[SECURE-MSG] Plaintext message sent successfully', {
-          payloadType: payload?.type,
-          readyState: ws.readyState
-        });
-      }
-    });
-    return true;
-  } catch (sendError) {
-    if (isWebSocketDeliveryClosedError(sendError) || isClosedWebSocketState(wsReadyState(ws))) {
-      cryptoLogger.info('[SECURE-MSG] Plaintext message skipped after socket closed', {
+    const delivered = await sendWebSocketTextWithDeadline(ws, payloadString);
+
+    if (!delivered) {
+      console.log('[SECURE-MSG] Plaintext message dropped because socket closed', {
         payloadType: payload?.type,
         readyState: wsReadyState(ws)
       });
       return false;
     }
-    cryptoLogger.error('[SECURE-MSG] Exception while sending plaintext message', {
+
+    console.log('[SECURE-MSG] Plaintext message sent successfully', {
+      payloadType: payload?.type,
+      readyState: ws.readyState
+    });
+    return true;
+  } catch (sendError) {
+    if (isWebSocketDeliveryClosedError(sendError) || isClosedWebSocketState(wsReadyState(ws))) {
+      console.log('[SECURE-MSG] Plaintext message skipped after socket closed', {
+        payloadType: payload?.type,
+        readyState: wsReadyState(ws)
+      });
+      return false;
+    }
+    console.error('[SECURE-MSG] Exception while sending plaintext message', {
       payloadType: payload?.type,
       error: sendError.message,
       stack: sendError.stack
     });
     throw sendError;
   }
-}
-
-// Get or create PQ response sender for a connection
-export async function createPQResponseSender(ws, context) {
-  return async (wsTarget, payload) => {
-    const pqSessionId = wsTarget._pqSessionId || context?.pqSessionId;
-    if (!pqSessionId) {
-      cryptoLogger.error('[PQ-RESPONSE] No PQ session - SECURITY REQUIREMENT VIOLATION', {
-        payloadType: payload?.type
-      });
-      throw new Error('PQ session required for secure communication');
-    }
-
-    const session = await getPQSession(pqSessionId);
-    if (!session) {
-      cryptoLogger.error('[PQ-RESPONSE] PQ session not found');
-      throw new Error('PQ session not found');
-    }
-
-    return await sendPQEncryptedResponse(wsTarget, session, payload);
-  };
 }

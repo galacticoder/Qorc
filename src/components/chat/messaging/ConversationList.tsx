@@ -20,7 +20,6 @@ import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 export interface Conversation {
   readonly id: string;
   readonly username: string;
-  readonly inboxId?: string;
   readonly lastMessage?: string;
   readonly lastMessageTime?: Date;
   readonly unreadCount?: number;
@@ -31,6 +30,7 @@ export interface Conversation {
 }
 
 interface ConversationListProps {
+  readonly currentUsername: string;
   readonly conversations: ReadonlyArray<Conversation>;
   readonly selectedConversation?: string;
   readonly onSelectConversation: (username: string) => void;
@@ -147,13 +147,6 @@ const ConversationItem = memo<ConversationItemProps>(({
           <div className="qor-conversation-preview">
             <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
           </div>
-        ) : conversation.lastMessage ? (
-          <div
-            className="qor-conversation-preview"
-            title={conversation.lastMessage}
-          >
-            {conversation.lastMessage}
-          </div>
         ) : conversation.secureContentId ? (
           <div className="qor-conversation-preview">
             <SecureCanvasText
@@ -162,6 +155,13 @@ const ConversationItem = memo<ConversationItemProps>(({
               fontSize={12}
               color="inherit"
             />
+          </div>
+        ) : conversation.lastMessage ? (
+          <div
+            className="qor-conversation-preview"
+            title={conversation.lastMessage}
+          >
+            {conversation.lastMessage}
           </div>
         ) : null}
       </div>
@@ -297,6 +297,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
 
 // Main conversation list component
 export const ConversationList = memo<ConversationListProps>(function ConversationList({
+  currentUsername,
   conversations,
   selectedConversation,
   onSelectConversation,
@@ -401,6 +402,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       if (!(e instanceof CustomEvent)) return;
       const detail = e.detail;
       if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      if ((detail as any).account !== currentUsername || !currentUsername) return;
 
       const peer = sanitizeUiText((detail as any).peer, MAX_UI_CALL_STATUS_PEER_LENGTH);
       if (!peer) return;
@@ -419,7 +421,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         setActiveStatus(null);
       }
     } catch { }
-  }, []);
+  }, [currentUsername]);
 
   useEffect(() => {
     window.addEventListener(EventType.UI_CALL_STATUS, handleCallStatus as EventListener);

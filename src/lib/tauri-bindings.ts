@@ -4,25 +4,20 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit } from '@tauri-apps/api/event';
+import { listen } from '@tauri-apps/api/event';
+import { Base64 } from './cryptography/base64';
+import { PROTOCOL_KEYS } from './config/protocol-keys';
 
-// ============================================
-// Type Definitions
-// ============================================
-
-export interface ScreenSource {
-    id: string;
-    name: string;
-    thumbnail: string | null;
-    source_type: string;
-    app_icon: string | null;
-    display_size: [number, number] | null;
+function serializeJsonForNative(value: unknown): string {
+    const encoded = JSON.stringify(value);
+    if (typeof encoded !== 'string') throw new Error('Value is not JSON serializable');
+    return encoded;
 }
 
-export interface TorInstallStatus {
-    is_installed: boolean;
-    version: string | null;
-    path: string | null;
+export interface NativeScreenSource {
+    id: string;
+    name: string;
+    source_type: string;
 }
 
 export interface TorStatus {
@@ -42,396 +37,466 @@ export interface TorInfo {
     bootstrap_progress: number;
 }
 
-export interface IdentityBundle {
-    registration_id: number;
-    identity_key_public: string;
-    identity_key_fingerprint: string;
-}
-
-export interface PreKeyInfo {
-    keyId: number;
-    publicKeyBase64: string;
-}
-
 export interface SignedPreKeyInfo {
     keyId: number;
     publicKeyBase64: string;
     signatureBase64: string;
 }
 
-export interface KyberPreKeyInfo {
+export interface MlKemPreKeyInfo {
     keyId: number;
     publicKeyBase64: string;
     signatureBase64: string;
 }
 
-export interface PQKyberPreKey {
-    keyId: number;
+export interface StaticMlKemKey {
     publicKeyBase64: string;
+    signatureBase64: string;
 }
 
 export interface PreKeyBundle {
     registrationId: number;
     deviceId: number;
     identityKeyBase64: string;
-    preKey: PreKeyInfo | null;
     signedPreKey: SignedPreKeyInfo;
-    kyberPreKey: KyberPreKeyInfo | null;
-    pqKyber: PQKyberPreKey | null;
+    mlKemPreKey: MlKemPreKeyInfo;
+    staticMlKem: StaticMlKemKey;
 }
 
 export interface PQEnvelopeAlgorithms {
     kem: string;
     kdf: string;
     aead: string;
-    mac: string;
 }
 
 export interface PQEnvelope {
     version: string;
     algorithms: PQEnvelopeAlgorithms;
-    pqKeyId: number;
     kemCiphertext: string;
     nonce: string;
     ciphertext: string;
-    tag: string;
-    mac: string;
-    aad: string;
     salt: string;
 }
 
 export interface EncryptedMessage {
     messageType: number;
-    ciphertext: string;
-    registrationId?: number | null;
-    senderDeviceId?: number | null;
-    recipientDeviceId?: number | null;
     pqEnvelope: PQEnvelope;
-    message_type?: number;
-    sender_device_id?: number | null;
-    recipient_device_id?: number | null;
-    pq_envelope?: PQEnvelope;
 }
 
 export interface DecryptResult {
     success: boolean;
     plaintext: string | null;
+    content_ref: string | null;
     error: string | null;
     requires_key_refresh: boolean | null;
+    pending_id: string | null;
 }
 
-export interface DeviceCredentials {
-    device_id: string;
-    public_key_pem: string;
-    fingerprint: string;
-    private_key_base64?: string;
-    public_key_base64?: string;
-    privateKeyBase64?: string;
-    publicKeyBase64?: string;
+export interface PendingDecryptedMessage {
+    pendingId: string;
+    fromUsername: string;
+    senderIdentityKey: string;
+    identityRootFingerprint: string;
+    identityBundleFingerprint: string;
+    transportMessageId: string;
+    applicationType: string;
+    plaintext: string;
+    contentRef: string | null;
 }
 
-export interface LinkPreview {
-    url: string;
-    title: string | null;
-    description: string | null;
-    image: string | null;
-    site_name: string | null;
-    favicon: string | null;
+export interface NativeMessageContentCommitResult {
+    stored: boolean;
+    duplicate: boolean;
 }
 
-export interface PlatformInfo {
-    platform: string;
-    arch: string;
-    version: string;
-    hostname: string;
+export interface NativeRenderedMessageContent {
+    pngBase64: string;
+    width: number;
+    height: number;
 }
 
-export interface PirRecordQueryResult {
-    success: boolean;
-    request: string;
-    handle: string;
+export interface AuthPowBatchResult {
+    solution: string | null;
+    nextNonce: string;
+    iterations: number;
 }
 
-export interface PirRecordRecoverResult {
-    success: boolean;
-    record: string;
+export interface NativeAccountPublicKeys {
+    kyberPublicBase64: string;
+    dilithiumPublicBase64: string;
+    x25519PublicBase64: string;
+    accountRootPublicBase64: string;
+    recoveryPublicBase64: string;
 }
 
-// ============================================
-// Secure Storage
-// ============================================
+export interface NativeAccountOpenResult {
+    created: boolean;
+    publicKeys: NativeAccountPublicKeys;
+}
+
+export interface NativeHybridPlaintext {
+    routing: {
+        to: string;
+        from: string;
+        type: string;
+        timestamp: number;
+        size: number;
+    };
+    payloadType: 'text' | 'json' | 'binary';
+    payloadBase64: string;
+}
+
+export const account = {
+    open: (
+        accountOwner: string,
+        username: string,
+        password: string,
+        passphrase: string,
+    ) => invoke<NativeAccountOpenResult>('account_open', {
+        accountOwner,
+        username,
+        password,
+        passphrase,
+    }),
+    publicKeys: () => invoke<NativeAccountPublicKeys>('account_public_keys'),
+    isUnlocked: (accountOwner: string) =>
+        invoke<boolean>('account_is_unlocked', { accountOwner }),
+    sign: (purpose: string, message: Uint8Array) =>
+        invoke<string>('account_sign', {
+            purpose,
+            messageBase64: Base64.arrayBufferToBase64(message),
+        }),
+    p2pHandshakeSecrets: (
+        kemCiphertext: Uint8Array,
+        peerX25519Public: Uint8Array,
+    ) => invoke<{ pqSecretBase64: string; x25519SecretBase64: string }>(
+        'account_p2p_handshake_secrets',
+        {
+            kemCiphertextBase64: Base64.arrayBufferToBase64(kemCiphertext),
+            peerX25519PublicBase64: Base64.arrayBufferToBase64(peerX25519Public),
+        },
+    ),
+    discoveryPublication: (
+        serverScope: string,
+        publicationWindow: number,
+        purpose: 'id' | 'padding',
+        counter = 0,
+    ) => invoke<string>('account_discovery_publication', {
+        serverScope,
+        publicationWindow,
+        purpose,
+        counter,
+    }),
+    decryptHybrid: (envelope: unknown, expectedSenderPublic: string) =>
+        invoke<NativeHybridPlaintext>('account_decrypt_hybrid', {
+            envelopeJson: serializeJsonForNative(envelope),
+            expectedSenderPublic,
+        }),
+    openSealedEnvelope: (envelope: unknown) =>
+        invoke<{ from: string; payload: unknown } | null>('account_open_sealed_envelope', {
+            envelopeJson: serializeJsonForNative(envelope),
+        }),
+    tokenVaultLoad: (serverScope: string, vaultKind: 'working' | 'resume') =>
+        invoke<string | null>('account_token_vault_load', { serverScope, vaultKind }),
+    tokenVaultStore: (
+        serverScope: string,
+        vaultKind: 'working' | 'resume',
+        plaintextJson: string,
+    ) => invoke<boolean>('account_token_vault_store', { serverScope, vaultKind, plaintextJson }),
+    tokenVaultRemove: (serverScope: string, vaultKind: 'working' | 'resume') =>
+        invoke<boolean>('account_token_vault_remove', { serverScope, vaultKind }),
+    lock: (accountOwner: string) =>
+        invoke<boolean>('account_lock', { accountOwner }),
+};
 
 export const storage = {
-    init: () => invoke<boolean>('secure_init'),
     get: (key: string) => invoke<string | null>('secure_get', { key }),
     set: (key: string, value: string) => invoke<boolean>('secure_set', { key, value }),
     remove: (key: string) => invoke<boolean>('secure_remove', { key }),
     has: (key: string) => invoke<boolean>('secure_has', { key }),
-    keys: () => invoke<string[]>('secure_keys'),
-    clear: () => invoke<boolean>('secure_clear'),
 };
 
-// ============================================
-// Tor Management
-// ============================================
+export const authPow = {
+    solveBatch: (
+        seedBase64: string,
+        difficulty: number,
+        startNonceBase64: string,
+        maxIterations: number
+    ) => invoke<AuthPowBatchResult>('auth_pow_solve_batch', {
+        seedBase64,
+        difficulty,
+        startNonceBase64,
+        maxIterations
+    })
+};
 
 export const tor = {
-    checkInstallation: () => invoke<TorInstallStatus>('tor_check_installation'),
-    download: () => invoke<{ success: boolean; already_exists?: boolean; error?: string }>('tor_download'),
-    install: () => invoke<{ success: boolean; already_exists?: boolean; error?: string }>('tor_install'),
     configure: (config: string) => invoke<boolean>('tor_configure', { config: { config } }),
     start: () => invoke<{ success: boolean; starting?: boolean; error?: string }>('tor_start'),
     stop: () => invoke<boolean>('tor_stop'),
     status: () => invoke<TorStatus>('tor_status'),
     info: () => invoke<TorInfo>('tor_info'),
-    initialize: () => invoke<boolean>('tor_initialize'),
     verifyConnection: () => invoke<{ success: boolean; ip_address?: string; error?: string }>('tor_verify_connection'),
-    testConnection: () => invoke<{ success: boolean; ip_address?: string; error?: string }>('tor_test_connection'),
     rotateCircuit: () => invoke<{ success: boolean; ip_changed?: boolean; before_ip?: string; after_ip?: string }>('tor_rotate_circuit'),
-    uninstall: () => invoke<boolean>('tor_uninstall'),
 };
 
-// ============================================
-// Signal Protocol
-// ============================================
-
 export const signal = {
-    // Identity
-    generateIdentity: (username: string) => invoke<IdentityBundle>('signal_generate_identity', { username }),
-    generatePreKeys: (username: string, startId: number, count: number) =>
-        invoke<PreKeyInfo[]>('signal_generate_prekeys', { username, startId, count }),
-    generateSignedPreKey: (username: string, keyId: number) =>
-        invoke<SignedPreKeyInfo>('signal_generate_signed_prekey', { username, keyId }),
-    generateKyberPreKey: (username: string, keyId: number) =>
-        invoke<KyberPreKeyInfo>('signal_generate_kyber_prekey', { username, keyId }),
-    generatePQKyberPreKey: (username: string, keyId: number) =>
-        invoke<PQKyberPreKey>('signal_generate_pq_kyber_prekey', { username, keyId }),
-
     // Sessions
     createPreKeyBundle: (username: string) => invoke<PreKeyBundle>('signal_create_prekey_bundle', { username }),
-    processPreKeyBundle: (selfUsername: string, peerUsername: string, bundle: PreKeyBundle) =>
-        invoke<boolean>('signal_process_prekey_bundle', { selfUsername, peerUsername, bundle }),
-    hasSession: (selfUsername: string, peerUsername: string, deviceId?: number) =>
-        invoke<boolean>('signal_has_session', { selfUsername, peerUsername, deviceId }),
-    deleteSession: (selfUsername: string, peerUsername: string, deviceId?: number) =>
-        invoke<boolean>('signal_delete_session', { selfUsername, peerUsername, deviceId }),
+    processVerifiedPreKeyBundle: async (selfUsername: string, peerUsername: string, bundle: PreKeyBundle) => {
+        await invoke<boolean>('signal_install_transparency_verified_peer_identity', {
+            selfUsername,
+            peerUsername,
+            newIdentityKey: bundle.identityKeyBase64,
+        });
+        return invoke<boolean>('signal_process_prekey_bundle', {
+            selfUsername,
+            peerUsername,
+            bundleJson: serializeJsonForNative(bundle),
+        });
+    },
+    hasSession: (selfUsername: string, peerUsername: string) =>
+        invoke<boolean>('signal_has_session', { selfUsername, peerUsername }),
+    hasPeerStaticMlkemKey: (selfUsername: string, peerUsername: string) =>
+        invoke<boolean>('signal_has_peer_static_mlkem_key', { selfUsername, peerUsername }),
     deleteAllSessions: (selfUsername: string, peerUsername: string) =>
         invoke<boolean>('signal_delete_all_sessions', { selfUsername, peerUsername }),
 
     // Encryption
     encrypt: (fromUsername: string, toUsername: string, plaintext: string) =>
         invoke<EncryptedMessage>('signal_encrypt', { fromUsername, toUsername, plaintext }),
-    decrypt: (fromUsername: string, toUsername: string, encrypted: EncryptedMessage) =>
-        invoke<DecryptResult>('signal_decrypt', { fromUsername, toUsername, encrypted }),
+    encryptContentRef: (
+        fromUsername: string,
+        toUsername: string,
+        plaintextTemplate: string,
+        contentRef: string,
+    ) => invoke<EncryptedMessage>('signal_encrypt_content_ref', {
+        fromUsername,
+        toUsername,
+        plaintextTemplate,
+        contentRef,
+    }),
+    decrypt: (
+        fromUsername: string,
+        toUsername: string,
+        encrypted: EncryptedMessage,
+        transportMessageId: string,
+        applicationType: string,
+        identityRootFingerprint: string,
+        identityBundleFingerprint: string,
+    ) =>
+        invoke<DecryptResult>('signal_decrypt', {
+            fromUsername,
+            toUsername,
+            encryptedJson: serializeJsonForNative(encrypted),
+            transportMessageId,
+            applicationType,
+            identityRootFingerprint,
+            identityBundleFingerprint,
+        }),
+    listPendingDecrypts: (username: string) =>
+        invoke<PendingDecryptedMessage[]>('signal_list_pending_decrypts', { username }),
+    ackPendingDecrypts: (username: string, pendingIds: string[]) =>
+        invoke<boolean>('signal_ack_pending_decrypts', {
+            username,
+            pendingIdsJson: serializeJsonForNative(pendingIds),
+        }),
 
     // Keys
-    setPeerKyberKey: (peerUsername: string, publicKey: string) =>
-        invoke<boolean>('signal_set_peer_kyber_key', { peerUsername, publicKey }),
-    hasPeerKyberKey: (peerUsername: string) => invoke<boolean>('signal_has_peer_kyber_key', { peerUsername }),
-    trustPeerIdentity: (selfUsername: string, peerUsername: string, deviceId?: number) =>
-        invoke<boolean>('signal_trust_peer_identity', { selfUsername, peerUsername, deviceId }),
-    setStaticMlkemKeys: (username: string, publicKey: string, secretKey: string) =>
-        invoke<boolean>('signal_set_static_mlkem_keys', { username, publicKey, secretKey }),
+    installTransparencyVerifiedPeerIdentity: (selfUsername: string, peerUsername: string, newIdentityKey: string) =>
+        invoke<boolean>('signal_install_transparency_verified_peer_identity', { selfUsername, peerUsername, newIdentityKey }),
+    revokeTransparencyPeerIdentity: (selfUsername: string, peerUsername: string) =>
+        invoke<boolean>('signal_revoke_transparency_peer_identity', { selfUsername, peerUsername }),
+    peekPreKeyIdentity: (fromUsername: string, toUsername: string, encrypted: EncryptedMessage) =>
+        invoke<string | null>('signal_peek_prekey_identity', {
+            fromUsername,
+            toUsername,
+            encryptedJson: serializeJsonForNative(encrypted),
+        }),
     initStorage: (username: string) => invoke<boolean>('signal_init_storage', { username }),
-    setStorageKey: (key: string) => invoke<boolean>('signal_set_storage_key', { key }),
 };
 
-// ============================================
-// WebSocket
-// ============================================
+export const nativeMessageContent = {
+    storeOutgoing: (
+        storageId: string,
+        content: string,
+        recipient: string,
+        applicationType: 'message' | 'edit-message',
+        wireMessageId: string,
+        overwrite = false,
+    ) =>
+        invoke<NativeMessageContentCommitResult>('message_content_store_outgoing', {
+            storageId,
+            content,
+            recipient,
+            applicationType,
+            wireMessageId,
+            overwrite,
+        }),
+    commitPending: (
+        username: string,
+        pendingId: string,
+        expectedWireMessageId: string,
+        storageId: string,
+        overwrite = false,
+    ) => invoke<NativeMessageContentCommitResult>('message_content_commit_pending', {
+        username,
+        pendingId,
+        expectedWireMessageId,
+        storageId,
+        overwrite,
+    }),
+    has: (storageId: string) => invoke<boolean>('message_content_has', { storageId }),
+    render: (storageId: string, maxWidth: number, fontSize: number, color: string) =>
+        invoke<NativeRenderedMessageContent>('message_content_render', {
+            storageId,
+            maxWidth,
+            fontSize,
+            color,
+        }),
+    cloneForDisplay: (sourceId: string, targetId: string, overwrite = false) =>
+        invoke<NativeMessageContentCommitResult>('message_content_clone_for_display', {
+            sourceId,
+            targetId,
+            overwrite,
+        }),
+    copy: (storageId: string) => invoke<boolean>('message_content_copy', { storageId }),
+    revokeSend: (storageId: string) => invoke<boolean>('message_content_revoke_send', { storageId }),
+    delete: (storageId: string) => invoke<boolean>('message_content_delete', { storageId }),
+};
 
 export const websocket = {
-    connect: () => invoke<{ success: boolean; already_connected?: boolean; new_connection?: boolean; error?: string }>('ws_connect'),
-    disconnect: () => invoke<boolean>('ws_disconnect'),
-    send: (payload: unknown) => invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send', { payload }),
-    probeConnect: (url: string, timeoutMs?: number) => invoke<{ success: boolean; error?: string }>('ws_probe_connect', { url, timeoutMs }),
-    setServerUrl: (url: string) => invoke<boolean>('ws_set_server_url', { url }),
+    connect: () => invoke<{ success: boolean; already_connected?: boolean; new_connection?: boolean; connectionToken?: number; error?: string }>('ws_connect'),
+    disconnect: (connectionToken?: number) => invoke<boolean>('ws_disconnect', { connectionToken }),
+    rotateSocksIdentity: () => invoke<void>('ws_rotate_socks_identity'),
+    send: (payloadJson: string, connectionToken: number) =>
+        invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send', { payloadJson, connectionToken }),
+    setServerUrl: (url: string) => invoke<void>('ws_set_server_url', { url }),
     getServerUrl: () => invoke<string | null>('ws_get_server_url'),
-    getState: () => invoke<{ connected: boolean; connecting: boolean; reconnect_attempts: number; queue_size: number; connection_duration_ms: number }>('ws_get_state'),
-    setBackgroundMode: (enabled: boolean) => invoke<boolean>('ws_set_background_mode', { enabled }),
-    setTorReady: (ready: boolean, socksPort?: number) => invoke<boolean>('ws_set_tor_ready', { ready, socksPort }),
+    getState: () => invoke<{ connected: boolean; connecting: boolean; queue_size: number; connectionToken?: number }>('ws_get_state'),
+    syncTorState: () => invoke<boolean>('ws_sync_tor_state'),
 };
 
-// ============================================
-// P2P Transport
-// ============================================
+export interface NativePirQuery {
+    sessionId: number;
+    query: string;
+    pubParams: string;
+}
+
+export const pir = {
+    generateQuery: (count: number, entryBytes: number, targetRow: number) =>
+        invoke<NativePirQuery>('pir_generate_query', { count, entryBytes, targetRow }),
+    decodeResponse: (response: string, sessionId: number) =>
+        invoke<string>('pir_decode_response', { response, sessionId }),
+    discardQuery: (sessionId: number) =>
+        invoke<void>('pir_discard_query', { sessionId }),
+};
 
 export const p2p = {
     connect: (connectionId: string, endpointUrl: string) =>
-        invoke<{ success: boolean; already_connected?: boolean; error?: string }>('p2p_connect', { connectionId, endpointUrl }),
-    disconnect: (connectionId: string) => invoke<boolean>('p2p_disconnect', { connectionId }),
-    send: (connectionId: string, message: unknown) => invoke<{ success: boolean; error?: string }>('p2p_send', { connectionId, message }),
+        invoke<{ success: boolean; already_connected?: boolean; connectionToken?: number; error?: string }>('p2p_connect', { connectionId, endpointUrl }),
+    disconnect: (connectionId: string, connectionToken?: number) =>
+        invoke<boolean>('p2p_disconnect', { connectionId, connectionToken }),
+    rotateIdentity: () => invoke<string>('p2p_rotate_identity'),
+    send: (connectionId: string, connectionToken: number, message: unknown) =>
+        invoke<{ success: boolean; error?: string }>('p2p_send', {
+            connectionId,
+            connectionToken,
+            messageJson: serializeJsonForNative(message),
+        }),
+    authenticateConnection: (connectionId: string, connectionToken: number) =>
+        invoke<boolean>('p2p_authenticate_connection', { connectionId, connectionToken }),
     getLocalEndpoint: () => invoke<string | null>('p2p_local_endpoint'),
-    getStatus: () => invoke<{ activeConnections: number; connectionIds: string[]; localEndpoint?: string; torReady: boolean; backgroundMode: boolean }>('p2p_status'),
-    setBackgroundMode: (enabled: boolean) => invoke<boolean>('p2p_set_background_mode', { enabled }),
 };
 
-// ============================================
-// Local PIR Client
-// ============================================
-
-export const pir = {
-    queryRecord: (args: {
-        parameterId: string;
-        recordCount: number;
-        recordSize: number;
-        publicParams: string;
-        index: number;
-    }) => invoke<PirRecordQueryResult>('pir_query_record', args),
-    recoverRecord: (handle: string, response: string) =>
-        invoke<PirRecordRecoverResult>('pir_recover_record', { handle, response }),
-    queryFetch: (epochId: string, query: string) =>
-        invoke<{ ok?: boolean; response?: string; proof?: string; recordDigest?: string; error?: string }>(
-            'pir_query_fetch', { epochId, query }
-        ),
-    discoveryApiFetch: (path: string, body: string) =>
-        invoke<any>('discovery_api_fetch', { path, body }),
+export const anonymousHttp = {
+    fetch: (body: Uint8Array, expectedServerUrl: string) =>
+        invoke<ArrayBuffer>('anonymous_api_fetch', body, {
+            headers: { [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl },
+        }),
+    prewarm: () => invoke<boolean>('prewarm_anonymous_transport'),
 };
-
-// ============================================
-// Offline-message spool
-// ============================================
-
-export const spool = {
-    fetchSnapshot: () => invoke<unknown>('fetch_spool_snapshot'),
-};
-
-// ============================================
-// Notifications
-// ============================================
 
 export const notifications = {
-    show: (title: string, body?: string, icon?: string) => invoke<boolean>('notification_show', { title, body, icon }),
+    show: () => invoke<boolean>('notification_show'),
     setEnabled: (enabled: boolean) => invoke<boolean>('notification_set_enabled', { enabled }),
-    isEnabled: () => invoke<boolean>('notification_is_enabled'),
-    setBadge: (count: number) => invoke<boolean>('notification_set_badge', { count }),
-    clearBadge: () => invoke<boolean>('notification_clear_badge'),
-    getBadge: () => invoke<number>('notification_get_badge'),
 };
-
-// ============================================
-// File Operations
-// ============================================
-
-export const file = {
-    save: (filename: string, data: string, mimeType?: string) =>
-        invoke<{ success: boolean; path?: string; error?: string }>('file_save', { filename, data, mimeType }),
-    getDownloadSettings: () => invoke<{ download_path: string | null; ask_where_to_save: boolean }>('file_get_download_settings'),
-    setDownloadPath: (path: string) => invoke<boolean>('file_set_download_path', { path }),
-    chooseDownloadPath: () => invoke<string | null>('file_choose_download_path'),
-    readBase64: (path: string) => invoke<string>('file_read_base64', { path }),
-    getInfo: (path: string) => invoke<{ exists: boolean; is_file: boolean; is_directory: boolean; size: number; name: string }>('file_get_info', { path }),
-};
-
-// ============================================
-// System
-// ============================================
 
 export const system = {
-    getPlatformInfo: () => invoke<PlatformInfo>('get_platform_info'),
-    getPlatform: () => invoke<string>('get_platform'),
-    getArch: () => invoke<string>('get_arch'),
     getInstanceId: () => invoke<string>('get_instance_id'),
     openExternal: (url: string) => invoke<boolean>('open_external', { url }),
-    getScreenSources: (options?: { types?: string[]; thumbnailSize?: { width: number; height: number } }) =>
-        invoke<ScreenSource[]>('get_screen_sources', { options }),
-    getUserDataPath: () => invoke<string>('get_user_data_path'),
-    getAppVersion: () => invoke<string>('get_app_version'),
-    getAppName: () => invoke<string>('get_app_name'),
-    getServerUrl: () => invoke<string | null>('get_server_url'),
+    requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'enumerate') =>
+        invoke<boolean>('request_media_access', { kind }),
+    getScreenSources: () => invoke<NativeScreenSource[]>('get_screen_sources'),
 };
-
-// ============================================
-// Power Save Blocker
-// ============================================
 
 export const power = {
-    start: (blockerType?: string) => invoke<number>('power_save_blocker_start', { blockerType }),
-    stop: (id: number) => invoke<boolean>('power_save_blocker_stop', { id }),
-    isStarted: (id: number) => invoke<boolean>('power_save_blocker_is_started', { id }),
+    start: () => invoke<boolean>('power_save_blocker_start'),
+    stop: () => invoke<boolean>('power_save_blocker_stop'),
 };
-
-// ============================================
-// Session Management
-// ============================================
 
 export const session = {
-    getBackgroundState: () => invoke<{ active: boolean; last_activity: number | null; pending_messages: number }>('session_get_background_state'),
+    getBackgroundState: () => invoke<{ active: boolean }>('session_get_background_state'),
     setBackgroundState: (active: boolean) => invoke<boolean>('session_set_background_state', { active }),
-    updatePendingCount: (count: number) => invoke<boolean>('session_update_pending_count', { count }),
 };
-
-// ============================================
-// Auth & Device Credentials
-// ============================================
-
-export const auth = {
-    refreshTokens: (refreshToken: string) =>
-        invoke<{ success: boolean; access_token?: string; refresh_token?: string; expires_in?: number; error?: string }>('auth_refresh_tokens', { refreshToken }),
-    getDeviceCredentials: () => invoke<DeviceCredentials>('device_get_credentials'),
-    signChallenge: (challenge: string) => invoke<{ signature: string; device_id: string }>('device_sign_challenge', { challenge }),
-};
-
-// ============================================
-// Link Preview
-// ============================================
-
-export const link = {
-    fetchPreview: (url: string) => invoke<LinkPreview>('link_fetch_preview', { url }),
-};
-
-// ============================================
-// Database
-// ============================================
 
 export const database = {
-    init: (username: string, masterKeyB64: string) => invoke<boolean>('db_init', { username, masterKeyB64 }),
-    setSecure: (store: string, key: string, value: Uint8Array) => invoke<boolean>('db_set_secure', { store, key, value: Array.from(value) }),
-    getSecure: (store: string, key: string) => invoke<number[] | null>('db_get_secure', { store, key }).then(v => v ? new Uint8Array(v) : null),
-    listSecure: (store: string) => invoke<[string, number[]][]>('db_list_secure', { store }).then(v => v.map(([k, bytes]) => [k, new Uint8Array(bytes)] as [string, Uint8Array])),
-    scanSecure: (prefix: string) => invoke<[string, string, number[]][]>('db_scan_secure', { prefix }).then(v => v.map(([s, k, bytes]) => [s, k, new Uint8Array(bytes)] as [string, string, Uint8Array])),
+    // Compare-and-drop only the expected owners native DB and Signal state
+    lock: (accountOwner: string) => invoke<boolean>('db_lock', { accountOwner }),
+    setSecure: (store: string, key: string, value: Uint8Array) => invoke<boolean>('db_set_secure', {
+        store,
+        key,
+        valueB64: Base64.arrayBufferToBase64(value),
+    }),
+    getSecure: (store: string, key: string) =>
+        invoke<string | null>('db_get_secure', { store, key })
+            .then(value => value ? Base64.base64ToUint8Array(value) : null),
+    hasSecure: (store: string, key: string) => invoke<boolean>('db_has_secure', { store, key }),
+    listSecureKeys: (store: string) => invoke<string[]>('db_list_secure_keys', { store }),
+    scanSecureKeys: (prefix: string) => invoke<[string, string][]>('db_scan_secure_keys', { prefix }),
+    mutateSecure: (
+        writes: Array<{ store: string; key: string; value: Uint8Array }>,
+        deletions: Array<{ store: string; key: string }>,
+    ) => invoke<boolean>('db_mutate_secure', {
+        mutationJson: serializeJsonForNative({
+            writes: writes.map(({ store, key, value }) => ({
+                store,
+                key,
+                valueB64: Base64.arrayBufferToBase64(value),
+            })),
+            deletions,
+        }),
+    }),
     delete: (store: string, key: string) => invoke<boolean>('db_delete', { store, key }),
-    clearStore: (store: string) => invoke<boolean>('db_clear_store', { store }),
-    compact: () => invoke<boolean>('db_compact'),
 };
-
-// ============================================
-// System Tray
-// ============================================
-
 export const tray = {
-    /** Get close-to-tray setting (default: true) */
     getCloseToTray: () => invoke<boolean>('get_close_to_tray'),
-    /** Set close-to-tray setting */
     setCloseToTray: (enabled: boolean) => invoke<boolean>('set_close_to_tray', { enabled }),
-    /** Set tray badge unread count */
-    setUnreadCount: (count: number) => invoke<void>('tray_set_unread_count', { count }),
-    /** Increment tray badge unread count */
     incrementUnread: () => invoke<void>('tray_increment_unread'),
-    /** Clear tray badge unread count */
     clearUnread: () => invoke<void>('tray_clear_unread'),
 };
 
-// ============================================
-// Events
-// ============================================
-
 export const events = {
-    listen,
-    emit,
-    onTorStatus: (callback: (data: unknown) => void) => listen('tor-status', (e) => callback(e.payload)),
     onWsMessage: (callback: (data: unknown) => void) => listen('ws-message', (e) => callback(e.payload)),
+    onWsLifecycle: (callback: (data: unknown) => void) => listen('ws-lifecycle', (e) => callback(e.payload)),
     onP2PMessage: (callback: (data: unknown) => void) => listen('p2p-message', (e) => callback(e.payload)),
 };
 
-// ============================================
-// Utility
-// ============================================
-
 export function isTauri(): boolean {
+    if (typeof window === 'undefined') return false;
     return (
         '__TAURI__' in window ||
         '__TAURI_INTERNALS__' in window ||
         '__TAURI_IPC__' in window
     );
+}
+
+export async function requireNativeMediaAccess(
+    kind: 'audio' | 'video' | 'audio-video'
+): Promise<void> {
+    if (!isTauri()) return;
+    const granted = await system.requestMediaAccess(kind);
+    if (!granted) {
+        throw new DOMException('Native media access was denied', 'NotAllowedError');
+    }
 }

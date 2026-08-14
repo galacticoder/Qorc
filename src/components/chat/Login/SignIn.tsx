@@ -1,52 +1,34 @@
 import React, { useState, useCallback, useMemo } from "react";
-import { USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from "../../../lib/constants";
+import {
+  PASSPHRASE_MAX_LENGTH,
+  PASSWORD_MAX_LENGTH,
+  USERNAME_MAX_LENGTH,
+} from "../../../lib/constants";
 
 interface SignInFormProps {
   readonly onSubmit: (username: string, password: string, passphrase: string) => Promise<void>;
   readonly disabled: boolean;
   readonly authStatus?: string;
-  readonly error?: string;
-  readonly hasServerTrustRequest?: boolean;
   readonly initialUsername?: string;
-  readonly initialPassword?: string;
-  readonly onChangeUsername?: (v: string) => void;
-  readonly onChangePassword?: (v: string) => void;
-  readonly onChangePassphrase?: (v: string) => void;
+  readonly submitLabel?: string;
 }
 
 export function SignInForm({
   onSubmit,
   disabled,
   authStatus,
-  hasServerTrustRequest,
   initialUsername = "",
-  initialPassword = "",
-  onChangeUsername,
-  onChangePassword,
-  onChangePassphrase
+  submitLabel = "Sign in",
 }: SignInFormProps) {
   const [username, setUsername] = useState(initialUsername);
-  const [password, setPassword] = useState(initialPassword);
+  const [password, setPassword] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleUsernameChange = useCallback((v: string): void => {
-    setUsername(v);
-    onChangeUsername?.(v);
-  }, [onChangeUsername]);
-
-  const handlePasswordChange = useCallback((v: string): void => {
-    setPassword(v);
-    onChangePassword?.(v);
-  }, [onChangePassword]);
-
-  const handlePassphraseChange = useCallback((v: string): void => {
-    setPassphrase(v);
-    onChangePassphrase?.(v);
-  }, [onChangePassphrase]);
-
   const isFormValid = useMemo(() =>
-    username.trim().length > 0 && password.length > 0 && passphrase.trim().length > 0,
+    username.trim().length > 0 &&
+      password.length > 0 &&
+      passphrase.trim().length > 0,
     [username, password, passphrase]
   );
 
@@ -55,15 +37,14 @@ export function SignInForm({
     if (disabled || isSubmitting || !isFormValid) return;
 
     const sanitizedUsername = username.trim();
-
-    if (sanitizedUsername.length === 0 || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
-    if (password.length < 1 || password.length > PASSWORD_MAX_LENGTH) return;
-    if (passphrase.trim().length === 0) return;
+    const trimmedPassphrase = passphrase.trim();
 
     setIsSubmitting(true);
     try {
-      await onSubmit(sanitizedUsername, password, passphrase.trim());
+      await onSubmit(sanitizedUsername, password, trimmedPassphrase);
     } finally {
+      setPassword("");
+      setPassphrase("");
       setIsSubmitting(false);
     }
   }, [disabled, isSubmitting, isFormValid, username, password, passphrase, onSubmit]);
@@ -81,7 +62,7 @@ export function SignInForm({
           id="username"
           placeholder="Enter your username"
           value={username}
-          onChange={(e) => handleUsernameChange(e.target.value)}
+          onChange={(e) => setUsername(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           maxLength={USERNAME_MAX_LENGTH}
@@ -97,10 +78,11 @@ export function SignInForm({
           type="password"
           placeholder="Enter your encryption passphrase"
           value={passphrase}
-          onChange={(e) => handlePassphraseChange(e.target.value)}
+          onChange={(e) => setPassphrase(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoComplete="current-password"
+          maxLength={PASSPHRASE_MAX_LENGTH}
         />
       </div>
 
@@ -112,7 +94,7 @@ export function SignInForm({
           type="password"
           placeholder="Enter your password"
           value={password}
-          onChange={(e) => handlePasswordChange(e.target.value)}
+          onChange={(e) => setPassword(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoComplete="current-password"
@@ -120,18 +102,12 @@ export function SignInForm({
         />
       </div>
 
-      {hasServerTrustRequest && !isSubmitting && (
-        <p className="auth-simple-message">
-          Verify server identity before proceeding
-        </p>
-      )}
-
       <button
         type="submit"
         className="login-simple-submit"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? (authStatus || "Signing in...") : "Sign in"}
+        {isSubmitting ? (authStatus || `${submitLabel}...`) : submitLabel}
       </button>
     </form>
   );

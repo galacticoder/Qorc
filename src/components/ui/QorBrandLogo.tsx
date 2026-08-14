@@ -1,4 +1,3 @@
-import React from 'react';
 import lightModeLogo from '@/assets/brand/qor-chat-logo-for-light-mode.jpg';
 import darkModeLogo from '@/assets/brand/qor-chat-logo-for-dark-mode.jpg';
 import { cn } from '@/lib/utils/shared-utils';

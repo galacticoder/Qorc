@@ -1,37 +1,47 @@
 /**
  * Automatic Load Balancer Manager
- * 
- * Monitors Redis for active servers and automatically:
- * - Generates HAProxy configuration
- * - Starts/stops HAProxy based on server count
- * - Updates configuration when servers join/leave
- * - Supports cross-machine server discovery
  */
 
 import { withRedisClient } from '../session/redis-client.js';
 import { HAProxyConfigGenerator } from './haproxy-config-generator.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+
 import { HAProxyManager } from './haproxy-manager.js';
 import { TorManager } from './tor-manager.js';
 import { LBCommandListener } from './lb-command-listener.js';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import os from 'os';
 import net from 'net';
 import { fileURLToPath } from 'url';
+import {
+  DEFAULT_HAPROXY_ADMIN_PASSWORD,
+  IS_ROOT,
+  LOOPBACK_HOST,
+  TEMP_DIRECTORY,
+  haproxyStatsDashboardUrl,
+} from '../config/infrastructure.js';
+import { CLUSTER_SERVERS_KEY } from '../config/redis-keys.js';
 
-const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-const TMPDIR = os.tmpdir();
-const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (isRoot ? '443' : '8443'), 10);
+const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (IS_ROOT ? '443' : '8443'), 10);
 const SERVER_ACTIVE_TIMEOUT_MS = Math.min(
   Math.max(parseInt(process.env.LB_SERVER_ACTIVE_TIMEOUT_MS || '45000', 10) || 45000, 10000),
   300000
 );
 
 const LOADBALANCER_LOCK_FILE = process.env.LOADBALANCER_LOCK_FILE ||
-  (isRoot && process.platform !== 'win32' ? '/var/run/auto-loadbalancer.pid' : path.join(TMPDIR, 'auto-loadbalancer.pid'));
+  (IS_ROOT && process.platform !== 'win32' ? '/var/run/auto-loadbalancer.pid' : path.join(TEMP_DIRECTORY, 'auto-loadbalancer.pid'));
 const MIN_SERVERS_FOR_LB = 1;
+
+function isPortFree(port, host) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', () => resolve(false));
+    server.listen({ port, host }, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
 
 class AutoLoadBalancer {
   constructor() {
@@ -70,7 +80,7 @@ class AutoLoadBalancer {
   // Get active servers from Redis
   async getActiveServers() {
     return await withRedisClient(async (client) => {
-      const servers = await client.hgetall('cluster:servers');
+      const servers = await client.hgetall(CLUSTER_SERVERS_KEY);
       const now = Date.now();
       const activeServers = [];
 
@@ -83,14 +93,14 @@ class AutoLoadBalancer {
           if (age < SERVER_ACTIVE_TIMEOUT_MS) {
             activeServers.push({
               serverId,
-              host: serverInfo.host || '127.0.0.1',
+              host: serverInfo.host || LOOPBACK_HOST,
               port: serverInfo.port || 8443,
               lastHeartbeat,
               ...serverInfo
             });
           }
         } catch (err) {
-          cryptoLogger.error('[AUTO-LB] Failed to parse server data', { serverId, error: err.message });
+          console.error('[AUTO-LB] Failed to parse server data', { serverId, error: err.message });
         }
       }
 
@@ -106,15 +116,6 @@ class AutoLoadBalancer {
       if (p > 0 && p < 65536) backendPorts.add(p);
     }
 
-    const isPortFree = (port) => new Promise((resolve) => {
-      const srv = net.createServer();
-      srv.unref();
-      srv.on('error', () => resolve(false));
-      srv.listen({ port, host: '0.0.0.0' }, () => {
-        srv.close(() => resolve(true));
-      });
-    });
-
     let candidate = DEFAULT_HTTPS_PORT;
     for (let i = 0; i < 20; i += 1) {
       const port = candidate + i;
@@ -125,7 +126,7 @@ class AutoLoadBalancer {
         return port;
       }
 
-      const free = await isPortFree(port);
+      const free = await isPortFree(port, '0.0.0.0');
       if (free) return port;
     }
     return currentPort || candidate;
@@ -140,18 +141,9 @@ class AutoLoadBalancer {
       return currentPort;
     }
 
-    const isPortFree = (port) => new Promise((resolve) => {
-      const srv = net.createServer();
-      srv.unref();
-      srv.on('error', () => resolve(false));
-      srv.listen({ port, host: '127.0.0.1' }, () => {
-        srv.close(() => resolve(true));
-      });
-    });
-
     for (let i = 0; i < 20; i += 1) {
       const port = defaultStats + i;
-      if (await isPortFree(port)) return port;
+      if (await isPortFree(port, LOOPBACK_HOST)) return port;
     }
     return currentPort || defaultStats;
   }
@@ -169,7 +161,7 @@ class AutoLoadBalancer {
       statsPort: statsPort,
       tlsCertPath: process.env.HAPROXY_CERT_PATH || '/etc/haproxy/certs',
       statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
-      statsPassword: process.env.HAPROXY_STATS_PASSWORD || 'adminpass',
+      statsPassword: process.env.HAPROXY_STATS_PASSWORD || DEFAULT_HAPROXY_ADMIN_PASSWORD,
     });
 
     try {
@@ -280,14 +272,16 @@ class AutoLoadBalancer {
 
       // Periodically update the onion address in Redis for the TUI to display
       const onionAddr = await this.torManager.getOnionAddress();
-      if (onionAddr) {
-        await withRedisClient(async (client) => {
+      await withRedisClient(async (client) => {
+        if (onionAddr && this.torManager.isPublished()) {
           await client.set('cluster:lb:onionAddress', `https://${onionAddr}`);
-        });
-      }
+        } else {
+          await client.del('cluster:lb:onionAddress');
+        }
+      });
 
     } catch (error) {
-      cryptoLogger.error('[AUTO-LB] Monitor cycle failed', error);
+      console.error('[AUTO-LB] Monitor cycle failed', error);
     }
   }
 
@@ -306,7 +300,7 @@ class AutoLoadBalancer {
             const servers = await this.getActiveServers();
             await this.haproxyManager.displayStatus(haproxyPid, servers);
           } else {
-            console.log(`\tStats Dashboard: http://localhost:${process.env.HAPROXY_STATS_PORT || 8404}/haproxy-stats`);
+            console.log(`\tStats Dashboard: ${haproxyStatsDashboardUrl()}`);
           }
 
           const onionAddr = await this.torManager.getOnionAddress();
@@ -324,10 +318,10 @@ class AutoLoadBalancer {
       }
 
       await fs.writeFile(LOADBALANCER_LOCK_FILE, process.pid.toString(), { mode: 0o600 });
-      cryptoLogger.info('[AUTO-LB] Acquired process lock', { pid: process.pid, lockFile: LOADBALANCER_LOCK_FILE });
+      console.log('[AUTO-LB] Acquired process lock', { pid: process.pid, lockFile: LOADBALANCER_LOCK_FILE });
       return true;
     } catch (error) {
-      cryptoLogger.error('[AUTO-LB] Failed to acquire lock', error);
+      console.error('[AUTO-LB] Failed to acquire lock', error);
       return false;
     }
   }
@@ -339,11 +333,11 @@ class AutoLoadBalancer {
 
         if (lockPid === process.pid) {
           await fs.unlink(LOADBALANCER_LOCK_FILE);
-          cryptoLogger.info('[AUTO-LB] Released process lock', { pid: process.pid });
+          console.log('[AUTO-LB] Released process lock', { pid: process.pid });
         }
       }
     } catch (error) {
-      cryptoLogger.error('[AUTO-LB] Failed to release lock', error);
+      console.error('[AUTO-LB] Failed to release lock', error);
     }
   }
 
@@ -358,7 +352,6 @@ class AutoLoadBalancer {
     console.log(`\tRedis: ${process.env.REDIS_URL || 'redis://127.0.0.1:6379'}`);
     console.log(`\tMin servers: ${MIN_SERVERS_FOR_LB}`);
 
-
     const noGui = (process.env.NO_GUI || 'false').toLowerCase() === 'true';
     if (!noGui) {
       await this.commandListener.setup();
@@ -367,7 +360,10 @@ class AutoLoadBalancer {
     }
 
     await this.monitor();
-    await this.torManager.start(this.listenPort);
+    const torStarted = await this.torManager.start(this.listenPort);
+    if (!torStarted) {
+      throw new Error('Authenticated Tor hidden service failed to publish its descriptor');
+    }
 
     this.monitorInterval = setInterval(() => this.monitor(), 1000);
 
@@ -412,7 +408,7 @@ class AutoLoadBalancer {
       await this.haproxyManager.stop();
     }
 
-    if (this.haproxyManager.isRunning) {
+    if (await this.torManager.isRunning()) {
       console.log('\t[OK] Stopping Tor service...');
       await this.torManager.stop();
       console.log('\t[OK] Tor service terminated');

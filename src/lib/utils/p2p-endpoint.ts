@@ -1,32 +1,30 @@
 export type ParsedP2PEndpoint = {
   endpointUrl: string;
   endpointId: string;
+  hasDirectAddress: boolean;
 };
 
-const IROH_PREFIX = 'iroh://';
-
-// Accept only iroh endpoints in iroh://<endpoint_id_hex> form
+const ONION_PREFIX = 'onion://';
+const ONION_HOST_RE = /^[a-z2-7]{56}\.onion$/;
 export function normalizeP2PEndpointUrl(input: string | null | undefined): string | undefined {
   if (typeof input !== 'string') return undefined;
-  const trimmed = input.trim();
-  if (!trimmed) return undefined;
+  if (input !== input.trim() || !input || input.length > 512) return undefined;
+  if (!input.startsWith(ONION_PREFIX)) return undefined;
 
-  if (!trimmed.startsWith(IROH_PREFIX)) return undefined;
+  const host = input.slice(ONION_PREFIX.length).toLowerCase();
+  if (!ONION_HOST_RE.test(host)) return undefined;
 
-  const rawRest = trimmed.slice(IROH_PREFIX.length).trim();
-  const endpointId = rawRest.split('?', 1)[0]?.trim();
-  if (!endpointId || endpointId.length < 16) return undefined;
-
-  return `${IROH_PREFIX}${rawRest}`;
+  return `${ONION_PREFIX}${host}`;
 }
 
 export function parseP2PEndpointUrl(input: string | null | undefined): ParsedP2PEndpoint | null {
   const normalized = normalizeP2PEndpointUrl(input);
   if (!normalized) return null;
 
-  const endpointId = normalized.slice(IROH_PREFIX.length).split('?', 1)[0];
+  const host = normalized.slice(ONION_PREFIX.length);
   return {
     endpointUrl: normalized,
-    endpointId
+    endpointId: host,
+    hasDirectAddress: true
   };
 }

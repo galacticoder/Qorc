@@ -13,7 +13,6 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { withRedisClient } from '../server/session/redis-client.js';
-import { logger as cryptoLogger } from '../server/crypto/crypto-logger.js';
 import { CryptoUtils } from '../server/crypto/unified-crypto.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,10 +22,10 @@ const ADMIN_KEYS_ENC_FILE = path.join(__dirname, '../server/config/.cluster-admi
 
 // Configuration constants
 const ADMIN_CONFIG = {
-  TOKEN_EXPIRATION: 3600000,          // 1 hour
-  MAX_FAILED_ATTEMPTS: 5,             // 5 failed attempts
-  LOCKOUT_DURATION: 900000,           // 15 minutes lockout
-  NONCE_EXPIRATION: 86400000,         // 24 hours nonce cache
+  TOKEN_EXPIRATION: 3600000,
+  MAX_FAILED_ATTEMPTS: 5,
+  LOCKOUT_DURATION: 900000,
+  NONCE_EXPIRATION: 86400000,
   TOKEN_VERSION: 3,
   ALGORITHM: 'ML-KEM-1024+X25519 | ML-DSA-87+Ed25519 | PostQuantumAEAD',
 };
@@ -225,24 +224,24 @@ class AdminAuth {
           'SECURITY: Corrupted admin key file'
         );
         this.keypair = await unlockKeypair(username, password, encryptedPackage);
-        cryptoLogger.info('[ADMIN] Unlocked existing admin keypair');
+        console.log('[ADMIN] Unlocked existing admin keypair');
       } else {
         this.keypair = generateHybridKeypair();
         const encryptedPackage = await protectKeypair(this.keypair, username, password);
 
         fs.writeFileSync(ADMIN_KEYS_ENC_FILE, JSON.stringify(encryptedPackage, null, 2), { mode: 0o600 });
-        cryptoLogger.info('[ADMIN] Generated and protected new admin keypair');
+        console.log('[ADMIN] Generated and protected new admin keypair');
       }
 
       this.adminUsername = username;
       this.initialized = true;
 
-      cryptoLogger.info('[ADMIN] Hybrid admin auth initialized', {
+      console.log('[ADMIN] Hybrid admin auth initialized', {
         algorithm: ADMIN_CONFIG.ALGORITHM,
         username: username,
       });
     } catch (error) {
-      cryptoLogger.error('[ADMIN] Failed to initialize', { error: error.message });
+      console.error('[ADMIN] Failed to initialize', { error: error.message });
       throw error;
     }
   }
@@ -327,7 +326,7 @@ class AdminAuth {
         await client.pexpire(REDIS_KEYS.ADMIN_TOKENS, ADMIN_CONFIG.TOKEN_EXPIRATION);
       });
 
-      cryptoLogger.info('[ADMIN] Generated admin token', {
+      console.log('[ADMIN] Generated admin token', {
         adminId,
         algorithm: ADMIN_CONFIG.ALGORITHM,
         expiresAt: new Date(payload.expiresAt).toISOString(),
@@ -335,7 +334,7 @@ class AdminAuth {
 
       return tokenString;
     } catch (error) {
-      cryptoLogger.error('[ADMIN] Failed to generate token', { error: error.message });
+      console.error('[ADMIN] Failed to generate token', { error: error.message });
       throw error;
     }
   }
@@ -452,7 +451,7 @@ class AdminAuth {
         algorithm: ADMIN_CONFIG.ALGORITHM,
       };
     } catch (error) {
-      cryptoLogger.error('[ADMIN] Token verification failed', { error: error.message });
+      console.error('[ADMIN] Token verification failed', { error: error.message });
       throw error;
     }
   }
@@ -464,13 +463,13 @@ class AdminAuth {
       await withRedisClient(async (client) => {
         const removed = await client.hdel(REDIS_KEYS.ADMIN_TOKENS, tokenHash);
         if (removed > 0) {
-          cryptoLogger.info('[ADMIN] Token revoked', {
+          console.log('[ADMIN] Token revoked', {
             tokenHash: tokenHash.substring(0, 16) + '...',
           });
         }
       });
     } catch (error) {
-      cryptoLogger.error('[ADMIN] Failed to revoke token', error);
+      console.error('[ADMIN] Failed to revoke token', error);
       throw error;
     }
   }
@@ -506,7 +505,7 @@ class AdminAuth {
         const lockKey = `${REDIS_KEYS.ADMIN_FAILURES}:lock:${identifier}`;
         await client.set(lockKey, '1', 'PX', ADMIN_CONFIG.LOCKOUT_DURATION);
 
-        cryptoLogger.error('[ADMIN] Account locked', {
+        console.error('[ADMIN] Account locked', {
           identifier,
           failures,
           lockoutMinutes: ADMIN_CONFIG.LOCKOUT_DURATION / 60000,
@@ -550,7 +549,7 @@ class AdminAuth {
       await client.ltrim(REDIS_KEYS.ADMIN_AUDIT, 0, 999);
     });
 
-    cryptoLogger.info('[ADMIN] Admin action', { adminId, action });
+    console.log('[ADMIN] Admin action', { adminId, action });
   }
 }
 

@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
-import websocketClient from '../../lib/websocket/websocket';
 
 interface TokenValidationProps {
   Authentication: {
     tokenValidationInProgress: boolean;
     isLoggedIn: boolean;
     accountAuthenticated: boolean;
+    showPasswordPrompt: boolean;
     attemptAuthRecovery: () => Promise<boolean>;
     setTokenValidationInProgress: (value: boolean) => void;
     setAuthStatus: (status: string) => void;
@@ -20,70 +20,71 @@ export function useTokenValidation({
   selectedServerUrl,
 }: TokenValidationProps) {
 
-  const tokenRecoveryAttemptedRef = useRef(false);
+  const validationGenerationRef = useRef(0);
   useEffect(() => {
-    if (!Authentication.tokenValidationInProgress) {
-      tokenRecoveryAttemptedRef.current = false;
-      return;
-    }
-    if (Authentication.isLoggedIn || Authentication.accountAuthenticated) return;
-    if (!setupComplete || !selectedServerUrl) return;
-    if (tokenRecoveryAttemptedRef.current) return;
+    const generation = ++validationGenerationRef.current;
+    let attempts = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let inFlight = false;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && validationGenerationRef.current === generation;
 
-    tokenRecoveryAttemptedRef.current = true;
-    (async () => {
+    if (
+      !Authentication.tokenValidationInProgress
+      || Authentication.isLoggedIn
+      || Authentication.accountAuthenticated
+      || Authentication.showPasswordPrompt
+    ) {
+      return () => { cancelled = true; };
+    }
+    if (!setupComplete || !selectedServerUrl) return () => { cancelled = true; };
+
+    const tryRecover = async () => {
+      if (!isCurrent() || inFlight) return;
+      inFlight = true;
+      attempts += 1;
+      const attempt = attempts;
       try {
         const recovered = await Authentication.attemptAuthRecovery();
-        if (!recovered) {
+        if (!isCurrent()) return;
+        if (recovered) return;
+        if (attempt >= 2) {
           Authentication.setTokenValidationInProgress(false);
           Authentication.setAuthStatus('');
+        } else {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            void tryRecover();
+          }, 15000);
         }
       } catch {
-        Authentication.setTokenValidationInProgress(false);
-        Authentication.setAuthStatus('');
+        if (!isCurrent()) return;
+        if (attempt >= 2) {
+          Authentication.setTokenValidationInProgress(false);
+          Authentication.setAuthStatus('');
+        } else {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            void tryRecover();
+          }, 15000);
+        }
+      } finally {
+        if (isCurrent()) inFlight = false;
       }
-    })();
-  }, [Authentication.tokenValidationInProgress, Authentication.isLoggedIn, Authentication.accountAuthenticated, setupComplete, selectedServerUrl]);
-
-  const tokenValidationEnsureRef = useRef<{ attempts: number; retryTimer: NodeJS.Timeout | null }>({ attempts: 0, retryTimer: null });
-  useEffect(() => {
-    const state = tokenValidationEnsureRef.current;
-    if (!Authentication.tokenValidationInProgress || Authentication.isLoggedIn || Authentication.accountAuthenticated) {
-      state.attempts = 0;
-      if (state.retryTimer) {
-        clearTimeout(state.retryTimer);
-        state.retryTimer = null;
-      }
-      return;
-    }
-    if (!setupComplete || !selectedServerUrl) return;
-
-    const trySend = async (reason: string, forceResend: boolean) => {
-      try {
-        await websocketClient.connect();
-      } catch { }
-      try {
-        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`, forceResend);
-      } catch { }
     };
 
-    if (state.attempts === 0) {
-      state.attempts = 1;
-      void trySend('initial', false);
-      state.retryTimer = setTimeout(() => {
-        state.retryTimer = null;
-        if (Authentication.tokenValidationInProgress && !Authentication.isLoggedIn && !Authentication.accountAuthenticated && state.attempts === 1) {
-          state.attempts = 2;
-          void trySend('retry', true);
-        }
-      }, 15000);
-    }
+    void tryRecover();
 
     return () => {
-      if (state.retryTimer) {
-        clearTimeout(state.retryTimer);
-        state.retryTimer = null;
-      }
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [Authentication.tokenValidationInProgress, Authentication.isLoggedIn, Authentication.accountAuthenticated, setupComplete, selectedServerUrl]);
+  }, [
+    Authentication.tokenValidationInProgress,
+    Authentication.isLoggedIn,
+    Authentication.accountAuthenticated,
+    Authentication.showPasswordPrompt,
+    setupComplete,
+    selectedServerUrl,
+  ]);
 }

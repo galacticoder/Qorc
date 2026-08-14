@@ -1,5 +1,11 @@
 import { QualityOption } from '../constants';
 
+export interface ScreenSource {
+  readonly id: string;
+  readonly name: string;
+  readonly type: 'screen' | 'window';
+}
+
 export interface ScreenSharingResolution {
   id: string;
   name: string;
@@ -14,6 +20,14 @@ export interface ScreenSharingSettings {
   quality: QualityOption;
 }
 
+export const cloneScreenSharingSettings = (
+  settings: ScreenSharingSettings,
+): ScreenSharingSettings => ({
+  resolution: { ...settings.resolution },
+  frameRate: settings.frameRate,
+  quality: settings.quality,
+});
+
 export const SCREEN_SHARING_RESOLUTIONS: ScreenSharingResolution[] = [
   { id: 'native', name: 'Native Resolution', width: 0, height: 0, isNative: true },
   { id: '720p', name: '720p (1280×720)', width: 1280, height: 720 },
@@ -23,4 +37,3 @@ export const SCREEN_SHARING_RESOLUTIONS: ScreenSharingResolution[] = [
 ];
 
 export const SCREEN_SHARING_FRAMERATES = [15, 30, 60] as const;
-export type ScreenSharingFrameRate = typeof SCREEN_SHARING_FRAMERATES[number];

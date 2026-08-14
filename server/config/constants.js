@@ -1,112 +1,42 @@
-function envInt(name, fallback, min, max) {
-  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
-}
+import { envInt } from '../utils/env.js';
 
-// Server configuration constants
 export const SERVER_CONSTANTS = {
-  // Bandwidth and rate limiting
-  BANDWIDTH_QUOTA: envInt('WS_BANDWIDTH_QUOTA_BYTES', 512 * 1024 * 1024, 512 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+  BANDWIDTH_QUOTA: envInt('WS_BANDWIDTH_QUOTA_BYTES', 64 * 1024 * 1024, 8 * 1024 * 1024, 512 * 1024 * 1024),
   BANDWIDTH_WINDOW: envInt('WS_BANDWIDTH_WINDOW_MS', 60 * 1000, 5 * 1000, 10 * 60 * 1000),
-  MESSAGE_HARD_LIMIT_PER_MINUTE: 1000,
-  MESSAGE_RATE_RESET_INTERVAL: 60000,
-  
-  // WebSocket configuration
+  MESSAGE_HARD_LIMIT_PER_MINUTE: envInt('WS_FRAME_MAX_PER_WINDOW', 500, 50, 100_000),
+  MESSAGE_RATE_RESET_INTERVAL: envInt('WS_FRAME_WINDOW_MS', 60_000, 5_000, 10 * 60_000),
   HEARTBEAT_INTERVAL: 30000,
-  CONNECTION_TIMEOUT: 30000,
   WS_FIXED_MESSAGE_SIZE_BYTES: 64 * 1024,
-  
-  // Batch processing
-  BATCH_SIZE: 10,
-  BATCH_TIMEOUT: 1000,
-  MAX_BATCH_SIZE: 100,
-  
-  // Blocking cache
-  BLOCKING_CACHE_TTL: 30000,
-  BLOCKING_CACHE_MAX_SIZE: 1000,
-  BLOCKING_MIN_DELAY: 50,
-  
-  // Cleanup intervals
-  BLOCK_TOKEN_CLEANUP_INTERVAL: 60 * 60 * 1000,
-  STATUS_LOG_INTERVAL: 60000,
-  
-  // Message size limits
-  MAX_MESSAGE_SIZE: 5 * 1024 * 1024,
-  MAX_JSON_PAYLOAD_SIZE: 5 * 1024 * 1024,
-  
-  // Certificate validation
-  MAX_CERT_PATH_LENGTH: 1000,
-  ALLOWED_CERT_EXTENSIONS: ['.pem', '.crt', '.key'],
-  DANGEROUS_PATH_PATTERNS: ['../', '..\\', '%2e%2e', '%2f', '%5c', '\0'],
-  
-  // Cluster configuration
-  MAX_CLUSTER_WORKERS: 32,
-  DEFAULT_CLUSTER_WORKERS: 1,
-  WORKER_BOOTSTRAP_TIMEOUT: 30000,
-  
-  // Security timeouts
-  AUTH_LOCK_TTL: 5000,
-  SESSION_CLEANUP_TIMEOUT: 10000,
-  TUNNEL_CLEANUP_TIMEOUT: 10000,
-};
-
-// Rate limiting configuration
-export const RATE_LIMIT_CONFIG = {
-  // Connection limits
-  MAX_CONNECTIONS_PER_IP: 10,
-  CONNECTION_WINDOW: 60000,
-  
-  // Message limits
-  MAX_MESSAGES_PER_USER_PER_MINUTE: 100,
-  MAX_MESSAGES_PER_CONNECTION_PER_MINUTE: 1000,
-  
-  // Auth attempt limits
-  MAX_AUTH_ATTEMPTS_PER_USER: 5,
-  AUTH_LOCKOUT_DURATION: 3600000,
-  AUTH_ATTEMPT_WINDOW: 3600000,
-  
-  // Backoff configuration
-  MAX_BACKOFF_MINUTES: 60,
-  BACKOFF_MULTIPLIER: 2,
-};
-
-// Database configuration
-export const DATABASE_CONFIG = {
-  // Offline message storage
-  MAX_OFFLINE_MESSAGES_PER_USER: 1000,
-  
-  // Session storage
-  SESSION_TTL: 24 * 60 * 60 * 1000,
-  SESSION_CLEANUP_INTERVAL: 60 * 60 * 1000,
-  
-  // Blocking storage
-  BLOCK_LIST_VERSION: 1,
-  BLOCK_LIST_MAX_SIZE: 10000,
+  MAX_JSON_PAYLOAD_SIZE: 512 * 1024,
+  AVATAR_BLOB_MAX_COUNT: envInt('AVATAR_BLOB_MAX_COUNT', 20_000, 100, 100_000),
 };
 
 // Security headers
 export const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
-  'X-XSS-Protection': '1; mode=block',
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Referrer-Policy': 'no-referrer',
   'Permissions-Policy': 'microphone=(self), camera=(self)',
   'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; worker-src 'self' blob:;",
 };
 
-// CORS configuration
+const FIRST_PARTY_ORIGINS = [
+  'tauri://localhost',
+  'http://tauri.localhost',
+  'https://tauri.localhost',
+];
+
 export const CORS_CONFIG = {
   ALLOWED_ORIGINS: (() => {
     const rawOrigins = process.env.ALLOWED_CORS_ORIGINS || '';
-    return rawOrigins
+    const configured = rawOrigins
       .split(',')
       .map(origin => origin.trim())
       .filter(origin => origin.length > 0);
+    return Array.from(new Set([...FIRST_PARTY_ORIGINS, ...configured]));
   })(),
   ALLOWED_METHODS: 'GET, POST, PUT, DELETE, OPTIONS',
   ALLOWED_HEADERS: 'Content-Type, Authorization',
-  ALLOW_CREDENTIALS: true,
   MAX_AGE_SECONDS: 86400,
 };

@@ -1,40 +1,27 @@
 import React, { useEffect } from 'react';
-import { Message } from '../components/chat/messaging/types';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, isUnsafeObjectKey } from '../lib/sanitizers';
+import { isCanonicalAuthUsername, isPlainObject, hasPrototypePollutionKeys } from '../lib/sanitizers';
 import { sanitizeHybridKeys } from '../lib/utils/messaging-validators';
-import { areHybridPublicKeysEquivalent } from '../lib/utils/peer-certificate-utils';
-import { SecurityAuditLogger } from '../lib/cryptography/audit-logger';
-import { secureMessageQueue } from '../lib/database/secure-message-queue';
-import { blockingSystem } from '../lib/blocking/blocking-system';
 import { EventType } from '../lib/types/event-types';
-import {
-  MAX_LOCAL_USERNAME_LENGTH,
-  MAX_INLINE_BASE64_BYTES,
-  BASE64_STANDARD_REGEX
-} from '../lib/constants';
 import type { User } from '../components/chat/messaging/UserList';
-import { SignalType } from '../lib/types/signal-types';
-import { p2pTransport } from '../lib/transport/p2p-transport';
-import { isRendezvousRouteId } from '../lib/transport/rendezvous-routing';
+import {
+  isKeyTransparencyAuthorizedPeerKeySet,
+  isKeyTransparencyPeerRevoked,
+} from '../lib/key-transparency/verified-material';
+import {
+  KEY_TRANSPARENCY_MAX_LOG_SIZE,
+  isKeyTransparencyHash,
+} from '../../shared/key-transparency-protocol.js';
 
 interface UseEventHandlersProps {
   allowEvent: (eventType: string) => boolean;
-  users: User[];
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
-  messageSender: any;
-  Authentication: any;
-  Database: any;
+  currentUsername: string;
 }
 
 export function useEventHandlers({
   allowEvent,
-  users,
   setUsers,
-  setMessages,
-  messageSender,
-  Authentication,
-  Database,
+  currentUsername,
 }: UseEventHandlersProps) {
   // Handle user keys becoming available
   useEffect(() => {
@@ -45,21 +32,23 @@ export function useEventHandlers({
         if (!allowEvent(EventType.USER_KEYS_AVAILABLE)) return;
         const detail = (event as CustomEvent).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+        const detailKeys = Object.keys(detail).sort().join(',');
+        if (detailKeys !== [
+          'account',
+          'hybridKeys',
+          'identityBundleFingerprint',
+          'identityRootFingerprint',
+          'peerCertificateFingerprint',
+          'username',
+        ].sort().join(',')) return;
+        if ((detail as any).account !== currentUsername || !currentUsername) return;
 
-        const username = sanitizeNonEmptyText((detail as any).username, MAX_LOCAL_USERNAME_LENGTH, false);
-        if (!username || isUnsafeObjectKey(username)) return;
+        const username = (detail as any).username;
+        if (!isCanonicalAuthUsername(username)) return;
 
-        if (processedKeysAvailableRef.size > 512) processedKeysAvailableRef.clear();
         const now = Date.now();
-        const last = processedKeysAvailableRef.get(username) || 0;
-        if (now - last < 2000) return;
-        processedKeysAvailableRef.set(username, now);
 
         const hybridKeysRaw = (detail as any).hybridKeys;
-        const inboxId = (detail as any).inboxId;
-        const routeId = isRendezvousRouteId((detail as any).routeId) ? (detail as any).routeId : undefined;
-        const mailboxLookupId = isRendezvousRouteId((detail as any).mailboxLookupId) ? (detail as any).mailboxLookupId : undefined;
-        const bundleLookupId = isRendezvousRouteId((detail as any).bundleLookupId) ? (detail as any).bundleLookupId : undefined;
         if (!isPlainObject(hybridKeysRaw) || hasPrototypePollutionKeys(hybridKeysRaw)) return;
 
         const maybeKyber = (hybridKeysRaw as any).kyberPublicBase64;
@@ -70,7 +59,11 @@ export function useEventHandlers({
         if (typeof maybeX25519 === 'string' && maybeX25519.length > 1_000) return;
 
         const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
-        if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64) return;
+        if (
+          !hybridKeys?.kyberPublicBase64 ||
+          !hybridKeys?.dilithiumPublicBase64 ||
+          !hybridKeys?.x25519PublicBase64
+        ) return;
         const incomingPeerCertificateFingerprint = typeof (detail as any).peerCertificateFingerprint === 'string'
           ? (detail as any).peerCertificateFingerprint.trim().toLowerCase()
           : '';
@@ -83,212 +76,93 @@ export function useEventHandlers({
         if (!incomingPeerCertificateFingerprint || !incomingIdentityRootFingerprint) return;
         if (!/^[a-f0-9]{64}$/i.test(incomingPeerCertificateFingerprint)) return;
         if (!/^[a-f0-9]{64}$/i.test(incomingIdentityRootFingerprint)) return;
-        if (incomingIdentityBundleFingerprint && !/^[a-f0-9]{64}$/i.test(incomingIdentityBundleFingerprint)) return;
-        const incomingPeerCertificatePinnedAt = Number.isFinite((detail as any).peerCertificatePinnedAt)
-          ? Math.trunc((detail as any).peerCertificatePinnedAt)
-          : now;
-        if (inboxId && typeof inboxId === 'string') {
-          try { p2pTransport.registerUsernameAlias(username, inboxId); } catch { }
+        if (!/^[a-f0-9]{64}$/i.test(incomingIdentityBundleFingerprint)) return;
+        if (!isKeyTransparencyAuthorizedPeerKeySet({
+          account: currentUsername,
+          peer: username,
+          kyberPublicBase64: hybridKeys.kyberPublicBase64,
+          dilithiumPublicBase64: hybridKeys.dilithiumPublicBase64,
+          x25519PublicBase64: hybridKeys.x25519PublicBase64,
+          peerCertificateFingerprint: incomingPeerCertificateFingerprint,
+          identityRootFingerprint: incomingIdentityRootFingerprint,
+          identityBundleFingerprint: incomingIdentityBundleFingerprint,
+        })) return;
+
+        const eventId = `${username}\0${incomingPeerCertificateFingerprint}\0${incomingIdentityRootFingerprint}\0${incomingIdentityBundleFingerprint}`;
+        const last = processedKeysAvailableRef.get(eventId) || 0;
+        if (now - last < 2000) return;
+        processedKeysAvailableRef.delete(eventId);
+        processedKeysAvailableRef.set(eventId, now);
+        while (processedKeysAvailableRef.size > 512) {
+          const oldest = processedKeysAvailableRef.keys().next().value as string | undefined;
+          if (!oldest) break;
+          processedKeysAvailableRef.delete(oldest);
         }
 
-        let targetUser = users.find(user => user.username === username);
-        const nextHybridKeys = { ...hybridKeys, inboxId, routeId, mailboxLookupId, bundleLookupId };
-        const existingPeerCertificateFingerprint = targetUser?.peerCertificateFingerprint?.trim().toLowerCase() || '';
-        const existingIdentityRootFingerprint = targetUser?.identityRootFingerprint?.trim().toLowerCase() || '';
-        const hasPinnedPeerCertificate = existingPeerCertificateFingerprint.length > 0;
-        const incomingFingerprintMismatch = !!(
-          hasPinnedPeerCertificate &&
-          incomingPeerCertificateFingerprint &&
-          incomingPeerCertificateFingerprint !== existingPeerCertificateFingerprint
-        );
-        const incomingIdentityRootMismatch = !!(
-          existingIdentityRootFingerprint &&
-          incomingIdentityRootFingerprint &&
-          incomingIdentityRootFingerprint !== existingIdentityRootFingerprint
-        );
-        const unpinnedMutationAgainstPinnedPeer = !!(
-          hasPinnedPeerCertificate &&
-          !incomingPeerCertificateFingerprint &&
-          targetUser &&
-          !areHybridPublicKeysEquivalent(
-            {
-              ...targetUser.hybridPublicKeys,
-              inboxId: targetUser.inboxId || targetUser.hybridPublicKeys?.inboxId,
-              routeId: targetUser.routeId || targetUser.hybridPublicKeys?.routeId,
-              mailboxLookupId: targetUser.mailboxLookupId || targetUser.hybridPublicKeys?.mailboxLookupId
-            },
-            nextHybridKeys
-          )
-        );
-
-        if (incomingFingerprintMismatch || incomingIdentityRootMismatch || unpinnedMutationAgainstPinnedPeer) {
-          console.warn('[UserKeys] Rejected key update that conflicts with pinned peer certificate', {
-            hasPinnedPeerCertificate,
-            incomingFingerprintPresent: !!incomingPeerCertificateFingerprint,
-            incomingIdentityRootPresent: !!incomingIdentityRootFingerprint
-          });
-          return;
-        }
-
-        if (!targetUser) {
-          targetUser = {
-            id: crypto.randomUUID(),
-            username,
-            hybridPublicKeys: nextHybridKeys,
-            inboxId,
-            routeId,
-            mailboxLookupId,
-            bundleLookupId,
-            peerCertificateFingerprint: incomingPeerCertificateFingerprint || undefined,
-            peerCertificatePinnedAt: incomingPeerCertificateFingerprint ? incomingPeerCertificatePinnedAt : undefined,
-            identityRootFingerprint: incomingIdentityRootFingerprint || undefined,
-            identityBundleFingerprint: incomingIdentityBundleFingerprint || undefined
+        setUsers(prev => {
+          const index = prev.findIndex(user => user.username === username);
+          const nextUser: User = {
+            ...(index >= 0 ? prev[index] : { id: crypto.randomUUID(), username }),
+            hybridPublicKeys: { ...hybridKeys },
+            peerCertificateFingerprint: incomingPeerCertificateFingerprint,
+            peerCertificateVerifiedAt: now,
+            identityRootFingerprint: incomingIdentityRootFingerprint,
+            identityBundleFingerprint: incomingIdentityBundleFingerprint,
           };
-          setUsers(prev => [...prev, targetUser!]);
-        } else if (
-          !targetUser.hybridPublicKeys ||
-          targetUser.inboxId !== inboxId ||
-          !areHybridPublicKeysEquivalent(
-            {
-              ...targetUser.hybridPublicKeys,
-              inboxId: targetUser.inboxId || targetUser.hybridPublicKeys?.inboxId,
-              routeId: targetUser.routeId || targetUser.hybridPublicKeys?.routeId,
-              mailboxLookupId: targetUser.mailboxLookupId || targetUser.hybridPublicKeys?.mailboxLookupId
-            },
-            nextHybridKeys
-          ) ||
-          (!existingPeerCertificateFingerprint && !!incomingPeerCertificateFingerprint)
-        ) {
-          setUsers(prev => prev.map(user =>
-            user.username === username ? {
-              ...user,
-              hybridPublicKeys: nextHybridKeys,
-              inboxId,
-              routeId,
-              mailboxLookupId,
-              bundleLookupId,
-              peerCertificateFingerprint: user.peerCertificateFingerprint || incomingPeerCertificateFingerprint || undefined,
-              peerCertificatePinnedAt: user.peerCertificatePinnedAt || (incomingPeerCertificateFingerprint ? incomingPeerCertificatePinnedAt : undefined),
-              identityRootFingerprint: user.identityRootFingerprint || incomingIdentityRootFingerprint || undefined,
-              identityBundleFingerprint: incomingIdentityBundleFingerprint || user.identityBundleFingerprint || undefined
-            } : user
-          ));
-          targetUser = {
-            ...targetUser,
-            hybridPublicKeys: nextHybridKeys,
-            inboxId,
-            routeId,
-            mailboxLookupId,
-            bundleLookupId,
-            peerCertificateFingerprint: targetUser.peerCertificateFingerprint || incomingPeerCertificateFingerprint || undefined,
-            peerCertificatePinnedAt: targetUser.peerCertificatePinnedAt || (incomingPeerCertificateFingerprint ? incomingPeerCertificatePinnedAt : undefined),
-            identityRootFingerprint: targetUser.identityRootFingerprint || incomingIdentityRootFingerprint || undefined,
-            identityBundleFingerprint: incomingIdentityBundleFingerprint || targetUser.identityBundleFingerprint || undefined
-          };
-        }
-
-        const queuedMessages = await secureMessageQueue.processQueueForUser(username);
-        if (queuedMessages.length === 0) return;
-
-        targetUser = users.find(user => user.username === username) || targetUser;
-
-        const sentIds: string[] = [];
-        for (const queuedMsg of queuedMessages) {
-          try {
-            await messageSender.handleSendMessage(
-              targetUser, queuedMsg.content, queuedMsg.replyTo, queuedMsg.fileData,
-              queuedMsg.messageSignalType, queuedMsg.originalMessageId, queuedMsg.editMessageId
-            );
-            sentIds.push(queuedMsg.id);
-            await new Promise<void>((r) => setTimeout(r, 0));
-          } catch (_error) {
-            SecurityAuditLogger.log(SignalType.ERROR, 'queued-message-send-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
-          }
-        }
-
-        if (sentIds.length) {
-          setMessages(prev => prev.map(msg => (
-            sentIds.includes(msg.id) ? { ...msg, pending: false, receipt: { delivered: true, read: false } } : msg
-          )));
-        }
+          if (index < 0) return [...prev, nextUser];
+          const next = [...prev];
+          next[index] = nextUser;
+          return next;
+        });
+        window.dispatchEvent(new CustomEvent(EventType.P2P_FETCH_PEER_CERT, {
+          detail: { account: currentUsername, peer: username },
+        }));
       } catch { }
     };
 
     window.addEventListener(EventType.USER_KEYS_AVAILABLE, handleUserKeysAvailable as EventListener);
     return () => window.removeEventListener(EventType.USER_KEYS_AVAILABLE, handleUserKeysAvailable as EventListener);
-  }, [users, messageSender, allowEvent]);
+  }, [allowEvent, currentUsername, setUsers]);
 
-  // Handle block list response
   useEffect(() => {
-    const onBlockListResponse = async (e: Event) => {
+    const handleTransparencyRootChanged = (event: Event) => {
       try {
-        if (!allowEvent(EventType.BLOCK_LIST_RESPONSE)) return;
-        const detail = (e as CustomEvent).detail;
+        if (!allowEvent(EventType.KEY_TRANSPARENCY_ROOT_CHANGED)) return;
+        if (!(event instanceof CustomEvent)) return;
+        const detail = event.detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+        if (Object.keys(detail).sort().join(',') !== 'account,peer,rootCommitment,version') return;
+        const { account, peer, rootCommitment, version } = detail as Record<string, unknown>;
+        if (account !== currentUsername || !currentUsername) return;
+        if (!isCanonicalAuthUsername(peer) || peer === currentUsername) return;
+        if (!isKeyTransparencyHash(rootCommitment)) return;
+        if (
+          !Number.isSafeInteger(version) ||
+          (version as number) < 1 ||
+          (version as number) > KEY_TRANSPARENCY_MAX_LOG_SIZE
+        ) return;
+        if (!isKeyTransparencyPeerRevoked(currentUsername, peer)) return;
 
-        const passphrase = Authentication.passphrasePlaintextRef?.current || '';
-        const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey || null;
-        const key = passphrase ? passphrase : (kyberSecret ? { kyberSecret } : null);
-        if (!key || !Database.dbInitialized) return;
-
-        const encryptedDataRaw = typeof (detail as any).encryptedBlockList === 'string' ? (detail as any).encryptedBlockList : null;
-        const saltRaw = typeof (detail as any).salt === 'string' ? (detail as any).salt : null;
-        if (!encryptedDataRaw || !saltRaw) return;
-
-        const maxChars = Math.ceil((MAX_INLINE_BASE64_BYTES * 4) / 3) + 128;
-        const encryptedData = encryptedDataRaw.trim();
-        if (!encryptedData || encryptedData.length > maxChars) return;
-        if (!BASE64_STANDARD_REGEX.test(encryptedData)) return;
-
-        const pad = encryptedData.endsWith('==') ? 2 : encryptedData.endsWith('=') ? 1 : 0;
-        const estimatedBytes = Math.floor((encryptedData.length * 3) / 4) - pad;
-        if (estimatedBytes <= 0 || estimatedBytes > MAX_INLINE_BASE64_BYTES) return;
-
-        const salt = saltRaw.trim();
-        if (!salt || salt.length > 256) return;
-        if (!BASE64_STANDARD_REGEX.test(salt)) return;
-
-        const lastUpdated = typeof (detail as any).lastUpdated === 'number' && Number.isFinite((detail as any).lastUpdated)
-          ? (detail as any).lastUpdated : null;
-        const versionRaw = typeof (detail as any).version === 'number' && Number.isFinite((detail as any).version)
-          ? (detail as any).version : 3;
-        const version = versionRaw >= 3 ? Math.floor(versionRaw) : 3;
-
-        await new Promise((r) => setTimeout(r, 0));
-        await blockingSystem.handleServerBlockListData(encryptedData, salt, lastUpdated, version, key as any);
+        setUsers((previous) => previous.map((user) => user.username === peer ? {
+          ...user,
+          hybridPublicKeys: undefined,
+          peerCertificateFingerprint: undefined,
+          peerCertificateVerifiedAt: undefined,
+          identityRootFingerprint: undefined,
+          identityBundleFingerprint: undefined,
+        } : user));
       } catch { }
     };
 
-    window.addEventListener(EventType.BLOCK_LIST_RESPONSE, onBlockListResponse as EventListener);
-    return () => window.removeEventListener(EventType.BLOCK_LIST_RESPONSE, onBlockListResponse as EventListener);
-  }, [Authentication.passphrasePlaintextRef?.current, allowEvent]);
-
-  // Handle clear conversation messages
-  useEffect(() => {
-    const lastHandled = new Map<string, number>();
-
-    const handleClearConversationMessages = (event: CustomEvent) => {
-      try {
-        if (!allowEvent(EventType.CLEAR_CONVERSATION_MESSAGES)) return;
-        const detail = (event as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const username = sanitizeNonEmptyText((detail as any).username, MAX_LOCAL_USERNAME_LENGTH, false);
-        if (!username || isUnsafeObjectKey(username)) return;
-
-        if (lastHandled.size > 512) lastHandled.clear();
-        const now = Date.now();
-        const last = lastHandled.get(username) || 0;
-        if (now - last < 2000) return;
-        lastHandled.set(username, now);
-
-        setMessages(prev => prev.filter(msg => !(msg.sender === username || msg.recipient === username)));
-      } catch { }
-    };
-
-    window.addEventListener(EventType.CLEAR_CONVERSATION_MESSAGES, handleClearConversationMessages as EventListener);
-    return () => window.removeEventListener(EventType.CLEAR_CONVERSATION_MESSAGES, handleClearConversationMessages as EventListener);
-  }, [allowEvent]);
+    window.addEventListener(
+      EventType.KEY_TRANSPARENCY_ROOT_CHANGED,
+      handleTransparencyRootChanged as EventListener,
+    );
+    return () => window.removeEventListener(
+      EventType.KEY_TRANSPARENCY_ROOT_CHANGED,
+      handleTransparencyRootChanged as EventListener,
+    );
+  }, [allowEvent, currentUsername, setUsers]);
 
   // Handle settings events
   useEffect(() => {

@@ -1,25 +1,63 @@
 import crypto from 'node:crypto';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { SignalType } from '../signals.js';
 import { UserDatabase } from '../database/database.js';
-import { anonymousSessionService } from './anonymous-session-service.js';
 import { OPAQUEServer, OPAQUEHelpers } from '../crypto/opaque-service.js';
-import { PrivacyPassServer, PrivacyPassHelpers, NullifierStore } from './privacy-pass-server.js';
-import { ZKDeviceProofVerifier, DeviceCommitmentHelpers } from './zk-verifier.js';
-import { BlindSignatureIssuer } from '../security/blind-signatures.js';
-import { sendSecureMessage, sendSecureMessageChunked } from '../messaging/pq-envelope-handler.js';
+import { PrivacyPassServer, PrivacyPassHelpers } from './privacy-pass-server.js';
+import {
+  consumeVerifiedAuthChannelBinding,
+  sendSecureMessage,
+  sendSecureAuthResponse,
+} from '../messaging/pq-envelope-handler.js';
 import { ServerGatekeeper } from './gatekeeper.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import { applyAdaptiveAuthDelay, recordAuthFailure, getAuthVerificationDifficulty, getAuthPreflightDifficulty, recordAuthPreflightCompletion, createPowChallenge, verifyPowSolution, throttleExpensiveAuthRequest, acquireExpensiveAuthVerificationSlot } from '../security/auth-throttle.js';
+import { isAuthPreflightLive, verifyAuthPreflightProof } from './auth-preflight.js';
+import {
+  decodeCanonicalBase64,
+  decodeCanonicalBase64List
+} from '../utils/encoding.js';
+import { hasExactPlainObjectKeys, requireUuidV4 } from '../utils/validation.js';
+import {
+  wipeByteArrays,
+  wipeBytes,
+  wipeIssuedTokenBatch
+} from '../utils/wipe.js';
+import {
+  AUTH_SERVER_BUSY,
+  AUTH_SERVICE_BUSY_MESSAGE,
+  AUTH_SERVICE_UNAVAILABLE_MESSAGE,
+  INVALID_REQUEST,
+  INVALID_TOKEN_BATCH_MESSAGE,
+  POW_REQUIRED,
+  PROOF_OF_WORK_REQUIRED_MESSAGE,
+  REGISTRATION_ATTEMPT_MISMATCH,
+  REGISTRATION_RECEIPT_EXPIRED
+} from '../config/error-codes.js';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES
+} from '../../shared/crypto-sizes.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import {
+  AUTH_CHANNEL_BINDING_BYTES,
+  HASH_OUTPUT_BYTES,
+  OPAQUE_ELEMENT_BYTES,
+  OPAQUE_ENVELOPE_BYTES,
+  OPAQUE_NONCE_BYTES,
+  PRIVACY_PASS_BLINDED_TOKEN_BYTES,
+  SHA_256_ALGORITHM
+} from '../utils/crypto-consts.js';
+
 import * as ServerConfig from '../config/config.js';
 
-async function rejectConnection(ws, type, reason, code = 1008) {
-  cryptoLogger.warn('[AUTH] Rejecting connection', { type });
-  await sendSecureMessage(ws, { type, message: reason });
+async function rejectConnection(ws, type, reason, code = 1008, authRequestId = undefined) {
+  console.warn('[AUTH] Rejecting connection', { type });
+  await sendSecureMessage(ws, { type, message: reason, authRequestId });
   ws.close(code, reason);
   return;
 }
 
-async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'general', attemptsRemaining = undefined, locked = false, cooldownSeconds = undefined, logout = false }) {
+async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'general', attemptsRemaining = undefined, locked = false, cooldownSeconds = undefined, logout = false, authRequestId = undefined }) {
   const payload = {
     type: SignalType.AUTH_ERROR,
     message,
@@ -27,17 +65,18 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
     category,
     locked,
   };
+  if (authRequestId !== undefined) payload.authRequestId = authRequestId;
   if (attemptsRemaining !== undefined) payload.attemptsRemaining = attemptsRemaining;
   if (cooldownSeconds !== undefined) payload.cooldownSeconds = cooldownSeconds;
   if (logout) payload.logout = true;
   try { await sendSecureMessage(ws, payload); } catch (e) {
-    cryptoLogger.error('[AUTH] Failed to send soft auth error', { error: e?.message });
+    console.error('[AUTH] Failed to send soft auth error', { error: e?.message });
   }
   return { handled: true };
 }
 
 function requiresServerEntry(ws) {
-  return Boolean(ServerConfig.getServerPasswordHash()) && !ws?._hasServerAuth;
+  return ServerConfig.isServerPasswordGateReady() && !ws?._hasServerAuth;
 }
 
 function serverEntryResponseFields(ws) {
@@ -48,91 +87,231 @@ function serverEntryResponseFields(ws) {
   };
 }
 
-// Immutable state manager
+const REGISTRATION_FINALIZE_TTL_MS = 2 * 60_000;
+const REGISTRATION_CONFIRM_TTL_MS = 2 * 60_000;
+const LOGIN_FINALIZE_TTL_MS = 2 * 60_000;
+
+function authRequestCommitment(kind, data) {
+  const hash = crypto.createHash(SHA_256_ALGORITHM);
+  hash.update(`${PROTOCOL_KEYS.AUTH_PREFLIGHT}:${kind}\0`);
+  hash.update(String(data?.blindedElement ?? ''));
+  hash.update('\0');
+  if (Array.isArray(data?.clientPubKeys)) {
+    for (const publicKey of data.clientPubKeys) {
+      hash.update('\0');
+      hash.update(String(publicKey ?? ''));
+    }
+  }
+  return hash.digest('base64url');
+}
+
+async function requireAuthPreflight(ws, data, kind, responseType, suppliedCommitment = null) {
+  const authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+  const commitment = suppliedCommitment || authRequestCommitment(kind, data);
+  const pending = ws._authPreflight;
+  const now = Date.now();
+  const pendingIsLive = isAuthPreflightLive(pending, now);
+  if (
+    pendingIsLive &&
+    (pending?.kind !== kind || pending?.authRequestId !== authRequestId)
+  ) {
+    await sendAuthError(ws, {
+      message: 'Another authentication request is in progress',
+      code: 'AUTH_IN_PROGRESS',
+      authRequestId
+    });
+    return false;
+  }
+
+  ws._authPreflight = null;
+
+  if (verifyAuthPreflightProof(pending, {
+    kind,
+    authRequestId,
+    commitment,
+    solution: data?.preflightPowSolution
+  }, now)) {
+    return true;
+  }
+
+  const challenge = createPowChallenge(await getAuthPreflightDifficulty());
+  ws._authPreflight = {
+    kind,
+    authRequestId,
+    commitment,
+    seed: challenge.seed,
+    difficulty: challenge.difficulty,
+    createdAt: Date.now()
+  };
+  await sendSecureMessage(ws, {
+    type: responseType,
+    authRequestId,
+    preflightRequired: true,
+    powChallenge: challenge
+  });
+  return false;
+}
+
+function decodeMlKemPublicKeys(keys, expectedCount) {
+  if (!Array.isArray(keys) || keys.length !== expectedCount) {
+    throw new Error('Invalid ML-KEM public-key set');
+  }
+  return decodeCanonicalBase64List(keys, ML_KEM_1024_PUBLIC_KEY_BYTES, 2200);
+}
+
+function privateAuthRequestCommitment(blindedElement, publicKeys) {
+  const hash = crypto.createHash(SHA_256_ALGORITHM);
+  hash.update(PROTOCOL_KEYS.PRIVATE_AUTH_REQUEST);
+  hash.update(blindedElement);
+  for (const publicKey of publicKeys) hash.update(publicKey);
+  return hash.digest();
+}
+
+// Connection-private immutable authentication state.
 export class SecureStateManager {
   static states = new WeakMap();
   static setState(ws, updates) {
     const current = this.states.get(ws) || {};
     const newState = Object.freeze({
       ...current,
-      ...updates,
-      lastModified: Date.now(),
-      stateVersion: (current.stateVersion || 0) + 1
+      ...updates
     });
     this.states.set(ws, newState);
-    return newState;
   }
   static getState(ws) {
     return this.states.get(ws) || {};
   }
+  static clearState(ws) {
+    const state = this.states.get(ws);
+    wipeBytes(state?.registrationSalt);
+    this.states.delete(ws);
+  }
 }
 
 export class AccountAuthHandler {
-  constructor(serverHybridKeyPair, db) {
-    this.serverHybridKeyPair = serverHybridKeyPair;
-    this.db = db;
-    this.nullifierStore = new NullifierStore(db);
+  constructor() {
     this.opaqueServer = OPAQUEServer;
     this.ppServer = PrivacyPassServer;
-    this.zkVerifier = new ZKDeviceProofVerifier(db);
-    this.gatekeeper = new ServerGatekeeper(db);
+    this.gatekeeper = new ServerGatekeeper();
+  }
+
+  clearConnectionState(ws) {
+    SecureStateManager.clearState(ws);
+    ServerGatekeeper.clearConnectionState(ws);
+    ws._authPreflight = null;
+    ws._loginServerNonce = null;
+    ws._loginServerNonceAt = null;
+    ws._loginAuthRequestId = null;
+    wipeBytes(ws._loginAuthChannelBinding);
+    ws._loginAuthChannelBinding = null;
+    ws._loginPowSeed = null;
+    ws._loginPowDifficulty = 0;
+    ws._loginRequestInProgress = false;
+    delete ws._connectionPrivacyMode;
   }
 
   /**
    * OT Registration
-   * Server assigns a random shard without knowing who the user is
    */
   async handleOTRegisterRequest(ws, data) {
+    let authRequestId;
+    let blindedElement = null;
+    let registrationResponse = null;
+    let pendingRegistrationStored = false;
     try {
-      const { blindedElement, clientPublicKey } = OPAQUEHelpers.parseRegistrationRequest(data);
-      cryptoLogger.info('[AUTH] OT registration request received', {
+      authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+      const requestKeys = Object.hasOwn(data, 'preflightPowSolution')
+        ? ['authRequestId', 'blindedElement', 'preflightPowSolution', 'type']
+        : ['authRequestId', 'blindedElement', 'type'];
+      if (!hasExactPlainObjectKeys(data, requestKeys)) {
+        ws._authPreflight = null;
+        return sendAuthError(ws, {
+          message: 'Invalid registration request',
+          code: INVALID_REQUEST,
+          authRequestId
+        });
+      }
+      const registrationState = SecureStateManager.getState(ws);
+      if (
+        registrationState.hasAuthenticated ||
+        ws._authenticated ||
+        ws._hasAuthenticated ||
+        registrationState.pendingRegistration ||
+        registrationState.registrationFinalizeInProgress ||
+        registrationState.registrationReadyRecordId ||
+        registrationState.registrationConfirmInProgress ||
+        ws._loginRequestInProgress ||
+        ws._loginServerNonce
+      ) {
+        return sendAuthError(ws, {
+          message: 'Registration already in progress',
+          code: 'AUTH_IN_PROGRESS',
+          authRequestId
+        });
+      }
+
+      if (!await requireAuthPreflight(
+        ws,
+        data,
+        'registration',
+        SignalType.AUTH_OT_REGISTER_RESPONSE
+      )) {
+        return { pending: true, preflight: true };
+      }
+      await recordAuthPreflightCompletion();
+
+      ({ blindedElement } = OPAQUEHelpers.parseRegistrationRequest(data));
+      console.log('[AUTH] OT registration request received', {
         hasBlindedElement: !!blindedElement,
-        hasClientPublicKey: !!clientPublicKey,
         hasPqSession: !!ws._pqSessionId
       });
 
       // OPRF evaluation
-      const registrationResponse = await this.opaqueServer.createRegistrationResponse(blindedElement, clientPublicKey);
+      registrationResponse = await this.opaqueServer.createRegistrationResponse(blindedElement);
 
-      const allocatedSlot = await UserDatabase.allocatePrivateAuthSlot();
-      const shardId = allocatedSlot.shard_id;
-      const slotIndex = allocatedSlot.credential_index;
-      const shardSize = OPAQUEServer.getShardSize();
-
-      // Store registration state
-      ws.clientState = SecureStateManager.setState(ws, {
+      SecureStateManager.setState(ws, {
         pendingRegistration: true,
-        serverPrivateKey: registrationResponse.serverPrivateKey,
-        registrationSalt: registrationResponse.serverNonce,
-        assignedShardId: shardId,
-        assignedSlotIndex: slotIndex,
-        assignedShardSize: shardSize
+        registrationSalt: new Uint8Array(registrationResponse.serverNonce),
+        registrationStartedAt: Date.now(),
+        registrationAuthRequestId: authRequestId
       });
+      pendingRegistrationStored = true;
 
-      await sendSecureMessage(ws, {
+      const delivered = await sendSecureMessage(ws, {
         type: SignalType.AUTH_OT_REGISTER_RESPONSE,
+        authRequestId,
         ...OPAQUEHelpers.formatResponse({
           evaluatedElement: registrationResponse.evaluatedElement,
-          serverPublicKey: registrationResponse.serverPublicKey,
           serverNonce: registrationResponse.serverNonce
-        }),
-        shardId,
-        slotIndex,
-        shardSize
+        })
       });
+      if (delivered === false) throw new Error('Registration response was not delivered');
 
-      cryptoLogger.info('[AUTH] OT registration response sent', {
-        shardId,
-        slotIndex,
-        shardSize
-      });
+      console.log('[AUTH] OT registration response sent');
       return { pending: true };
     } catch (error) {
-      cryptoLogger.error('[AUTH] OT registration request error', { error: error?.message });
+      if (pendingRegistrationStored) {
+        const state = SecureStateManager.getState(ws);
+        if (state.registrationAuthRequestId === authRequestId) {
+          wipeBytes(state.registrationSalt);
+          SecureStateManager.setState(ws, {
+            pendingRegistration: false,
+            registrationSalt: null,
+            registrationStartedAt: null,
+            registrationAuthRequestId: null
+          });
+        }
+      }
+      console.error('[AUTH] OT registration request error', { error: error?.message });
       return sendAuthError(ws, {
         message: "Registration request failed",
-        code: 'REGISTRATION_REQUEST_FAILED'
+        code: 'REGISTRATION_REQUEST_FAILED',
+        authRequestId
       });
+    } finally {
+      wipeBytes(blindedElement);
+      wipeBytes(registrationResponse?.evaluatedElement);
+      wipeBytes(registrationResponse?.serverNonce);
     }
   }
 
@@ -140,128 +319,293 @@ export class AccountAuthHandler {
    * OT Registration finalization
    */
   async handleOTRegisterFinalize(ws, data) {
-    const { serverPrivateKey, registrationSalt, assignedShardId, assignedSlotIndex, assignedShardSize, blindedTokens } = SecureStateManager.getState(ws);
-
-    if (!serverPrivateKey || assignedShardId === undefined) {
+    let authRequestId;
+    try {
+      authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+    } catch {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Registration state lost");
     }
+    const registrationState = SecureStateManager.getState(ws);
+    const {
+      pendingRegistration,
+      registrationFinalizeInProgress,
+      registrationSalt,
+      registrationStartedAt,
+      registrationAuthRequestId
+    } = registrationState;
 
+    if (
+      !pendingRegistration ||
+      registrationFinalizeInProgress ||
+      !registrationSalt ||
+      registrationAuthRequestId !== authRequestId
+    ) {
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Registration state lost", 1008, authRequestId);
+    }
+    const registrationAgeMs = Date.now() - Number(registrationStartedAt);
+    if (
+      !Number.isSafeInteger(registrationStartedAt) ||
+      !Number.isSafeInteger(registrationAgeMs) ||
+      registrationAgeMs < 0 ||
+      registrationAgeMs > REGISTRATION_FINALIZE_TTL_MS
+    ) {
+      wipeBytes(registrationSalt);
+      SecureStateManager.setState(ws, {
+        pendingRegistration: false,
+        registrationFinalizeInProgress: false,
+        registrationSalt: null,
+        registrationStartedAt: null,
+        registrationAuthRequestId: null
+      });
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Registration state expired", 1008, authRequestId);
+    }
+
+    SecureStateManager.setState(ws, {
+      pendingRegistration: false,
+      registrationFinalizeInProgress: true,
+      registrationSalt: null,
+      registrationStartedAt: null,
+      registrationAuthRequestId: null
+    });
+
+    let envelopeBytes = null;
+    let authPublicKeyBytes = null;
+    let registrationAttemptBytes = null;
     try {
-      const { credentialId, envelope, maskedResponse } = data;
-      cryptoLogger.info('[AUTH] OT registration finalize received', {
-        hasCredentialId: !!credentialId,
+      const { envelope, authPublicKey, registrationAttemptId } = data;
+      console.log('[AUTH] OT registration finalize received', {
         hasEnvelope: !!envelope,
-        blindedTokenBatchCount: Array.isArray(data.blindedTokens) ? data.blindedTokens.length : 0,
+        hasAuthPublicKey: !!authPublicKey,
         hasPqSession: !!ws._pqSessionId
       });
 
-      if (!credentialId || !envelope) {
-        return sendAuthError(ws, { message: "Missing credential data", code: 'INVALID_REQUEST' });
+      if (
+        !hasExactPlainObjectKeys(data, [
+          'authPublicKey',
+          'authRequestId',
+          'envelope',
+          'registrationAttemptId',
+          'type'
+        ]) ||
+        !envelope ||
+        !authPublicKey
+      ) {
+        return sendAuthError(ws, { message: "Missing credential data", code: INVALID_REQUEST, authRequestId });
       }
 
-      const credentialLookupId = UserDatabase.credentialLookupId(credentialId);
+      try {
+        envelopeBytes = decodeCanonicalBase64(envelope, OPAQUE_ENVELOPE_BYTES);
+        authPublicKeyBytes = decodeCanonicalBase64(authPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES, 3600);
+        registrationAttemptBytes = decodeCanonicalBase64(registrationAttemptId, HASH_OUTPUT_BYTES, 64);
+      } catch {
+        return sendAuthError(ws, { message: "Invalid credential data", code: INVALID_REQUEST, authRequestId });
+      }
 
       const record = this.opaqueServer.createRegistrationRecord(
-        credentialLookupId,
-        Buffer.from(envelope, 'base64'),
-        serverPrivateKey,
-        Buffer.from(maskedResponse, 'base64'),
+        envelopeBytes,
+        authPublicKeyBytes,
         registrationSalt
       );
 
+      const opaqueRecord = JSON.stringify(record);
+      if (Buffer.byteLength(opaqueRecord, 'utf8') > OPAQUEServer.getRegistrationRecordMaxBytes()) {
+        return sendAuthError(ws, {
+          message: "Credential payload too large",
+          code: 'CREDENTIAL_TOO_LARGE',
+          authRequestId
+        });
+      }
+
       const userRecord = {
-        credentialId: credentialLookupId,
-        opaqueRecord: JSON.stringify(record),
-        shard_id: assignedShardId,
-        credential_index: assignedSlotIndex
+        recordId: UserDatabase.createRecordId(registrationAttemptId),
+        opaqueRecord
       };
+      const slotResult = await UserDatabase.stageUserRecord(userRecord);
 
-      const shardResult = await UserDatabase.saveUserRecord(userRecord);
+      SecureStateManager.setState(ws, {
+        registrationFinalizeInProgress: false,
+        registrationReadyRecordId: slotResult.recovery_only ? null : userRecord.recordId,
+        registrationReadyAt: slotResult.recovery_only ? null : Date.now(),
+        registrationReadyAuthRequestId: slotResult.recovery_only ? null : authRequestId
+      });
 
-      cryptoLogger.info('[AUTH] OT registration complete');
+      const delivered = await sendSecureMessage(ws, {
+        type: SignalType.AUTH_OT_REGISTER_READY,
+        authRequestId,
+        staged: slotResult.recovery_only !== true,
+        registrationAlreadyCommitted: slotResult.recovery_only === true,
+        credentialIndex: slotResult.credential_index,
+        anonymitySetSize: OPAQUEServer.getAnonymitySetSize()
+      });
+      if (delivered === false) throw new Error('Registration ready response was not delivered');
 
-      // Issue session token
-      const { anonymousSessionService } = await import('./anonymous-session-service.js');
-      const anonymousSession = await anonymousSessionService.createSessionWithCapabilities();
-      cryptoLogger.info('[AUTH] Created session token for registration', { hasToken: !!anonymousSession.token });
+      console.log('[AUTH] OT registration staged');
+      return { pending: true };
+    } catch (error) {
+      SecureStateManager.setState(ws, {
+        registrationFinalizeInProgress: false,
+        registrationReadyRecordId: null,
+        registrationReadyAt: null,
+        registrationReadyAuthRequestId: null
+      });
+      console.error('[AUTH] OT registration finalization error', {
+        category: 'internal'
+      });
+      return sendAuthError(ws, {
+        message: error?.code === REGISTRATION_RECEIPT_EXPIRED
+          ? 'Registration retry expired. Start registration again.'
+          : error?.code === REGISTRATION_ATTEMPT_MISMATCH
+            ? 'Registration retry state changed. Start registration again.'
+            : 'Failed to stage account creation',
+        code: error?.code === REGISTRATION_RECEIPT_EXPIRED
+          ? REGISTRATION_RECEIPT_EXPIRED
+          : error?.code === REGISTRATION_ATTEMPT_MISMATCH
+            ? REGISTRATION_ATTEMPT_MISMATCH
+            : 'REGISTRATION_FINALIZATION_FAILED',
+        authRequestId
+      });
+    } finally {
+      wipeBytes(envelopeBytes);
+      wipeBytes(authPublicKeyBytes);
+      wipeBytes(registrationAttemptBytes);
+      wipeBytes(registrationSalt);
+      if (SecureStateManager.getState(ws).registrationFinalizeInProgress) {
+        SecureStateManager.setState(ws, {
+          registrationFinalizeInProgress: false
+        });
+      }
+    }
+  }
 
-      const responsePayload = {
+  /**
+   * Promote staged registration
+   */
+  async handleOTRegisterConfirm(ws, data) {
+    let authRequestId;
+    let registrationAttemptBytes = null;
+    let blindedTokenBytes = [];
+    let issuedTokenBatch = null;
+    let releaseVerificationSlot = null;
+    let issuanceEpoch = null;
+    try {
+      authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+      registrationAttemptBytes = decodeCanonicalBase64(data?.registrationAttemptId, HASH_OUTPUT_BYTES, 64);
+    } catch {
+      return rejectConnection(ws, SignalType.AUTH_ERROR, 'Invalid registration confirmation');
+    }
+
+    const recordId = UserDatabase.createRecordId(data.registrationAttemptId);
+    const state = SecureStateManager.getState(ws);
+    const readyAgeMs = Date.now() - Number(state.registrationReadyAt);
+    if (
+      state.registrationConfirmInProgress ||
+      state.registrationReadyRecordId !== recordId ||
+      state.registrationReadyAuthRequestId !== authRequestId ||
+      ws._loginRequestInProgress ||
+      ws._loginServerNonce ||
+      !Number.isSafeInteger(readyAgeMs) ||
+      readyAgeMs < 0 ||
+      readyAgeMs > REGISTRATION_CONFIRM_TTL_MS
+    ) {
+      wipeBytes(registrationAttemptBytes);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, 'Registration confirmation state lost', 1008, authRequestId);
+    }
+
+    SecureStateManager.setState(ws, {
+      registrationReadyRecordId: null,
+      registrationReadyAt: null,
+      registrationReadyAuthRequestId: null,
+      registrationConfirmInProgress: true
+    });
+
+    try {
+      if (
+        !hasExactPlainObjectKeys(data, [
+          'authRequestId',
+          'blindedTokens',
+          'registrationAttemptId',
+          'tokenEpoch',
+          'type'
+        ]) ||
+        !Array.isArray(data?.blindedTokens) ||
+        data.blindedTokens.length !== 250
+      ) {
+        throw new Error(INVALID_TOKEN_BATCH_MESSAGE);
+      }
+      blindedTokenBytes = decodeCanonicalBase64List(
+        data.blindedTokens,
+        PRIVACY_PASS_BLINDED_TOKEN_BYTES,
+        64
+      );
+      issuanceEpoch = this.ppServer.validateIssuanceEpoch(data.tokenEpoch);
+      releaseVerificationSlot = await acquireExpensiveAuthVerificationSlot(ws._connectionAbortSignal);
+
+      const slotResult = await UserDatabase.confirmStagedUserRecord(recordId);
+      if (slotResult.already_committed === true) {
+        const error = new Error('Registration was already committed');
+        error.code = 'REGISTRATION_ALREADY_COMMITTED';
+        throw error;
+      }
+
+      issuedTokenBatch = await this.ppServer.issueAccountAuthTokenBatch(
+        blindedTokenBytes,
+        issuanceEpoch,
+        ws._connectionAbortSignal
+      );
+      releaseVerificationSlot?.();
+      releaseVerificationSlot = null;
+
+      const formattedTokenBatch = PrivacyPassHelpers.formatResponse(issuedTokenBatch);
+      const delivered = await sendSecureMessage(ws, {
         type: SignalType.AUTH_FULL_SUCCESS,
+        authRequestId,
+        authenticated: true,
+        registrationConfirmed: true,
         ...serverEntryResponseFields(ws),
-        shardId: shardResult.shard_id,
-        credentialIndex: shardResult.credential_index,
-        shardSize: assignedShardSize || OPAQUEServer.getShardSize(),
-        anonymousSession: {
-          token: anonymousSession.token,
-          expiresAt: anonymousSession.expiresAt,
-          tokenType: 'Anonymous'
-        }
-      };
+        credentialIndex: slotResult.credential_index,
+        anonymitySetSize: OPAQUEServer.getAnonymitySetSize(),
+        anonymousTokenBatch: formattedTokenBatch
+      });
+      if (delivered === false) throw new Error('Registration success was not delivered');
 
-      // Issue blind routing credentials if blinded token was provided
-      if (data.blindedToken && !requiresServerEntry(ws)) {
-        try {
-          const { generateCapabilityToken, storeCapabilityToken } = await import('../routing/capability-tokens.js');
-
-          const cap = generateCapabilityToken();
-          try {
-            await storeCapabilityToken(cap.token, [], {
-              ttl: Math.max(1, Math.floor((cap.expiresAt - Date.now()) / 1000))
-            });
-          } catch (e) {
-            cryptoLogger.warn('[AUTH] Failed to store capability token for registration', { error: e?.message });
-          }
-
-          const signed = await BlindSignatureIssuer.signBlindedMessage(data.blindedToken);
-          const serverBlindPublicKey = await BlindSignatureIssuer.getPublicKey();
-          responsePayload.blindRouting = {
-            capabilityToken: cap.token,
-            expiresAt: cap.expiresAt,
-            signedBlindedToken: signed.signature,
-            blindSignatureKid: signed.kid,
-            serverBlindPublicKey
-          };
-          cryptoLogger.info('[AUTH] Issued blind routing credentials for registration');
-        } catch (e) {
-          cryptoLogger.error('[AUTH] Failed to issue blind routing for registration', { error: e?.message });
-        }
-      } else if (data.blindedToken) {
-        cryptoLogger.info('[AUTH] Deferring blind routing credentials until server entry is granted');
-      }
-
-      const requestedTokenBatch = Array.isArray(data.blindedTokens) ? data.blindedTokens : blindedTokens;
-
-      // Issue initial Privacy Pass tokens if blinded tokens were provided
-      if (requestedTokenBatch && requestedTokenBatch.length > 0) {
-        const tokenBatch = await this.ppServer.issueTokenBatch(
-          requestedTokenBatch.map(t => Buffer.from(t, 'base64')),
-          Buffer.from('INITIAL_REGISTRATION_PROOF_AUTH_V1')
-        );
-
-        await sendSecureMessage(ws, {
-          ...responsePayload,
-          message: "Account created and tokens issued",
-          anonymousTokenBatch: PrivacyPassHelpers.formatResponse(tokenBatch)
-        });
-      } else {
-        await sendSecureMessage(ws, {
-          ...responsePayload,
-          message: "Account created successfully"
-        });
-      }
-
-      ws.clientState = SecureStateManager.setState(ws, {
-        pendingRegistration: false,
+      SecureStateManager.setState(ws, {
+        registrationConfirmInProgress: false,
         hasAuthenticated: true
       });
-
+      console.log('[AUTH] OT registration confirmed', {
+        replayedReceipt: slotResult.already_committed === true
+      });
       return { success: true };
     } catch (error) {
-      cryptoLogger.error('[AUTH] OT registration finalization error', { error: error?.message });
-      return sendAuthError(ws, {
-        message: "Failed to finalize account creation: " + error.message,
-        code: 'REGISTRATION_FINALIZATION_FAILED'
+      SecureStateManager.setState(ws, {
+        registrationConfirmInProgress: false
       });
+      console.error('[AUTH] OT registration confirmation error', {
+        category: 'internal'
+      });
+      return sendAuthError(ws, {
+        message: error?.code === REGISTRATION_RECEIPT_EXPIRED
+          ? 'Registration retry expired. Start registration again.'
+          : error?.code === 'REGISTRATION_ALREADY_COMMITTED'
+            ? 'Account creation was already committed. Sign in to continue.'
+          : 'Failed to confirm account creation',
+        code: error?.code === REGISTRATION_RECEIPT_EXPIRED
+          ? REGISTRATION_RECEIPT_EXPIRED
+          : error?.code === 'REGISTRATION_ALREADY_COMMITTED'
+            ? 'REGISTRATION_ALREADY_COMMITTED'
+          : 'REGISTRATION_CONFIRMATION_FAILED',
+        authRequestId
+      });
+    } finally {
+      releaseVerificationSlot?.();
+      wipeIssuedTokenBatch(issuedTokenBatch);
+      wipeByteArrays(blindedTokenBytes);
+      wipeBytes(registrationAttemptBytes);
+      if (SecureStateManager.getState(ws).registrationConfirmInProgress) {
+        SecureStateManager.setState(ws, {
+          registrationConfirmInProgress: false
+        });
+      }
     }
   }
 
@@ -269,53 +613,212 @@ export class AccountAuthHandler {
    * OT Sign In
    */
   async handleOTSignIn(ws, data) {
+    let authRequestId;
+    let requestCommitmentBytes = null;
+    let blindedElementBytes = null;
+    let clientPublicKeyBytes = [];
+    let computedCommitment = null;
+    let evaluated = null;
+    let serverNonce = null;
+    let createdLoginNonce = null;
+    let challengeDelivered = false;
+    let releaseExpensiveSlot = null;
+    let otRecords = null;
+    let evaluatedElementBase64 = null;
+    let powChallenge = null;
+    let authChannelBinding = null;
     try {
-      const { shardId, clientPubKeys, blindedElement, anonymousTokenData } = data;
-      if (!Number.isInteger(shardId) || shardId < 0 || !Array.isArray(clientPubKeys) || clientPubKeys.length !== OPAQUEServer.getShardSize()) {
-        return sendAuthError(ws, { message: 'Invalid private auth request', code: 'INVALID_PRIVATE_AUTH_REQUEST' });
+      authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+      const authState = SecureStateManager.getState(ws);
+      if (
+        authState.hasAuthenticated ||
+        ws._authenticated ||
+        ws._hasAuthenticated ||
+        authState.pendingRegistration ||
+        authState.registrationFinalizeInProgress ||
+        authState.registrationReadyRecordId ||
+        authState.registrationConfirmInProgress
+      ) {
+        return sendAuthError(ws, { message: 'Authentication already in progress', code: 'AUTH_IN_PROGRESS', authRequestId });
       }
-      
-      // Verify Anonymous Token
-      let redemptionResult = null;
-      if (anonymousTokenData) {
-        const parsedRequest = PrivacyPassHelpers.parseRedemptionRequest(anonymousTokenData);
-        redemptionResult = await this.ppServer.redeemToken(
-          parsedRequest.token,
-          parsedRequest.nullifier,
-          parsedRequest.mac,
-          parsedRequest.tokenSecret,
-          'account-auth'
+
+      const { clientPubKeys, blindedElement } = data;
+      const hasPreflightProof = Object.hasOwn(data, 'preflightPowSolution');
+      const requestKeys = hasPreflightProof
+        ? [
+            'authRequestId',
+            'authChannelBinding',
+            'blindedElement',
+            'clientPubKeys',
+            'preflightPowSolution',
+            'requestCommitment',
+            'type'
+          ]
+        : ['authChannelBinding', 'authRequestId', 'blindedElement', 'requestCommitment', 'type'];
+      if (!hasExactPlainObjectKeys(data, requestKeys)) {
+        ws._authPreflight = null;
+        return sendAuthError(ws, {
+          message: 'Invalid private auth request',
+          code: 'INVALID_PRIVATE_AUTH_REQUEST',
+          authRequestId
+        });
+      }
+      try {
+        requestCommitmentBytes = decodeCanonicalBase64(data?.requestCommitment, HASH_OUTPUT_BYTES, 64);
+      } catch {
+        return sendAuthError(ws, { message: 'Invalid private auth request', code: 'INVALID_PRIVATE_AUTH_REQUEST', authRequestId });
+      }
+
+      if (!await requireAuthPreflight(
+        ws,
+        data,
+        'login',
+        SignalType.AUTH_OT_RESPONSE,
+        data.requestCommitment
+      )) {
+        return { pending: true, preflight: true };
+      }
+      authChannelBinding = consumeVerifiedAuthChannelBinding(data);
+      if (!authChannelBinding) {
+        return sendAuthError(ws, {
+          message: 'Invalid private auth request',
+          code: 'INVALID_PRIVATE_AUTH_REQUEST',
+          authRequestId
+        });
+      }
+
+      releaseExpensiveSlot = await throttleExpensiveAuthRequest(ws._connectionAbortSignal);
+
+      try {
+        blindedElementBytes = decodeCanonicalBase64(blindedElement, OPAQUE_ELEMENT_BYTES);
+        clientPublicKeyBytes = decodeMlKemPublicKeys(
+          clientPubKeys,
+          OPAQUEServer.getAnonymitySetSize()
         );
+      } catch {
+        return sendAuthError(ws, { message: 'Invalid private auth request', code: 'INVALID_PRIVATE_AUTH_REQUEST', authRequestId });
+      }
+      computedCommitment = privateAuthRequestCommitment(
+        blindedElementBytes,
+        clientPublicKeyBytes
+      );
+      if (!crypto.timingSafeEqual(requestCommitmentBytes, computedCommitment)) {
+        return sendAuthError(ws, { message: 'Invalid private auth request', code: 'INVALID_PRIVATE_AUTH_REQUEST', authRequestId });
       }
 
-      // Load the shard from DB
-      const shardRecords = await UserDatabase.getShardRecords(shardId);
+      if (ws._loginRequestInProgress) {
+        return sendAuthError(ws, { message: 'Authentication request already in progress', code: 'AUTH_IN_PROGRESS', authRequestId });
+      }
+      if (ws._loginServerNonce) {
+        const nonceAge = Date.now() - Number(ws._loginServerNonceAt || 0);
+        if (Number.isSafeInteger(nonceAge) && nonceAge >= 0 && nonceAge <= LOGIN_FINALIZE_TTL_MS) {
+          return sendAuthError(ws, { message: 'Authentication finalization required', code: 'AUTH_IN_PROGRESS', authRequestId });
+        }
+        ws._loginServerNonce = null;
+        ws._loginServerNonceAt = null;
+        ws._loginAuthRequestId = null;
+        wipeBytes(ws._loginAuthChannelBinding);
+        ws._loginAuthChannelBinding = null;
+        ws._loginPowSeed = null;
+        ws._loginPowDifficulty = 0;
+      }
+      ws._loginRequestInProgress = true;
 
-      // Perform OPRF evaluation
-      const evaluated = OPAQUEServer.createLoginResponseLocal(
-        Buffer.from(blindedElement, 'base64')
-      );
+      try {
+        try {
+          const privateAuthRecords = await UserDatabase.getPrivateAuthRecords();
 
-      // Encrypt the entire shard for OT
-      const otRecords = await OPAQUEServer.encryptShardForOT(shardRecords, clientPubKeys);
+          evaluated = OPAQUEServer.createLoginResponseLocal(
+            blindedElementBytes
+          );
 
-      // Generate a server nonce for this attempt and bind it to this connection
-      const serverNonce = crypto.randomBytes(32);
-      ws._loginServerNonce = serverNonce.toString('base64');
-      ws._loginServerNonceAt = Date.now();
+          otRecords = await OPAQUEServer.encryptAnonymitySetForOT(
+            privateAuthRecords,
+            clientPublicKeyBytes,
+            ws._connectionAbortSignal
+          );
 
-      // Send back to client
-      await sendSecureMessageChunked(ws, {
-        type: SignalType.AUTH_OT_RESPONSE,
-        otRecords,
-        serverNonce: serverNonce.toString('base64'),
-        evaluatedElement: Buffer.from(evaluated).toString('base64'),
-        redemptionResult: redemptionResult ? PrivacyPassHelpers.formatResponse(redemptionResult) : null
-      });
+          // generate server nonce for attempt
+          serverNonce = crypto.randomBytes(OPAQUE_NONCE_BYTES);
+          createdLoginNonce = serverNonce.toString('base64');
+          ws._loginServerNonce = createdLoginNonce;
+          ws._loginServerNonceAt = Date.now();
+          ws._loginAuthRequestId = authRequestId;
+          ws._loginAuthChannelBinding = authChannelBinding;
+          authChannelBinding = null;
+source.
+          powChallenge = createPowChallenge(await getAuthVerificationDifficulty());
+          ws._loginPowSeed = powChallenge.seed;
+          ws._loginPowDifficulty = powChallenge.difficulty;
+
+          const evaluatedCopy = Buffer.from(evaluated);
+          try {
+            evaluatedElementBase64 = evaluatedCopy.toString('base64');
+          } finally {
+            evaluatedCopy.fill(0);
+          }
+        } finally {
+          releaseExpensiveSlot?.();
+          releaseExpensiveSlot = null;
+          wipeBytes(requestCommitmentBytes);
+          requestCommitmentBytes = null;
+          wipeBytes(blindedElementBytes);
+          blindedElementBytes = null;
+          wipeByteArrays(clientPublicKeyBytes);
+          clientPublicKeyBytes = [];
+          wipeBytes(computedCommitment);
+          computedCommitment = null;
+          wipeBytes(evaluated);
+          evaluated = null;
+          wipeBytes(serverNonce);
+          serverNonce = null;
+        }
+
+        const delivered = await sendSecureAuthResponse(ws, {
+          type: SignalType.AUTH_OT_RESPONSE,
+          authRequestId,
+          otRecords,
+          serverNonce: createdLoginNonce,
+          evaluatedElement: evaluatedElementBase64,
+          powChallenge
+        });
+        if (delivered === false) {
+          throw new Error('Private authentication response was not delivered');
+        }
+        challengeDelivered = true;
+      } finally {
+        ws._loginRequestInProgress = false;
+      }
 
     } catch (error) {
-      cryptoLogger.error('[AUTH] OT login failed', { error: error?.message });
-      return sendAuthError(ws, { message: 'Login request failed', code: 'LOGIN_REQUEST_FAILED' });
+      if (createdLoginNonce && !challengeDelivered && ws._loginServerNonce === createdLoginNonce) {
+        ws._loginServerNonce = null;
+        ws._loginServerNonceAt = null;
+        ws._loginAuthRequestId = null;
+        wipeBytes(ws._loginAuthChannelBinding);
+        ws._loginAuthChannelBinding = null;
+        ws._loginPowSeed = null;
+        ws._loginPowDifficulty = 0;
+      }
+      ws._loginRequestInProgress = false;
+      console.error('[AUTH] OT login failed', { error: error?.message });
+      return sendAuthError(ws, {
+        message: error?.code === AUTH_SERVER_BUSY ? AUTH_SERVICE_BUSY_MESSAGE : 'Login request failed',
+        code: error?.code === AUTH_SERVER_BUSY ? AUTH_SERVER_BUSY : 'LOGIN_REQUEST_FAILED',
+        authRequestId
+      });
+    } finally {
+      releaseExpensiveSlot?.();
+      wipeBytes(requestCommitmentBytes);
+      wipeBytes(blindedElementBytes);
+      wipeByteArrays(clientPublicKeyBytes);
+      wipeBytes(computedCommitment);
+      wipeBytes(evaluated);
+      wipeBytes(serverNonce);
+      wipeBytes(authChannelBinding);
+      otRecords = null;
+      evaluatedElementBase64 = null;
+      powChallenge = null;
     }
   }
 
@@ -323,330 +826,169 @@ export class AccountAuthHandler {
    * OT Sign In finalization
    */
   async handleSignInFinalize(ws, data) {
+    let authRequestId;
+    let authProof = null;
+    let stashedNonceBytes = null;
+    let blindedTokenBytes = [];
+    let issuedTokenBatch = null;
+    let releaseVerificationSlot = null;
+    let issuanceEpoch = null;
+    let stashedAuthChannelBinding = null;
     try {
-      const { authProof, shardId } = data;
-
-      const stashedNonce = ws._loginServerNonce;
-      ws._loginServerNonce = null;
-      ws._loginServerNonceAt = null;
-
-      if (!authProof || !stashedNonce || !Number.isInteger(shardId) || shardId < 0) {
+      try {
+        authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
+      } catch {
         return sendAuthError(ws, { message: 'Invalid login finalization request', code: 'INVALID_FINALIZE_REQUEST' });
       }
+      const stashedNonce = ws._loginServerNonce;
+      const stashedNonceAt = Number(ws._loginServerNonceAt || 0);
+      const stashedAuthRequestId = ws._loginAuthRequestId;
+      stashedAuthChannelBinding = ws._loginAuthChannelBinding;
+      ws._loginServerNonce = null;
+      ws._loginServerNonceAt = null;
+      ws._loginAuthRequestId = null;
+      ws._loginAuthChannelBinding = null;
 
-      const shardRecords = await UserDatabase.getShardRecords(shardId);
-      if (!Array.isArray(shardRecords) || shardRecords.length === 0) {
-        return sendAuthError(ws, { message: 'Authentication failed', code: 'AUTH_FAILED' });
+      const powDifficulty = ws._loginPowDifficulty || 0;
+      const powSeed = ws._loginPowSeed;
+      ws._loginPowSeed = null;
+      ws._loginPowDifficulty = 0;
+
+      const authState = SecureStateManager.getState(ws);
+      if (
+        authState.hasAuthenticated ||
+        ws._authenticated ||
+        ws._hasAuthenticated ||
+        authState.pendingRegistration ||
+        authState.registrationFinalizeInProgress ||
+        authState.registrationReadyRecordId ||
+        authState.registrationConfirmInProgress
+      ) {
+        return sendAuthError(ws, {
+          message: 'Authentication already completed or another flow is in progress',
+          code: 'AUTH_IN_PROGRESS',
+          authRequestId
+        });
       }
 
-      const loginResult = await OPAQUEServer.finishLoginAcrossShard(
-        shardRecords,
-        Buffer.from(authProof, 'base64'),
-        Buffer.from(stashedNonce, 'base64')
-      );
+      if (!hasExactPlainObjectKeys(data, [
+        'authProof',
+        'authRequestId',
+        'blindedTokens',
+        'powSolution',
+        'tokenEpoch',
+        'type'
+      ])) {
+        return sendAuthError(ws, {
+          message: 'Invalid login finalization request',
+          code: 'INVALID_FINALIZE_REQUEST',
+          authRequestId
+        });
+      }
 
-      if (loginResult.success) {
-        // Success then use anonymous session tokens
-        const anonymousSession = await anonymousSessionService.createSessionWithCapabilities();
+      try {
+        authProof = decodeCanonicalBase64(data?.authProof, ML_DSA_87_SIGNATURE_BYTES, 6200);
+        if (!Array.isArray(data?.blindedTokens) || data.blindedTokens.length !== 250) {
+          throw new Error('Invalid blinded token batch');
+        }
+        blindedTokenBytes = decodeCanonicalBase64List(
+          data.blindedTokens,
+          PRIVACY_PASS_BLINDED_TOKEN_BYTES,
+          64
+        );
+        issuanceEpoch = this.ppServer.validateIssuanceEpoch(data.tokenEpoch);
+      } catch {
+        return sendAuthError(ws, { message: 'Invalid login finalization request', code: 'INVALID_FINALIZE_REQUEST', authRequestId });
+      }
 
-        const uniformResponse = OPAQUEServer.generateUniformResponse({
-          success: true,
-          sessionKey: loginResult.sessionKey,
-          anonymousSessionToken: anonymousSession.token,
-          sessionExpiresAt: anonymousSession.expiresAt
-        }, loginResult.sessionKey);
+      const stashedNonceAgeMs = Date.now() - stashedNonceAt;
+      if (
+        !stashedNonce ||
+        !(stashedAuthChannelBinding instanceof Uint8Array) ||
+        stashedAuthChannelBinding.length !== AUTH_CHANNEL_BINDING_BYTES ||
+        stashedAuthRequestId !== authRequestId ||
+        !Number.isSafeInteger(stashedNonceAgeMs) ||
+        stashedNonceAgeMs < 0 ||
+        stashedNonceAgeMs > LOGIN_FINALIZE_TTL_MS
+      ) {
+        return sendAuthError(ws, { message: 'Invalid login finalization request', code: 'INVALID_FINALIZE_REQUEST', authRequestId });
+      }
+      stashedNonceBytes = decodeCanonicalBase64(stashedNonce, OPAQUE_NONCE_BYTES, 64);
 
-        // Issue blind routing credentials if blinded token was provided
-        let blindRouting = null;
-        if (data.blindedToken && !requiresServerEntry(ws)) {
-          try {
-            const { generateCapabilityToken, storeCapabilityToken } = await import('../routing/capability-tokens.js');
+      if (powDifficulty > 0 && !verifyPowSolution(powSeed, powDifficulty, data.powSolution)) {
+        return sendAuthError(ws, { message: PROOF_OF_WORK_REQUIRED_MESSAGE, code: POW_REQUIRED, authRequestId });
+      }
 
-            const cap = generateCapabilityToken();
-            try {
-              await storeCapabilityToken(cap.token, [], {
-                ttl: Math.max(1, Math.floor((cap.expiresAt - Date.now()) / 1000))
-              });
-            } catch (e) {
-              cryptoLogger.warn('[AUTH] Failed to store capability token for login', { error: e?.message });
-            }
+      await applyAdaptiveAuthDelay(ws._connectionAbortSignal);
 
-            const signed = await BlindSignatureIssuer.signBlindedMessage(data.blindedToken);
-            const serverBlindPublicKey = await BlindSignatureIssuer.getPublicKey();
-            blindRouting = {
-              capabilityToken: cap.token,
-              expiresAt: cap.expiresAt,
-              signedBlindedToken: signed.signature,
-              blindSignatureKid: signed.kid,
-              serverBlindPublicKey
-            };
-            cryptoLogger.info('[AUTH] Issued blind routing credentials for login');
-          } catch (e) {
-            cryptoLogger.error('[AUTH] Failed to issue blind routing for login', { error: e?.message });
-          }
-        } else if (data.blindedToken) {
-          cryptoLogger.info('[AUTH] Deferring blind routing credentials until server entry is granted');
+      releaseVerificationSlot = await acquireExpensiveAuthVerificationSlot(ws._connectionAbortSignal);
+      let loginResult;
+      try {
+        issuedTokenBatch = await this.ppServer.issueAccountAuthTokenBatch(
+          blindedTokenBytes,
+          issuanceEpoch,
+          ws._connectionAbortSignal
+        );
+        const privateAuthRecords = await UserDatabase.getPrivateAuthRecords();
+        if (!Array.isArray(privateAuthRecords)) {
+          throw new Error('Private authentication records unavailable');
         }
 
-        await sendSecureMessage(ws, {
+        loginResult = await OPAQUEServer.finishLoginAcrossAnonymitySet(
+          privateAuthRecords,
+          authProof,
+          stashedNonceBytes,
+          stashedAuthChannelBinding,
+          ws._connectionAbortSignal
+        );
+      } finally {
+        releaseVerificationSlot?.();
+        releaseVerificationSlot = null;
+      }
+      if (loginResult.success) {
+        const formattedIssuedTokenBatch = PrivacyPassHelpers.formatResponse(issuedTokenBatch);
+        const delivered = await sendSecureMessage(ws, {
           type: SignalType.AUTH_FULL_SUCCESS,
+          authRequestId,
+          authenticated: true,
           ...serverEntryResponseFields(ws),
-          maskedResult: Buffer.from(uniformResponse).toString('base64'),
-          anonymousSession: {
-            token: anonymousSession.token,
-            expiresAt: anonymousSession.expiresAt,
-            tokenType: 'Anonymous'
-          },
-          blindRouting
+          anonymousTokenBatch: formattedIssuedTokenBatch
         });
+        if (delivered === false) throw new Error('Login success was not delivered');
 
-        ws.clientState = SecureStateManager.setState(ws, {
+        SecureStateManager.setState(ws, {
           hasAuthenticated: true
         });
 
-        cryptoLogger.info('[AUTH] Successful blind login');
+        console.log('[AUTH] Successful blind login');
         return { success: true };
       } else {
-        const uniformResponse = OPAQUEServer.generateUniformResponse({ success: false }, randomBytes(32));
-        await sendSecureMessage(ws, {
-          type: SignalType.AUTH_FULL_SUCCESS,
-          maskedResult: Buffer.from(uniformResponse).toString('base64')
-        });
+        try {
+          await sendSecureMessage(ws, {
+            type: SignalType.AUTH_FULL_SUCCESS,
+            authRequestId,
+            authenticated: false,
+            ...serverEntryResponseFields(ws)
+          });
+        } finally {
+          try {
+            await recordAuthFailure();
+          } catch {
+            ws.close?.(1013, AUTH_SERVICE_UNAVAILABLE_MESSAGE);
+          }
+        }
       }
     } catch (error) {
-      cryptoLogger.error('[AUTH] Login finalization failed', { error: error?.message });
-      return sendAuthError(ws, { message: 'Login finalization failed', code: 'LOGIN_FINALIZATION_FAILED' });
+      console.error('[AUTH] Login finalization failed', { error: error?.message });
+      return sendAuthError(ws, { message: 'Login finalization failed', code: 'LOGIN_FINALIZATION_FAILED', authRequestId });
+    } finally {
+      releaseVerificationSlot?.();
+      wipeIssuedTokenBatch(issuedTokenBatch);
+      wipeBytes(authProof);
+      wipeBytes(stashedNonceBytes);
+      wipeBytes(stashedAuthChannelBinding);
+      wipeByteArrays(blindedTokenBytes);
     }
   }
 
-  /**
-   * Blind signature request
-   */
-  async handleBlindSignatureRequest(ws, blindedToken) {
-    const state = SecureStateManager.getState(ws);
-    if (!state.hasPassedAccountLogin) {
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication required");
-    }
-
-    try {
-      const signed = await BlindSignatureIssuer.signBlindedMessage(blindedToken);
-      const serverBlindPublicKey = await BlindSignatureIssuer.getPublicKey();
-
-      await sendSecureMessage(ws, {
-        type: SignalType.BLIND_SIGNATURE_RESPONSE,
-        signedBlindedToken: signed.signature,
-        blindSignatureKid: signed.kid,
-        serverBlindPublicKey
-      });
-    } catch (e) {
-      cryptoLogger.error('[AUTH] Blind signature failed', { error: e?.message });
-    }
-  }
-
-  /**
-   * Process device proof response
-   */
-  async processDeviceProofResponse(ws, msgString) {
-    try {
-      const data = JSON.parse(msgString);
-      const proofPayload = typeof data.proof === 'string' ? JSON.parse(data.proof) : data.proof;
-      const verifyResult = await this.zkVerifier.verifyProof(data.challengeId, proofPayload);
-
-      if (!verifyResult.valid) {
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid proof");
-      }
-
-      if (data.blindedTokens) {
-        const tokenBatch = await this.ppServer.issueTokenBatch(
-          data.blindedTokens.map(t => Buffer.from(t, 'base64')),
-          Buffer.from(verifyResult.proofId)
-        );
-
-        await sendSecureMessage(ws, {
-          type: SignalType.PRIVACY_PASS_ISSUANCE,
-          ...PrivacyPassHelpers.formatResponse(tokenBatch)
-        });
-      }
-
-      return { success: true };
-    } catch (e) {
-      cryptoLogger.error('[AUTH] ZK proof error', { error: e?.message });
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Verification failed");
-    }
-  }
-
-  /**
-   * Handle ZK challenge request
-   */
-  async handleZKChallengeRequest(ws) {
-    try {
-      const challengeData = await this.zkVerifier.generateChallenge();
-      await sendSecureMessage(ws, {
-        type: SignalType.ZK_REFRESH_CHALLENGE,
-        ...DeviceCommitmentHelpers.formatChallengeResponse(challengeData)
-      });
-    } catch (e) {
-      cryptoLogger.error('[AUTH] ZK challenge error', { error: e?.message });
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Failed to generate challenge");
-    }
-  }
-
-  /**
-   * Register ring public key for ZK proofs
-   */
-  async handleZKDeviceRegisterRequest(ws, data) {
-    const state = SecureStateManager.getState(ws);
-    if (!state.hasPassedAccountLogin && !state.hasAuthenticated) {
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication required");
-    }
-
-    try {
-      const { ringPublicKey } = DeviceCommitmentHelpers.parseRegistrationRequest(data || {});
-      const commitmentHash = await this.zkVerifier.registerDeviceCommitment(ringPublicKey);
-      await sendSecureMessage(ws, {
-        type: SignalType.ZK_DEVICE_REGISTER_RESPONSE,
-        success: true,
-        commitmentHash
-      });
-    } catch (e) {
-      cryptoLogger.error('[AUTH] ZK device registration failed', { error: e?.message });
-      await sendSecureMessage(ws, {
-        type: SignalType.ZK_DEVICE_REGISTER_RESPONSE,
-        success: false,
-        error: 'registration_failed'
-      });
-    }
-  }
-
-  /**
-   * Process authentication request
-   */
-  async processAuthRequest(ws, str) {
-    if (!str || typeof str !== 'string') {
-      cryptoLogger.warn('[AUTH] Invalid authentication request format');
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request format");
-    }
-
-    if (str.length > 1048576) {
-      cryptoLogger.warn('[AUTH] Authentication request too large');
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Request too large");
-    }
-
-    try {
-      const parsed = JSON.parse(str);
-      const {
-        type,
-        blindedElement,
-        blindedToken,
-        blindedTokens,
-        proofOfKnowledge
-      } = parsed;
-
-      if (!parsed || typeof parsed !== 'object') {
-        cryptoLogger.warn('[AUTH] Invalid authentication data structure');
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request structure");
-      }
-
-      // Verify request signature only if a client public key is already known for this connection
-      if (ws.clientPublicKey) {
-        const signatureHeader = ws.headers?.['x-request-signature'];
-        if (!signatureHeader) {
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Missing request signature");
-        }
-        if (!(await this.verifyRequestSignature(str, signatureHeader, ws))) {
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request signature");
-        }
-      }
-
-      // Extract credentialId from request
-      let credentialId = parsed.credentialId || null;
-
-      // Validate credentialId format
-      if (credentialId) {
-        if (typeof credentialId !== 'string' || credentialId.length < 32 || !/^[a-f0-9]+$/i.test(credentialId)) {
-          cryptoLogger.warn('[AUTH] Invalid credentialId format');
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid credential ID format");
-        }
-      }
-
-      // Route to OT-based handlers
-      switch (type) {
-        case SignalType.AUTH_OT_REGISTER_REQUEST:
-          cryptoLogger.info('[AUTH] Handling OT registration request');
-          return this.handleOTRegisterRequest(ws, parsed);
-        case SignalType.AUTH_OT_REGISTER_FINALIZE:
-          cryptoLogger.info('[AUTH] Handling OT registration finalize');
-          return this.handleOTRegisterFinalize(ws, parsed);
-        case SignalType.BLIND_SIGNATURE_REQUEST:
-          cryptoLogger.info('[AUTH] Handling blind signature request');
-          return this.handleBlindSignatureRequest(ws, blindedToken);
-        case SignalType.ZK_REFRESH_CHALLENGE:
-          cryptoLogger.info('[AUTH] Handling ZK refresh challenge');
-          return this.handleZKChallengeRequest(ws);
-        case SignalType.ZK_DEVICE_REGISTER:
-          cryptoLogger.info('[AUTH] Handling ZK device register');
-          return this.handleZKDeviceRegisterRequest(ws, parsed);
-        case SignalType.ZK_PROOF_RESPONSE:
-          cryptoLogger.info('[AUTH] Handling ZK proof response');
-          return this.processDeviceProofResponse(ws, str);
-        case SignalType.AUTH_OT_REQUEST:
-          cryptoLogger.info('[AUTH] Handling blind OT sign in');
-          return this.handleOTSignIn(ws, parsed);
-        case SignalType.AUTH_OT_FINALIZE:
-          cryptoLogger.info('[AUTH] Handling blind OT login finalize');
-          return this.handleSignInFinalize(ws, parsed);
-        case SignalType.SERVER_ENTRY_REQUEST:
-          cryptoLogger.info('[AUTH] Handling server entry request');
-          return this.gatekeeper.handleEntryRequest(ws, blindedElement);
-        case SignalType.SERVER_ENTRY_TOKEN_ISSUANCE:
-          cryptoLogger.info('[AUTH] Handling server entry token issuance');
-          return this.gatekeeper.handleTokenIssuance(ws, blindedTokens, proofOfKnowledge);
-        default:
-          cryptoLogger.warn('[AUTH] Invalid auth type', { type });
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid auth type");
-      }
-    } catch (error) {
-      cryptoLogger.error('[AUTH] Auth processing error', { error: error?.message });
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
-    }
-  }
-
-  /**
-   * Verify request signature
-   */
-  async verifyRequestSignature(data, signature, ws) {
-    const clientKeyBase64 = ws.clientPublicKey;
-    if (!clientKeyBase64) return false;
-    try {
-      const publicKey = new Uint8Array(Buffer.from(clientKeyBase64, 'base64'));
-      const msg = Buffer.from(String(data), 'utf8');
-      const sig = Buffer.from(signature, 'base64');
-      return ml_dsa87.verify(sig, msg, publicKey);
-    } catch {
-      return false;
-    }
-  }
-}
-
-/**
- * Server Authentication Handler
- *  will implement soon.
- * Manages admin-level and server-specific authentication tasks.
- */
-export class ServerAuthHandler {
-  constructor(serverHybridKeyPair, db, serverConfig) {
-    this.serverHybridKeyPair = serverHybridKeyPair;
-    this.db = db;
-    this.serverConfig = serverConfig;
-    this.gatekeeper = new ServerGatekeeper(db);
-  }
-
-  /**
-   * Handle server-level operations if any
-   * Currently delegates to Gatekeeper for anonymous entry
-   */
-  async handleServerOperation() {
-    cryptoLogger.info('[SERVER-AUTH] Processing server-level operation');
-    // TODO: implementation for admin/server tasks
-  }
 }

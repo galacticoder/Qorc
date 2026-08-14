@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useTheme } from 'next-themes';
+import { useTheme } from '../../contexts/ThemeContext';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { RefreshCw } from 'lucide-react';
 import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { screenSharingSettings } from '../../lib/database/screen-sharing-settings';
 import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
-import { file, notifications as tauriNotifications, database, tray } from '../../lib/tauri-bindings';
+import { notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
+import { copyTextToClipboard } from '../../lib/clipboard';
 import {
   hasPrototypePollutionKeys,
   isPlainObject,
@@ -32,14 +34,13 @@ import {
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { AppSettingsStyles } from './sections/AppSettingsStyles';
+import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 
 interface AppSettingsProps {
-  passphraseRef?: React.RefObject<string>;
-  kyberSecretRef?: React.RefObject<Uint8Array | null>;
   currentUsername?: string;
   currentDisplayName?: string;
   onLogout?: () => void | Promise<void>;
-  findUser?: (handle: string, opts?: { forceRefresh?: boolean }) => Promise<unknown>;
+  findUser?: (handle: string, opts?: { forceRefresh?: boolean; monitorContact?: boolean }) => Promise<unknown>;
 }
 
 interface NotificationSettings {
@@ -180,8 +181,6 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
 });
 
 export const AppSettings = React.memo(function AppSettings({
-  passphraseRef,
-  kyberSecretRef,
   currentUsername = '',
   currentDisplayName = '',
   onLogout,
@@ -190,14 +189,11 @@ export const AppSettings = React.memo(function AppSettings({
   const { theme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionId>('account');
-  const [downloadSettings, setDownloadSettings] = useState({ downloadPath: '', autoSave: false });
-  const [isChoosingPath, setIsChoosingPath] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const clearArmTimerRef = useRef<number | null>(null);
   const [logoutArmed, setLogoutArmed] = useState(false);
   const logoutTimerRef = useRef<number | null>(null);
-  const [isCompactingDatabase, setIsCompactingDatabase] = useState(false);
   const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true, sound: true });
   const [audioSettings, setAudioSettings] = useState<AudioSettings>({ noiseSuppression: true, echoCancellation: true });
   const [closeToTray, setCloseToTray] = useState(true);
@@ -209,6 +205,8 @@ export const AppSettings = React.memo(function AppSettings({
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const devicesLoadingRef = useRef(false);
   const [preferredMicId, setPreferredMicId] = useState('');
   const [preferredSpeakerId, setPreferredSpeakerId] = useState('');
   const [preferredCameraId, setPreferredCameraId] = useState('');
@@ -229,7 +227,7 @@ export const AppSettings = React.memo(function AppSettings({
   const themeClass = activeTheme === 'light' ? 'light' : 'dark';
   const displayUsername = currentDisplayName || currentUsername || 'User';
   const copyUsername = currentDisplayName || currentUsername || '';
-  const blockingKeyAvailable = Boolean(passphraseRef?.current || kyberSecretRef?.current);
+  const blockingAvailable = Boolean(currentUsername);
 
   const visibleResolutions = useMemo(
     () => visibleResolutionIds
@@ -246,17 +244,14 @@ export const AppSettings = React.memo(function AppSettings({
     preferredCameraId: string;
   }>) => {
     try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
+      const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
       const parsed = stored ? JSON.parse(stored) : {};
-      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, ...updates }));
+      syncEncryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, JSON.stringify({ ...parsed, ...updates }));
     } catch { }
   }, []);
 
   const loadBlockedUsers = useCallback(async () => {
-    const passphrase = passphraseRef?.current;
-    const kyberSecret = kyberSecretRef?.current || null;
-
-    if (!passphrase && !kyberSecret) {
+    if (!blockingAvailable) {
       setBlockedUsersError('Please log in.');
       setBlockedUsers([]);
       return;
@@ -266,8 +261,7 @@ export const AppSettings = React.memo(function AppSettings({
     setBlockedUsersError(null);
 
     try {
-      const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
-      const users = await blockingSystem.getBlockedUsers(key);
+      const users = await blockingSystem.getBlockedUsers();
       setBlockedUsers(users);
     } catch (error) {
       console.error('Error loading blocked users:', error);
@@ -276,39 +270,39 @@ export const AppSettings = React.memo(function AppSettings({
     } finally {
       setBlockedUsersLoading(false);
     }
-  }, [passphraseRef, kyberSecretRef]);
+  }, [blockingAvailable]);
+
+  const refreshMediaDevices = useCallback(async () => {
+    if (devicesLoadingRef.current) return;
+    devicesLoadingRef.current = true;
+    setDevicesLoading(true);
+    try {
+      if (!await system.requestMediaAccess('enumerate')) return;
+      const devices = await navigator.mediaDevices?.enumerateDevices?.();
+      if (!Array.isArray(devices) || devices.length > 128) {
+        throw new Error('Invalid media device list');
+      }
+      setMicDevices(devices.filter((device) => device.kind === 'audioinput'));
+      setSpeakerDevices(devices.filter((device) => device.kind === 'audiooutput'));
+      setCameraDevices(devices.filter((device) => device.kind === 'videoinput'));
+    } catch {
+      toast.error('Could not load media devices');
+    } finally {
+      devicesLoadingRef.current = false;
+      setDevicesLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
   useEffect(() => {
-    const initDownloadSettings = async () => {
-      try {
-        const settings = await file.getDownloadSettings();
-        setDownloadSettings({
-          downloadPath: settings.download_path || '',
-          autoSave: !settings.ask_where_to_save,
-        });
-      } catch { }
-    };
-
     const initTraySettings = async () => {
       try {
         setCloseToTray(await tray.getCloseToTray());
       } catch { }
       setIsTrayLoading(false);
-    };
-
-    const loadDevices = async () => {
-      try {
-        const devices = await navigator.mediaDevices?.enumerateDevices?.() ?? [];
-        setMicDevices(devices.filter((device) => device.kind === 'audioinput'));
-        setSpeakerDevices(devices.filter((device) => device.kind === 'audiooutput'));
-        setCameraDevices(devices.filter((device) => device.kind === 'videoinput'));
-      } catch (error) {
-        console.error('[AppSettings] Failed to enumerate devices:', error);
-      }
     };
 
     const initProfilePicture = async () => {
@@ -321,13 +315,11 @@ export const AppSettings = React.memo(function AppSettings({
       }
     };
 
-    initDownloadSettings();
     initTraySettings();
-    loadDevices();
     initProfilePicture();
 
     try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
+      const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed.notifications) {
@@ -398,14 +390,14 @@ export const AppSettings = React.memo(function AppSettings({
   }, []);
 
   useEffect(() => {
-    if (blockingKeyAvailable) {
+    if (blockingAvailable) {
       loadBlockedUsers();
     }
-  }, [blockingKeyAvailable, loadBlockedUsers]);
+  }, [blockingAvailable, loadBlockedUsers]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && blockingKeyAvailable) {
+      if (document.visibilityState === 'visible' && blockingAvailable) {
         loadBlockedUsers();
       }
     };
@@ -426,7 +418,7 @@ export const AppSettings = React.memo(function AppSettings({
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
         if (!sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH)) return;
 
-        if (blockingKeyAvailable) {
+        if (blockingAvailable) {
           loadBlockedUsers();
         }
       } catch { }
@@ -439,24 +431,18 @@ export const AppSettings = React.memo(function AppSettings({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
     };
-  }, [blockingKeyAvailable, loadBlockedUsers]);
+  }, [blockingAvailable, loadBlockedUsers]);
 
   const handleCopyUsername = async () => {
     if (!copyUsername) return;
 
     try {
-      await navigator.clipboard?.writeText(copyUsername);
+      await copyTextToClipboard(copyUsername);
+      setCopiedUsername(true);
+      window.setTimeout(() => setCopiedUsername(false), 900);
     } catch {
-      const input = document.createElement('input');
-      input.value = copyUsername;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      input.remove();
+      toast.error('Could not copy username');
     }
-
-    setCopiedUsername(true);
-    window.setTimeout(() => setCopiedUsername(false), 900);
   };
 
   const handleAvatarChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -522,27 +508,6 @@ export const AppSettings = React.memo(function AppSettings({
     saveSettings({ audioSettings: updated });
   };
 
-  const handleChooseDownloadPath = async () => {
-    if (isChoosingPath) return;
-    setIsChoosingPath(true);
-    try {
-      const newPath = await file.chooseDownloadPath();
-      if (newPath) {
-        const ok = await file.setDownloadPath(newPath);
-        if (ok) {
-          setDownloadSettings((prev) => ({ ...prev, downloadPath: newPath }));
-          toast.success('Download path updated');
-        } else {
-          toast.error('Failed to update download path');
-        }
-      }
-    } catch {
-      toast.error('Failed to change download path');
-    } finally {
-      setIsChoosingPath(false);
-    }
-  };
-
   const handleDevicePreference = (
     key: 'preferredMicId' | 'preferredSpeakerId' | 'preferredCameraId',
     value: string
@@ -565,20 +530,6 @@ export const AppSettings = React.memo(function AppSettings({
 
   const handleQualityChange = (quality: QualityOption) => {
     screenSharingSettings.setQuality(quality).catch(() => toast.error('Failed to update quality'));
-  };
-
-  const handleCompactDatabase = async () => {
-    if (isCompactingDatabase) return;
-    setIsCompactingDatabase(true);
-    try {
-      await database.compact();
-      toast.success('Database compacted successfully');
-    } catch (error) {
-      toast.error('Failed to compact database');
-      console.error(error);
-    } finally {
-      setIsCompactingDatabase(false);
-    }
   };
 
   const armClearData = useCallback(() => {
@@ -604,7 +555,7 @@ export const AppSettings = React.memo(function AppSettings({
 
     setIsClearingData(true);
     try {
-      await encryptedStorage.setItem('app_settings_v1', '');
+      await encryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, '');
       window.location.reload();
     } catch {
       toast.error('Failed to clear data');
@@ -656,9 +607,7 @@ export const AppSettings = React.memo(function AppSettings({
     const username = blockInput.trim();
     if (!username || blockChecking) return;
 
-    const passphrase = passphraseRef?.current;
-    const kyberSecret = kyberSecretRef?.current || null;
-    if (!passphrase && !kyberSecret) {
+    if (!blockingAvailable) {
       setBlockModalError('Please log in.');
       return;
     }
@@ -685,7 +634,7 @@ export const AppSettings = React.memo(function AppSettings({
       if (findUser) {
         let exists = false;
         try {
-          exists = Boolean(await findUser(username));
+          exists = Boolean(await findUser(username, { monitorContact: false }));
         } catch {
           setBlockModalError("Couldn't verify that username right now. Check your connection and try again.");
           setBlockChecking(false);
@@ -698,8 +647,7 @@ export const AppSettings = React.memo(function AppSettings({
         }
       }
 
-      const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
-      await blockingSystem.blockUser(username, key);
+      await blockingSystem.blockUser(username);
       await loadBlockedUsers();
       setBlockModalOpen(false);
     } catch (error) {
@@ -708,7 +656,7 @@ export const AppSettings = React.memo(function AppSettings({
     } finally {
       setBlockChecking(false);
     }
-  }, [blockInput, blockChecking, passphraseRef, kyberSecretRef, currentUsername, blockedUsers, findUser, loadBlockedUsers]);
+  }, [blockInput, blockChecking, blockingAvailable, currentUsername, blockedUsers, findUser, loadBlockedUsers]);
 
   const openUnblockModal = useCallback((username: string) => {
     setUnblockTarget(username);
@@ -721,9 +669,7 @@ export const AppSettings = React.memo(function AppSettings({
 
   const confirmUnblock = useCallback(async () => {
     if (!unblockTarget || unblocking) return;
-    const passphrase = passphraseRef?.current;
-    const kyberSecret = kyberSecretRef?.current || null;
-    if (!passphrase && !kyberSecret) {
+    if (!blockingAvailable) {
       setBlockedUsersError('Please log in.');
       setUnblockTarget(null);
       return;
@@ -732,8 +678,7 @@ export const AppSettings = React.memo(function AppSettings({
     setUnblocking(true);
     setBlockedUsersError(null);
     try {
-      const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
-      await blockingSystem.unblockUser(unblockTarget, key);
+      await blockingSystem.unblockUser(unblockTarget);
       await loadBlockedUsers();
       setUnblockTarget(null);
     } catch (error) {
@@ -742,7 +687,7 @@ export const AppSettings = React.memo(function AppSettings({
     } finally {
       setUnblocking(false);
     }
-  }, [unblockTarget, unblocking, passphraseRef, kyberSecretRef, loadBlockedUsers]);
+  }, [unblockTarget, unblocking, blockingAvailable, loadBlockedUsers]);
 
   if (!mounted) return null;
 
@@ -843,15 +788,6 @@ export const AppSettings = React.memo(function AppSettings({
                   </div>
 
                   <div className="account-actions">
-                    <div className="account-action-row">
-                      <div>
-                        <div className="setting-label">Compact Database</div>
-                        <div className="setting-description">Optimize storage by removing deleted data and defragmenting the local database.</div>
-                      </div>
-                      <button className="action" type="button" disabled={isCompactingDatabase} onClick={handleCompactDatabase}>
-                        {isCompactingDatabase ? 'Compacting' : 'Compact'}
-                      </button>
-                    </div>
                     <div className="account-action-row account-danger-row">
                       <div>
                         <div className="setting-label" style={{ color: 'var(--danger)' }}>Clear All Data</div>
@@ -935,24 +871,6 @@ export const AppSettings = React.memo(function AppSettings({
                   </div>
                 </div>
               </div>
-
-              <div className="settings-section">
-                <h3 className="section-title">Files</h3>
-                <div className="settings-list">
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Download Location</div>
-                      <div className="setting-description">Choose where downloaded files are saved.</div>
-                    </div>
-                    <div className="input-line">
-                      <input className="text-input" value={downloadSettings.downloadPath || '~/Downloads/Qor'} readOnly aria-label="Download location" />
-                      <button className="action" type="button" disabled={isChoosingPath} onClick={handleChooseDownloadPath}>
-                        {isChoosingPath ? 'Choosing' : 'Browse'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
             </section>
 
             <section className={`pane ${activeSection === 'audio' ? 'active' : ''}`} data-settings-pane="audio">
@@ -987,6 +905,21 @@ export const AppSettings = React.memo(function AppSettings({
               <div className="settings-section">
                 <h3 className="section-title">Device Selection</h3>
                 <div className="settings-list">
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">Available devices</div>
+                    </div>
+                    <button
+                      className="action"
+                      type="button"
+                      disabled={devicesLoading}
+                      aria-label="Refresh media devices"
+                      title="Refresh media devices"
+                      onClick={() => { void refreshMediaDevices(); }}
+                    >
+                      <RefreshCw className={devicesLoading ? 'animate-spin' : ''} size={16} />
+                    </button>
+                  </div>
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Microphone</div>
@@ -1121,7 +1054,7 @@ export const AppSettings = React.memo(function AppSettings({
                   <button
                     className="action"
                     type="button"
-                    disabled={!blockingKeyAvailable}
+                    disabled={!blockingAvailable}
                     onClick={openBlockModal}
                   >
                     Block a user

@@ -1,151 +1,180 @@
 /**
- * OPRF Token Billboard
- * 
- * Stores opaque encrypted discovery blobs indexed by an OPRF-derived token
+ * Opaque discovery publication store
  */
 
-import { getPgPool, privateLookupId, cryptoLogger } from './core.js';
-import crypto from 'crypto';
+import { getPgPool, withTransaction } from './core.js';
+import { selectRandomRankEvictionIds } from './random-rank-eviction.js';
+import {
+  DISCOVERY_BLOB_BASE64_CHARS,
+  DISCOVERY_STORED_PUBLICATION_CAP,
+  isCanonicalDiscoveryBlob,
+  isCanonicalDiscoveryBucketIds
+} from '../discovery/bucket-layout.js';
+import { HEX_64_RE } from '../utils/patterns.js';
 
-function discoveryTokenLookup(token) {
-  return privateLookupId('discovery-token-v2', token);
-}
+const DISCOVERY_BLOB_FETCH_MAX = 512;
 
-export function deriveDiscoveryPirSlotKey(token) {
-  const normalized = typeof token === 'string' ? token.trim().toLowerCase() : '';
-  if (!/^[a-f0-9]{64}$/i.test(normalized)) {
-    throw new Error('invalid_discovery_token_for_pir_slot');
-  }
-  return crypto
-    .createHash('sha256')
-    .update('qor-discovery-pir-slot-key-v1')
-    .update('\0')
-    .update(normalized)
-    .update('\0')
-    .digest('base64url');
+function isPublishId(value) {
+  return typeof value === 'string' && HEX_64_RE.test(value);
 }
 
 export class DiscoveryDB {
-  // Store or refresh one account's K-anon discovery entry for the current epoch
-  static async storeBucketEntry(epochId, bucketId, publishId, encryptedBlob, expiresAt, publishedAt = Date.now()) {
-    const eid = typeof epochId === 'string' ? epochId.trim() : '';
-    const bid = Number.isInteger(bucketId) ? bucketId : Number.parseInt(bucketId, 10);
-    const pid = typeof publishId === 'string' ? publishId.trim() : '';
-    if (!eid || !Number.isInteger(bid) || bid < 0 || !pid || !/^[a-f0-9]{16,128}$/i.test(pid) || !encryptedBlob) {
-      cryptoLogger.warn('[DB][DISCOVERY] store rejected - missing/invalid fields', {
-        hasEpoch: !!eid, bucketIdValid: Number.isInteger(bid) && bid >= 0, hasPublishId: !!pid, hasBlob: !!encryptedBlob
-      });
+  static async storePublication(publishId, bucketIds, encryptedBlob, expiresAt) {
+    const now = Date.now();
+    if (
+      !isPublishId(publishId) ||
+      !isCanonicalDiscoveryBucketIds(bucketIds) ||
+      !isCanonicalDiscoveryBlob(encryptedBlob) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= now
+    ) {
       return 0;
     }
 
-    try {
-      const pool = await getPgPool();
-      const res = await pool.query(
-        `INSERT INTO discovery_billboard ("epochId", "bucketId", "publishId", "encryptedBlob", "expiresAt", "publishedAt")
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT ("epochId", "publishId") DO UPDATE SET
-           "bucketId" = EXCLUDED."bucketId",
-           "encryptedBlob" = EXCLUDED."encryptedBlob",
-           "expiresAt" = EXCLUDED."expiresAt",
-           "publishedAt" = EXCLUDED."publishedAt"`,
-        [eid, bid, pid, encryptedBlob, expiresAt, publishedAt]
-      );
-      cryptoLogger.info('[DB][DISCOVERY] store ok', {
-        bucketId: bid,
-        encryptedBlobLen: typeof encryptedBlob === 'string' ? encryptedBlob.length : null,
-        expiresAt, publishedAt, rowCount: res?.rowCount ?? null
-      });
-      return res?.rowCount ?? 1;
-    } catch (error) {
-      cryptoLogger.error('[DB][DISCOVERY] store failed', {
-        error: error?.message || String(error)
-      });
-      return 0;
-    }
-  }
-
-  // Return a target free private retrieval snapshot
-  static async snapshotActive(maxRows = 50000) {
-    try {
-      const capped = Math.min(Math.max(Number(maxRows) || 50000, 1), 200000);
-      const pool = await getPgPool();
-      const { rows } = await pool.query(
-        `SELECT "epochId", "bucketId", "encryptedBlob", "expiresAt", "publishedAt" FROM discovery_billboard
-         WHERE "expiresAt" > $1
-         ORDER BY "expiresAt" DESC
-         LIMIT $2`,
-        [Date.now(), capped]
-      );
-      return rows.map((row) => ({
-        epochId: row.epochId,
-        bucketId: row.bucketId,
-        encryptedBlob: row.encryptedBlob,
-        expiresAt: row.expiresAt,
-        publishedAt: row.publishedAt
-      }));
-    } catch (error) {
-      cryptoLogger.error('[DB][DISCOVERY] snapshot failed', {
-        error: error?.message || String(error)
-      });
-      return [];
-    }
-  }
-
-  static async snapshotSince(publishedAfter, maxRows = 50000) {
-    try {
-      const capped = Math.min(Math.max(Number(maxRows) || 50000, 1), 200000);
-      const since = Math.max(0, Math.trunc(Number(publishedAfter) || 0));
-      const pool = await getPgPool();
-      const { rows } = await pool.query(
-        `SELECT "epochId", "bucketId", "encryptedBlob", "expiresAt", "publishedAt" FROM discovery_billboard
-         WHERE "expiresAt" > $1 AND "publishedAt" > $2
-         ORDER BY "publishedAt" DESC
-         LIMIT $3`,
-        [Date.now(), since, capped]
-      );
-      return rows.map((row) => ({
-        epochId: row.epochId,
-        bucketId: row.bucketId,
-        encryptedBlob: row.encryptedBlob,
-        expiresAt: row.expiresAt,
-        publishedAt: row.publishedAt
-      }));
-    } catch (error) {
-      cryptoLogger.error('[DB][DISCOVERY] delta snapshot failed', {
-        error: error?.message || String(error)
-      });
-      return [];
-    }
-  }
-
-  // Cleanup expired entries
-  static async cleanup() {
     try {
       const pool = await getPgPool();
       const result = await pool.query(
-        'DELETE FROM discovery_billboard WHERE "expiresAt" < $1',
-        [Date.now()]
+        `INSERT INTO discovery_billboard ("publishId", "bucketIds", "encryptedBlob", "expiresAt")
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT ("publishId") DO UPDATE SET
+           "bucketIds" = EXCLUDED."bucketIds",
+           "encryptedBlob" = EXCLUDED."encryptedBlob",
+           "expiresAt" = EXCLUDED."expiresAt"`,
+        [publishId, bucketIds, encryptedBlob, expiresAt]
       );
-      const count = result.rowCount || 0;
-      if (count > 0) {
-        cryptoLogger.info('[DB] Cleaned up expired discovery entries', { count });
-      }
-      return count;
+      return result?.rowCount ?? 0;
     } catch (error) {
-      cryptoLogger.error('[DB] Error cleaning up discovery entries', { error: error?.message });
+      console.error('[DB][DISCOVERY] publication store failed', {
+        error: error?.message || String(error)
+      });
       return 0;
     }
   }
 
-  // Get entry count
-  static async getCount() {
+  static async snapshotActiveMetadata(maxRows = 4096, maxBytes = null) {
+    const capped = Number.isSafeInteger(maxRows)
+      ? Math.min(Math.max(maxRows, 1), 100_000)
+      : 4096;
+    const byteCap = Number.isSafeInteger(maxBytes) && maxBytes > 0
+      ? maxBytes
+      : null;
+    const rowLimit = byteCap === null
+      ? capped
+      : Math.min(capped, Math.floor(byteCap / DISCOVERY_BLOB_BASE64_CHARS));
+
     try {
       const pool = await getPgPool();
-      const { rows } = await pool.query('SELECT COUNT(*) FROM discovery_billboard');
-      return parseInt(rows[0].count, 10);
+      const { rows } = await pool.query(
+        `SELECT "publishId", "bucketIds", "expiresAt"
+         FROM discovery_billboard
+         WHERE "expiresAt" > $1
+         ORDER BY "expiresAt" DESC, "publishId" ASC
+         LIMIT $2`,
+        [Date.now(), rowLimit]
+      );
+
+      const normalized = rows.map((row) => ({
+          publishId: row.publishId,
+          bucketIds: row.bucketIds,
+          expiresAt: Number(row.expiresAt)
+        }));
+      if (normalized.some((row) => !(
+          isPublishId(row.publishId) &&
+          isCanonicalDiscoveryBucketIds(row.bucketIds) &&
+          Number.isSafeInteger(row.expiresAt)
+        ))) {
+        throw new Error('invalid_discovery_snapshot_row');
+      }
+      const validatedAt = Date.now();
+      return normalized.filter((row) => row.expiresAt > validatedAt);
     } catch (error) {
-      cryptoLogger.error('[DB] Error counting discovery entries', { error: error?.message });
+      console.error('[DB][DISCOVERY] snapshot failed');
+      throw error;
+    }
+  }
+
+  static async getActiveBlobsByPublishIds(publishIds) {
+    if (!Array.isArray(publishIds) || publishIds.length < 1 || publishIds.length > DISCOVERY_BLOB_FETCH_MAX) {
+      throw new Error('invalid_discovery_blob_selection');
+    }
+    const ids = Array.from(new Set(publishIds));
+    if (ids.length !== publishIds.length || ids.some((publishId) => !isPublishId(publishId))) {
+      throw new Error('invalid_discovery_blob_selection');
+    }
+
+    try {
+      const pool = await getPgPool();
+      const { rows } = await pool.query(
+        `SELECT "publishId", "encryptedBlob"
+         FROM discovery_billboard
+         WHERE "expiresAt" > $1 AND "publishId" = ANY($2::text[])`,
+        [Date.now(), ids]
+      );
+      const blobs = new Map();
+      for (const row of rows) {
+        if (!isPublishId(row.publishId) || !isCanonicalDiscoveryBlob(row.encryptedBlob)) {
+          throw new Error('invalid_discovery_blob_row');
+        }
+        blobs.set(row.publishId, row.encryptedBlob);
+      }
+      return blobs;
+    } catch (error) {
+      console.error('[DB][DISCOVERY] selected blob fetch failed');
+      throw error;
+    }
+  }
+
+  static async cleanup() {
+    let removed = 0;
+    try {
+      const pool = await getPgPool();
+      const result = await pool.query(
+        'DELETE FROM discovery_billboard WHERE "expiresAt" <= $1',
+        [Date.now()]
+      );
+      removed = result.rowCount || 0;
+    } catch (error) {
+      console.error('[DB][DISCOVERY] cleanup failed', { error: error?.message || String(error) });
+    }
+    return removed + await this.enforceCap(DISCOVERY_STORED_PUBLICATION_CAP);
+  }
+
+  static async enforceCap(maxRows = DISCOVERY_STORED_PUBLICATION_CAP) {
+    const cap = Number.isSafeInteger(maxRows)
+      ? Math.min(Math.max(maxRows, 1), 100_000)
+      : DISCOVERY_STORED_PUBLICATION_CAP;
+    let client;
+    try {
+      const pool = await getPgPool();
+      client = await pool.connect();
+      return await withTransaction(client, async () => {
+        await client.query('SELECT pg_advisory_xact_lock(1364156996)');
+        await client.query('LOCK TABLE discovery_billboard IN SHARE ROW EXCLUSIVE MODE');
+        const expired = await client.query(
+          'DELETE FROM discovery_billboard WHERE "expiresAt" <= $1',
+          [Date.now()]
+        );
+        const { rows } = await client.query('SELECT "publishId" FROM discovery_billboard');
+        if (rows.length <= cap) return expired?.rowCount ?? 0;
+
+        const evictedIds = selectRandomRankEvictionIds(
+          rows.map((row) => row?.publishId),
+          cap,
+          isPublishId
+        );
+        const evicted = await client.query(
+          'DELETE FROM discovery_billboard WHERE "publishId" = ANY($1::text[])',
+          [evictedIds]
+        );
+        return (expired?.rowCount ?? 0) + (evicted?.rowCount ?? 0);
+      });
+    } catch (error) {
+      console.error('[DB][DISCOVERY] enforceCap failed', {
+        error: error?.message || String(error)
+      });
       return 0;
+    } finally {
+      client?.release();
     }
   }
 }

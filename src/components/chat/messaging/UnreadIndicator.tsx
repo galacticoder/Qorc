@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from 'react';
+import { memo, useMemo } from 'react';
 
 interface UnreadIndicatorProps {
     readonly count: number;
@@ -32,5 +32,3 @@ export const UnreadIndicator = memo<UnreadIndicatorProps>(({ count, isSelected =
 });
 
 UnreadIndicator.displayName = 'UnreadIndicator';
-
-export default UnreadIndicator;

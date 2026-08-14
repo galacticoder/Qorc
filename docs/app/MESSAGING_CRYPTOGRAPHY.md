@@ -1,132 +1,263 @@
-# Qor-Chat P2P & Messaging Cryptography
+# Messaging Cryptography
 
-This document describes, in detail, the exact cryptography used to protect messages
-in Qor-Chat: the primitives, how the P2P transport is secured, how end-to-end message
-encryption works, the nested envelope layers, and how it compares to other messengers.
+This document lists the cryptographic layers used by the current messaging and
+P2P protocols. `docs/app/MESSAGING.md` describes delivery and durability.
 
-> Scope: message confidentiality/integrity/authentication and transport security.
-> Discovery (OPRF + PIR) and authentication (OPAQUE/ZK) are covered in
-> [DISCOVERY.md](DISCOVERY.md), [PRIVATE_DISCOVERY_DEEP_DIVE.md](PRIVATE_DISCOVERY_DEEP_DIVE.md)
-> and [AUTHENTICATION.md](AUTHENTICATION.md).
+## Current Protocols
 
----
+| Boundary | Current wire form | Main primitives |
+|---|---|---|
+| Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq-v2` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
+| End-to-end outer envelope | `hybrid-envelope-v2` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
+| Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
+| Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD |
+| WebSocket session | `pq-ws-7` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD |
+| Anonymous HTTP tunnel | `qor-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
+| Account-root transparency | `qor-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+| Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 key establishment, no classical KEX fallback |
 
-## 1. Primitives
+These wire forms and algorithm bindings are required. Classical-only message
+decryption is not accepted.
 
-Every asymmetric primitive is **post-quantum at the maximum NIST security level**, used
-in a **hybrid** construction with a classical primitive so the system is secure as long
-as *either* the PQ or the classical primitive holds.
+## Signal Core
 
-| Role | Algorithm | Standard / level | Notes |
-|---|---|---|---|
-| Key encapsulation (KEM) | **ML-KEM-1024** ("Kyber-1024") | FIPS 203, NIST **Level 5** | Used for every KEM: noise handshake, hybrid envelope, sealed sender, libsignal Kyber pre-keys |
-| Classical key exchange | **X25519** | RFC 7748 | Hybrid partner to ML-KEM (defense in depth) |
-| Digital signatures | **ML-DSA-87** ("Dilithium5") | FIPS 204, NIST **Level 5** | Identity, routing-header auth, handshake auth |
-| AEAD (symmetric) | **AES-256-GCM** and **XChaCha20-Poly1305** | NIST SP 800-38D / RFC 8439 | 256-bit keys. XChaCha for large random-nonce frames |
-| KDF / hashing | **BLAKE3** and **HKDF** | — | Key derivation from shared secrets |
-| E2E ratchet | **libsignal** (Signal Protocol) with **ML-KEM Kyber pre-keys** | Signal **PQXDH** ("PQ3") | Upstream `signalapp/libsignal`, Double Ratchet |
+The native Signal store supplies identity keys, signed prekeys, one-time prekeys,
+and ML-KEM prekeys. Session establishment combines the Signal/X25519 agreements
+with the advertised ML-KEM prekey. Every session must negotiate or use SPQR
+version 1, and non-PQ ratchet state is rejected. Each encrypted message is then
+placed inside the required `signal-pq-v2` envelope.
+Native decryption checks exact algorithm bindings and atomically commits ratchet
+state with staged plaintext.
 
-Source of truth:
-[post_quantum.rs](../../src-tauri/src/crypto/post_quantum.rs) (`kyber1024`, `ml_dsa_87`),
-[aead.rs](../../src-tauri/src/crypto/aead.rs) (`Aes256Gcm`, `XChaCha20Poly1305`),
-[hybrid.ts](../../src/lib/cryptography/hybrid.ts) (ML-KEM + X25519 + Dilithium),
-[store.rs](../../src-tauri/src/signal_protocol/store.rs) (`KyberPreKeyRecord`).
+The Double Ratchet supplies forward secrecy and post-compromise recovery. The
+additional ML-KEM envelope supplies a mandatory post-quantum confidentiality
+layer to every current Signal ciphertext, including established-session
+messages. That outer KEM uses an account static ML-KEM key, SPQR is the component
+that provides ongoing post-quantum ratchet evolution rather than treating that
+static envelope as post-quantum forward secrecy by itself.
 
----
+Code:
 
-## 2. End-to-end message encryption (the inner core)
+- `src-tauri/src/signal_protocol/mod.rs`
+- `src-tauri/src/signal_protocol/store.rs`
+- `src/hooks/app/useEncryptionProvider.ts`
 
-The *content* of a message is protected by the **Signal Double Ratchet** with a
-**post-quantum X3DH (PQXDH)** key agreement — the same family Signal calls **PQ3** and
-Apple ships in iMessage, but here keyed at the **maximum** parameter set.
+## Hybrid Envelope
 
-**Session establishment (first message):**
-1. The sender fetches the recipient's pre-key bundle, which includes a classical signed
-   pre-key **and an ML-KEM-1024 Kyber pre-key** (`KyberPreKeyRecord`).
-2. PQXDH derives the initial root key from **both** the X25519 DH agreements **and** the
-   ML-KEM encapsulation — quantum-safe initial secrecy.
-3. The first message is a **`PreKeyWhisperMessage`** (type 3). It is large (~50 KB here)
-   because it carries the KEM ciphertext and pre-key material. Subsequent messages are
-   small.
+`hybrid-envelope-v2` encapsulates to the recipient's certified ML-KEM-1024 key
+and performs X25519 with the recipient's certified Hybrid key. The two secrets
+are domain-separated into the AEAD key. The sender signs the current routing
+header with ML-DSA-87. The recipient requires agreement between the certificate,
+outer sender hint, Hybrid signature, and final libsignal sender.
 
-**Ongoing messages:** the Double Ratchet advances a symmetric-key ratchet on every
-message and a DH ratchet on replies, giving:
-- **Forward secrecy** — compromising today's keys does not reveal past messages.
-- **Post-compromise security ("self-healing")** — a future ratchet step locks an
-  attacker back out.
+The Signal identity X25519 key and the Hybrid/P2P X25519 key are distinct signed
+subkeys. They are not required to have the same bytes.
 
-The ratchet output (the `signalCiphertext`) is what the outer layers carry.
+Before accepting those certified subkeys, the client verifies that their account
+root matches the current append-only transparency commitment for the handle.
+This authorizes continuity of the Qor cryptographic identity, it does not prove
+who owns the handle in the real world.
 
----
+Persistent receive keys are native-only. Rust verifies the canonical signed
+public header, decapsulates ML-KEM, performs the static X25519 agreement, derives
+both encryption layers, verifies the BLAKE3 MACs, authenticates both AEAD layers,
+checks the declared payload size and type, and returns only the one bounded
+plaintext requested by the caller. The JavaScript Hybrid module constructs
+outgoing envelopes from public recipient material and obtains the sender
+signature through a purpose-bound native operation. It has no receive private
+key fields or local decryption capability.
 
-## 3. The envelope layers (defense in depth)
+Code:
 
-A sent message is wrapped in **three nested cryptographic layers**, then a fourth
-transport layer. Each layer is independently post-quantum.
+- `src/lib/cryptography/hybrid.ts`
+- `src/lib/key-transparency/client.ts`
+- `src/lib/utils/certified-identity-utils.ts`
 
-```
-  plaintext
-    └─►(1) libsignal Double Ratchet (PQXDH)         ── E2E content, forward secrecy
-         └─►(2) Hybrid envelope                       ── E2E confidentiality + sender auth
-              ML-KEM-1024 + X25519 → HKDF → AEAD
-              routing header signed with ML-DSA-87
-              └─►(3a) Sealed-sender "ss-v1" (server path)   ── hides who↔who from server
-                     ML-KEM-1024 → BLAKE3 → AEAD
-                 (3b) PQ-Noise session (P2P path)            ── transport for direct delivery
-                     ML-KEM-1024 + X25519 + ML-DSA-87 handshake → AEAD frames
-                   └─►(4) Tor (SOCKS5h) for server traffic   ── network-level anonymity
-```
+## Server Sealed Sender
 
-**Layer 2 — Hybrid envelope** ([hybrid.ts](../../src/lib/cryptography/hybrid.ts)):
-the ratchet ciphertext is sealed to the recipient by encapsulating to **both** their
-ML-KEM-1024 key **and** their X25519 key. The two shared secrets are combined via HKDF
-into an AES-256-GCM key. A **routing header** (who it's for, sequence) is signed with the
-sender's **ML-DSA-87** key so the recipient can pin and verify the sender. `version:
-hybrid-envelope-v1`.
+For server delivery, the client wraps the Hybrid payload in `ss-v2`. A fresh
+ML-KEM encapsulation derives an AES-256-GCM key, and the KEM ciphertext is bound
+as additional authenticated data. The plaintext contains the sender identity but
+is padded to a 128 KiB or 256 KiB frame before encryption. The server sees only
+the fixed envelope fields and cannot select a recipient from the request. The
+128 KiB class is eligible for offline catch-up. The 256 KiB class carries file
+chunks and is delivered live or over P2P only.
 
-**Layer 3a — Sealed sender (server path)** ([blind-routing-client.ts](../../src/lib/transport/blind-routing-client.ts)):
-to deliver via the server without revealing sender or recipient, the whole hybrid
-envelope is encapsulated **again** to the recipient's ML-KEM-1024 key — an ephemeral KEM
-ciphertext + BLAKE3-derived AES key. The server sees only an opaque blob with no `from`
-and no recipient identity. `version: ss-v1`. The server writes it to a **global mix
-spool** broadcast to everyone. Only the intended recipient's KEM decapsulation succeeds
-([spool-snapshot-service.js](../../server/routing/spool-snapshot-service.js)).
+Live delivery broadcasts every candidate to every activated socket, so a client
+that is connected receives entries it cannot open and discards them. Only the
+recipient can decapsulate the sealed envelope, failed trials remain local and are
+memoized so the same envelope is never decapsulated twice. Catch-up for entries
+missed while disconnected is not broadcast — it is retrieved by PIR over the tag
+index, described in `docs/app/OFFLINE_MESSAGING.md`.
 
-**Layer 3b — PQ-Noise session (P2P path)** ([pq-noise-session.ts](../../src/lib/transport/pq-noise-session.ts),
-[p2p-transport.ts](../../src/lib/transport/p2p-transport.ts)):
-when peers are directly connected (iroh **QUIC**), the hybrid envelope is sent over a
-mutually-authenticated PQ-Noise session. The handshake performs an **ML-KEM-1024
-encapsulation + X25519 ECDH**, mixes both into the session keys, and authenticates each
-side with an **ML-DSA-87** signature (the peer's signing key is pinned). Frames are then
-AEAD-encrypted. The server is **not involved at all** on this path.
+Sealed-envelope opening is native. The renderer submits one exact `ss-v2`
+envelope, Rust performs ML-KEM decapsulation, fixed-frame authentication and
+parsing, exact JSON validation, and canonical sender-handle validation. The
+account ML-KEM secret remains inside the native account boundary.
 
-**Layer 4 — Tor:** all server-bound traffic runs over Tor (SOCKS5h). The PQ handshake —
-not the TLS certificate — authenticates the server, so a self-signed cert is fine.
+Code:
 
----
+- `src/lib/transport/blind-routing-client.ts`
+- `src/lib/transport/message-framing.ts`
+- `server/routing/sealed-sender.js`
 
-## 4. Send / receive walkthrough
+## P2P Session
 
-**Send** ([unified-signal-transport.ts](../../src/lib/transport/unified-signal-transport.ts)):
-1. Encrypt content with the libsignal ratchet → hybrid envelope (layers 1–2).
-2. **Prefer P2P:** if a PQ-Noise session to the peer exists, send the hybrid envelope
-   directly over it (layer 3b). The server sees nothing.
-3. **Fallback to server:** otherwise wrap in sealed-sender `ss-v1` (layer 3a) and
-   `BLIND_ROUTE` it to the global mix spool over Tor (layer 4).
+`hybrid-mlkem1024-mldsa87-session-v5` uses both ML-KEM-1024 and X25519 when
+deriving directional session keys. ML-DSA-87 signatures authenticate the complete
+handshake against certified peer keys, and both sides verify key-confirmation
+frames before marking the connection ready. Encrypted frames carry strict
+counters and replay state.
 
-**Receive** ([useEncryptedMessageHandler.ts](../../src/hooks/message-handling/useEncryptedMessageHandler.ts)):
-1. P2P envelopes (`hybrid-envelope-v1`) skip sealed-sender. Server envelopes (`ss-v1`)
-   are KEM-decapsulated first (trial-decryption of the global mix — only ours succeed).
-2. Pin/verify the sender's ML-DSA-87 identity from the signed routing header.
-3. Hybrid-decrypt (ML-KEM-1024 + X25519) → ratchet-decrypt (PQXDH) → plaintext.
-4. Render. Send a sealed delivery receipt back the same way.
+The enclosing transport is a Tor onion-service stream. Tor's own circuit
+cryptography is classical, so the P2P transport contributes no post-quantum key
+exchange of its own: the
+`hybrid-mlkem1024-mldsa87-session-v5` application session above is the sole
+source of PQ confidentiality and peer authentication on this path, and it is
+required unconditionally. There is no application relay, ambient discovery,
+port mapping, or gateway probing. Every peer connection is dialled through Tor.
 
----
+Application messages receive another ML-DSA signature and a monotonic route
+proof bound to the active session and peer certificates. These prove transport
+authorization, the inner libsignal identity remains the conversation identity.
 
-## 6. Summary
+The P2P renderer and transport retain only the three certified public identity
+keys. Device ML-DSA transcript signatures and the static responder ML-KEM/X25519
+operations run in Rust. The native P2P operation returns only two 32-byte
+handshake-scoped shared secrets because the short-lived Noise session is still
+implemented in JavaScript, those secrets are zeroed after directional session
+keys are derived. Persistent private keys are never copied into the P2P hook,
+service, connection, or transport objects.
 
-Content is protected by a post-quantum Double Ratchet (PQXDH) and then wrapped in a
-hybrid ML-KEM-1024 + X25519 envelope authenticated with ML-DSA-87, then delivered either
-**peer-to-peer over a PQ-Noise session (server sees nothing)** or **server-side via a
-sealed-sender blind route through a global mix over Tor**. Every asymmetric step is
-post-quantum at NIST Level 5, in a classical hybrid.
+Calls derive separate direction-, call-, and media-kind-bound keys from this
+session. Their frame encryption, rotation, and replay rules are documented in
+`docs/app/CALLING.md`.
+
+Code:
+
+- `src/lib/cryptography/noise-protocol.ts`
+- `src/lib/transport/pq-noise-session.ts`
+- `src/lib/transport/p2p-transport.ts`
+- `src/lib/transport/secure-p2p-service.ts`
+
+## WebSocket Session
+
+`pq-ws-7` derives each connection from an initiator encapsulation to the server's
+ML-KEM-1024 key, an ephemeral-client/static-server X25519 agreement, and a second
+server encapsulation to the client's fresh ML-KEM-1024 key. The server's
+ML-DSA-87-signed acknowledgement binds the request digest and responder KEM
+ciphertext. Both sides then exchange encrypted key-confirmation messages before
+application traffic is released.
+
+There is no client transport signing identity. After the authenticated server
+handshake, ordinary frames use directional symmetric keys so they do not add a
+transferable client signature. Envelopes bind session ID, fingerprint, message
+ID, timestamp, counter, and exact AAD. AEAD must authenticate before the receive
+counter is committed, preventing corrupted frames from burning valid sequence
+numbers. Rekeying is staged: the active session remains current until encrypted
+confirmation succeeds, queued sends are bounded, and abandoned candidate keys
+are wiped on every terminal path.
+
+Server-bound WebSocket traffic is carried over Tor. Tor provides network-path
+separation, the post-quantum handshake provides application server identity.
+
+Code:
+
+- `src/lib/websocket/handshake.ts`
+- `src/lib/websocket/encryption.ts`
+- `server/messaging/pq-envelope-handler.js`
+
+## Anonymous HTTP Tunnel
+
+Discovery lookup, VOPRF evaluation, avatar storage/fetch, and tagged-spool
+index/PIR retrieval use one outer `POST /api/anonymous` route. The operation and
+JSON body are inside a padded authenticated-encryption envelope. Requests derive
+their key from an encapsulation to the authenticated server ML-KEM-1024 key plus
+X25519. Responses add a fresh server encapsulation to the request's ephemeral
+client ML-KEM key and are signed by the pinned server ML-DSA-87 key before the
+client decapsulates them.
+
+The wire has three request classes—64 KiB, 512 KiB, and 2 MiB—and four response
+classes: 64 KiB, 512 KiB, 4 MiB, and 8.5 MiB. Ten operations share this route,
+including key-transparency sync and append. A fresh Tor SOCKS isolation credential and
+HTTP/1.1 connection are used per request. Intermediaries do not see the operation
+name, but they can see the outer size class and timing. The destination server
+must decrypt the operation to execute it, so this tunnel does not hide the
+operation from the server itself. Trust material and response completion are
+also bound to the exact authenticated native WebSocket generation, reconnecting
+to the same server cannot start an operation queued by another generation or
+release its anonymous response into the active connection lifetime.
+
+Code:
+
+- `src/lib/transport/pq-anonymous-http.ts`
+- `src-tauri/src/commands/discovery.rs`
+- `server/routes/pq-anonymous-http.js`
+
+## Quantum Resistance Boundary
+
+For message content, current protocols require both classical and post-quantum
+contributions. An attacker must defeat the enforced ML-KEM layer to recover the
+application plaintext from a recorded Hybrid, Signal, sealed-sender, P2P, or
+WebSocket envelope, assuming the keys and composition are implemented correctly.
+ML-DSA authenticates the current Hybrid, P2P, and WebSocket transcripts and
+headers. Classical X25519 is retained as an independent hybrid contribution.
+
+ML-KEM-1024 and ML-DSA-87 target NIST security category 5. The mandatory
+`X25519MLKEM768` TLS group uses ML-KEM-768, which targets category 3. These
+are NIST comparison categories, not literal measured bit-security scores for the
+complete composed application. AES-256 and 256-bit hashes retain a substantial
+generic quantum-search margin, but Grover-style analysis is still why symmetric
+key/output sizes must not be described as unchanged 256-bit quantum security.
+
+This does not make the entire app or network path post-quantum:
+
+- Signal identity signatures and parts of the Double Ratchet remain classical,
+  PQXDH, SPQR v1, and the required outer ML-KEM envelope supplement them.
+- Qor-controlled client-facing TLS permits only `X25519MLKEM768`, a hybrid
+  ML-KEM-768 + X25519 group. TLS certificate signatures remain classical, while
+  the pinned application ML-DSA/P2P transcript authentication supplies the
+  additional PQ identity layer. The P2P transport is a Tor onion stream whose
+  circuit cryptography is classical and contributes no PQ key exchange, the
+  application session covers that path. Other infrastructure TLS is not covered
+  by this claim.
+- Tor circuit establishment remains classical. The hybrid application and TLS
+  layers protect recorded content against passive harvest-now/decrypt-later
+  attacks, but they do not make Tor routing, availability, or traffic analysis
+  post-quantum.
+- OPAQUE, discovery VOPRF, and Privacy Pass use classical Ristretto255-based
+  operations. Hashes used inside those protocols do not remove their
+  discrete-log assumptions.
+- Key-transparency rolling-chain hashing and ML-DSA signatures are
+  post-quantum-oriented, but the epoch label is derived through the classical
+  discovery VOPRF. A
+  malicious VOPRF operator can enumerate candidate labels, and a fresh install
+  still trusts its first pinned server signer.
+- Symmetric AEAD and hash functions are not public-key post-quantum primitives,
+  their key and output sizes are selected with quantum search margins in mind.
+- A later compromise of a recipient's static ML-KEM secret can expose envelopes
+  addressed to that key. Signal's ratchets and SPQR provide separate forward and
+  post-compromise properties, subject to their update schedule and endpoint
+  security.
+
+No internal test suite proves the cryptographic constructions or their
+composition. Independent protocol review, implementation audit, test vectors,
+and interoperability analysis remain required before making a formal
+post-quantum security claim.
+
+## Key And Metadata Limits
+
+The cryptographic layers protect content and sender/recipient fields carried
+inside them. They do not erase timing, volume, endpoint availability, or Tor
+connection metadata. The server path uses Tor, fixed sealed-sender size classes,
+delayed mixing, cover entries, and a tag index identical for every client to reduce
+those signals. A global observer or a peer participating through Tor still has
+correlation information, but peers do not learn each other's IP addresses.
+
+Local message plaintext is also bounded. Durable history is encrypted by the
+native SQLCipher and authenticated row-encryption layers. Conversation database
+segments, IPC pages, and per-conversation renderer state are capped at 50
+messages. Loading another page replaces the renderer's bounded metadata window;
+stored private text remains in native content records rather than accumulating
+in JavaScript. See `docs/app/LOCAL_DATA_SECURITY.md` for the account master,
+database key hierarchy, Signal storage, token pools, and threat boundaries.

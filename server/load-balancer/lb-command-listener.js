@@ -1,8 +1,11 @@
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
+import { deriveQuantumAeadKey } from '../crypto/aead-key-derivation.js';
 import { withRedisClient } from '../session/redis-client.js';
 import crypto from 'crypto';
 import path from 'path';
+import { UTF8_ENCODER } from '../utils/encoding.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { REDIS_KEYS } from '../config/redis-keys.js';
 
 export class LBCommandListener {
     constructor(repoRoot, onCommand) {
@@ -28,9 +31,9 @@ export class LBCommandListener {
             }
 
             this.commandKeypair = await unlockKeypair(username, password);
-            cryptoLogger.info('[AUTO-LB] Initialized PQ command encryption using HAProxy stats keypair');
+            console.log('[AUTO-LB] Initialized PQ command encryption using HAProxy stats keypair');
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Failed to initialize command encryption', error);
+            console.error('[AUTO-LB] Failed to initialize command encryption', error);
             throw error;
         }
     }
@@ -73,26 +76,20 @@ export class LBCommandListener {
                 Buffer.from(kyberSharedSecret),
                 Buffer.from(x25519SharedSecret),
             ]);
-            const info = new TextEncoder().encode('lb-command-encryption-v2');
-            const aeadKey = await CryptoUtils.KDF.quantumHKDF(
-                new Uint8Array(rawSecret),
-                CryptoUtils.Hash.shake256(rawSecret, 64),
-                info,
-                32
-            );
+            const aeadKey = await deriveQuantumAeadKey(rawSecret, PROTOCOL_KEYS.LB_COMMAND_ENCRYPTION);
 
             const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
-            const aad = new TextEncoder().encode('lb-command-v2');
+            const aad = UTF8_ENCODER.encode(PROTOCOL_KEYS.LB_COMMAND_AAD);
             let plaintext;
             try {
                 plaintext = aead.decrypt(ciphertext, nonce, tag, aad);
             } catch (_error) {
-                throw new Error('SECURITY: Command decryption failed - invalid ciphertext');
+                throw new Error('SECURITY: Command decryption failed');
             }
 
             return JSON.parse(Buffer.from(plaintext).toString('utf8'));
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Command decryption failed', error);
+            console.error('[AUTO-LB] Command decryption failed', error);
             throw new Error('Failed to decrypt command');
         }
     }
@@ -110,18 +107,18 @@ export class LBCommandListener {
                 const cmd = this.commandQueue.shift();
 
                 try {
-                    cryptoLogger.info('[AUTO-LB] Processing queued command', { command: cmd.cmd, queueLength: this.commandQueue.length });
+                    console.log('[AUTO-LB] Processing queued command', { command: cmd.cmd, queueLength: this.commandQueue.length });
 
                     if (this.onCommand) {
                         await this.onCommand(cmd);
                     }
                 } catch (error) {
-                    cryptoLogger.error('[AUTO-LB] Failed to execute command', { command: cmd.cmd, error });
+                    console.error('[AUTO-LB] Failed to execute command', { command: cmd.cmd, error });
                     console.error(`[COMMAND] Error executing ${cmd.cmd}:`, error.message);
                 }
 
                 if (this.commandQueue.length > 0) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise((resolve) => setTimeout(resolve, 100));
                 }
             }
         } finally {
@@ -148,10 +145,10 @@ export class LBCommandListener {
                     });
                 }
 
-                await this.commandSubscriber.subscribe('lb:command:encrypted');
+                await this.commandSubscriber.subscribe(REDIS_KEYS.LB_ENCRYPTED_COMMAND_CHANNEL);
 
                 this.commandSubscriber.on('message', async (channel, encryptedMessage) => {
-                    if (channel !== 'lb:command:encrypted') {
+                    if (channel !== REDIS_KEYS.LB_ENCRYPTED_COMMAND_CHANNEL) {
                         return;
                     }
 
@@ -161,24 +158,24 @@ export class LBCommandListener {
                         }
 
                         const cmd = await this.decryptCommand(encryptedMessage);
-                        cryptoLogger.info('[AUTO-LB] Received encrypted command from TUI', { command: cmd.cmd });
+                        console.log('[AUTO-LB] Received encrypted command from TUI', { command: cmd.cmd });
                         this.commandQueue.push(cmd);
 
                         this.processQueue().catch((error) => {
-                            cryptoLogger.error('[AUTO-LB] Command queue processing error', error);
+                            console.error('[AUTO-LB] Command queue processing error', error);
                         });
                     } catch (error) {
                         if (encryptedMessage && encryptedMessage.trim().length > 0) {
-                            cryptoLogger.error('[AUTO-LB] Failed to process encrypted command', error);
+                            console.error('[AUTO-LB] Failed to process encrypted command', error);
                             console.error('[COMMAND] Error processing command:', error.message);
                         }
                     }
                 });
 
-                cryptoLogger.info('[AUTO-LB] PQ-encrypted command listener setup complete');
+                console.log('[AUTO-LB] PQ-encrypted command listener setup complete');
             });
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Failed to setup command listener', error);
+            console.error('[AUTO-LB] Failed to setup command listener', error);
             console.error('[ERROR] Failed to setup command listener:', error.message);
         }
     }
@@ -187,7 +184,7 @@ export class LBCommandListener {
     async stop() {
         if (this.commandSubscriber) {
             try {
-                await this.commandSubscriber.unsubscribe('lb:command:encrypted');
+                await this.commandSubscriber.unsubscribe(REDIS_KEYS.LB_ENCRYPTED_COMMAND_CHANNEL);
                 await this.commandSubscriber.quit();
                 console.log('\t[OK] Closed command listener');
             } catch {

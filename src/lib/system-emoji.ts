@@ -1,644 +1,390 @@
-import { STORAGE_KEYS } from './database/storage-keys';
-import { SecureDB } from './database/secureDB';
-import { isTauri } from './tauri-bindings';
+import { STORAGE_KEYS, STORAGE_STORES } from './database/storage-keys';
+import type { SecureDB } from './database/secureDB';
 
-async function computeIntegrityHash(emojis: ReadonlyArray<string>): Promise<string> {
-  const text = emojis.join('');
-
-  if (typeof globalThis.crypto?.subtle === 'undefined') {
-    let fallback = 0;
-    for (let i = 0; i < text.length; i++) {
-      fallback = Math.imul(31, fallback) + text.charCodeAt(i);
-      fallback |= 0;
-    }
-    return fallback.toString(16);
-  }
-
-  const encoder = new TextEncoder();
-  const data = encoder.encode(text);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(digest));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+export interface EmojiRecord {
+  readonly emoji: string;
+  readonly name: string;
+  readonly categoryId: string;
+  readonly subgroupId: string;
 }
 
-async function verifyEmojiIntegrity(emojis: string[], hash: string | null): Promise<boolean> {
-  if (!hash) return false;
-  const computed = await computeIntegrityHash(emojis);
-  return computed === hash;
+export interface EmojiCategory {
+  readonly id: string;
+  readonly label: string;
+  readonly emojis: readonly EmojiRecord[];
 }
 
-function deepFreeze<T>(obj: T): Readonly<T> {
-  if (obj === null || typeof obj !== 'object' || Object.isFrozen(obj)) {
-    return obj as Readonly<T>;
-  }
-  Object.freeze(obj);
-  for (const key of Object.getOwnPropertyNames(obj)) {
-    const record = obj as Record<string, unknown>;
-    const value = record[key];
-    if (value && typeof value === 'object') {
-      deepFreeze(value);
-    }
-  }
-  return obj as Readonly<T>;
+export interface EmojiCatalogView {
+  readonly version: string;
+  readonly categories: readonly EmojiCategory[];
+  readonly frequent: readonly EmojiRecord[];
 }
 
-function sanitizeSearchQuery(query: string): string {
-  return query
-    .replace(/<[^>]*>/g, '')
-    .replace(/[<>'"]/g, '')
-    .slice(0, CONFIG.MAX_SEARCH_QUERY_LENGTH)
-    .trim();
-}
-/**
- * System emoji management
- */
-
-interface SecureBridgeAPI {
-  getSystemEmojis?: () => Promise<string[]>;
+interface IndexedEmojiRecord extends EmojiRecord {
+  readonly order: number;
+  readonly normalizedName: string;
+  readonly searchText: string;
 }
 
-const CONFIG = Object.freeze({
-  CACHE_TTL: 5 * 60 * 1000,
-  MAX_EMOJI_LENGTH: 10,
-  DEFAULT_CATEGORY_SIZE: 20,
-  SEARCH_CACHE_LIMIT: 100,
-  RATE_LIMIT_WINDOW: 1000,
-  RATE_LIMIT_MAX_REQUESTS: 25,
-  MAX_PAGE_SIZE: 100,
-  MAX_PAGE_NUMBER: 1000,
-  MAX_SEARCH_QUERY_LENGTH: 64,
-  SEARCH_DEBOUNCE_MS: 150
-} as const);
-
-class LRUCache<K, V> {
-  private cache = new Map<K, V>();
-
-  constructor(private readonly maxSize: number) { }
-
-  get(key: K): V | undefined {
-    const value = this.cache.get(key);
-    if (value !== undefined) {
-      this.cache.delete(key);
-      this.cache.set(key, value);
-    }
-    return value;
-  }
-
-  set(key: K, value: V): void {
-    if (this.cache.has(key)) {
-      this.cache.delete(key);
-    } else if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey !== undefined) {
-        this.cache.delete(firstKey);
-      }
-    }
-    this.cache.set(key, value);
-  }
-
-  clear(): void {
-    this.cache.clear();
-  }
+interface UsageEntry {
+  count: number;
+  lastUsed: number;
 }
 
-const FALLBACK_EMOJIS = deepFreeze([
-  '😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '🫠', '😉', '😊', '😇',
-  '🥰', '😍', '🤩', '😘', '😗', '☺️', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝',
-  '🤑', '🤗', '🤭', '🫢', '🫣', '🤫', '🤔', '🫡', '🤐', '🤨', '😐', '😑', '😶', '🫥',
-  '😏', '😒', '🙄', '😬', '🤥', '🫨', '😌', '😔', '😪', '🤤', '😴', '😷', '🤒', '🤕',
-  '🤢', '🤮', '🤧', '🥵', '🥶', '🥴', '😵', '🤯', '🤠', '🥳', '🥸', '😎', '🤓', '🧐',
-  '😕', '🫤', '😟', '🙁', '☹️', '😮', '😯', '😲', '😳', '🥺', '🥹', '😦', '😧', '😨',
-  '😰', '😥', '😢', '😭', '😱', '😖', '😣', '😞', '😓', '😩', '😫', '🥱', '😤', '😡',
-  '😠', '🤬', '😈', '👿', '💀', '☠️', '💩', '🤡', '👹', '👺', '👻', '👽', '👾', '🤖',
-  '😺', '😸', '😹', '😻', '😼', '😽', '🙀', '😿', '😾', '🙈', '🙉', '🙊',
-  '💋', '💌', '💘', '💝', '💖', '💗', '💓', '💞', '💕', '💟', '❣️', '💔', '❤️‍🔥', '❤️‍🩹',
-  '❤️', '🩷', '🧡', '💛', '💚', '💙', '🩵', '💜', '🤎', '🖤', '🩶', '🤍', '💯', '💢',
-  '💥', '💫', '💦', '💨', '🕳️', '💣', '💬', '👁️‍🗨️', '🗨️', '🗯️', '💭', '💤',
-  '👋', '🤚', '🖐️', '✋', '🖖', '🫱', '🫲', '🫳', '🫴', '👌', '🤌', '🤏', '✌️', '🤞',
-  '🫰', '🤟', '🤘', '🤙', '👈', '👉', '👆', '🖕', '👇', '☝️', '🫵', '👍', '👎', '✊',
-  '👊', '🤛', '🤜', '👏', '🙌', '🫶', '👐', '🤲', '🤝', '🙏', '✍️', '💅', '🤳', '💪',
-  '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷', '🦴', '👀', '👁️',
-  '👅', '👄', '🫦', '👶', '🧒', '👦', '👧', '🧑', '👱', '👨', '🧔', '👩', '🧓', '👴',
-  '👵', '🙍', '🙎', '🙅', '🙆', '💁', '🙋', '🧏', '🙇', '🤦', '🤷', '👮', '🕵️', '💂',
-  '🥷', '👷', '🫅', '🤴', '👸', '👳', '👲', '🧕', '🤵', '👰', '🤰', '🫃', '🫄', '🤱',
-  '👼', '🎅', '🤶', '🦸', '🦹', '🧙', '🧚', '🧛', '🧜', '🧝', '🧞', '🧟', '🧌', '💆',
-  '💇', '🚶', '🧍', '🧎', '🏃', '💃', '🕺', '🕴️', '👯', '🧖', '🧗', '🤸', '🏌️', '🏇',
-  '⛷️', '🏂', '🏋️', '🤼', '🤽', '🤾', '🤺', '⛹️', '🏊', '🚣', '🧘', '🛀', '🛌',
-  '👭', '👫', '👬', '💏', '💑', '👨‍👩‍👦', '👨‍👩‍👧', '👨‍👩‍👧‍👦', '👨‍👩‍👦‍👦', '👨‍👩‍👧‍👧', '👨‍👦', '👨‍👦‍👦',
-  '👨‍👧', '👨‍👧‍👦', '👨‍👧‍👧', '👩‍👦', '👩‍👦‍👦', '👩‍👧', '👩‍👧‍👦', '👩‍👧‍👧',
-  '🐵', '🐒', '🦍', '🦧', '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝', '🐱', '🐈',
-  '🐈‍⬛', '🦁', '🐯', '🐅', '🐆', '🐴', '🫎', '🫏', '🐎', '🦄', '🦓', '🦌', '🦬', '🐮',
-  '🐂', '🐃', '🐄', '🐷', '🐖', '🐗', '🐽', '🐏', '🐑', '🐐', '🐪', '🐫', '🦙', '🦒',
-  '🐘', '🦣', '🦏', '🦛', '🐭', '🐁', '🐀', '🐹', '🐰', '🐇', '🐿️', '🦫', '🦔', '🦇',
-  '🐻', '🐻‍❄️', '🐨', '🐼', '🦥', '🦦', '🦨', '🦘', '🦡', '🐾', '🦃', '🐔', '🐓', '🐣',
-  '🐤', '🐥', '🐦', '🐧', '🕊️', '🦅', '🦆', '🦢', '🦉', '🦤', '🪶', '🦩', '🦚', '🦜',
-  '🪽', '🐦‍⬛', '🪿', '🐸', '🐊', '🐢', '🦎', '🐍', '🐲', '🐉', '🦕', '🦖', '🐳', '🐋',
-  '🐬', '🦭', '🐟', '🐠', '🐡', '🦈', '🐙', '🐚', '🪸', '🪼', '🐌', '🦋', '🐛', '🐜',
-  '🐝', '🪲', '🐞', '🦗', '🪳', '🕷️', '🕸️', '🦂', '🦟', '🪰', '🪱', '🦠', '💐', '🌸',
-  '💮', '🪷', '🏵️', '🌹', '🥀', '🌺', '🌻', '🌼', '🌷', '🪻', '🌱', '🪴', '🌲', '🌳',
-  '🌴', '🌵', '🌾', '🌿', '☘️', '🍀', '🍁', '🍂', '🍃', '🪹', '🪺', '🍄',
-  '🍇', '🍈', '🍉', '🍊', '🍋', '🍌', '🍍', '🥭', '🍎', '🍏', '🍐', '🍑', '🍒', '🍓',
-  '🫐', '🥝', '🍅', '🫒', '🥥', '🥑', '🍆', '🥔', '🥕', '🌽', '🌶️', '🫑', '🥒', '🥬',
-  '🥦', '🧄', '🧅', '🍄', '🥜', '🫘', '🌰', '🫚', '🫛', '🍞', '🥐', '🥖', '🫓', '🥨',
-  '🥯', '🥞', '🧇', '🧀', '🍖', '🍗', '🥩', '🥓', '🍔', '🍟', '🍕', '🌭', '🥪', '🌮',
-  '🌯', '🫔', '🥙', '🧆', '🥚', '🍳', '🥘', '🍲', '🫕', '🥣', '🥗', '🍿', '🧈', '🧂',
-  '🥫', '🍱', '🍘', '🍙', '🍚', '🍛', '🍜', '🍝', '🍠', '🍢', '🍣', '🍤', '🍥', '🥮',
-  '🍡', '🥟', '🥠', '🥡', '🦀', '🦞', '🦐', '🦑', '🦪', '🍦', '🍧', '🍨', '🍩', '🍪',
-  '🎂', '🍰', '🧁', '🥧', '🍫', '🍬', '🍭', '🍮', '🍯', '🍼', '🥛', '☕', '🫖', '🍵',
-  '🍶', '🍾', '🍷', '🍸', '🍹', '🍺', '🍻', '🥂', '🥃', '🫗', '🥤', '🧋', '🧃', '🧉',
-  '🧊', '🥢', '🍽️', '🍴', '🥄', '🔪', '🫙', '🏺',
-  '⚽', '🏀', '🏈', '⚾', '🥎', '🎾', '🏐', '🏉', '🥏', '🎱', '🪀', '🏓', '🏸', '🏒',
-  '🏑', '🥍', '🏏', '🪃', '🥅', '⛳', '🪁', '🏹', '🎣', '🤿', '🥊', '🥋', '🎽', '🛹',
-  '🛼', '🛷', '⛸️', '🥌', '🎿', '⛷️', '🏂', '🪂', '🏋️', '🤸', '🤺', '⛹️', '🤾', '🏌️',
-  '🏇', '🧘', '🏄', '🏊', '🤽', '🚣', '🧗', '🚴', '🚵', '🎖️', '🏆', '🏅', '🥇', '🥈',
-  '🥉', '🎃', '🎄', '🎆', '🎇', '🧨', '✨', '🎈', '🎉', '🎊', '🎋', '🎍', '🎎', '🎏',
-  '🎐', '🎑', '🧧', '🎀', '🎁', '🎗️', '🎟️', '🎫', '🎠', '🎡', '🎢', '🎪', '🤹', '🎭',
-  '🎨', '🎬', '🎤', '🎧', '🎼', '🎹', '🪇', '🥁', '🪘', '🎷', '🎺', '🪗', '🎸', '🪕',
-  '🎻', '🪈', '🎲', '♟️', '🎯', '🎳', '🎮', '🎰', '🧩',
-  '🚗', '🚕', '🚙', '🚌', '🚎', '🏎️', '🚓', '🚑', '🚒', '🚐', '🛻', '🚚', '🚛', '🚜',
-  '🏍️', '🛵', '🦽', '🦼', '🛺', '🚲', '🛴', '🛹', '🛼', '🚏', '🛣️', '🛤️', '🛢️', '⛽',
-  '🛞', '🚨', '🚥', '🚦', '🛑', '🚧', '⚓', '🛟', '⛵', '🛶', '🚤', '🛳️', '⛴️', '🛥️',
-  '🚢', '✈️', '🛩️', '🛫', '🛬', '🪂', '💺', '🚁', '🚟', '🚠', '🚡', '🛰️', '🚀', '🛸',
-  '🌍', '🌎', '🌏', '🌐', '🗺️', '🧭', '🏔️', '⛰️', '🌋', '🗻', '🏕️', '🏖️', '🏜️', '🏝️',
-  '🏞️', '🏟️', '🏛️', '🏗️', '🧱', '🪨', '🪵', '🛖', '🏘️', '🏚️', '🏠', '🏡', '🏢', '🏣',
-  '🏤', '🏥', '🏦', '🏨', '🏩', '🏪', '🏫', '🏬', '🏭', '🏯', '🏰', '💒', '🗼', '🗽',
-  '⛪', '🕌', '🛕', '🕍', '⛩️', '🕋', '⛲', '⛺', '🌁', '🌃', '🏙️', '🌄', '🌅', '🌆',
-  '🌇', '🌉', '♨️', '🎠', '🛝', '🎡', '🎢', '💈', '🎪',
-  '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '❣️', '💕', '💞', '💓',
-  '💗', '💖', '💘', '💝', '💟', '☮️', '✝️', '☪️', '🕉️', '☸️', '✡️', '🔯', '🕎', '☯️',
-  '☦️', '🛐', '⛎', '♈', '♉', '♊', '♋', '♌', '♍', '♎', '♏', '♐', '♑', '♒', '♓',
-  '🆔', '⚛️', '🉑', '☢️', '☣️', '📴', '📳', '🈶', '🈚', '🈸', '🈺', '🈷️', '✴️', '🆚',
-  '💮', '🉐', '㊙️', '㊗️', '🈴', '🈵', '🈹', '🈲', '🅰️', '🅱️', '🆎', '🆑', '🅾️', '🆘',
-  '❌', '⭕', '🛑', '⛔', '📛', '🚫', '💯', '💢', '♨️', '🚷', '🚯', '🚳', '🚱', '🔞',
-  '📵', '🚭', '❗', '❕', '❓', '❔', '‼️', '⁉️', '🔅', '🔆', '〽️', '⚠️', '🚸', '🔱',
-  '⚜️', '🔰', '♻️', '✅', '🈯', '💹', '❇️', '✳️', '❎', '🌐', '💠', 'Ⓜ️', '🌀', '💤',
-  '🏧', '🚾', '♿', '🅿️', '🛗', '🈳', '🈂️', '🛂', '🛃', '🛄', '🛅', '🚹', '🚺', '🚼',
-  '⚧️', '🚻', '🚮', '🎦', '📶', '🈁', '🔣', 'ℹ️', '🔤', '🔡', '🔠', '🆖', '🆗', '🆙',
-  '🆒', '🆕', '🆓', '0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟',
-  '🔢', '#️⃣', '*️⃣', '⏏️', '▶️', '⏸️', '⏯️', '⏹️', '⏺️', '⏭️', '⏮️', '⏩', '⏪', '⏫',
-  '⏬', '◀️', '🔼', '🔽', '➡️', '⬅️', '⬆️', '⬇️', '↗️', '↘️', '↙️', '↖️', '↕️', '↔️',
-  '↪️', '↩️', '⤴️', '⤵️', '🔀', '🔁', '🔂', '🔄', '🔃', '🎵', '🎶', '➕', '➖', '➗',
-  '✖️', '🟰', '♾️', '💲', '💱', '™️', '©️', '®️', '👁️‍🗨️', '🔚', '🔙', '🔛', '🔝', '🔜',
-  '〰️', '➰', '➿', '✔️', '☑️', '🔘', '🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '⚫', '⚪',
-  '🟤', '🔺', '🔻', '🔸', '🔹', '🔶', '🔷', '🔳', '🔲', '▪️', '▫️', '◾', '◽', '◼️',
-  '◻️', '🟥', '🟧', '🟨', '🟩', '🟦', '🟪', '⬛', '⬜', '🟫', '🔈', '🔇', '🔉', '🔊',
-  '🔔', '🔕', '📣', '📢', '💬', '💭', '🗯️', '♠️', '♣️', '♥️', '♦️', '🃏', '🎴', '🀄',
-  '🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛', '🕜', '🕝',
-  '🕞', '🕟', '🕠', '🕡', '🕢', '🕣', '🕤', '🕥', '🕦', '🕧',
-  '🏳️', '🏴', '🏁', '🚩', '🏳️‍🌈', '🏳️‍⚧️', '🏴‍☠️', '🇦🇨', '🇦🇩', '🇦🇪', '🇦🇫', '🇦🇬',
-  '🇦🇮', '🇦🇱', '🇦🇲', '🇦🇴', '🇦🇶', '🇦🇷', '🇦🇸', '🇦🇹', '🇦🇺', '🇦🇼', '🇦🇽', '🇦🇿',
-  '🇧🇦', '🇧🇧', '🇧🇩', '🇧🇪', '🇧🇫', '🇧🇬', '🇧🇭', '🇧🇮', '🇧🇯', '🇧🇱', '🇧🇲', '🇧🇳',
-  '🇧🇴', '🇧🇶', '🇧🇷', '🇧🇸', '🇧🇹', '🇧🇻', '🇧🇼', '🇧🇾', '🇧🇿', '🇨🇦', '🇨🇨', '🇨🇩',
-  '🇨🇫', '🇨🇬', '🇨🇭', '🇨🇮', '🇨🇰', '🇨🇱', '🇨🇲', '🇨🇳', '🇨🇴', '🇨🇵', '🇨🇷', '🇨🇺',
-  '🇨🇻', '🇨🇼', '🇨🇽', '🇨🇾', '🇨🇿', '🇩🇪', '🇩🇬', '🇩🇯', '🇩🇰', '🇩🇲', '🇩🇴', '🇩🇿',
-  '🇪🇦', '🇪🇨', '🇪🇪', '🇪🇬', '🇪🇭', '🇪🇷', '🇪🇸', '🇪🇹', '🇪🇺', '🇫🇮', '🇫🇯', '🇫🇰',
-  '🇫🇲', '🇫🇴', '🇫🇷', '🇬🇦', '🇬🇧', '🇬🇩', '🇬🇪', '🇬🇫', '🇬🇬', '🇬🇭', '🇬🇮', '🇬🇱',
-  '🇬🇲', '🇬🇳', '🇬🇵', '🇬🇶', '🇬🇷', '🇬🇸', '🇬🇹', '🇬🇺', '🇬🇼', '🇬🇾', '🇭🇰', '🇭🇲',
-  '🇭🇳', '🇭🇷', '🇭🇹', '🇭🇺', '🇮🇨', '🇮🇩', '🇮🇪', '🇮🇱', '🇮🇲', '🇮🇳', '🇮🇴', '🇮🇶',
-  '🇮🇷', '🇮🇸', '🇮🇹', '🇯🇪', '🇯🇲', '🇯🇴', '🇯🇵', '🇰🇪', '🇰🇬', '🇰🇭', '🇰🇮', '🇰🇲',
-  '🇰🇳', '🇰🇵', '🇰🇷', '🇰🇼', '🇰🇾', '🇰🇿', '🇱🇦', '🇱🇧', '🇱🇨', '🇱🇮', '🇱🇰', '🇱🇷',
-  '🇱🇸', '🇱🇹', '🇱🇺', '🇱🇻', '🇱🇾', '🇲🇦', '🇲🇨', '🇲🇩', '🇲🇪', '🇲🇫', '🇲🇬', '🇲🇭',
-  '🇲🇰', '🇲🇱', '🇲🇲', '🇲🇳', '🇲🇴', '🇲🇵', '🇲🇶', '🇲🇷', '🇲🇸', '🇲🇹', '🇲🇺', '🇲🇻',
-  '🇲🇼', '🇲🇽', '🇲🇾', '🇲🇿', '🇳🇦', '🇳🇨', '🇳🇪', '🇳🇫', '🇳🇬', '🇳🇮', '🇳🇱', '🇳🇴',
-  '🇳🇵', '🇳🇷', '🇳🇺', '🇳🇿', '🇴🇲', '🇵🇦', '🇵🇪', '🇵🇫', '🇵🇬', '🇵🇭', '🇵🇰', '🇵🇱',
-  '🇵🇲', '🇵🇳', '🇵🇷', '🇵🇸', '🇵🇹', '🇵🇼', '🇵🇾', '🇶🇦', '🇷🇪', '🇷🇴', '🇷🇸', '🇷🇺',
-  '🇷🇼', '🇸🇦', '🇸🇧', '🇸🇨', '🇸🇩', '🇸🇪', '🇸🇬', '🇸🇭', '🇸🇮', '🇸🇯', '🇸🇰', '🇸🇱',
-  '🇸🇲', '🇸🇳', '🇸🇴', '🇸🇷', '🇸🇸', '🇸🇹', '🇸🇻', '🇸🇽', '🇸🇾', '🇸🇿', '🇹🇦', '🇹🇨',
-  '🇹🇩', '🇹🇫', '🇹🇬', '🇹🇭', '🇹🇯', '🇹🇰', '🇹🇱', '🇹🇲', '🇹🇳', '🇹🇴', '🇹🇷', '🇹🇹',
-  '🇹🇻', '🇹🇼', '🇹🇿', '🇺🇦', '🇺🇬', '🇺🇲', '🇺🇳', '🇺🇸', '🇺🇾', '🇺🇿', '🇻🇦', '🇻🇨',
-  '🇻🇪', '🇻🇬', '🇻🇮', '🇻🇳', '🇻🇺', '🇼🇫', '🇼🇸', '🇽🇰', '🇾🇪', '🇾🇹', '🇿🇦', '🇿🇲', '🇿🇼'
-]) as ReadonlyArray<string>;
-
-let fallbackEmojisHashPromise: Promise<string> | null = null;
-
-function getFallbackEmojisHash(): Promise<string> {
-  if (!fallbackEmojisHashPromise) {
-    fallbackEmojisHashPromise = computeIntegrityHash(FALLBACK_EMOJIS);
-  }
-  return fallbackEmojisHashPromise;
+interface UsageState {
+  stats: Map<string, UsageEntry>;
+  loaded: boolean;
+  loadPromise: Promise<void> | null;
+  persistChain: Promise<void>;
+  persistDirty: boolean;
+  persistRunning: boolean;
 }
 
-const MINIMAL_EMOJIS = Object.freeze(['👍', '👎', '❤️', '✅', '❌'] as const);
+type PersistedUsage = Record<string, readonly [count: number, lastUsed: number]>;
 
-const FALLBACK_GROUP_DEFINITIONS = deepFreeze({
-  Popular: FALLBACK_EMOJIS.slice(0, CONFIG.DEFAULT_CATEGORY_SIZE),
-  Smileys: ['😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '😊', '😍'],
-  Gestures: ['👍', '👎', '👏', '🙏', '🤝', '✋', '👌', '🤌', '🤏', '💪'],
-  Hearts: ['❤️', '💔', '💖'],
-  Symbols: ['💯', '✨', '🔥', '⭐', '⚡', '✅', '❌', '❓', '❗']
-}) as Readonly<Record<string, ReadonlyArray<string>>>;
+const MAX_TRACKED_EMOJIS = 256;
+const MAX_USAGE_COUNT = 1_000_000;
+const DEFAULT_FREQUENT_LIMIT = 32;
+const DEFAULT_SEARCH_LIMIT = 240;
 
-let emojiCache: string[] | null = null;
-let cacheTimestamp = 0;
-let emojiCacheHash: string | null = null;
-
-const searchCache = new LRUCache<string, string[]>(CONFIG.SEARCH_CACHE_LIMIT);
-
-const searchRateLimit = {
-  windowStart: 0,
-  count: 0
+const CATEGORY_SEARCH_ALIASES: Readonly<Record<string, string>> = {
+  'smileys-and-emotion': 'face smile happy sad laugh love heart feeling reaction',
+  'people-and-body': 'person people body hand gesture human skin tone',
+  'animals-and-nature': 'animal nature plant flower weather pet',
+  'food-and-drink': 'food drink meal fruit vegetable restaurant',
+  'travel-and-places': 'travel place transport vehicle building map weather',
+  activities: 'activity sport game event celebration art',
+  objects: 'object tool technology office household clothing',
+  symbols: 'symbol sign arrow shape mark button',
+  flags: 'flag country nation region',
 };
 
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const EMOJI_SEARCH_ALIASES: Readonly<Record<string, string>> = {
+  '😀': 'happy grin smile',
+  '😁': 'happy grin smile',
+  '😅': 'nervous relief sweat',
+  '🤣': 'lol lmao rofl laugh laughing funny',
+  '😂': 'lol lmao laugh laughing funny cry crying',
+  '🙂': 'happy smile',
+  '🙃': 'sarcasm sarcastic silly',
+  '😉': 'wink flirty',
+  '😊': 'happy blush smile',
+  '🥰': 'love affection hearts',
+  '😍': 'love crush heart eyes',
+  '😘': 'kiss love',
+  '🤔': 'think thinking hmm',
+  '🫡': 'salute respect',
+  '😐': 'blank neutral meh',
+  '🙄': 'eyeroll eye roll annoyed',
+  '😬': 'awkward grimace nervous',
+  '😴': 'sleep sleeping tired',
+  '🥳': 'party celebrate celebration birthday',
+  '😎': 'cool sunglasses',
+  '🥺': 'please pleading puppy eyes',
+  '😢': 'sad cry crying tear',
+  '😭': 'sad cry crying sob',
+  '😱': 'shock shocked scream scared',
+  '😡': 'angry mad rage',
+  '🤬': 'angry mad swear cursing',
+  '💀': 'dead dying funny skull',
+  '👻': 'ghost halloween spooky',
+  '❤️': 'love heart red',
+  '💔': 'heartbreak broken heart sad',
+  '🔥': 'fire hot lit',
+  '✨': 'sparkle sparkles magic',
+  '🎉': 'party celebrate celebration confetti',
+  '👍': 'yes like approve approved okay ok good thumbs up',
+  '👎': 'no dislike disapprove bad thumbs down',
+  '👏': 'clap applause congratulations',
+  '🙌': 'hooray praise celebrate hands',
+  '🙏': 'please pray prayer thanks thank you',
+  '🤝': 'deal agreement handshake',
+  '💪': 'strong strength muscle',
+  '👀': 'eyes look watching',
+  '✅': 'yes done check correct complete',
+  '❌': 'no wrong cancel cross',
+  '⚠️': 'warning caution alert',
+  '💯': 'hundred perfect agree',
+  '🚀': 'rocket launch fast ship',
+  '🇺🇸': 'usa america united states us flag',
+  '🇬🇧': 'uk britain british united kingdom flag',
+};
 
-const EMOJI_REGEX = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic})(\uFE0F?(\u200D(\p{Emoji_Presentation}|\p{Extended_Pictographic}))*)?$/u;
+const DEFAULT_FREQUENT_VALUES = [
+  '😂', '❤️', '👍', '🤣', '😊', '🙏', '😍', '🔥',
+  '🥰', '👏', '🎉', '😁', '💯', '😭', '🤔', '😎',
+  '✅', '👀', '🙌', '✨', '💪', '😉', '🥳', '🤝',
+] as const;
 
-function logSecurityEvent(event: string, _details?: Record<string, unknown>): void {
-  console.error('[system-emoji] security', event);
+function normalizeText(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('en-US')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
-function getSearchPenaltyMs(overLimitCount: number): number {
-  const penalty = Math.min(overLimitCount * 100, 5000);
-  return penalty;
-}
+let localEmojiVersion = 'unknown';
+let allEmojiRecords: IndexedEmojiRecord[] = [];
+let emojiCategories: readonly EmojiCategory[] = [];
+let emojiByValue = new Map<string, IndexedEmojiRecord>();
+let emojiCatalogPromise: Promise<void> | null = null;
 
-class CircuitBreaker {
-  private failureCount = 0;
-  private lastFailureTime = 0;
+function ensureEmojiCatalogLoaded(): Promise<void> {
+  if (!emojiCatalogPromise) {
+    emojiCatalogPromise = import('../data/emoji-catalog').then((localCatalog) => {
+      const nextRecords: IndexedEmojiRecord[] = [];
+      const nextCategories = localCatalog.LOCAL_EMOJI_CATEGORIES.map((category) => {
+        const records: IndexedEmojiRecord[] = [];
+        const categoryAliases = CATEGORY_SEARCH_ALIASES[category.id] ?? '';
 
-  constructor(
-    private readonly failureThreshold: number,
-    private readonly resetTimeoutMs: number
-  ) { }
-
-  isOpen(): boolean {
-    if (this.failureCount < this.failureThreshold) {
-      return false;
-    }
-    const now = Date.now();
-    return now - this.lastFailureTime < this.resetTimeoutMs;
-  }
-
-  async execute<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.isOpen()) {
-      throw new Error('Circuit breaker open - service unavailable');
-    }
-
-    try {
-      const result = await operation();
-      this.failureCount = 0;
-      return result;
-    } catch (_error) {
-      this.failureCount += 1;
-      this.lastFailureTime = Date.now();
-      throw _error;
-    }
-  }
-}
-
-const bridgeCircuitBreaker = new CircuitBreaker(5, 60_000);
-
-function getSecureBridge(): SecureBridgeAPI | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  if (!isTauri()) {
-    return null;
-  }
-  return null;
-}
-
-import { torNetworkManager } from './transport/tor-network';
-
-function isTorEnvironment(): boolean {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-  try {
-    if (typeof (window as any).__TOR_MODE__ === 'boolean') {
-      if ((window as any).__TOR_MODE__ === true) return true;
-    }
-
-    if (torNetworkManager.isConnected()) {
-      return true;
-    }
-
-    const hostname = window.location?.hostname ?? '';
-    const isOnion = hostname.endsWith('.onion');
-    const isTorBrowser = typeof navigator !== 'undefined' &&
-      navigator.plugins?.length === 0 &&
-      !(navigator as any).webkitTemporaryStorage;
-    return isOnion || isTorBrowser;
-  } catch {
-    return false;
-  }
-}
-
-function isValidEmoji(candidate: unknown): candidate is string {
-  if (typeof candidate !== 'string') return false;
-  const trimmed = candidate.trim();
-  if (trimmed.length === 0 || trimmed.length > CONFIG.MAX_EMOJI_LENGTH) return false;
-  const codePoints = Array.from(trimmed).map((char) => char.codePointAt(0) ?? 0);
-  if (codePoints.some((code) => code > 0x10ffff)) {
-    return false;
-  }
-  return EMOJI_REGEX.test(trimmed);
-}
-
-// Usage Tracking
-const USAGE_STORE = 'emoji_data';
-const USAGE_KEY = STORAGE_KEYS.USAGE_STATS;
-let usageStats: Record<string, number> = {};
-let statsLoaded = false;
-
-async function loadAndMergeStats(secureDB: SecureDB) {
-  if (!statsLoaded) {
-    try {
-      const stored = await secureDB.retrieve(USAGE_STORE, USAGE_KEY);
-      if (stored && typeof stored === 'object') {
-        const storedStats = stored as Record<string, number>;
-        for (const [k, v] of Object.entries(usageStats)) {
-          storedStats[k] = (storedStats[k] || 0) + v;
+        for (const entry of category.emojis) {
+          const subgroupWords = entry.subgroupId.replace(/-/g, ' ');
+          const normalizedName = normalizeText(entry.name);
+          const record: IndexedEmojiRecord = {
+            emoji: entry.emoji,
+            name: entry.name,
+            categoryId: category.id,
+            subgroupId: entry.subgroupId,
+            order: nextRecords.length,
+            normalizedName,
+            searchText: normalizeText(
+              `${entry.name} ${category.label} ${subgroupWords} ${categoryAliases} ${EMOJI_SEARCH_ALIASES[entry.emoji] ?? ''}`,
+            ),
+          };
+          records.push(record);
+          nextRecords.push(record);
         }
-        usageStats = storedStats;
-        statsLoaded = true;
+
+        return { id: category.id, label: category.label, emojis: records };
+      });
+
+      localEmojiVersion = localCatalog.LOCAL_EMOJI_VERSION;
+      allEmojiRecords = nextRecords;
+      emojiCategories = nextCategories;
+      emojiByValue = new Map(nextRecords.map((record) => [record.emoji, record]));
+    });
+  }
+  return emojiCatalogPromise;
+}
+
+function newUsageState(loaded: boolean): UsageState {
+  return {
+    stats: new Map(),
+    loaded,
+    loadPromise: null,
+    persistChain: Promise.resolve(),
+    persistDirty: false,
+    persistRunning: false,
+  };
+}
+
+const inMemoryUsageState = newUsageState(true);
+const usageByDatabase = new WeakMap<SecureDB, UsageState>();
+
+function getUsageState(secureDB?: SecureDB): UsageState {
+  if (!secureDB) return inMemoryUsageState;
+
+  let state = usageByDatabase.get(secureDB);
+  if (!state) {
+    state = newUsageState(false);
+    usageByDatabase.set(secureDB, state);
+  }
+  return state;
+}
+
+function parseUsageEntry(value: unknown): UsageEntry | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+
+  const count = Number(value[0]);
+  const lastUsed = Number(value[1]);
+  if (!Number.isFinite(count) || count <= 0 || !Number.isFinite(lastUsed) || lastUsed < 0) {
+    return null;
+  }
+  return {
+    count: Math.min(Math.floor(count), MAX_USAGE_COUNT),
+    lastUsed: Math.min(Math.floor(lastUsed), Date.now()),
+  };
+}
+
+function parsePersistedUsage(value: unknown): Map<string, UsageEntry> {
+  const parsed = new Map<string, UsageEntry>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return parsed;
+
+  for (const [emoji, rawEntry] of Object.entries(value)) {
+    if (!emojiByValue.has(emoji)) continue;
+    const entry = parseUsageEntry(rawEntry);
+    if (entry) parsed.set(emoji, entry);
+  }
+
+  return parsed;
+}
+
+async function ensureUsageLoaded(state: UsageState, secureDB?: SecureDB): Promise<void> {
+  if (state.loaded || !secureDB) return;
+  if (!state.loadPromise) {
+    state.loadPromise = (async () => {
+      try {
+        const stored = await secureDB.retrieve(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS);
+        state.stats = parsePersistedUsage(stored);
+      } catch {
+        state.stats = new Map();
+      } finally {
+        state.loaded = true;
       }
-    } catch (e) {
-      console.error('[SystemEmoji] Failed to load usage stats securely', e);
-    }
+    })();
+  }
+  await state.loadPromise;
+}
+
+function usageScore(entry: UsageEntry | undefined, now: number): number {
+  if (!entry) return 0;
+  const frequency = Math.log2(entry.count + 1) * 10;
+  if (!entry.lastUsed) return frequency;
+
+  const ageDays = Math.max(0, now - entry.lastUsed) / 86_400_000;
+  const recency = 12 * Math.exp(-ageDays / 21);
+  return frequency + recency;
+}
+
+function pruneUsage(state: UsageState): void {
+  if (state.stats.size <= MAX_TRACKED_EMOJIS) return;
+  const now = Date.now();
+  const entries = [...state.stats.entries()].sort(
+    (left, right) => usageScore(left[1], now) - usageScore(right[1], now),
+  );
+  for (let index = 0; index < entries.length - MAX_TRACKED_EMOJIS; index += 1) {
+    state.stats.delete(entries[index][0]);
   }
 }
 
-export async function recordEmojiUsage(emoji: string, secureDB?: SecureDB) {
-  if (!isValidEmoji(emoji)) return;
+function persistUsage(state: UsageState, secureDB: SecureDB): Promise<void> {
+  state.persistDirty = true;
+  if (state.persistRunning) return state.persistChain;
 
-  if (secureDB) {
-    await loadAndMergeStats(secureDB);
-  }
-
-  usageStats[emoji] = (usageStats[emoji] || 0) + 1;
-
-  if (secureDB) {
-    try {
-      await secureDB.store(USAGE_STORE, USAGE_KEY, usageStats);
-    } catch (e) {
-      console.error('[SystemEmoji] Failed to save usage stats securely', e);
+  state.persistRunning = true;
+  state.persistChain = (async () => {
+    while (state.persistDirty) {
+      state.persistDirty = false;
+      const payload: PersistedUsage = Object.fromEntries(
+        [...state.stats.entries()].map(([emoji, entry]) => [
+          emoji,
+          [entry.count, entry.lastUsed] as const,
+        ]),
+      );
+      try {
+        await secureDB.store(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS, payload);
+      } catch {
+        state.persistDirty = true;
+        break;
+      }
     }
-  }
-}
-
-function sortEmojisByUsage(emojis: string[]): string[] {
-  return emojis.sort((a, b) => {
-    const countA = usageStats[a] || 0;
-    const countB = usageStats[b] || 0;
-    if (countA > countB) return -1;
-    if (countA < countB) return 1;
-    return 0;
+  })().finally(() => {
+    state.persistRunning = false;
   });
+  return state.persistChain;
 }
 
-export async function getSystemEmojis(secureDB?: SecureDB): Promise<string[]> {
-  if (secureDB) {
-    await loadAndMergeStats(secureDB);
-  }
-
+function getFrequentRecords(state: UsageState, limit = DEFAULT_FREQUENT_LIMIT): EmojiRecord[] {
   const now = Date.now();
-  if (emojiCache && (now - cacheTimestamp) < CONFIG.CACHE_TTL) {
-    const integrityOk = await verifyEmojiIntegrity(emojiCache, emojiCacheHash);
-    if (!integrityOk) {
-      logSecurityEvent('Emoji cache integrity check failed');
-      await clearEmojiCache();
-      return MINIMAL_EMOJIS.slice();
-    }
+  const ranked = [...state.stats.entries()]
+    .map(([emoji, usage]) => ({ record: emojiByValue.get(emoji), score: usageScore(usage, now) }))
+    .filter((item): item is { record: IndexedEmojiRecord; score: number } => Boolean(item.record))
+    .sort((left, right) => right.score - left.score || left.record.order - right.record.order)
+    .map((item) => item.record);
 
-    return sortEmojisByUsage(emojiCache.slice());
+  const seen = new Set(ranked.map((record) => record.emoji));
+  for (const emoji of DEFAULT_FREQUENT_VALUES) {
+    if (ranked.length >= limit) break;
+    const record = emojiByValue.get(emoji);
+    if (record && !seen.has(emoji)) {
+      ranked.push(record);
+      seen.add(emoji);
+    }
   }
 
-  try {
-    const bridge = getSecureBridge();
-    if (bridge && typeof bridge.getSystemEmojis === 'function') {
-      const list = await bridgeCircuitBreaker.execute(() => bridge.getSystemEmojis!());
-      if (Array.isArray(list)) {
-        const validated = list.filter(isValidEmoji);
-        if (validated.length > 0) {
-          const deduped = Array.from(new Set(validated));
-          emojiCache = deduped;
-          cacheTimestamp = now;
-          emojiCacheHash = await computeIntegrityHash(deduped);
-          return deduped.slice();
-        }
-      }
-    }
-  } catch (_err) {
-    console.error('[system-emoji] getSystemEmojis-failed', _err instanceof Error ? _err.message : 'unknown');
-  }
-
-  const torActive = isTorEnvironment();
-  if (torActive) {
-    const remoteList = await fetchRemoteEmojis();
-    if (remoteList.length > 0) {
-      const deduped = Array.from(new Set(remoteList));
-      const sorted = sortEmojisByUsage(deduped);
-
-      emojiCache = sorted;
-      cacheTimestamp = now;
-      emojiCacheHash = await computeIntegrityHash(sorted);
-      return sorted.slice();
-    } else {
-      console.warn('[SystemEmoji] Remote emoji fetch returned empty list');
-    }
-  } else {
-  }
-
-  const fallbackSorted = sortEmojisByUsage(FALLBACK_EMOJIS.slice());
-  emojiCache = fallbackSorted;
-  cacheTimestamp = now;
-  emojiCacheHash = await getFallbackEmojisHash();
-  return emojiCache.slice();
+  return ranked.slice(0, limit);
 }
 
-const EMOJI_KEYWORDS = deepFreeze({
-  '😀': ['grin', 'smile', 'happy'],
-  '😃': ['smile', 'happy'],
-  '😄': ['laugh', 'happy'],
-  '😁': ['grin', 'cheerful'],
-  '😆': ['laughing', 'haha'],
-  '😅': ['relief', 'sweat'],
-  '😂': ['joy', 'tears', 'lol'],
-  '🤣': ['rofl', 'rolling'],
-  '😊': ['blush', 'smile'],
-  '😍': ['love', 'hearts', 'eyes'],
-  '😎': ['cool', 'sunglasses'],
-  '🙂': ['smile'],
-  '🙃': ['upside', 'playful'],
-  '😉': ['wink'],
-  '🥰': ['love', 'hearts'],
-  '😘': ['kiss'],
-  '😋': ['yum', 'delicious'],
-  '😜': ['cheeky'],
-  '🤪': ['wacky'],
-  '😝': ['tongue'],
-  '🤗': ['hug', 'embrace'],
-  '🤔': ['think', 'question'],
-  '😐': ['neutral'],
-  '🙄': ['eyeroll'],
-  '😏': ['smirk'],
-  '🥳': ['party', 'celebrate'],
-  '🤩': ['star', 'wow'],
-  '🥺': ['plead'],
-  '😭': ['cry', 'sad'],
-  '😡': ['angry'],
-  '😠': ['mad'],
-  '👍': ['thumbs', 'up'],
-  '👎': ['thumbs', 'down'],
-  '👏': ['clap'],
-  '🙏': ['pray', 'thanks'],
-  '🤝': ['handshake'],
-  '💪': ['muscle', 'strong'],
-  '❤️': ['heart', 'love'],
-  '💔': ['broken', 'heart'],
-  '💖': ['sparkle', 'heart'],
-  '💯': ['100', 'perfect'],
-  '✨': ['sparkles'],
-  '🔥': ['fire', 'lit'],
-  '⭐': ['star'],
-  '⚡': ['zap', 'power'],
-  '✅': ['check', 'green'],
-  '❌': ['cross', 'red'],
-  '❓': ['question'],
-  '❗': ['exclamation']
-}) as Readonly<Record<string, ReadonlyArray<string>>>;
+function searchScore(
+  record: IndexedEmojiRecord,
+  normalizedQuery: string,
+  terms: readonly string[],
+  state: UsageState,
+  now: number,
+): number {
+  if (!terms.every((term) => record.searchText.includes(term))) return -1;
 
-const EMOJI_API_URL = 'https://unpkg.com/emoji.json@15.0.0/emoji.json';
+  let score = 100;
+  if (record.normalizedName === normalizedQuery) score += 500;
+  else if (record.normalizedName.startsWith(normalizedQuery)) score += 300;
+  else if (record.normalizedName.includes(normalizedQuery)) score += 180;
+  else if (record.searchText.includes(normalizedQuery)) score += 90;
 
-const emojiInvertedIndex = new Map<string, string[]>();
-let sortedKeywords: string[] = [];
-let fetchPromise: Promise<string[]> | null = null;
+  const paddedName = ` ${record.normalizedName} `;
+  for (const term of terms) {
+    if (paddedName.includes(` ${term} `)) score += 35;
+    else if (record.normalizedName.includes(term)) score += 15;
+  }
 
-async function fetchRemoteEmojis(): Promise<string[]> {
-  if (fetchPromise) return fetchPromise;
-
-  fetchPromise = (async () => {
-    try {
-      const response = await fetch(EMOJI_API_URL, { cache: 'force-cache' });
-      if (!response.ok) throw new Error(`Failed to fetch emojis: ${response.status}`);
-      const data = await response.json();
-
-      if (!Array.isArray(data)) return [];
-
-      const emojis: string[] = [];
-      const tempIndex = new Map<string, Set<string>>();
-
-      data.forEach((item: any) => {
-        if (item && typeof item.char === 'string' && isValidEmoji(item.char)) {
-          const char = item.char;
-          emojis.push(char);
-
-          const keywords = new Set<string>();
-          if (item.keywords) {
-            const parts = typeof item.keywords === 'string'
-              ? item.keywords.split(' ')
-              : Array.isArray(item.keywords) ? item.keywords : [];
-            parts.forEach((p: string) => keywords.add(p.toLowerCase()));
-          }
-          if (item.name) {
-            keywords.add(item.name.toLowerCase());
-          }
-
-          keywords.forEach(k => {
-            if (!tempIndex.has(k)) tempIndex.set(k, new Set());
-            tempIndex.get(k)!.add(char);
-          });
-        }
-      });
-
-      tempIndex.forEach((set, keyword) => {
-        emojiInvertedIndex.set(keyword, Array.from(set));
-      });
-      sortedKeywords = Array.from(emojiInvertedIndex.keys()).sort();
-
-      return emojis;
-    } catch (error) {
-      console.error('Failed to fetch remote emojis:', error);
-      fetchPromise = null;
-      return [];
-    }
-  })();
-
-  return fetchPromise;
+  return score + Math.min(50, usageScore(state.stats.get(record.emoji), now));
 }
 
-export function searchEmojis(query: string, emojis: string[]): string[] {
+export async function getEmojiCatalog(secureDB?: SecureDB): Promise<EmojiCatalogView> {
+  await ensureEmojiCatalogLoaded();
+  const state = getUsageState(secureDB);
+  await ensureUsageLoaded(state, secureDB);
+  return {
+    version: localEmojiVersion,
+    categories: emojiCategories,
+    frequent: getFrequentRecords(state),
+  };
+}
+
+export function searchEmojiCatalog(
+  query: string,
+  secureDB?: SecureDB,
+  limit = DEFAULT_SEARCH_LIMIT,
+): readonly EmojiRecord[] {
+  const trimmed = query.trim().slice(0, 80);
+  if (!trimmed) return [];
+
+  const exactEmoji = emojiByValue.get(trimmed);
+  if (exactEmoji) return [exactEmoji];
+
+  const normalizedQuery = normalizeText(trimmed);
+  if (!normalizedQuery) return [];
+
+  const terms = normalizedQuery.split(' ').filter(Boolean);
+  const state = getUsageState(secureDB);
   const now = Date.now();
-  if (now - searchRateLimit.windowStart > CONFIG.RATE_LIMIT_WINDOW) {
-    searchRateLimit.windowStart = now;
-    searchRateLimit.count = 0;
-  }
-  searchRateLimit.count += 1;
-  if (searchRateLimit.count > CONFIG.RATE_LIMIT_MAX_REQUESTS) {
-    const overage = searchRateLimit.count - CONFIG.RATE_LIMIT_MAX_REQUESTS;
-    const penalty = getSearchPenaltyMs(overage);
-    logSecurityEvent('Emoji search rate limit exceeded', { overage, penalty });
-    throw new Error(`Too many requests. Try again in ${Math.ceil(penalty / 1000)} seconds.`);
-  }
+  const safeLimit = Math.max(1, Math.min(Math.floor(limit), 500));
 
-  const trimmed = sanitizeSearchQuery(query).toLowerCase();
-  if (!trimmed) {
-    return emojis;
-  }
-
-  const emojiSignature = emojis.length > 50
-    ? `${emojis.length}:${emojis[0] ?? ''}:${emojis[emojis.length - 1] ?? ''}`
-    : Array.from(new Set(emojis)).sort().join('|').substring(0, 200);
-  const cacheKey = `${trimmed}:${emojiSignature}`;
-
-  const cached = searchCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const matches = new Set<string>();
-
-  if (sortedKeywords.length > 0) {
-    for (const keyword of sortedKeywords) {
-      if (keyword.includes(trimmed)) {
-        const hits = emojiInvertedIndex.get(keyword);
-        if (hits) {
-          for (const h of hits) matches.add(h);
-        }
-      }
-    }
-
-    for (const emoji of emojis) {
-      if (emoji.includes(trimmed)) matches.add(emoji);
-    }
-
-  } else {
-    const seen = new Set<string>();
-    for (const emoji of emojis) {
-      if (seen.has(emoji)) continue;
-      if (emoji.includes(trimmed)) {
-        matches.add(emoji);
-        seen.add(emoji);
-        continue;
-      }
-
-      const keywords = EMOJI_KEYWORDS[emoji];
-      if (keywords && keywords.some((word: string) => word.includes(trimmed))) {
-        matches.add(emoji);
-        seen.add(emoji);
-      }
-    }
-  }
-
-  const result = Array.from(matches);
-  if (result.length === 0 && emojis.includes(trimmed)) {
-    result.push(trimmed);
-  }
-
-  const behaviorResult = result.length > 0 ? result : emojis;
-
-  searchCache.set(cacheKey, behaviorResult);
-  return behaviorResult;
+  return allEmojiRecords
+    .map((record) => ({
+      record,
+      score: searchScore(record, normalizedQuery, terms, state, now),
+    }))
+    .filter((item) => item.score >= 0)
+    .sort((left, right) => right.score - left.score || left.record.order - right.record.order)
+    .slice(0, safeLimit)
+    .map((item) => item.record);
 }
 
-export async function clearEmojiCache(): Promise<void> {
-  emojiCache = null;
-  cacheTimestamp = 0;
-  emojiCacheHash = null;
-  fallbackEmojisHashPromise = null;
-  searchCache.clear();
+export async function recordEmojiUsage(emoji: string, secureDB?: SecureDB): Promise<void> {
+  await ensureEmojiCatalogLoaded();
+  if (!emojiByValue.has(emoji)) return;
+
+  const state = getUsageState(secureDB);
+  await ensureUsageLoaded(state, secureDB);
+
+  const previous = state.stats.get(emoji);
+  state.stats.set(emoji, {
+    count: Math.min((previous?.count ?? 0) + 1, MAX_USAGE_COUNT),
+    lastUsed: Date.now(),
+  });
+  pruneUsage(state);
+
+  if (secureDB) await persistUsage(state, secureDB);
 }
-
-
-

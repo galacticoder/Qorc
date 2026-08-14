@@ -4,37 +4,23 @@
 
 import type { SignalHandlers } from '../types/signal-handler-types';
 import { SignalType } from '../types/signal-types';
+import { EventType } from '../types/event-types';
 import {
-  handleTokenValidationResponse,
   handleAuthError,
-  handleAuthFullSuccess,
-  handleZKRefreshChallenge,
-  handlePrivacyPassIssuance
+  handleAuthFullSuccess
 } from './auth-handlers';
-import {
-  handleServerPublicKey, handleHybridKeys
-} from './key-handlers';
-import {
-  handleLibsignalDeliverBundle, handleSessionResetRequest,
-  handleSessionEstablished, handleError
-} from './session-handlers';
-import {
-  handlePirManifest,
-  handlePirResponse,
-  handleBlockListSync, handleBlockListUpdate,
-  handleBlockListResponse
-} from './user-handlers';
-
-export { clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
+import { handleServerPublicKey } from './key-handlers';
+import { handleError } from './session-handlers';
+import { isStaleAuthOperation } from '../auth/auth-lifecycle';
 
 export async function handleSignalMessages(data: any, handlers: SignalHandlers) {
-  const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload, findUser } = handlers;
+  const { Authentication, handleEncryptedMessagePayload } = handlers;
 
   const type = data?.type;
   const message = data?.message ?? data?.data ?? data?.payload ?? '';
 
   if (!type) {
-    console.warn('[signals] missing-type', data);
+    console.warn('[signals] message missing type');
     return;
   }
 
@@ -43,39 +29,28 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
   const auth = {
     setServerHybridPublic: Authentication?.setServerHybridPublic,
-    serverHybridPublic: Authentication?.serverHybridPublic,
     handleAuthSuccess: Authentication?.handleAuthSuccess,
     loginUsernameRef: Authentication?.loginUsernameRef,
     originalUsernameRef: Authentication?.originalUsernameRef,
-    aesKeyRef: Authentication?.aesKeyRef,
     setAccountAuthenticated: Authentication?.setAccountAuthenticated,
     setIsLoggedIn: Authentication?.setIsLoggedIn,
     setLoginError: Authentication?.setLoginError,
-    setPassphraseHashParams: Authentication?.setPassphraseHashParams,
     passphrasePlaintextRef: Authentication?.passphrasePlaintextRef,
-    passphraseRef: Authentication?.passphraseRef,
     setShowPassphrasePrompt: Authentication?.setShowPassphrasePrompt,
     setShowPasswordPrompt: Authentication?.setShowPasswordPrompt,
     passwordRef: Authentication?.passwordRef,
     setIsSubmittingAuth: Authentication?.setIsSubmittingAuth,
     setAuthStatus: Authentication?.setAuthStatus,
     setTokenValidationInProgress: Authentication?.setTokenValidationInProgress,
-    setServerTrustRequest: Authentication?.setServerTrustRequest,
-    keyManagerRef: Authentication?.keyManagerRef,
+    keyManagerOwnerRef: Authentication?.keyManagerOwnerRef,
     setUsername: Authentication?.setUsername,
-    setMaxStepReached: Authentication?.setMaxStepReached,
     setRecoveryActive: Authentication?.setRecoveryActive,
     setVaultReady: Authentication?.setVaultReady,
     getKeysOnDemand: Authentication?.getKeysOnDemand,
     hybridKeysRef: Authentication?.hybridKeysRef,
-    accountAuthenticated: Authentication?.accountAuthenticated,
-    isLoggedIn: Authentication?.isLoggedIn,
-    isRegistrationMode: Authentication?.isRegistrationMode,
-    blindCredentialRef: Authentication?.blindCredentialRef,
-    serverHybridPublicRef: Authentication?.serverHybridPublicRef
+    serverHybridPublicRef: Authentication?.serverHybridPublicRef,
+    authLifecycle: Authentication?.authLifecycle
   };
-
-  const db = { setUsers: Database?.setUsers, users: Database?.users };
 
   try {
     switch (type) {
@@ -86,81 +61,22 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         await handleServerPublicKey(data, auth);
         break;
 
-      case SignalType.HYBRID_KEYS:
-        handleHybridKeys(data, db);
-        break;
-
       case SignalType.AUTH_FULL_SUCCESS:
         await handleAuthFullSuccess(data, auth);
         break;
 
       case SignalType.AUTH_OT_REGISTER_RESPONSE:
+      case SignalType.AUTH_OT_REGISTER_READY:
       case SignalType.AUTH_OT_RESPONSE:
         // handled in handlers.ts
         break;
 
-      case SignalType.TOKEN_VALIDATION_RESPONSE:
-        await handleTokenValidationResponse(data, auth);
-        break;
-
-      case SignalType.ZK_REFRESH_CHALLENGE:
-        await handleZKRefreshChallenge(data, auth);
-        break;
-      case SignalType.ZK_DEVICE_REGISTER_RESPONSE:
-        break;
-
-      case SignalType.PRIVACY_PASS_ISSUANCE:
-        await handlePrivacyPassIssuance(data, auth);
-        break;
-
-      case SignalType.ENCRYPTED_MESSAGE:
-      case SignalType.EDIT_MESSAGE:
-      case SignalType.DELETE_MESSAGE:
       case SignalType.SEALED_ENVELOPE:
         await handleEncryptedMessagePayload(data);
         break;
 
-      case SignalType.LIBSIGNAL_DELIVER_BUNDLE:
-        await handleLibsignalDeliverBundle(data, auth.loginUsernameRef, db.users, findUser);
-        break;
-
-      case SignalType.FILE_MESSAGE_CHUNK:
-        await handleFileMessageChunk(data, { from: data?.from, to: data?.to });
-        break;
-
-      case SignalType.PIR_MANIFEST:
-        handlePirManifest(data);
-        break;
-
-      case SignalType.PIR_RESPONSE:
-        handlePirResponse(data);
-        break;
-
-      case SignalType.BLOCK_LIST_SYNC:
-        handleBlockListSync(data);
-        break;
-
-      case SignalType.BLOCK_LIST_UPDATE:
-        handleBlockListUpdate(data);
-        break;
-
-      case SignalType.BLOCK_LIST_RESPONSE:
-        handleBlockListResponse(data);
-        break;
-
-      case SignalType.RATE_LIMIT_STATUS:
-        break;
-
       case SignalType.AUTH_ERROR:
         handleAuthError(data, message, auth);
-        break;
-
-      case SignalType.SESSION_RESET_REQUEST:
-        await handleSessionResetRequest(data, auth.loginUsernameRef);
-        break;
-
-      case SignalType.SESSION_ESTABLISHED:
-        handleSessionEstablished(data);
         break;
 
       case SignalType.ERROR:
@@ -171,7 +87,18 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         break;
     }
   } catch (_error) {
+    if (isStaleAuthOperation(_error)) return;
     console.error('[signals] signal-processing-error', (_error as Error).message);
     auth.setLoginError?.('Error processing server message');
+    if (type === SignalType.AUTH_FULL_SUCCESS && typeof data?.authRequestId === 'string') {
+      window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+        detail: {
+          type: 'AUTH_COMPLETION_FAILED',
+          code: 'AUTH_COMPLETION_FAILED',
+          authRequestId: data.authRequestId,
+          message: 'Authentication completion failed'
+        }
+      }));
+    }
   }
 }

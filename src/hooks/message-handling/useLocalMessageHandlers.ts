@@ -1,265 +1,234 @@
-import React, { useEffect, useCallback, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
-import { isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText, sanitizeFilename } from '../../lib/sanitizers';
-import { toast } from 'sonner';
+import { exactEventDetail, isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, sanitizeFilename, sanitizeMessageId } from '../../lib/sanitizers';
+import { nativeMessageContent } from '../../lib/tauri-bindings';
+import { setMessagesWithResult } from '../../lib/utils/set-messages-result';
 import { 
   MAX_LOCAL_MESSAGE_ID_LENGTH,
-  MAX_LOCAL_MESSAGE_LENGTH,
   MAX_LOCAL_USERNAME_LENGTH,
   MAX_LOCAL_MIMETYPE_LENGTH,
   MAX_LOCAL_EMOJI_LENGTH,
   MAX_LOCAL_FILE_SIZE_BYTES,
-  MAX_INLINE_BASE64_BYTES 
+  AUTH_USERNAME_REGEX,
 } from '../../lib/constants';
+import {
+  applyDeleteControl,
+  applyEditControl,
+  applyReactionControl,
+  hasWireMessageId,
+  isPlausibleControlOperationId,
+  type MessageControlOutcome,
+} from '../../lib/messages/message-controls';
 
 interface UseLocalMessageHandlersProps {
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   saveMessageWithContext: (message: Message) => Promise<any> | void;
-  secureDBRef: React.RefObject<any>;
   allowEvent: (eventType: string) => boolean;
+  currentUsername: string;
 }
 
 export function useLocalMessageHandlers({
   setMessages,
   saveMessageWithContext,
-  secureDBRef,
   allowEvent,
+  currentUsername,
 }: UseLocalMessageHandlersProps) {
   const saveMessageRef = useRef(saveMessageWithContext);
-  useEffect(() => { saveMessageRef.current = saveMessageWithContext; }, [saveMessageWithContext]);
+  const activeAccountRef = useRef(currentUsername);
+  const accountGenerationRef = useRef(0);
+  useLayoutEffect(() => { saveMessageRef.current = saveMessageWithContext; }, [saveMessageWithContext]);
+  useLayoutEffect(() => {
+    if (activeAccountRef.current === currentUsername) return;
+    activeAccountRef.current = currentUsername;
+    accountGenerationRef.current += 1;
+  }, [currentUsername]);
+
+  const captureAccountOperation = useCallback(() => {
+    const account = currentUsername;
+    const generation = accountGenerationRef.current;
+    return () => !!account &&
+      activeAccountRef.current === account &&
+      generation === accountGenerationRef.current;
+  }, [currentUsername]);
 
   const handleLocalMessageDelete = useCallback((event: CustomEvent) => {
     try {
-      if (!allowEvent(EventType.LOCAL_MESSAGE_DELETE)) return;
-      const detail = (event as any).detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      const isCurrent = captureAccountOperation();
+      if (!isCurrent()) return;
+      const detail = exactEventDetail(event, ['account', 'messageId', 'operationId']);
+      if (!detail || detail.account !== currentUsername) return;
       const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-      if (!messageId) return;
+      const operationId = isPlausibleControlOperationId(detail.operationId)
+        ? detail.operationId
+        : null;
+      if (!messageId || !operationId) return;
+      if (!allowEvent(EventType.LOCAL_MESSAGE_DELETE)) return;
 
-      let messageToPersist: Message | null = null;
-      setMessages(prev => prev.map(msg => {
-        if (msg.id === messageId) {
-          const updated = { ...msg, isDeleted: true, content: 'This message was deleted' } as Message;
-          messageToPersist = updated;
-          return updated;
-        }
-        return msg;
-      }));
-
-      if (messageToPersist) {
-        try { void saveMessageRef.current(messageToPersist); } catch { }
-      }
+      void setMessagesWithResult<MessageControlOutcome | null>(setMessages, (prev) => {
+        if (!isCurrent()) return { next: prev, result: null };
+        let matched: MessageControlOutcome | null = null;
+        const next = prev.map(msg => {
+          if (hasWireMessageId(msg, messageId) && msg.sender === currentUsername && msg.isCurrentUser === true) {
+            matched = applyDeleteControl(msg, currentUsername, operationId);
+            return matched?.message ?? msg;
+          }
+          return msg;
+        });
+        return { next: matched?.changed ? next : prev, result: matched };
+      }).then((outcome) => {
+        if (!outcome?.changed || !isCurrent()) return;
+        void nativeMessageContent.delete(outcome.message.secureContentId || messageId).catch(() => false);
+        void Promise.resolve(saveMessageRef.current(outcome.message)).catch(() => { });
+      }).catch(() => { });
     } catch { }
-  }, [setMessages, allowEvent]);
+  }, [setMessages, allowEvent, captureAccountOperation, currentUsername]);
 
   const handleLocalMessageEdit = useCallback((event: CustomEvent) => {
     try {
-      if (!allowEvent(EventType.LOCAL_MESSAGE_EDIT)) return;
-      const detail = (event as any).detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      const isCurrent = captureAccountOperation();
+      if (!isCurrent()) return;
+      const detail = exactEventDetail(event, ['account', 'contentVaultId', 'messageId', 'operationId']);
+      if (!detail || detail.account !== currentUsername) return;
       const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-      const newContent = sanitizeNonEmptyText(detail.newContent, MAX_LOCAL_MESSAGE_LENGTH, true);
-      if (!messageId || !newContent) return;
+      const contentVaultId = sanitizeMessageId(detail.contentVaultId);
+      const operationId = isPlausibleControlOperationId(detail.operationId)
+        ? detail.operationId
+        : null;
+      if (!messageId || !contentVaultId || !operationId) return;
+      if (!allowEvent(EventType.LOCAL_MESSAGE_EDIT)) return;
 
-      let messageToPersist: Message | null = null;
-      setMessages(prev => prev.map(msg => {
-        if (msg.id === messageId) {
-          const updated = { ...msg, content: newContent, isEdited: true } as Message;
-          messageToPersist = updated;
-          return updated;
-        }
-        return msg;
-      }));
-
-      if (messageToPersist) {
-        try { void saveMessageRef.current(messageToPersist); } catch { }
-      }
+      void (async () => {
+        if (!await nativeMessageContent.has(contentVaultId) || !isCurrent()) return;
+        const outcome = await setMessagesWithResult<MessageControlOutcome | null>(setMessages, (prev) => {
+          if (!isCurrent()) return { next: prev, result: null };
+          let matched: MessageControlOutcome | null = null;
+          const next = prev.map(msg => {
+            if (hasWireMessageId(msg, messageId) && msg.sender === currentUsername && msg.isCurrentUser === true) {
+              const applied = applyEditControl(msg, currentUsername, operationId);
+              matched = applied?.changed
+                ? { ...applied, message: { ...applied.message, content: '', secureContentId: contentVaultId } }
+                : applied;
+              return matched?.message ?? msg;
+            }
+            return msg;
+          });
+          return { next: matched?.changed ? next : prev, result: matched };
+        });
+        if (!outcome?.changed || !isCurrent()) return;
+        await Promise.resolve(saveMessageRef.current({ ...outcome.message, content: '' }));
+      })().catch(() => { });
     } catch { }
-  }, [setMessages, allowEvent]);
+  }, [setMessages, allowEvent, captureAccountOperation, currentUsername]);
 
   const handleLocalFileMessage = useCallback(async (event: CustomEvent) => {
     try {
-      if (!allowEvent(EventType.LOCAL_FILE_MESSAGE)) return;
-      const detail = (event as any).detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      const isCurrent = captureAccountOperation();
+      if (!isCurrent()) return;
+      const detail = exactEventDetail(event, [
+        'account', 'content', 'fileSize', 'filename', 'id', 'isCurrentUser',
+        'mimeType', 'receipt', 'recipient', 'sender', 'timestamp', 'type'
+      ]);
+      if (!detail || detail.account !== currentUsername) return;
 
       const fileId = sanitizeNonEmptyText(detail.id, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
       if (!fileId) return;
 
-      const filenameRaw = typeof detail.filename === 'string' ? detail.filename : SignalType.FILE;
+      const filenameRaw = typeof detail.filename === 'string' ? detail.filename : 'file';
       const filename = sanitizeFilename(filenameRaw, 128);
       const mimeType = sanitizeNonEmptyText(detail.mimeType, MAX_LOCAL_MIMETYPE_LENGTH, false) || 'application/octet-stream';
       const sender = sanitizeNonEmptyText(detail.sender, MAX_LOCAL_USERNAME_LENGTH, false) || '';
       const recipient = sanitizeNonEmptyText(detail.recipient, MAX_LOCAL_USERNAME_LENGTH, false) || '';
+      if (
+        sender !== currentUsername ||
+        sender !== sender.trim().toLowerCase() ||
+        recipient !== recipient.trim().toLowerCase() ||
+        !AUTH_USERNAME_REGEX.test(sender) ||
+        !AUTH_USERNAME_REGEX.test(recipient) ||
+        recipient === sender ||
+        detail.type !== SignalType.FILE ||
+        detail.isCurrentUser !== true ||
+        detail.content !== ''
+      ) return;
 
-      const sizeCandidate = typeof detail.fileSize === 'number' ? detail.fileSize : typeof detail.size === 'number' ? detail.size : undefined;
-      const fileSize = typeof sizeCandidate === 'number' && Number.isFinite(sizeCandidate) && sizeCandidate >= 0 && sizeCandidate <= MAX_LOCAL_FILE_SIZE_BYTES
+      const sizeCandidate = typeof detail.fileSize === 'number' ? detail.fileSize : undefined;
+      const fileSize = typeof sizeCandidate === 'number' && Number.isFinite(sizeCandidate) && sizeCandidate > 0 && sizeCandidate <= MAX_LOCAL_FILE_SIZE_BYTES
         ? sizeCandidate : undefined;
 
-      const content = sanitizeNonEmptyText(detail.content, 2048, false) || '';
-      const blobUrl = content.startsWith('blob:') ? content : '';
+      if (!fileSize) return;
 
-      let secureDbSaveSucceeded = false;
-      try {
-        if (secureDBRef.current) {
-          if (detail.fileBlob instanceof Blob) {
-            const saveResult = await secureDBRef.current.saveFile(fileId, detail.fileBlob);
-            secureDbSaveSucceeded = Boolean(saveResult?.success);
-            if (!saveResult.success && saveResult.quotaExceeded) {
-              toast.warning('Storage limit reached. This file will not save after restart.', { duration: 5000 });
-            }
-          } else if (blobUrl) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15_000);
-            try {
-              const resp = await fetch(blobUrl, { signal: controller.signal });
-              if (resp.ok) {
-                const fetchedBlob = await resp.blob();
-                if (fetchedBlob.size > 0 && fetchedBlob.size <= MAX_LOCAL_FILE_SIZE_BYTES) {
-                  const saveResult = await secureDBRef.current.saveFile(fileId, fetchedBlob);
-                  secureDbSaveSucceeded = Boolean(saveResult?.success);
-                  if (!saveResult.success && saveResult.quotaExceeded) {
-                    toast.warning('Storage limit reached. This file will not persist after restart.', { duration: 5000 });
-                  }
-                }
-              }
-            } finally {
-              clearTimeout(timeout);
-            }
-          }
-        }
-      } catch { }
-
-      let timestamp: Date;
-      try {
-        if (typeof detail.timestamp === 'number' && Number.isFinite(detail.timestamp)) {
-          timestamp = new Date(detail.timestamp);
-        } else if (typeof detail.timestamp === 'string') {
-          timestamp = new Date(detail.timestamp);
-        } else if (detail.timestamp instanceof Date) {
-          timestamp = detail.timestamp;
-        } else {
-          timestamp = new Date();
-        }
-        if (isNaN(timestamp.getTime())) timestamp = new Date();
-      } catch {
-        timestamp = new Date();
-      }
+      if (!Number.isSafeInteger(detail.timestamp) || (detail.timestamp as number) <= 0) return;
+      const timestamp = new Date(detail.timestamp as number);
+      if (!Number.isFinite(timestamp.getTime())) return;
 
       const receiptDetail = detail.receipt;
-      const receipt = isPlainObject(receiptDetail) && !hasPrototypePollutionKeys(receiptDetail)
-        ? { delivered: typeof receiptDetail.delivered === 'boolean' ? receiptDetail.delivered : false, read: typeof receiptDetail.read === 'boolean' ? receiptDetail.read : false }
-        : { delivered: false, read: false };
-
-      let safeOriginalBase64Data: string | undefined;
-      if (!secureDbSaveSucceeded && typeof detail.originalBase64Data === 'string') {
-        const raw = detail.originalBase64Data;
-        const maxChars = Math.ceil((MAX_INLINE_BASE64_BYTES * 4) / 3) + 128;
-        if (raw.length > 0 && raw.length <= maxChars) {
-          let normalized = raw.trim();
-          const commaIndex = normalized.indexOf(',');
-          if (commaIndex > 0 && commaIndex < 128) normalized = normalized.slice(commaIndex + 1);
-          normalized = normalized.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
-          if (/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
-            const pad = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
-            const estimatedBytes = Math.floor((normalized.length * 3) / 4) - pad;
-            if (estimatedBytes > 0 && estimatedBytes <= MAX_INLINE_BASE64_BYTES) {
-              safeOriginalBase64Data = normalized;
-            }
-          }
-        }
-      }
+      if (
+        !isPlainObject(receiptDetail) ||
+        hasPrototypePollutionKeys(receiptDetail) ||
+        Object.keys(receiptDetail).sort().join(',') !== 'delivered,read' ||
+        receiptDetail.delivered !== false ||
+        receiptDetail.read !== false
+      ) return;
+      if (!allowEvent(EventType.LOCAL_FILE_MESSAGE)) return;
 
       const newMessage: Message = {
         id: fileId,
-        content: blobUrl,
+        content: '',
         sender,
         recipient,
         timestamp,
         isCurrentUser: true,
-        type: SignalType.FILE,
+        type: 'file',
         filename,
         fileSize,
         mimeType,
-        receipt,
-        ...(safeOriginalBase64Data ? { originalBase64Data: safeOriginalBase64Data } : {}),
-        version: typeof detail.version === 'string' && detail.version.length > 0 ? detail.version : '1'
+        receipt: { delivered: false, read: false },
       } as Message;
 
-      let messageToPersist: Message | null = null;
-      setMessages(prev => {
-        if (prev.find(msg => msg.id === fileId)) return prev;
-        messageToPersist = newMessage;
-        return [...prev, newMessage];
-      });
+      const added = await setMessagesWithResult<boolean>(setMessages, (prev) => (
+        !isCurrent() || prev.find(msg => msg.id === fileId)
+          ? { next: prev, result: false }
+          : { next: [...prev, newMessage], result: true }
+      ));
+      if (!isCurrent()) return;
 
-      if (messageToPersist) {
-        try { void saveMessageRef.current(messageToPersist); } catch { }
-      }
+      void added;
     } catch { }
-  }, [setMessages, allowEvent, secureDBRef]);
+  }, [setMessages, allowEvent, captureAccountOperation, currentUsername]);
 
   const handleLocalReactionUpdate = useCallback((event: CustomEvent) => {
     try {
-      if (!allowEvent(EventType.LOCAL_REACTION_UPDATE)) return;
-      const detail = (event as any).detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      const isCurrent = captureAccountOperation();
+      if (!isCurrent()) return;
+      const detail = exactEventDetail(event, ['account', 'emoji', 'isAdd', 'messageId', 'operationId', 'username']);
+      if (!detail || detail.account !== currentUsername) return;
       const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
       const emoji = sanitizeNonEmptyText(detail.emoji, MAX_LOCAL_EMOJI_LENGTH, false);
       const username = sanitizeNonEmptyText(detail.username, MAX_LOCAL_USERNAME_LENGTH, false);
       const isAdd = typeof detail.isAdd === 'boolean' ? detail.isAdd : null;
-      if (!messageId || !emoji || !username || isAdd === null) return;
-      if (isUnsafeObjectKey(emoji)) return;
+      const operationId = isPlausibleControlOperationId(detail.operationId)
+        ? detail.operationId
+        : null;
+      if (!messageId || !emoji || !username || username !== currentUsername || isAdd === null || !operationId) return;
+      if (!allowEvent(EventType.LOCAL_REACTION_UPDATE)) return;
 
-      let updatedMessage: Message | null = null;
-
-      setMessages(prev => prev.map(msg => {
-        if (msg.id !== messageId) return msg;
-
-        const currentReactions: Record<string, string[]> = Object.create(null);
-        if (msg.reactions && typeof msg.reactions === 'object') {
-          for (const [reactionKey, rawUsers] of Object.entries(msg.reactions as Record<string, unknown>)) {
-            if (typeof reactionKey !== 'string' || isUnsafeObjectKey(reactionKey)) continue;
-            if (!Array.isArray(rawUsers)) continue;
-            const safeUsers: string[] = [];
-            const seen = new Set<string>();
-            for (const candidate of rawUsers as unknown[]) {
-              if (safeUsers.length >= 250) break;
-              const cleaned = sanitizeNonEmptyText(candidate, MAX_LOCAL_USERNAME_LENGTH, false);
-              if (!cleaned || seen.has(cleaned)) continue;
-              seen.add(cleaned);
-              safeUsers.push(cleaned);
-            }
-            if (safeUsers.length > 0) currentReactions[reactionKey] = safeUsers;
-          }
+      void setMessagesWithResult<MessageControlOutcome | null>(setMessages, (prev) => {
+        if (!isCurrent()) return { next: prev, result: null };
+        let outcome: MessageControlOutcome | null = null;
+        const next = prev.map(msg => {
+          if (!hasWireMessageId(msg, messageId)) return msg;
+          outcome = applyReactionControl(msg, username, operationId, emoji, isAdd);
+          return outcome?.message ?? msg;
+        });
+        return { next: outcome?.changed ? next : prev, result: outcome };
+      }).then((outcome) => {
+        if (outcome?.changed && isCurrent()) {
+          void Promise.resolve(saveMessageRef.current(outcome.message)).catch(() => { });
         }
-
-        const users = currentReactions[emoji] ? [...currentReactions[emoji]] : [];
-        if (isAdd) {
-          if (!users.includes(username) && users.length < 250) users.push(username);
-        } else {
-          const idx = users.indexOf(username);
-          if (idx !== -1) users.splice(idx, 1);
-        }
-
-        if (users.length > 0) {
-          currentReactions[emoji] = users;
-        } else {
-          delete currentReactions[emoji];
-        }
-
-        const updated = { ...msg, reactions: currentReactions };
-        updatedMessage = updated;
-        return updated;
-      }));
-
-      if (updatedMessage) {
-        try { void saveMessageRef.current(updatedMessage); } catch { }
-      }
+      }).catch(() => { });
     } catch { }
-  }, [setMessages, allowEvent]);
+  }, [setMessages, allowEvent, captureAccountOperation, currentUsername]);
 
   useEffect(() => {
     window.addEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);

@@ -1,19 +1,26 @@
 import type { SecureDB } from '../database/secureDB';
-import type { ProfilePictureMessage, AvatarData } from '../types/avatar-types';
+import type { AvatarData } from '../types/avatar-types';
 import { createInitialState } from './state';
 import { AvatarSystemState } from '../types/avatar-types';
-import { setSecureDB, setKeys, initialize } from './init';
+import { setSecureDB, initialize } from './init';
 import { clearPeerCache, cachePeerAvatar } from './cache';
-import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, getOwnProfileVersion, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
-import { getPeerAvatar, getPeerAvatarHash, isPeerAvatarStale, requestPeerAvatar } from './peer-avatar';
-import { createProfilePictureRequest, createProfilePictureResponse, handleIncomingMessage } from './messaging';
+import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
+import { getPeerAvatar, getPeerAvatarHash } from './peer-avatar';
 
 class ProfilePictureSystem {
     private static instance: ProfilePictureSystem | null = null;
     private state: AvatarSystemState;
+    private generation = 0;
+    private initializationPromise: Promise<void> | null = null;
 
     private constructor() {
         this.state = createInitialState();
+    }
+
+    private captureAccountOperation(): () => boolean {
+        const generation = this.generation;
+        const secureDB = this.state.secureDB;
+        return () => this.generation === generation && this.state.secureDB === secureDB;
     }
 
     // Get instance
@@ -26,27 +33,48 @@ class ProfilePictureSystem {
 
     // Set secure DB
     setSecureDB(db: SecureDB | null): void {
+        if (this.state.secureDB === db) return;
+        this.generation += 1;
+        this.initializationPromise = null;
         setSecureDB(this.state, db);
-    }
-
-    // Set keys
-    setKeys(kyberPublicBase64: string, kyberSecretKey: Uint8Array): void {
-        setKeys(this.state, kyberPublicBase64, kyberSecretKey);
     }
 
     // Initialize
     async initialize(): Promise<void> {
-        await initialize(this.state, () => { });
+        if (this.state.initialized || !this.state.secureDB) return;
+        if (this.initializationPromise) return this.initializationPromise;
+
+        const generation = this.generation;
+        const secureDB = this.state.secureDB;
+        const operation = initialize(
+            this.state,
+            () => { },
+            () => this.generation === generation && this.state.secureDB === secureDB
+        );
+        this.initializationPromise = operation;
+        try {
+            await operation;
+        } finally {
+            if (this.initializationPromise === operation) {
+                this.initializationPromise = null;
+            }
+        }
     }
 
     // Set own avatar
     async setOwnAvatar(imageDataUrl: string, isDefault: boolean = false): Promise<{ success: boolean; error?: string }> {
-        return setOwnAvatar(this.state, imageDataUrl, isDefault, () => Promise.resolve());
+        return setOwnAvatar(this.state, imageDataUrl, isDefault, this.captureAccountOperation());
     }
 
     // Remove own avatar
     async removeOwnAvatar(usernameOverride?: string): Promise<void> {
-        return removeOwnAvatar(this.state, usernameOverride, (url, def) => this.setOwnAvatar(url, def));
+        const isCurrent = this.captureAccountOperation();
+        return removeOwnAvatar(
+            this.state,
+            usernameOverride,
+            (url, def) => this.setOwnAvatar(url, def),
+            isCurrent
+        );
     }
 
     // Get own avatar
@@ -65,11 +93,6 @@ class ProfilePictureSystem {
         return getOwnAvatarHash(this.state);
     }
 
-    // Get own profile version
-    getOwnProfileVersion(): number {
-        return getOwnProfileVersion(this.state);
-    }
-
     // Check if own avatar is default
     isOwnAvatarDefault(): boolean {
         return isOwnAvatarDefault(this.state);
@@ -77,7 +100,7 @@ class ProfilePictureSystem {
 
     // Set share with others
     async setShareWithOthers(share: boolean): Promise<void> {
-        return setShareWithOthers(this.state, share, () => Promise.resolve());
+        return setShareWithOthers(this.state, share, this.captureAccountOperation());
     }
 
     // Get share with others
@@ -95,41 +118,25 @@ class ProfilePictureSystem {
         return getPeerAvatarHash(this.state, username);
     }
 
-    // Check if peer avatar is stale
-    isPeerAvatarStale(username: string): boolean {
-        return isPeerAvatarStale(this.state, username);
-    }
-
-    // Request peer avatar
-    async requestPeerAvatar(username: string): Promise<void> {
-        return requestPeerAvatar(this.state, username, async () => { });
-    }
-
     // Clear peer cache
     clearPeerCache(username?: string): void {
-        clearPeerCache(this.state, username);
+        clearPeerCache(this.state, username, this.captureAccountOperation());
     }
 
     // Cache peer avatar
     async cachePeerAvatar(username: string, data: string, mimeType: string, hash: string, isDefault: boolean = false): Promise<void> {
-        return cachePeerAvatar(this.state, username, data, mimeType, hash, isDefault);
+        return cachePeerAvatar(
+            this.state,
+            username,
+            data,
+            mimeType,
+            hash,
+            isDefault,
+            this.captureAccountOperation()
+        );
     }
 
-    // Create profile picture request
-    createProfilePictureRequest(): ProfilePictureMessage {
-        return createProfilePictureRequest();
-    }
-
-    // Create profile picture response
-    createProfilePictureResponse(): ProfilePictureMessage | null {
-        return createProfilePictureResponse(this.state);
-    }
-
-    // Handle incoming message
-    async handleIncomingMessage(message: ProfilePictureMessage, fromUsername: string): Promise<ProfilePictureMessage | null> {
-        return handleIncomingMessage(this.state, message, fromUsername);
-    }
 }
 
 export const profilePictureSystem = ProfilePictureSystem.getInstance();
-export type { ProfilePictureMessage, AvatarData };
+export type { AvatarData };

@@ -6,115 +6,194 @@
 
 import crypto from 'crypto';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { withRedisClient, createSubscriber } from '../session/redis-client.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { SignalType } from '../signals.js';
-import { recordLocalBroadcast } from '../diagnostics/runtime-monitor.js';
+import { withRedisClient, createSubscriber, closeSubscriber } from '../session/redis-client.js';
+import { envInt } from '../utils/env.js';
+import { BASE64URL_32_RE } from '../utils/patterns.js';
+import { randomDelay } from '../utils/random.js';
+import { exactRedisScoreArgument } from '../utils/redis-args.js';
 import {
-  validateCapabilityToken,
-  isRouteLookupId
-} from './capability-tokens.js';
-import { validateSealedEnvelope } from './sealed-sender.js';
+  moveRedisSortedSetLease,
+  REDIS_SORTED_SET_LEASE_RELEASE_GUARD
+} from '../utils/redis-lease.js';
+import { hasExactPlainObjectKeys } from '../utils/validation.js';
+import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+
+import { SignalType } from '../signals.js';
+import {
+  SEALED_ENVELOPE_VERSION,
+  SEALED_STANDARD_CIPHERTEXT_BYTES,
+  SEALED_KEM_CIPHERTEXT_BYTES,
+  SEALED_NONCE_BYTES,
+  validateSealedEnvelope
+} from './sealed-sender.js';
+import { SPOOL_DETECTION_PROBE_BYTES, SPOOL_TAG_BYTES,
+  untargetedProbeHex,
+} from '../../shared/spool-tag-protocol.js';
 
 // Configuration
 const DELIVERY_JITTER_MIN_MS = 10;
 const DELIVERY_JITTER_MAX_MS = 100;
-const DEDUP_WINDOW_MS = 10000;
-const DEDUP_MAX_ENTRIES = 2000;
-const MIXNET_DELAY_POOL_KEY = 'mixnet:delay:pool:v1';
-const GLOBAL_MIX_SPOOL_KEY = 'mixnet:global:spool:v1';
-const GLOBAL_MIX_SPOOL_BYTES_KEY = 'mixnet:global:spool:v1:bytes';
-const GLOBAL_MIX_CHANNEL = 'blind:global-mix:deliver';
-const MIXNET_ENABLED = String(process.env.MIXNET_RELAY_ENABLED || 'true').toLowerCase() !== 'false';
+const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+const DEDUP_MAX_ENTRIES = 20_000;
+const MIXNET_DELAY_POOL_KEY = PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS;
+const MIXNET_PROCESSING_POOL_KEY = PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS;
+const MIXNET_PENDING_BYTES_KEY = PROTOCOL_KEYS.MIXNET_PENDING_BYTES_REDIS;
+const MIXNET_ENTRY_KEY_PREFIX = PROTOCOL_KEYS.MIXNET_ENTRY_REDIS_PREFIX;
+const GLOBAL_MIX_SPOOL_KEY = PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS;
+const GLOBAL_MIX_SPOOL_BYTES_KEY = PROTOCOL_KEYS.MIXNET_SPOOL_BYTES_REDIS;
+const GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX = PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX;
+const GLOBAL_MIX_CHANNEL = PROTOCOL_KEYS.GLOBAL_MIX_CHANNEL;
 const MIXNET_DELAY_MIN_MS = envInt('MIXNET_DELAY_MIN_MS', 1500, 250, 120000);
 const MIXNET_DELAY_MAX_MS = envInt('MIXNET_DELAY_MAX_MS', 9000, MIXNET_DELAY_MIN_MS, 300000);
 const MIXNET_FLUSH_MIN_MS = envInt('MIXNET_FLUSH_MIN_MS', 700, 100, 60000);
 const MIXNET_FLUSH_MAX_MS = envInt('MIXNET_FLUSH_MAX_MS', 2500, MIXNET_FLUSH_MIN_MS, 120000);
 const MIXNET_BATCH_MAX_MESSAGES = envInt('MIXNET_BATCH_MAX_MESSAGES', 24, 1, 256);
-const MIXNET_POOL_TTL_SECONDS = envInt('MIXNET_POOL_TTL_SECONDS', 7 * 24 * 60 * 60, 60, 30 * 24 * 60 * 60);
-const MIXNET_AVOID_SAME_WRITER = String(process.env.MIXNET_AVOID_SAME_WRITER || 'true').toLowerCase() !== 'false';
-const MIXNET_SAME_WRITER_FALLBACK_MS = envInt('MIXNET_SAME_WRITER_FALLBACK_MS', 60000, 1000, 15 * 60 * 1000);
+const MIXNET_FLUSH_CONCURRENCY = envInt('MIXNET_FLUSH_CONCURRENCY', 8, 1, 32);
+const MIXNET_PROCESSING_TIMEOUT_MS = envInt('MIXNET_PROCESSING_TIMEOUT_MS', 120_000, 60_000, 10 * 60 * 1000);
+const MIXNET_POOL_TTL_SECONDS = envInt('MIXNET_POOL_TTL_SECONDS', 60 * 60, 60, 60 * 60);
+const MIXNET_INDEX_TTL_SECONDS = MIXNET_POOL_TTL_SECONDS + Math.ceil(MIXNET_DELAY_MAX_MS / 1000) + 60;
+const MIXNET_PENDING_MAX_MESSAGES = envInt('MIXNET_PENDING_MAX_MESSAGES', 2048, 64, 100_000);
+const MIXNET_PENDING_MAX_BYTES = envInt(
+  'MIXNET_PENDING_MAX_BYTES',
+  128 * 1024 * 1024,
+  8 * 1024 * 1024,
+  2 * 1024 * 1024 * 1024
+);
 const MIXNET_COVER_WRITES_MIN = envInt('MIXNET_COVER_WRITES_MIN', 1, 0, 32);
 const MIXNET_COVER_WRITES_MAX = envInt('MIXNET_COVER_WRITES_MAX', 2, MIXNET_COVER_WRITES_MIN, 64);
-const MIXNET_COVER_CIPHERTEXT_BYTES = envInt('MIXNET_COVER_CIPHERTEXT_BYTES', 32768, 2048, 1024 * 1024);
-const MIXNET_COVER_EPHEMERAL_BYTES = envInt('MIXNET_COVER_EPHEMERAL_BYTES', 512, 32, 8192);
-const MIXNET_COVER_NONCE_BYTES = envInt('MIXNET_COVER_NONCE_BYTES', 24, 12, 64);
-const GLOBAL_MIX_SPOOL_TTL_SECONDS = envInt('GLOBAL_MIX_SPOOL_TTL_SECONDS', 24 * 60 * 60, 60, 30 * 24 * 60 * 60);
-const GLOBAL_MIX_SPOOL_MAX_MESSAGES = envInt('GLOBAL_MIX_SPOOL_MAX_MESSAGES', 1024, 64, 10_000_000);
-const GLOBAL_MIX_SPOOL_MAX_BYTES = envInt('GLOBAL_MIX_SPOOL_MAX_BYTES', 16 * 1024 * 1024, 1024 * 1024, 2 * 1024 * 1024 * 1024);
+const GLOBAL_MIX_SPOOL_TTL_SECONDS = envInt('GLOBAL_MIX_SPOOL_TTL_SECONDS', 24 * 60 * 60, 60, 7 * 24 * 60 * 60);
+const GLOBAL_MIX_SPOOL_MAX_MESSAGES = envInt('GLOBAL_MIX_SPOOL_MAX_MESSAGES', 32768, 64, 10_000_000);
+const GLOBAL_MIX_SPOOL_MAX_BYTES = envInt('GLOBAL_MIX_SPOOL_MAX_BYTES', 512 * 1024 * 1024, 1024 * 1024, 4 * 1024 * 1024 * 1024);
 const LOCAL_BROADCAST_BUFFERED_MAX_BYTES = envInt('LOCAL_BROADCAST_BUFFERED_MAX_BYTES', 8 * 1024 * 1024, 1024 * 1024, 256 * 1024 * 1024);
 const LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS = envInt('LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS', 30000, 1000, 10 * 60 * 1000);
 const LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS = envInt('LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS', 2 * 60 * 1000, 10 * 1000, 30 * 60 * 1000);
 const LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS = envInt('LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS', 2 * 60 * 1000, 10 * 1000, 30 * 60 * 1000);
 const LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS = envInt('LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS', 0, 0, 5 * 60 * 1000);
+const LOCAL_BROADCAST_CONCURRENCY = envInt('LOCAL_BROADCAST_CONCURRENCY', 8, 1, 64);
+const LOCAL_BROADCAST_DRAIN_BUDGET_MS = 5_000;
+const LOCAL_BROADCAST_SEND_TIMEOUT_MS = 2_000;
+const BLIND_ROUTE_MAX_LOCAL_SOCKETS = envInt('BLIND_ROUTE_MAX_LOCAL_SOCKETS', 2048, 64, 100_000);
+const BLIND_DELIVERY_RETRY_MIN_MS = envInt('BLIND_DELIVERY_RETRY_MIN_MS', 5000, 1000, 60_000);
+const BLIND_DELIVERY_RETRY_MAX_MS = envInt(
+  'BLIND_DELIVERY_RETRY_MAX_MS',
+  60_000,
+  BLIND_DELIVERY_RETRY_MIN_MS,
+  10 * 60 * 1000
+);
+const GLOBAL_MIX_SPOOL_TRIM_BATCH = 256;
+const SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS = Math.ceil(SEALED_STANDARD_CIPHERTEXT_BYTES / 3) * 4;
+const SEALED_KEM_CIPHERTEXT_BASE64_CHARS = Math.ceil(SEALED_KEM_CIPHERTEXT_BYTES / 3) * 4;
+const SEALED_NONCE_BASE64_CHARS = Math.ceil(SEALED_NONCE_BYTES / 3) * 4;
+const GLOBAL_MIX_SPOOL_MEMBER_BYTES = Buffer.byteLength(JSON.stringify({
+  id: 'A'.repeat(43),
+  envelope: {
+    version: SEALED_ENVELOPE_VERSION,
+    ciphertext: 'A'.repeat(SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS),
+    ephemeralKey: 'A'.repeat(SEALED_KEM_CIPHERTEXT_BASE64_CHARS),
+    nonce: 'A'.repeat(SEALED_NONCE_BASE64_CHARS),
+    tag: 'a'.repeat(SPOOL_TAG_BYTES * 2),
+    probe: 'a'.repeat(SPOOL_DETECTION_PROBE_BYTES * 2)
+  }
+}), 'utf8');
+const GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS = 1_000;
+const GLOBAL_MIX_PUBLICATION_MAX_BYTES = envInt(
+  'GLOBAL_MIX_PUBLICATION_MAX_BYTES',
+  2 * 1024 * 1024,
+  64 * 1024,
+  16 * 1024 * 1024
+);
+const GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES = envInt(
+  'GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES',
+  64,
+  1,
+  4096
+);
+const GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES = envInt(
+  'GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES',
+  32 * 1024 * 1024,
+  1024 * 1024,
+  512 * 1024 * 1024
+);
+const GLOBAL_MIX_PUBLICATION_QUEUE_MAX_MESSAGES = envInt(
+  'GLOBAL_MIX_PUBLICATION_QUEUE_MAX_MESSAGES',
+  64,
+  1,
+  4096
+);
+const GLOBAL_MIX_PUBLICATION_QUEUE_MAX_BYTES = envInt(
+  'GLOBAL_MIX_PUBLICATION_QUEUE_MAX_BYTES',
+  32 * 1024 * 1024,
+  1024 * 1024,
+  512 * 1024 * 1024
+);
+const GLOBAL_MIX_PUBLICATION_QUEUE_MAX_AGE_MS = 30_000;
+const GLOBAL_MIX_SPOOL_INDEX_MEMBER_RE =
+  /^([A-Za-z0-9_-]{43}):([1-9][0-9]{0,9}):([0-9a-f]{16}):([0-9a-f]{64})$/;
+const MIXNET_INDEX_MEMBER_RE = /^([A-Za-z0-9_-]{43}):([1-9][0-9]{0,9})$/;
 
-// Message deduplication cache: hash -> timestamp
+// Message deduplication cache
 const recentDeliveryHashes = new Map();
+const recentPublicationIds = new Map();
 let mixnetRelayStarted = false;
 let mixnetRelayTimer = null;
 let mixnetRelayFlushInFlight = false;
+let mixnetRelayFlushCompletion = null;
 let blindDeliverySubscriberPromise = null;
+let blindDeliverySubscriber = null;
+let blindDeliveryRetryTimer = null;
+let blindDeliveryRetryAttempts = 0;
+let blindDeliverySubscriptionDesired = false;
+let blindDeliverySubscriptionGeneration = 0;
+const globalMixDeliveryQueue = [];
+let globalMixDeliveryQueuedBytes = 0;
+let globalMixDeliveryDrainPromise = null;
+let globalMixDeliveryGeneration = 0;
+let globalMixDeliveryPressureLoggedAt = 0;
+const globalMixPublicationQueue = [];
+let globalMixPublicationQueuedBytes = 0;
+let globalMixPublicationDrainPromise = null;
+let globalMixPublicationGeneration = 0;
 
-function envInt(name, fallback, min, max) {
-  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
-}
-
-function getServerId() {
-  return process.env.SERVER_ID || 'default';
-}
-
-function randomDelay(minMs, maxMs) {
-  const min = Math.max(0, Math.trunc(minMs));
-  const max = Math.max(min, Math.trunc(maxMs));
-  return crypto.randomInt(min, max + 1);
-}
-
-function countClass(value) {
-  const count = Math.max(0, Number(value) || 0);
-  if (count === 0) return '0';
-  if (count === 1) return '1';
-  if (count <= 3) return '2-3';
-  if (count <= 7) return '4-7';
-  if (count <= 15) return '8-15';
-  if (count <= 31) return '16-31';
-  return '32+';
-}
-
-function serializeSpoolMember(memberObject) {
-  let member = JSON.stringify(memberObject);
-  let byteSize = Buffer.byteLength(member, 'utf8');
-  for (let i = 0; i < 4; i += 1) {
-    memberObject.byteSize = byteSize;
-    member = JSON.stringify(memberObject);
-    const nextByteSize = Buffer.byteLength(member, 'utf8');
-    if (nextByteSize === byteSize) break;
-    byteSize = nextByteSize;
+function parseGlobalSpoolIndexMember(value) {
+  if (typeof value !== 'string') return null;
+  const match = GLOBAL_MIX_SPOOL_INDEX_MEMBER_RE.exec(value);
+  if (!match) return null;
+  const bytes = Number(match[2]);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES) {
+    return null;
   }
-  memberObject.byteSize = byteSize;
-  return JSON.stringify(memberObject);
+  return { id: match[1], bytes, tag: match[3], probe: match[4] };
+}
+
+function isCurrentGlobalSpoolRow(row) {
+  return row?.bytes === GLOBAL_MIX_SPOOL_MEMBER_BYTES;
+}
+
+function parseMixnetIndexMember(value) {
+  if (typeof value !== 'string') return null;
+  const match = MIXNET_INDEX_MEMBER_RE.exec(value);
+  if (!match) return null;
+  const bytes = Number(match[2]);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES) {
+    return null;
+  }
+  return { id: match[1], bytes };
 }
 
 function getEnvelopeHash(sealedEnvelope) {
   try {
-    if (!sealedEnvelope) return null;
-
-    let snippet;
-    if (typeof sealedEnvelope === 'string') {
-      snippet = sealedEnvelope.slice(0, 128);
-    } else if (typeof sealedEnvelope === 'object') {
-      snippet = [
-        sealedEnvelope.version,
-        sealedEnvelope.nonce,
-        typeof sealedEnvelope.ephemeralKey === 'string' ? sealedEnvelope.ephemeralKey.slice(0, 64) : '',
-        typeof sealedEnvelope.ciphertext === 'string' ? sealedEnvelope.ciphertext.slice(0, 128) : ''
-      ].join(':');
-    } else {
-      return null;
-    }
-
-    const hashBytes = blake3(Buffer.from(`global-mix:${snippet}`), { dkLen: 16 });
+    if (!sealedEnvelope || typeof sealedEnvelope !== 'object' || Array.isArray(sealedEnvelope)) return null;
+    const canonical = JSON.stringify({
+      version: sealedEnvelope.version,
+      ciphertext: sealedEnvelope.ciphertext,
+      ephemeralKey: sealedEnvelope.ephemeralKey,
+      nonce: sealedEnvelope.nonce
+    });
+    const hashBytes = blake3(
+      Buffer.from(`${PROTOCOL_KEYS.GLOBAL_MIX_HASH}\0${canonical}`),
+      { dkLen: HASH_OUTPUT_BYTES }
+    );
     return Buffer.from(hashBytes).toString('base64url');
   } catch {
     return null;
@@ -123,10 +202,12 @@ function getEnvelopeHash(sealedEnvelope) {
 
 function createCoverSealedEnvelope() {
   return {
-    version: 'ss-v1',
-    ciphertext: crypto.randomBytes(MIXNET_COVER_CIPHERTEXT_BYTES).toString('base64'),
-    ephemeralKey: crypto.randomBytes(MIXNET_COVER_EPHEMERAL_BYTES).toString('base64'),
-    nonce: crypto.randomBytes(MIXNET_COVER_NONCE_BYTES).toString('base64')
+    version: SEALED_ENVELOPE_VERSION,
+    ciphertext: crypto.randomBytes(SEALED_STANDARD_CIPHERTEXT_BYTES).toString('base64'),
+    ephemeralKey: crypto.randomBytes(SEALED_KEM_CIPHERTEXT_BYTES).toString('base64'),
+    nonce: crypto.randomBytes(SEALED_NONCE_BYTES).toString('base64'),
+    tag: crypto.randomBytes(SPOOL_TAG_BYTES).toString('hex'),
+    probe: untargetedProbeHex()
   };
 }
 
@@ -138,30 +219,35 @@ function validateGlobalEnvelope(sealedEnvelope) {
   return { valid: true };
 }
 
-function createMixnetEntry(sealedEnvelope, options = {}) {
+function createMixnetEntry(sealedEnvelope, cover) {
   const now = Date.now();
-  const delayMs = Number.isFinite(options.delayMs)
-    ? Math.max(0, Math.trunc(options.delayMs))
-    : randomDelay(MIXNET_DELAY_MIN_MS, MIXNET_DELAY_MAX_MS);
+  const delayMs = randomDelay(MIXNET_DELAY_MIN_MS, MIXNET_DELAY_MAX_MS);
+  const releaseAt = now + delayMs;
   const entropy = crypto.randomBytes(32).toString('base64url');
-  const id = Buffer.from(blake3(Buffer.from(`global:${now}:${entropy}`), { dkLen: 16 })).toString('base64url');
+  const id = Buffer.from(
+    blake3(Buffer.from(`global:${now}:${entropy}`), { dkLen: HASH_OUTPUT_BYTES })
+  ).toString('base64url');
   return {
     id,
+    cover,
     envelope: sealedEnvelope,
-    cover: !!options.cover,
-    ingressServerId: options.ingressServerId || getServerId(),
-    originSocketId: typeof options.originSocketId === 'string' ? options.originSocketId : undefined,
-    ingressAt: now,
-    releaseAt: now + delayMs,
-    hop: 1
+    releaseAt,
+    expiresAt: releaseAt + (MIXNET_POOL_TTL_SECONDS * 1000)
   };
 }
 
-function shouldDeferToAnotherWriter(entry) {
-  if (!MIXNET_AVOID_SAME_WRITER) return false;
-  if (!entry?.ingressServerId || entry.ingressServerId !== getServerId()) return false;
-  const age = Date.now() - Number(entry.ingressAt || entry.releaseAt || Date.now());
-  return age < MIXNET_SAME_WRITER_FALLBACK_MS;
+function hasValidMixnetLifetime(entry) {
+  return (
+    hasExactPlainObjectKeys(entry, ['cover', 'envelope', 'expiresAt', 'id', 'releaseAt']) &&
+    typeof entry.id === 'string' &&
+    BASE64URL_32_RE.test(entry.id) &&
+    typeof entry.cover === 'boolean' &&
+    Number.isSafeInteger(entry.releaseAt) &&
+    Number.isSafeInteger(entry.expiresAt) &&
+    entry.expiresAt > entry.releaseAt &&
+    entry.expiresAt - entry.releaseAt === MIXNET_POOL_TTL_SECONDS * 1000 &&
+    validateGlobalEnvelope(entry.envelope).valid
+  );
 }
 
 function shuffleArray(array) {
@@ -191,41 +277,44 @@ function scheduleMixnetFlush(delayMs = null) {
   }, delay);
 }
 
-export function startMixnetRelay() {
+function startMixnetRelay() {
   if (mixnetRelayStarted) return;
   mixnetRelayStarted = true;
   scheduleMixnetFlush(randomDelay(MIXNET_FLUSH_MIN_MS, MIXNET_FLUSH_MAX_MS));
-  cryptoLogger.info('[MIXNET] Delay-pool relay started', {
+  console.log('[MIXNET] Delay-pool relay started', {
     delayMinMs: MIXNET_DELAY_MIN_MS,
     delayMaxMs: MIXNET_DELAY_MAX_MS,
-    avoidSameWriter: MIXNET_AVOID_SAME_WRITER,
     coverMin: MIXNET_COVER_WRITES_MIN,
     coverMax: MIXNET_COVER_WRITES_MAX,
+    pendingMaxMessages: MIXNET_PENDING_MAX_MESSAGES,
+    pendingMaxBytes: MIXNET_PENDING_MAX_BYTES,
     globalSpoolMaxMessages: GLOBAL_MIX_SPOOL_MAX_MESSAGES,
     globalSpoolMaxBytes: GLOBAL_MIX_SPOOL_MAX_BYTES
   });
 }
 
-export function stopMixnetRelay() {
-  mixnetRelayStarted = false;
-  if (mixnetRelayTimer) {
-    clearTimeout(mixnetRelayTimer);
-    mixnetRelayTimer = null;
-  }
+async function stopMixnetRelay() {
+    mixnetRelayStarted = false;
+    if (mixnetRelayTimer) {
+      clearTimeout(mixnetRelayTimer);
+      mixnetRelayTimer = null;
+    }
+    await mixnetRelayFlushCompletion?.catch(() => { });
 }
 
-function isDuplicateDelivery(hash) {
-  if (!hash) return false;
+function reserveDeliveryHash(hash) {
+  if (!hash) return { duplicate: false, token: null };
   const now = Date.now();
   const prev = recentDeliveryHashes.get(hash);
-  if (prev && (now - prev) < DEDUP_WINDOW_MS) {
-    return true;
+  if (prev && (now - prev.createdAt) < DEDUP_WINDOW_MS) {
+    return { duplicate: true, token: null };
   }
-  recentDeliveryHashes.set(hash, now);
+  const token = Symbol('delivery-reservation');
+  recentDeliveryHashes.set(hash, { createdAt: now, token });
   // Periodic cleanup
   if (recentDeliveryHashes.size > DEDUP_MAX_ENTRIES) {
-    for (const [k, ts] of recentDeliveryHashes) {
-      if (now - ts > DEDUP_WINDOW_MS) recentDeliveryHashes.delete(k);
+    for (const [k, entry] of recentDeliveryHashes) {
+      if (now - entry.createdAt > DEDUP_WINDOW_MS) recentDeliveryHashes.delete(k);
     }
     // Hard-evict oldest entries if still over limit after expiry sweep
     if (recentDeliveryHashes.size > DEDUP_MAX_ENTRIES) {
@@ -238,14 +327,51 @@ function isDuplicateDelivery(hash) {
       }
     }
   }
-  return false;
+  return { duplicate: false, token };
+}
+
+function rollbackDeliveryHash(hash, token) {
+  if (!hash || !token) return;
+  const current = recentDeliveryHashes.get(hash);
+  if (current?.token === token) {
+    recentDeliveryHashes.delete(hash);
+  }
 }
 
 function pruneRecentDeliveryHashes(now = Date.now(), force = false) {
   let removed = 0;
-  for (const [hash, ts] of recentDeliveryHashes.entries()) {
-    if (force || now - ts > DEDUP_WINDOW_MS) {
+  for (const [hash, entry] of recentDeliveryHashes.entries()) {
+    if (force || now - entry.createdAt > DEDUP_WINDOW_MS) {
       recentDeliveryHashes.delete(hash);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function reservePublicationId(publicationId) {
+  if (typeof publicationId !== 'string' || !BASE64URL_32_RE.test(publicationId)) {
+    return false;
+  }
+  const now = Date.now();
+  const previous = recentPublicationIds.get(publicationId);
+  if (previous && now - previous < DEDUP_WINDOW_MS) return false;
+  recentPublicationIds.set(publicationId, now);
+  if (recentPublicationIds.size > DEDUP_MAX_ENTRIES) {
+    for (const [id, createdAt] of recentPublicationIds) {
+      if (now - createdAt > DEDUP_WINDOW_MS || recentPublicationIds.size > DEDUP_MAX_ENTRIES) {
+        recentPublicationIds.delete(id);
+      }
+    }
+  }
+  return true;
+}
+
+function pruneRecentPublicationIds(now = Date.now(), force = false) {
+  let removed = 0;
+  for (const [id, createdAt] of recentPublicationIds) {
+    if (force || now - createdAt > DEDUP_WINDOW_MS) {
+      recentPublicationIds.delete(id);
       removed += 1;
     }
   }
@@ -254,27 +380,6 @@ function pruneRecentDeliveryHashes(now = Date.now(), force = false) {
 
 // In-memory socket registry
 const localSocketRegistry = new Map();
-
-export function getBlindRouterRuntimeStats() {
-  pruneRecentDeliveryHashes();
-  let openSockets = 0;
-  let closedSockets = 0;
-  for (const ws of localSocketRegistry.values()) {
-    if (ws?.readyState === 1) openSockets += 1;
-    else closedSockets += 1;
-  }
-  return {
-    localSocketCount: localSocketRegistry.size,
-    openSockets,
-    closedSockets,
-    recentDeliveryHashes: recentDeliveryHashes.size,
-    mixnetRelayStarted,
-    mixnetRelayTimerActive: !!mixnetRelayTimer,
-    mixnetRelayFlushInFlight,
-    globalSpoolMaxMessages: GLOBAL_MIX_SPOOL_MAX_MESSAGES,
-    globalSpoolMaxBytes: GLOBAL_MIX_SPOOL_MAX_BYTES
-  };
-}
 
 export function pruneBlindRouterRuntimeState({ force = false } = {}) {
   let closedSocketsRemoved = 0;
@@ -286,7 +391,8 @@ export function pruneBlindRouterRuntimeState({ force = false } = {}) {
   }
   return {
     closedSocketsRemoved,
-    recentDeliveryHashesRemoved: pruneRecentDeliveryHashes(Date.now(), force)
+    recentDeliveryHashesRemoved: pruneRecentDeliveryHashes(Date.now(), force),
+    recentPublicationIdsRemoved: pruneRecentPublicationIds(Date.now(), force)
   };
 }
 
@@ -294,11 +400,25 @@ export function pruneBlindRouterRuntimeState({ force = false } = {}) {
  * Register a local WebSocket connection
  */
 export function registerLocalSocket(ws) {
-  // Generate PQ-secure socket ID
-  const entropy = crypto.randomBytes(64);
-  const timestamp = Buffer.from(Date.now().toString());
-  const socketIdBytes = blake3(Buffer.concat([entropy, timestamp]), { dkLen: 32 });
-  const socketId = Buffer.from(socketIdBytes).toString('base64url');
+  if (!ws || typeof ws !== 'object') {
+    throw new Error('A WebSocket is required for blind delivery registration');
+  }
+
+  const existingSocketId = ws._blindSocketId;
+  if (typeof existingSocketId === 'string') {
+    if (localSocketRegistry.get(existingSocketId) === ws) return existingSocketId;
+    delete ws._blindSocketId;
+  }
+
+  pruneBlindRouterRuntimeState();
+  if (localSocketRegistry.size >= BLIND_ROUTE_MAX_LOCAL_SOCKETS) {
+    throw new Error('Blind delivery registration capacity reached');
+  }
+
+  let socketId;
+  do {
+    socketId = crypto.randomBytes(32).toString('base64url');
+  } while (localSocketRegistry.has(socketId));
 
   ws._blindSocketId = socketId;
   localSocketRegistry.set(socketId, ws);
@@ -310,72 +430,106 @@ export function registerLocalSocket(ws) {
  * Unregister a local WebSocket connection
  */
 export function unregisterLocalSocket(ws) {
-  const socketId = ws._blindSocketId;
+  const socketId = ws?._blindSocketId;
   if (socketId) {
-    localSocketRegistry.delete(socketId);
+    if (localSocketRegistry.get(socketId) === ws) {
+      localSocketRegistry.delete(socketId);
+    }
+    delete ws._blindSocketId;
   }
-}
-
-/**
- * Claim an already committed rendezvous route for a socket
- */
-export async function claimInboxRoute(ws, capabilityToken, routeId, alreadyAuthorized = false) {
-  if (!isRouteLookupId(routeId)) {
-    return { success: false, error: 'invalid_route_id' };
-  }
-
-  if (!alreadyAuthorized) {
-    return { success: false, error: 'route_not_authorized' };
-  }
-
-  const socketId = ws._blindSocketId;
-  if (!socketId) {
-    return { success: false, error: 'socket_not_registered' };
-  }
-
-  if (!ws._claimedInboxRoutes) {
-    ws._claimedInboxRoutes = new Set();
-  }
-  ws._claimedInboxRoutes.add(routeId);
-
-  return { success: true };
 }
 
 export async function routeToGlobalMix(sealedEnvelope, options = {}) {
-  const { immediate = false, publish = true, cover = false, originSocketId = null } = options;
-
   const validation = validateGlobalEnvelope(sealedEnvelope);
   if (!validation.valid) {
     return { queued: false, delivered: 0, error: validation.error };
+  }
+
+  if (
+    options.liveOnly !== true &&
+    sealedEnvelope.ciphertext.length !== SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS
+  ) {
+    return { queued: false, delivered: 0, error: 'global_mix_spool_unsupported_size' };
   }
 
   const dedupHash = getEnvelopeHash(sealedEnvelope);
-  if (!cover && isDuplicateDelivery(dedupHash)) {
+  const reservation = reserveDeliveryHash(dedupHash);
+  if (reservation.duplicate) {
     return { queued: true, delivered: 0, deduplicated: true };
   }
 
-  if (MIXNET_ENABLED && !immediate) {
-    return enqueueMixnetRelay(sealedEnvelope, { cover, publish, originSocketId });
+  try {
+    if (options.liveOnly === true) {
+      const result = await writeToGlobalMixSpool(sealedEnvelope, { persist: false });
+      if (!result?.queued) rollbackDeliveryHash(dedupHash, reservation.token);
+      return result;
+    }
+    const result = await enqueueValidatedMixnetRelay(sealedEnvelope);
+    if (!result?.queued) {
+      rollbackDeliveryHash(dedupHash, reservation.token);
+    }
+    return result;
+  } catch (error) {
+    rollbackDeliveryHash(dedupHash, reservation.token);
+    throw error;
   }
-
-  return writeToGlobalMixSpool(sealedEnvelope, { publish, cover, originSocketId });
 }
 
 export async function enqueueMixnetRelay(sealedEnvelope, options = {}) {
-  const { cover = false, originSocketId = null } = options;
-
   const validation = validateGlobalEnvelope(sealedEnvelope);
   if (!validation.valid) {
     return { queued: false, delivered: 0, error: validation.error };
   }
 
-  const entry = createMixnetEntry(sealedEnvelope, { cover, originSocketId });
+  if (
+    options.cover !== true &&
+    sealedEnvelope.ciphertext.length !== SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS
+  ) {
+    return { queued: false, delivered: 0, error: 'global_mix_spool_unsupported_size' };
+  }
+
+  return enqueueValidatedMixnetRelay(sealedEnvelope, options);
+}
+
+async function enqueueValidatedMixnetRelay(sealedEnvelope, options = {}) {
+  const isCover = options.cover === true;
+  const entry = createMixnetEntry(sealedEnvelope, isCover);
+  const rawEntry = JSON.stringify(entry);
+  const entryBytes = Buffer.byteLength(rawEntry, 'utf8');
+  if (entryBytes <= 0 || entryBytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES) {
+    return { queued: false, delivered: 0, error: 'mixnet_entry_too_large' };
+  }
+  const indexMember = `${entry.id}:${entryBytes}`;
+  const entryKey = `${MIXNET_ENTRY_KEY_PREFIX}${entry.id}`;
+  const pendingMessageLimit = isCover
+    ? Math.max(1, Math.floor(MIXNET_PENDING_MAX_MESSAGES / 2))
+    : MIXNET_PENDING_MAX_MESSAGES;
+  const pendingByteLimit = isCover
+    ? Math.max(1, Math.floor(MIXNET_PENDING_MAX_BYTES / 2))
+    : MIXNET_PENDING_MAX_BYTES;
 
   try {
-    await withRedisClient(async (client) => {
-      await client.zadd(MIXNET_DELAY_POOL_KEY, entry.releaseAt, JSON.stringify(entry));
-      await client.expire(MIXNET_DELAY_POOL_KEY, MIXNET_POOL_TTL_SECONDS);
-    });
+    const queued = await withRedisClient((client) => client.eval(
+      ENQUEUE_MIX_MEMBER_SCRIPT,
+      4,
+      MIXNET_DELAY_POOL_KEY,
+      MIXNET_PROCESSING_POOL_KEY,
+      MIXNET_PENDING_BYTES_KEY,
+      entryKey,
+      entry.releaseAt,
+      indexMember,
+      rawEntry,
+      entryBytes,
+      MIXNET_INDEX_TTL_SECONDS,
+      entry.expiresAt - Date.now(),
+      pendingMessageLimit,
+      pendingByteLimit,
+      Date.now() - (MIXNET_POOL_TTL_SECONDS * 1000),
+      MIXNET_BATCH_MAX_MESSAGES
+    ));
+    if (Number(queued) !== 1) {
+      return { queued: false, delivered: 0, error: 'mixnet_capacity_reached' };
+    }
     startMixnetRelay();
     scheduleMixnetFlush();
     return {
@@ -384,80 +538,304 @@ export async function enqueueMixnetRelay(sealedEnvelope, options = {}) {
       relay: 'mixnet-delay-pool'
     };
   } catch (error) {
-    cryptoLogger.error('[MIXNET] Failed to enqueue ingress relay packet', { error: error.message });
+    console.error('[MIXNET] Failed to enqueue ingress relay packet', { error: error.message });
     return { queued: false, delivered: 0, error: 'mixnet_enqueue_failed' };
   }
 }
+
+const ENQUEUE_MIX_MEMBER_SCRIPT = `
+  local delayPool = KEYS[1]
+  local processingPool = KEYS[2]
+  local bytesKey = KEYS[3]
+  local entryKey = KEYS[4]
+  local score = ARGV[1]
+  local indexMember = ARGV[2]
+  local entry = ARGV[3]
+  local memberBytes = tonumber(ARGV[4])
+  local indexTtl = tonumber(ARGV[5])
+  local entryTtlMs = tonumber(ARGV[6])
+  local maxMessages = tonumber(ARGV[7])
+  local maxBytes = tonumber(ARGV[8])
+  local oldestAllowed = ARGV[9]
+  local trimBatch = tonumber(ARGV[10])
+
+  local function indexedBytes(value)
+    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+  end
+
+  local storedBytes = redis.call('GET', bytesKey)
+  local totalBytes = tonumber(storedBytes or '0')
+  if not storedBytes then
+    totalBytes = 0
+    for _, existing in ipairs(redis.call('ZRANGE', delayPool, 0, -1)) do
+      totalBytes = totalBytes + indexedBytes(existing)
+    end
+    for _, existing in ipairs(redis.call('ZRANGE', processingPool, 0, -1)) do
+      totalBytes = totalBytes + indexedBytes(existing)
+    end
+  end
+
+  local expired = redis.call('ZRANGEBYSCORE', delayPool, '-inf', oldestAllowed, 'LIMIT', 0, trimBatch)
+  for _, oldMember in ipairs(expired) do
+    if redis.call('ZREM', delayPool, oldMember) == 1 then
+      totalBytes = totalBytes - indexedBytes(oldMember)
+    end
+  end
+  if totalBytes < 0 then totalBytes = 0 end
+
+  local pendingCount = redis.call('ZCARD', delayPool) + redis.call('ZCARD', processingPool)
+  if pendingCount >= maxMessages or totalBytes + memberBytes > maxBytes then
+    redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+    redis.call('EXPIRE', delayPool, indexTtl)
+    redis.call('EXPIRE', processingPool, indexTtl)
+    return 0
+  end
+
+  if entryTtlMs <= 0 or not redis.call('SET', entryKey, entry, 'PX', entryTtlMs, 'NX') then
+    return 0
+  end
+  if redis.call('ZADD', delayPool, 'NX', score, indexMember) ~= 1 then
+    redis.call('DEL', entryKey)
+    return 0
+  end
+  totalBytes = totalBytes + memberBytes
+  redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+  redis.call('EXPIRE', delayPool, indexTtl)
+  redis.call('EXPIRE', processingPool, indexTtl)
+  return 1
+`;
 
 export async function enqueueMixnetCoverWrite() {
   return enqueueMixnetRelay(createCoverSealedEnvelope(), { cover: true });
 }
 
 async function writeToGlobalMixSpool(sealedEnvelope, options = {}) {
-  const { publish = true, originSocketId = null, cover = false } = options;
+  const spoolable =
+    sealedEnvelope.ciphertext.length === SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS;
+  const { persist = true } = options;
+  if (persist && !spoolable) {
+    throw new Error('global_mix_spool_unsupported_size');
+  }
+  let spoolInserted = true;
 
   const jitter = crypto.randomInt(DELIVERY_JITTER_MIN_MS, DELIVERY_JITTER_MAX_MS);
-  await new Promise(resolve => setTimeout(resolve, jitter));
-  if (!cover) {
-    await queueGlobalMixMessage(sealedEnvelope);
-  }
-  const delivered = await tryLocalBroadcastDelivery(sealedEnvelope, { originSocketId });
-
-  if (publish) {
-    await publishGlobalMixDelivery(sealedEnvelope).catch(() => { });
+  await new Promise((resolve) => setTimeout(resolve, jitter));
+  if (persist && spoolable) {
+    spoolInserted = await queueGlobalMixMessage(sealedEnvelope);
   }
 
-  return { queued: true, delivered };
+  const publication = {
+    envelope: sealedEnvelope,
+    publicationId: crypto.randomBytes(32).toString('base64url')
+  };
+  const publicationWire = JSON.stringify(publication);
+  const localQueued = enqueueGlobalMixDelivery(
+    publication,
+    Buffer.byteLength(publicationWire, 'utf8')
+  );
+  const publicationQueued = enqueueGlobalMixPublication(publicationWire);
+  const queued = persist || localQueued || publicationQueued;
+
+  return {
+    queued,
+    delivered: 0,
+    ...(!queued ? { error: 'live_delivery_unavailable' } : {}),
+    ...(persist && !spoolInserted ? { deduplicated: true } : {})
+  };
+}
+
+async function moveMixMember(client, sourceKey, destinationKey, raw, score, expectedSourceScore) {
+  return moveRedisSortedSetLease(client, {
+    sourceKey,
+    destinationKey,
+    member: raw,
+    destinationScore: score,
+    ttlSeconds: MIXNET_INDEX_TTL_SECONDS,
+    expectedSourceScore
+  });
+}
+
+const REMOVE_MIX_MEMBER_SCRIPT = `
+${REDIS_SORTED_SET_LEASE_RELEASE_GUARD}
+  local function indexedBytes(value)
+    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+  end
+  local storedBytes = redis.call('GET', KEYS[2])
+  local totalBytes = 0
+  if storedBytes then
+    totalBytes = tonumber(storedBytes) - indexedBytes(ARGV[1])
+  else
+    for _, existing in ipairs(redis.call('ZRANGE', KEYS[3], 0, -1)) do
+      totalBytes = totalBytes + indexedBytes(existing)
+    end
+    for _, existing in ipairs(redis.call('ZRANGE', KEYS[4], 0, -1)) do
+      totalBytes = totalBytes + indexedBytes(existing)
+    end
+  end
+  redis.call('DEL', KEYS[5])
+  if totalBytes < 0 then totalBytes = 0 end
+  redis.call('SET', KEYS[2], totalBytes, 'EX', ARGV[2])
+  redis.call('EXPIRE', KEYS[3], ARGV[2])
+  redis.call('EXPIRE', KEYS[4], ARGV[2])
+  return 1
+`;
+
+async function removeMixMember(client, poolKey, raw, expectedSourceScore) {
+  const sourceScore = exactRedisScoreArgument(expectedSourceScore);
+  const indexEntry = parseMixnetIndexMember(raw);
+  const entryKey = `${MIXNET_ENTRY_KEY_PREFIX}${indexEntry?.id || 'invalid'}`;
+  return Number(await client.eval(
+    REMOVE_MIX_MEMBER_SCRIPT,
+    5,
+    poolKey,
+    MIXNET_PENDING_BYTES_KEY,
+    MIXNET_DELAY_POOL_KEY,
+    MIXNET_PROCESSING_POOL_KEY,
+    entryKey,
+    raw,
+    MIXNET_INDEX_TTL_SECONDS,
+    sourceScore
+  )) === 1;
+}
+
+async function loadMixnetEntry(client, indexMember) {
+  const indexEntry = parseMixnetIndexMember(indexMember);
+  if (!indexEntry) return null;
+  const raw = await client.get(`${MIXNET_ENTRY_KEY_PREFIX}${indexEntry.id}`);
+  if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') !== indexEntry.bytes) {
+    return null;
+  }
+  let entry;
+  try {
+    entry = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (entry?.id !== indexEntry.id || !hasValidMixnetLifetime(entry)) return null;
+  return entry;
+}
+
+async function recoverStaleMixnetClaims(client) {
+  const now = Date.now();
+  const stale = await client.zrangebyscore(
+    MIXNET_PROCESSING_POOL_KEY,
+    '-inf',
+    now,
+    'LIMIT',
+    0,
+    MIXNET_BATCH_MAX_MESSAGES
+  );
+  for (const indexMember of stale || []) {
+    const currentScore = await client.zscore(MIXNET_PROCESSING_POOL_KEY, indexMember);
+    if (currentScore === null || Number(currentScore) > now) continue;
+    const entry = await loadMixnetEntry(client, indexMember);
+    if (!entry || entry.expiresAt <= now) {
+      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, currentScore);
+      continue;
+    }
+    const retryAt = Math.min(
+      entry.expiresAt,
+      now + randomDelay(MIXNET_FLUSH_MIN_MS, MIXNET_FLUSH_MAX_MS)
+    );
+    await moveMixMember(
+      client,
+      MIXNET_PROCESSING_POOL_KEY,
+      MIXNET_DELAY_POOL_KEY,
+      indexMember,
+      retryAt,
+      currentScore
+    );
+  }
+}
+
+async function finalizeMixnetClaim(indexMember, entry, claimUntil, succeeded) {
+  if (typeof indexMember !== 'string') return;
+  await withRedisClient(async (client) => {
+    if (succeeded) {
+      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, claimUntil);
+      return;
+    }
+    const now = Date.now();
+    if (!hasValidMixnetLifetime(entry) || entry.expiresAt <= now) {
+      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, claimUntil);
+      return;
+    }
+    const retryAt = Math.min(
+      entry.expiresAt,
+      now + randomDelay(MIXNET_FLUSH_MIN_MS, MIXNET_FLUSH_MAX_MS)
+    );
+    await moveMixMember(
+      client,
+      MIXNET_PROCESSING_POOL_KEY,
+      MIXNET_DELAY_POOL_KEY,
+      indexMember,
+      retryAt,
+      claimUntil
+    );
+  });
 }
 
 async function flushMixnetDelayPool() {
-  if (mixnetRelayFlushInFlight) return;
+  if (mixnetRelayFlushInFlight) return mixnetRelayFlushCompletion;
   mixnetRelayFlushInFlight = true;
+  let completeFlush;
+  const completion = new Promise((resolve) => { completeFlush = resolve; });
+  mixnetRelayFlushCompletion = completion;
 
   const claimed = [];
   try {
     await withRedisClient(async (client) => {
-      const rawItems = await client.zrangebyscore(
+      await trimExpiredGlobalMixSpool(client);
+      await recoverStaleMixnetClaims(client);
+      const dueMembers = await client.zrangebyscore(
         MIXNET_DELAY_POOL_KEY,
         '-inf',
         Date.now(),
         'LIMIT',
         0,
-        MIXNET_BATCH_MAX_MESSAGES
+        Math.min(MIXNET_BATCH_MAX_MESSAGES, MIXNET_FLUSH_CONCURRENCY)
       );
 
-      for (const raw of rawItems || []) {
-        let entry;
-        try {
-          entry = JSON.parse(raw);
-        } catch {
-          await client.zrem(MIXNET_DELAY_POOL_KEY, raw);
+      for (const indexMember of dueMembers || []) {
+        const currentScore = await client.zscore(MIXNET_DELAY_POOL_KEY, indexMember);
+        if (currentScore === null || Number(currentScore) > Date.now()) continue;
+        const entry = await loadMixnetEntry(client, indexMember);
+        const claimStartedAt = Date.now();
+        if (
+          !entry ||
+          entry.expiresAt <= claimStartedAt
+        ) {
+          await removeMixMember(client, MIXNET_DELAY_POOL_KEY, indexMember, currentScore);
           continue;
         }
 
-        if (shouldDeferToAnotherWriter(entry)) {
-          continue;
-        }
-
-        const removed = await client.zrem(MIXNET_DELAY_POOL_KEY, raw);
-        if (removed === 1 && entry?.envelope) {
-          claimed.push(entry);
+        const claimUntil = Math.min(
+          entry.expiresAt,
+          claimStartedAt + MIXNET_PROCESSING_TIMEOUT_MS
+        );
+        const moved = await moveMixMember(
+          client,
+          MIXNET_DELAY_POOL_KEY,
+          MIXNET_PROCESSING_POOL_KEY,
+          indexMember,
+          claimUntil,
+          currentScore
+        );
+        if (moved) {
+          claimed.push({ entry, indexMember, claimUntil });
         }
       }
     });
 
-    const realClaimedCount = claimed.filter((entry) => !entry.cover).length;
-    const coverCount = realClaimedCount > 0 && MIXNET_COVER_WRITES_MAX > 0
+    const coverCount = claimed.length > 0 && MIXNET_COVER_WRITES_MAX > 0
       ? crypto.randomInt(MIXNET_COVER_WRITES_MIN, MIXNET_COVER_WRITES_MAX + 1)
       : 0;
     const covers = Array.from({ length: coverCount }, () => ({
-      id: crypto.randomBytes(16).toString('base64url'),
-      envelope: createCoverSealedEnvelope(),
-      cover: true,
-      ingressServerId: getServerId(),
-      ingressAt: Date.now(),
-      releaseAt: Date.now(),
-      hop: 2
+      entry: {
+        id: crypto.randomBytes(32).toString('base64url'),
+        cover: true,
+        envelope: createCoverSealedEnvelope()
+      }
     }));
 
     const batch = shuffleArray([...claimed, ...covers]);
@@ -465,218 +843,331 @@ async function flushMixnetDelayPool() {
       return;
     }
 
-    for (const entry of batch) {
-      if (!entry?.envelope) continue;
-      const microDelay = randomDelay(0, 80);
-      if (microDelay > 0) {
-        await new Promise(resolve => setTimeout(resolve, microDelay));
-      }
-      try {
-        await writeToGlobalMixSpool(entry.envelope, {
-          publish: true,
-          originSocketId: entry.originSocketId,
-          cover: !!entry.cover
-        });
-      } catch (error) {
-        cryptoLogger.warn('[MIXNET] Global writer failed', {
-          cover: !!entry.cover,
-          error: error?.message
-        });
-      }
+    for (let offset = 0; offset < batch.length; offset += MIXNET_FLUSH_CONCURRENCY) {
+      await Promise.all(
+        batch
+          .slice(offset, offset + MIXNET_FLUSH_CONCURRENCY)
+          .map(processMixnetClaim)
+      );
     }
-
-    cryptoLogger.info('[MIXNET] Flushed delayed global writer batch', {
-      realCountClass: countClass(realClaimedCount),
-      coverCountClass: countClass(batch.filter((entry) => entry.cover).length),
-      totalCountClass: countClass(batch.length)
-    });
   } catch (error) {
-    cryptoLogger.error('[MIXNET] Delay-pool flush failed', { error: error.message });
+    console.error('[MIXNET] Delay-pool flush failed', { error: error.message });
   } finally {
     mixnetRelayFlushInFlight = false;
+    if (mixnetRelayFlushCompletion === completion) mixnetRelayFlushCompletion = null;
+    completeFlush();
+  }
+}
+
+async function processMixnetClaim(claimedItem) {
+  const entry = claimedItem?.entry;
+  if (!entry?.envelope) return;
+  const microDelay = randomDelay(0, 80);
+  if (microDelay > 0) {
+    await new Promise((resolve) => setTimeout(resolve, microDelay));
+  }
+  let succeeded = false;
+  try {
+    await writeToGlobalMixSpool(entry.envelope, {
+      persist: entry.cover !== true
+    });
+    succeeded = true;
+  } catch (error) {
+    console.warn('[MIXNET] Global writer failed', {
+      error: error?.message
+    });
+  } finally {
+    try {
+      await finalizeMixnetClaim(
+        claimedItem.indexMember,
+        entry,
+        claimedItem.claimUntil,
+        succeeded
+      );
+    } catch (error) {
+      console.warn('[MIXNET] Durable claim finalization failed', {
+        succeeded,
+        error: error?.message
+      });
+    }
   }
 }
 
 async function queueGlobalMixMessage(sealedEnvelope) {
   try {
-    await withRedisClient(async (client) => {
-      const key = GLOBAL_MIX_SPOOL_KEY;
-      const score = (Date.now() * 1000) + crypto.randomInt(0, 1000);
-      const envelopeHash = getEnvelopeHash(sealedEnvelope) || crypto.randomBytes(16).toString('base64url');
+    return await withRedisClient(async (client) => {
+      const now = Date.now();
+      const score = (now * 1000) + crypto.randomInt(0, 1000);
+      const envelopeHash = getEnvelopeHash(sealedEnvelope);
+      if (!envelopeHash) throw new Error('global_mix_spool_invalid_envelope');
+      const id = Buffer.from(
+        blake3(
+          Buffer.from(`${PROTOCOL_KEYS.GLOBAL_SPOOL_HASH}\0${envelopeHash}`),
+          { dkLen: HASH_OUTPUT_BYTES }
+        )
+      ).toString('base64url');
       const memberObject = {
-        id: Buffer.from(blake3(Buffer.from(`global:${score}:${envelopeHash}`), { dkLen: 16 })).toString('base64url'),
-        envelope: sealedEnvelope,
-        queuedAt: Date.now(),
-        score
+        id,
+        envelope: sealedEnvelope
       };
-      const member = serializeSpoolMember(memberObject);
-      await client.zadd(key, score, member);
-      await client.expire(key, GLOBAL_MIX_SPOOL_TTL_SECONDS);
-      await client.incrby(GLOBAL_MIX_SPOOL_BYTES_KEY, memberObject.byteSize);
-      await client.expire(GLOBAL_MIX_SPOOL_BYTES_KEY, GLOBAL_MIX_SPOOL_TTL_SECONDS);
-      await trimGlobalMixSpool(client);
+      const member = JSON.stringify(memberObject);
+      const memberBytes = Buffer.byteLength(member, 'utf8');
+      if (
+        memberBytes !== GLOBAL_MIX_SPOOL_MEMBER_BYTES ||
+        memberBytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES
+      ) {
+        throw new Error('global_mix_spool_invalid_member_size');
+      }
+
+      // one ciphertext size is spoolable
+      if (sealedEnvelope.ciphertext.length !== SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS) {
+        throw new Error('global_mix_spool_unsupported_size');
+      }
+      const indexMember = `${id}:${memberBytes}:${sealedEnvelope.tag}:${sealedEnvelope.probe}`;
+      const entryKey = `${GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX}${id}`;
+      const ttlMilliseconds = GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000;
+      const oldestAllowed = ((now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000)) * 1000);
+      const appendResult = await client.eval(
+        APPEND_AND_TRIM_GLOBAL_SPOOL_SCRIPT,
+        3,
+        GLOBAL_MIX_SPOOL_KEY,
+        GLOBAL_MIX_SPOOL_BYTES_KEY,
+        entryKey,
+        score,
+        indexMember,
+        member,
+        memberBytes,
+        ttlMilliseconds,
+        GLOBAL_MIX_SPOOL_TTL_SECONDS + 60,
+        oldestAllowed,
+        GLOBAL_MIX_SPOOL_MAX_MESSAGES,
+        GLOBAL_MIX_SPOOL_MAX_BYTES,
+        GLOBAL_MIX_SPOOL_TRIM_BATCH
+      );
+      if (!Array.isArray(appendResult) || Number(appendResult[0]) !== 1) {
+        throw new Error('global_mix_spool_capacity_reached');
+      }
+      return Number(appendResult[3]) === 1;
     });
   } catch (error) {
-    cryptoLogger.error('[BLIND-ROUTER] Global mix spool failed', { error: error.message });
+    console.error('[BLIND-ROUTER] Global mix spool failed', { error: error.message });
     throw error;
   }
 }
 
-function serializedMemberBytes(raw) {
-  if (typeof raw !== 'string') return 0;
-  try {
-    const parsed = JSON.parse(raw);
-    const size = Number(parsed?.byteSize);
-    if (Number.isFinite(size) && size > 0) return size;
-  } catch {
-  }
-  return Buffer.byteLength(raw, 'utf8');
+const APPEND_AND_TRIM_GLOBAL_SPOOL_SCRIPT = `
+  local spool = KEYS[1]
+  local bytesKey = KEYS[2]
+  local entryKey = KEYS[3]
+  local score = ARGV[1]
+  local indexMember = ARGV[2]
+  local member = ARGV[3]
+  local memberBytes = tonumber(ARGV[4])
+  local entryTtlMs = tonumber(ARGV[5])
+  local indexTtl = tonumber(ARGV[6])
+  local oldestAllowed = ARGV[7]
+  local maxMessages = tonumber(ARGV[8])
+  local maxBytes = tonumber(ARGV[9])
+  local trimBatch = tonumber(ARGV[10])
+
+  local function indexedBytes(value)
+    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+  end
+
+  local storedTotalBytes = redis.call('GET', bytesKey)
+  local totalBytes = tonumber(storedTotalBytes or '0')
+  if not storedTotalBytes then
+    totalBytes = 0
+    local existingMembers = redis.call('ZRANGE', spool, 0, -1)
+    for _, existingMember in ipairs(existingMembers) do
+      totalBytes = totalBytes + indexedBytes(existingMember)
+    end
+  end
+
+  local function removeMembers(members)
+    for _, oldMember in ipairs(members) do
+      if redis.call('ZREM', spool, oldMember) == 1 then
+        totalBytes = totalBytes - indexedBytes(oldMember)
+      end
+    end
+  end
+
+  local expired = redis.call('ZRANGEBYSCORE', spool, '-inf', oldestAllowed, 'LIMIT', 0, trimBatch)
+  removeMembers(expired)
+
+  if totalBytes < 0 then totalBytes = 0 end
+  local existing = redis.call('ZSCORE', spool, indexMember)
+  if existing then
+    local retained = redis.call('GET', entryKey)
+    if retained == member then
+      redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+      redis.call('EXPIRE', spool, indexTtl)
+      return { 1, redis.call('ZCARD', spool), totalBytes, 0 }
+    end
+    if retained then
+      return { 0, redis.call('ZCARD', spool), totalBytes, 0 }
+    end
+    if redis.call('ZREM', spool, indexMember) == 1 then
+      totalBytes = totalBytes - memberBytes
+      if totalBytes < 0 then totalBytes = 0 end
+    end
+  end
+
+  if memberBytes > maxBytes or redis.call('ZCARD', spool) >= maxMessages or totalBytes + memberBytes > maxBytes then
+    redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+    redis.call('EXPIRE', spool, indexTtl)
+    return { 0, redis.call('ZCARD', spool), totalBytes, 0 }
+  end
+
+  if not redis.call('SET', entryKey, member, 'PX', entryTtlMs, 'NX') then
+    return { 0, redis.call('ZCARD', spool), totalBytes, 0 }
+  end
+  if redis.call('ZADD', spool, 'NX', score, indexMember) ~= 1 then
+    redis.call('DEL', entryKey)
+    return { 0, redis.call('ZCARD', spool), totalBytes, 0 }
+  end
+
+  totalBytes = totalBytes + memberBytes
+  redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+  redis.call('EXPIRE', spool, indexTtl)
+  return { 1, redis.call('ZCARD', spool), totalBytes, 1 }
+`;
+
+const TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT = `
+  local spool = KEYS[1]
+  local bytesKey = KEYS[2]
+  local oldestAllowed = ARGV[1]
+  local trimBatch = tonumber(ARGV[2])
+  local indexTtl = tonumber(ARGV[3])
+
+  local function indexedBytes(value)
+    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+  end
+
+  local storedTotalBytes = redis.call('GET', bytesKey)
+  local totalBytes = tonumber(storedTotalBytes or '0')
+  if not storedTotalBytes then
+    totalBytes = 0
+    for _, existingMember in ipairs(redis.call('ZRANGE', spool, 0, -1)) do
+      totalBytes = totalBytes + indexedBytes(existingMember)
+    end
+  end
+
+  local removed = 0
+  local expired = redis.call('ZRANGEBYSCORE', spool, '-inf', oldestAllowed, 'LIMIT', 0, trimBatch)
+  for _, oldMember in ipairs(expired) do
+    if redis.call('ZREM', spool, oldMember) == 1 then
+      totalBytes = totalBytes - indexedBytes(oldMember)
+      removed = removed + 1
+    end
+  end
+  if totalBytes < 0 then totalBytes = 0 end
+
+  local count = redis.call('ZCARD', spool)
+  if count == 0 then
+    redis.call('DEL', bytesKey)
+  else
+    redis.call('SET', bytesKey, totalBytes, 'EX', indexTtl)
+    redis.call('EXPIRE', spool, indexTtl)
+  end
+  return { removed, count, totalBytes }
+`;
+
+async function trimExpiredGlobalMixSpool(client, now = Date.now()) {
+  const oldestAllowed = ((now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000)) * 1000);
+  return client.eval(
+    TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT,
+    2,
+    GLOBAL_MIX_SPOOL_KEY,
+    GLOBAL_MIX_SPOOL_BYTES_KEY,
+    oldestAllowed,
+    GLOBAL_MIX_SPOOL_TRIM_BATCH,
+    GLOBAL_MIX_SPOOL_TTL_SECONDS + 60
+  );
 }
 
-async function removeSpoolMembers(client, members) {
-  const selected = (Array.isArray(members) ? members : []).filter((member) => typeof member === 'string');
-  if (selected.length === 0) return 0;
-  const removedBytes = selected.reduce((total, member) => total + serializedMemberBytes(member), 0);
-  await client.zrem(GLOBAL_MIX_SPOOL_KEY, ...selected);
-  if (removedBytes > 0) {
-    await client.decrby(GLOBAL_MIX_SPOOL_BYTES_KEY, removedBytes);
-  }
-  return removedBytes;
-}
-
-async function recomputeGlobalMixSpoolBytes(client) {
-  const rawItems = await client.zrange(GLOBAL_MIX_SPOOL_KEY, 0, -1);
-  const totalBytes = (rawItems || []).reduce((total, member) => total + serializedMemberBytes(member), 0);
-  await client.set(GLOBAL_MIX_SPOOL_BYTES_KEY, totalBytes, 'EX', GLOBAL_MIX_SPOOL_TTL_SECONDS);
-  return totalBytes;
-}
-
-async function trimGlobalMixSpool(client) {
-  const key = GLOBAL_MIX_SPOOL_KEY;
-  const oldestAllowed = ((Date.now() - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000)) * 1000);
-
-  for (;;) {
-    const expired = await client.zrangebyscore(key, 0, oldestAllowed, 'LIMIT', 0, 256);
-    if (!expired || expired.length === 0) break;
-    await removeSpoolMembers(client, expired);
-    if (expired.length < 256) break;
-  }
-
-  const count = Number(await client.zcard(key)) || 0;
-  if (count > GLOBAL_MIX_SPOOL_MAX_MESSAGES) {
-    const excess = count - GLOBAL_MIX_SPOOL_MAX_MESSAGES;
-    const oldest = await client.zrange(key, 0, excess - 1);
-    await removeSpoolMembers(client, oldest);
-  }
-
-  let totalBytes = Number(await client.get(GLOBAL_MIX_SPOOL_BYTES_KEY));
-  if (!Number.isFinite(totalBytes) || totalBytes < 0) {
-    totalBytes = await recomputeGlobalMixSpoolBytes(client);
-  }
-
-  while (totalBytes > GLOBAL_MIX_SPOOL_MAX_BYTES) {
-    const oldest = await client.zrange(key, 0, 127);
-    if (!oldest || oldest.length === 0) {
-      await client.set(GLOBAL_MIX_SPOOL_BYTES_KEY, 0, 'EX', GLOBAL_MIX_SPOOL_TTL_SECONDS);
-      break;
-    }
-    totalBytes -= await removeSpoolMembers(client, oldest);
-  }
-
-  await client.expire(GLOBAL_MIX_SPOOL_BYTES_KEY, GLOBAL_MIX_SPOOL_TTL_SECONDS);
-}
-
-async function tryLocalBroadcastDelivery(sealedEnvelope, options = {}) {
-  const originSocketId = typeof options.originSocketId === 'string' ? options.originSocketId : null;
+async function tryLocalBroadcastDelivery(sealedEnvelope, generation) {
+  if (generation !== globalMixDeliveryGeneration) return 0;
   const socketIds = Array.from(localSocketRegistry.keys());
   if (socketIds.length === 0) {
     return 0;
   }
+  for (let index = socketIds.length - 1; index > 0; index -= 1) {
+    const swap = crypto.randomInt(index + 1);
+    [socketIds[index], socketIds[swap]] = [socketIds[swap], socketIds[index]];
+  }
 
   let delivered = 0;
-  let attempts = 0;
-  let skippedBackpressure = 0;
-  let skippedSuspended = 0;
-  let skippedNotReady = 0;
-  for (const socketId of socketIds) {
-    if (originSocketId && socketId === originSocketId) {
-      continue;
-    }
-    const ws = localSocketRegistry.get(socketId);
-    if (!ws || ws.readyState !== 1) {
-      localSocketRegistry.delete(socketId);
-      continue;
-    }
-    attempts += 1;
-    const now = Date.now();
-    if (Number(ws._blindBroadcastSuspendedUntil || 0) > now) {
-      skippedSuspended += 1;
-      continue;
-    }
-    if (!ws._pqSessionId) {
-      skippedNotReady += 1;
-      continue;
-    }
-    if (!isBroadcastDeliveryReady(ws)) {
-      skippedNotReady += 1;
-      continue;
-    }
-    if (LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS > 0) {
-      const lastSentAt = Number(ws._lastBlindBroadcastSentAt || 0);
-      if (lastSentAt > 0 && now - lastSentAt < LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS) {
-        continue;
+  const drainDeadline = Date.now() + LOCAL_BROADCAST_DRAIN_BUDGET_MS;
+  for (let offset = 0; offset < socketIds.length; offset += LOCAL_BROADCAST_CONCURRENCY) {
+    if (generation !== globalMixDeliveryGeneration) return delivered;
+    const remainingMs = drainDeadline - Date.now();
+    if (remainingMs <= 0) break;
+    const batch = socketIds.slice(offset, offset + LOCAL_BROADCAST_CONCURRENCY);
+    await Promise.all(batch.map(async (socketId) => {
+      if (generation !== globalMixDeliveryGeneration) return;
+      const ws = localSocketRegistry.get(socketId);
+      if (!ws || ws.readyState !== 1) {
+        localSocketRegistry.delete(socketId);
+        return;
       }
-    }
-    if (Number(ws.bufferedAmount || 0) > LOCAL_BROADCAST_BUFFERED_MAX_BYTES) {
-      skippedBackpressure += 1;
-      if (!Number.isFinite(ws._blindBroadcastBackpressureSince) || ws._blindBroadcastBackpressureSince <= 0) {
-        ws._blindBroadcastBackpressureSince = now;
+      const now = Date.now();
+      if (Number(ws._blindBroadcastSuspendedUntil || 0) > now) {
+        return;
       }
-      if (now - ws._blindBroadcastBackpressureSince > LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS) {
-        ws._blindBroadcastSuspendedUntil = now + LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS;
-        ws._blindBroadcastBackpressureSince = 0;
-        cryptoLogger.warn('[BLIND-ROUTER] Local privacy broadcast suspended - sustained backpressure', {
-          bufferedClass: 'over-limit'
-        });
-        continue;
+      if (!ws._pqSessionId || !isBroadcastDeliveryReady(ws)) {
+        return;
       }
-      if (shouldLogLocalBroadcastBackpressure(ws)) {
-        cryptoLogger.warn('[BLIND-ROUTER] Local privacy broadcast skipped - socket backpressure', {
-          bufferedClass: 'over-limit'
-        });
+      const pqSession = ws._pqSessionData;
+      if (
+        pqSession?.sessionId !== ws._pqSessionId ||
+        Number(pqSession.sendQueueCount || 0) > 0
+      ) {
+        return;
       }
-      continue;
-    }
-    ws._blindBroadcastBackpressureSince = 0;
-    try {
-      await sendToSocket(ws, sealedEnvelope);
-      ws._lastBlindBroadcastSentAt = Date.now();
-      delivered += 1;
-    } catch (error) {
-      cryptoLogger.info('[BLIND-ROUTER] Local privacy broadcast delivery skipped', {
-        error: error?.message
-      });
-    }
+      if (LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS > 0) {
+        const lastSentAt = Number(ws._lastBlindBroadcastSentAt || 0);
+        if (lastSentAt > 0 && now - lastSentAt < LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS) {
+          return;
+        }
+      }
+      if (Number(ws.bufferedAmount || 0) > LOCAL_BROADCAST_BUFFERED_MAX_BYTES) {
+        if (!Number.isFinite(ws._blindBroadcastBackpressureSince) || ws._blindBroadcastBackpressureSince <= 0) {
+          ws._blindBroadcastBackpressureSince = now;
+        }
+        if (now - ws._blindBroadcastBackpressureSince > LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS) {
+          ws._blindBroadcastSuspendedUntil = now + LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS;
+          ws._blindBroadcastBackpressureSince = 0;
+          console.warn('[BLIND-ROUTER] Local privacy broadcast suspended, sustained backpressure', {
+            bufferedClass: 'over-limit'
+          });
+          return;
+        }
+        if (shouldLogLocalBroadcastBackpressure(ws)) {
+          console.warn('[BLIND-ROUTER] Local privacy broadcast skipped, socket backpressure', {
+            bufferedClass: 'over-limit'
+          });
+        }
+        return;
+      }
+      ws._blindBroadcastBackpressureSince = 0;
+      try {
+        const sendBudgetMs = Math.min(
+          LOCAL_BROADCAST_SEND_TIMEOUT_MS,
+          Math.max(1, drainDeadline - Date.now())
+        );
+        const didDeliver = await sendToSocket(ws, sealedEnvelope, sendBudgetMs);
+        if (!didDeliver) return;
+        ws._lastBlindBroadcastSentAt = Date.now();
+        delivered += 1;
+      } catch { }
+    }));
   }
-  recordLocalBroadcast({
-    attempts,
-    delivered,
-    skippedBackpressure,
-    skippedSuspended,
-    skippedNotReady
-  });
   return delivered;
 }
 
 function isBroadcastDeliveryReady(ws) {
-  return !!(
-    ws?._unlinkedSession ||
-    hasClaimedInboxRoute(ws)
-  );
-}
-
-function hasClaimedInboxRoute(ws) {
-  return !!(ws?._claimedInboxRoutes && ws._claimedInboxRoutes.size > 0);
+  return ws?._unlinkedSession === true;
 }
 
 function shouldLogLocalBroadcastBackpressure(ws) {
@@ -691,156 +1182,333 @@ function shouldLogLocalBroadcastBackpressure(ws) {
   return true;
 }
 
-async function publishGlobalMixDelivery(sealedEnvelope) {
-  const originServerId = process.env.SERVER_ID || 'default';
+async function publishGlobalMixDelivery(publicationWire) {
   await withRedisClient(async (client) => {
-    await client.publish(GLOBAL_MIX_CHANNEL, JSON.stringify({
-      envelope: sealedEnvelope,
-      originServerId,
-      timestamp: Date.now()
-    }));
+    await client.publish(GLOBAL_MIX_CHANNEL, publicationWire);
   });
 }
 
-export async function snapshotGlobalMixSpool(limit = 2048) {
-  const cappedLimit = Math.min(Math.max(Number(limit) || 2048, 1), 100_000);
-  const results = [];
-
-  try {
-    await withRedisClient(async (client) => {
-      const rawItems = await client.zrevrangebyscore(GLOBAL_MIX_SPOOL_KEY, '+inf', '-inf', 'LIMIT', 0, cappedLimit);
-      for (const raw of (rawItems || []).reverse()) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (parsed?.envelope) {
-            results.push({
-              score: Number(parsed.score || parsed.queuedAt || 0),
-              queuedAt: Number(parsed.queuedAt || 0),
-              envelope: parsed.envelope
-            });
-          }
-        } catch {
-        }
-      }
-    });
-  } catch (error) {
-    cryptoLogger.error('[BLIND-ROUTER] Global mix PIR snapshot failed', { error: error.message });
+function enqueueGlobalMixPublication(publicationWire) {
+  if (!blindDeliverySubscriptionDesired) return false;
+  const wireBytes = Buffer.byteLength(publicationWire, 'utf8');
+  if (
+    wireBytes <= 0 ||
+    wireBytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES ||
+    globalMixPublicationQueue.length >= GLOBAL_MIX_PUBLICATION_QUEUE_MAX_MESSAGES ||
+    globalMixPublicationQueuedBytes + wireBytes > GLOBAL_MIX_PUBLICATION_QUEUE_MAX_BYTES
+  ) {
+    return false;
   }
-
-  return results;
+  globalMixPublicationQueue.push({
+    wire: publicationWire,
+    wireBytes,
+    createdAt: Date.now(),
+    generation: globalMixPublicationGeneration
+  });
+  globalMixPublicationQueuedBytes += wireBytes;
+  startGlobalMixPublicationDrain();
+  return true;
 }
 
-/**
- * Send envelope to socket with PQ encryption if available
- */
-async function sendToSocket(ws, sealedEnvelope) {
+function startGlobalMixPublicationDrain() {
+  if (globalMixPublicationDrainPromise) return;
+  let drainPromise;
+  const finish = () => {
+    if (globalMixPublicationDrainPromise === drainPromise) {
+      globalMixPublicationDrainPromise = null;
+    }
+    if (globalMixPublicationQueue.length > 0) {
+      startGlobalMixPublicationDrain();
+    }
+  };
+  drainPromise = (async () => {
+    while (globalMixPublicationQueue.length > 0) {
+      const queued = globalMixPublicationQueue.shift();
+      if (!queued) continue;
+      globalMixPublicationQueuedBytes = Math.max(0, globalMixPublicationQueuedBytes - queued.wireBytes);
+      if (
+        queued.generation !== globalMixPublicationGeneration ||
+        Date.now() - queued.createdAt > GLOBAL_MIX_PUBLICATION_QUEUE_MAX_AGE_MS
+      ) {
+        continue;
+      }
+      try {
+        await publishGlobalMixDelivery(queued.wire);
+      } catch {
+      }
+    }
+  })();
+  globalMixPublicationDrainPromise = drainPromise;
+  void drainPromise.then(finish, finish);
+}
+
+// captures tag index and its PIR records from one redis scan
+export async function readGlobalMixPirSnapshot(now = Date.now()) {
+  return withRedisClient(async (client) => {
+    await trimExpiredGlobalMixSpool(client, now);
+    const oldestReadable = (
+      now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000) + GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS
+    ) * 1000;
+    const members = await client.zrangebyscore(
+      GLOBAL_MIX_SPOOL_KEY,
+      `(${oldestReadable}`,
+      '+inf'
+    );
+    const rows = [];
+    for (const member of members || []) {
+      const row = parseGlobalSpoolIndexMember(member);
+      if (!row) throw new Error('invalid_global_mix_spool_index');
+      if (!isCurrentGlobalSpoolRow(row)) continue;
+      rows.push(row);
+    }
+    if (rows.length === 0) {
+      return { ids: [], tags: [], probes: [], records: [] };
+    }
+
+    const raw = await client.mget(
+      ...rows.map((row) => `${GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX}${row.id}`)
+    );
+    if (!Array.isArray(raw) || raw.length !== rows.length) {
+      throw new Error('invalid_global_mix_spool_read');
+    }
+
+    const records = [];
+    for (let index = 0; index < raw.length; index += 1) {
+      if (typeof raw[index] !== 'string') {
+        throw new Error('global_mix_spool_entry_expired_during_pir_build');
+      }
+      const envelope = JSON.parse(raw[index]).envelope;
+      records.push(Buffer.concat([
+        Buffer.from(envelope.ephemeralKey, 'base64'),
+        Buffer.from(envelope.nonce, 'base64'),
+        Buffer.from(envelope.ciphertext, 'base64')
+      ]));
+    }
+    return {
+      ids: rows.map((row) => row.id),
+      tags: rows.map((row) => row.tag),
+      probes: rows.map((row) => row.probe),
+      records
+    };
+  });
+}
+
+// Send envelope to socket
+async function sendToSocket(ws, sealedEnvelope, deliveryTimeoutMs) {
   const pqSessionId = ws._pqSessionId;
 
   if (pqSessionId) {
     const { sendPQEncryptedResponse } = await import('../messaging/pq-envelope-handler.js');
-    const { getPQSession: getSession } = await import('../session/pq-session-storage.js');
-    const session = await getSession(pqSessionId);
+    const session = ws._pqSessionData;
 
-    if (session) {
+    if (session?.sessionId === pqSessionId) {
       const messageWrapper = {
         type: SignalType.SEALED_ENVELOPE,
         envelope: sealedEnvelope
       };
-      await sendPQEncryptedResponse(ws, session, messageWrapper);
-      return;
+      return sendPQEncryptedResponse(ws, session, messageWrapper, {
+        deliveryTimeoutMs
+      });
     }
   }
 
   throw new Error('No PQ session available for socket delivery');
 }
 
-export async function handleGlobalMixDelivery(message) {
-  const { envelope, originServerId } = message || {};
-  if (originServerId && originServerId === (process.env.SERVER_ID || 'default')) {
-    return;
+function validateGlobalMixPublication(message) {
+  if (
+    !message ||
+    typeof message !== 'object' ||
+    Array.isArray(message) ||
+    (Object.getPrototypeOf(message) !== Object.prototype && Object.getPrototypeOf(message) !== null) ||
+    Object.keys(message).sort().join(',') !== 'envelope,publicationId' ||
+    typeof message.publicationId !== 'string' ||
+    !BASE64URL_32_RE.test(message.publicationId) ||
+    !validateGlobalEnvelope(message.envelope).valid
+  ) {
+    return null;
   }
-  await tryLocalBroadcastDelivery(envelope);
+  return {
+    envelope: message.envelope,
+    publicationId: message.publicationId
+  };
 }
 
-/**
- * Subscribe to global mix delivery channel for this server
- */
+function startGlobalMixDeliveryDrain() {
+  if (globalMixDeliveryDrainPromise) return;
+  let drainPromise;
+  drainPromise = (async () => {
+    while (globalMixDeliveryQueue.length > 0) {
+      const queued = globalMixDeliveryQueue.shift();
+      if (!queued) continue;
+      globalMixDeliveryQueuedBytes = Math.max(0, globalMixDeliveryQueuedBytes - queued.wireBytes);
+      if (queued.generation !== globalMixDeliveryGeneration) continue;
+      await tryLocalBroadcastDelivery(queued.envelope, queued.generation);
+    }
+  })().catch(() => {
+    console.warn('[BLIND-ROUTER] Cross-instance delivery drain failed');
+  }).finally(() => {
+    if (globalMixDeliveryDrainPromise === drainPromise) {
+      globalMixDeliveryDrainPromise = null;
+    }
+    if (globalMixDeliveryQueue.length > 0) startGlobalMixDeliveryDrain();
+  });
+  globalMixDeliveryDrainPromise = drainPromise;
+}
+
+function enqueueGlobalMixDelivery(message, wireBytes) {
+  if (!blindDeliverySubscriptionDesired) return false;
+  const publication = validateGlobalMixPublication(message);
+  if (!publication) return false;
+  const retainedBytes = Number.isSafeInteger(wireBytes) && wireBytes > 0
+    ? wireBytes
+    : Buffer.byteLength(JSON.stringify(message), 'utf8');
+  if (
+    globalMixDeliveryQueue.length >= GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES ||
+    globalMixDeliveryQueuedBytes + retainedBytes > GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES
+  ) {
+    const now = Date.now();
+    if (now - globalMixDeliveryPressureLoggedAt >= LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS) {
+      globalMixDeliveryPressureLoggedAt = now;
+      console.warn('[BLIND-ROUTER] Cross-instance live delivery dropped under bounded pressure');
+    }
+    return false;
+  }
+  if (!reservePublicationId(publication.publicationId)) return false;
+  globalMixDeliveryQueue.push({
+    envelope: publication.envelope,
+    wireBytes: retainedBytes,
+    generation: globalMixDeliveryGeneration
+  });
+  globalMixDeliveryQueuedBytes += retainedBytes;
+  startGlobalMixDeliveryDrain();
+  return true;
+}
+
+// Subscribe to global mix delivery channel for this server
+function scheduleBlindDeliveryRetry() {
+  if (
+    !blindDeliverySubscriptionDesired ||
+    blindDeliveryRetryTimer ||
+    blindDeliverySubscriber ||
+    blindDeliverySubscriberPromise
+  ) return;
+
+  const upperBound = Math.min(
+    BLIND_DELIVERY_RETRY_MAX_MS,
+    BLIND_DELIVERY_RETRY_MIN_MS * (2 ** Math.min(blindDeliveryRetryAttempts, 6))
+  );
+  const delayMs = randomDelay(BLIND_DELIVERY_RETRY_MIN_MS, upperBound);
+  blindDeliveryRetryAttempts += 1;
+  blindDeliveryRetryTimer = setTimeout(() => {
+    blindDeliveryRetryTimer = null;
+    subscribeToBlindDelivery().catch(() => { });
+  }, delayMs);
+  blindDeliveryRetryTimer.unref?.();
+}
+
 export async function subscribeToBlindDelivery() {
+  blindDeliverySubscriptionDesired = true;
+  if (blindDeliverySubscriber) return;
   if (blindDeliverySubscriberPromise) {
     return blindDeliverySubscriberPromise;
   }
 
-  blindDeliverySubscriberPromise = (async () => {
-    try {
-      startMixnetRelay();
-      const subscriber = await createSubscriber();
-
-      await subscriber.subscribe(GLOBAL_MIX_CHANNEL, (message) => {
-        try {
-          const parsed = JSON.parse(message);
-          handleGlobalMixDelivery(parsed).catch(() => { });
-        } catch (error) {
-          cryptoLogger.error('[BLIND-ROUTER] Invalid global mix delivery message');
-        }
-      });
-
-      cryptoLogger.info('[BLIND-ROUTER] Subscribed to global mix delivery channel', { channel: GLOBAL_MIX_CHANNEL });
-    } catch (error) {
-      blindDeliverySubscriberPromise = null;
-      cryptoLogger.error('[BLIND-ROUTER] Failed to subscribe', { error: error.message });
+  const generation = blindDeliverySubscriptionGeneration;
+  let subscriber = null;
+  const initialization = (async () => {
+    startMixnetRelay();
+    subscriber = await createSubscriber();
+    if (!blindDeliverySubscriptionDesired || generation !== blindDeliverySubscriptionGeneration) {
+      throw new Error('Blind delivery subscription cancelled');
     }
-  })();
 
-  return blindDeliverySubscriberPromise;
+    subscriber.on('message', (channel, message) => {
+      if (
+        channel !== GLOBAL_MIX_CHANNEL ||
+        typeof message !== 'string' ||
+        Buffer.byteLength(message, 'utf8') > GLOBAL_MIX_PUBLICATION_MAX_BYTES
+      ) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(message);
+        enqueueGlobalMixDelivery(parsed, Buffer.byteLength(message, 'utf8'));
+      } catch {
+        console.error('[BLIND-ROUTER] Invalid global mix delivery message');
+      }
+    });
+    subscriber.once('end', () => {
+      if (blindDeliverySubscriber !== subscriber) return;
+      blindDeliverySubscriber = null;
+      scheduleBlindDeliveryRetry();
+    });
+    await subscriber.subscribe(GLOBAL_MIX_CHANNEL);
+    if (!blindDeliverySubscriptionDesired || generation !== blindDeliverySubscriptionGeneration) {
+      throw new Error('Blind delivery subscription cancelled');
+    }
+
+    blindDeliverySubscriber = subscriber;
+    blindDeliveryRetryAttempts = 0;
+    console.log('[BLIND-ROUTER] Global delivery subscription ready');
+  })();
+  blindDeliverySubscriberPromise = initialization;
+
+  try {
+    await initialization;
+  } catch (error) {
+    if (subscriber && blindDeliverySubscriber !== subscriber) {
+      await closeSubscriber(subscriber);
+    }
+    if (blindDeliverySubscriberPromise === initialization) {
+      blindDeliverySubscriberPromise = null;
+    }
+    if (blindDeliverySubscriptionDesired && generation === blindDeliverySubscriptionGeneration) {
+      console.error('[BLIND-ROUTER] Global delivery subscription unavailable');
+      scheduleBlindDeliveryRetry();
+    }
+    throw error;
+  }
+
+  if (blindDeliverySubscriberPromise === initialization) {
+    blindDeliverySubscriberPromise = null;
+  }
 }
 
-export async function rotateInboxRoutes(ws, capabilityToken, oldRouteIds, newRouteIds, alreadyAuthorized = false) {
-  if (!alreadyAuthorized && capabilityToken) {
-    const validation = await validateCapabilityToken(capabilityToken);
-    if (!validation.valid) {
-      return { success: false, error: validation.error };
-    }
-    alreadyAuthorized = true;
-  }
-  if (!alreadyAuthorized) {
-    return { success: false, error: 'authentication_required' };
-  }
-
-  const oldIds = (Array.isArray(oldRouteIds) ? oldRouteIds : []).filter(isRouteLookupId);
-  const nextIds = (Array.isArray(newRouteIds) ? newRouteIds : []).filter(isRouteLookupId);
-  const socketId = ws._blindSocketId;
-  if (!socketId) {
-    return { success: false, error: 'socket_not_registered' };
+export async function stopBlindDeliverySubscription() {
+  blindDeliverySubscriptionDesired = false;
+  blindDeliverySubscriptionGeneration += 1;
+  globalMixDeliveryGeneration += 1;
+  globalMixPublicationGeneration += 1;
+  globalMixDeliveryQueue.length = 0;
+  globalMixDeliveryQueuedBytes = 0;
+  globalMixPublicationQueue.length = 0;
+  globalMixPublicationQueuedBytes = 0;
+  if (blindDeliveryRetryTimer) {
+    clearTimeout(blindDeliveryRetryTimer);
+    blindDeliveryRetryTimer = null;
   }
 
-  if (ws._claimedInboxRoutes) {
-    for (const routeId of oldIds) {
-      ws._claimedInboxRoutes.delete(routeId);
-    }
-  }
-  if (!ws._claimedInboxRoutes) {
-    ws._claimedInboxRoutes = new Set();
-  }
-  for (const routeId of nextIds) {
-    ws._claimedInboxRoutes.add(routeId);
-  }
+  const pending = blindDeliverySubscriberPromise;
+  if (pending) await pending.catch(() => { });
+  blindDeliverySubscriberPromise = null;
 
-  return { success: true, newRouteIds: nextIds };
+  const subscriber = blindDeliverySubscriber;
+  blindDeliverySubscriber = null;
+  if (subscriber) await closeSubscriber(subscriber);
+  blindDeliveryRetryAttempts = 0;
+  await stopMixnetRelay();
+  await globalMixPublicationDrainPromise?.catch(() => { });
+  await globalMixDeliveryDrainPromise?.catch(() => { });
 }
 
 export const BlindRouter = {
   registerLocalSocket,
   unregisterLocalSocket,
-  claimInboxRoute,
   routeToGlobalMix,
   enqueueMixnetRelay,
   enqueueMixnetCoverWrite,
-  getBlindRouterRuntimeStats,
   pruneBlindRouterRuntimeState,
-  rotateInboxRoutes,
-  snapshotGlobalMixSpool,
   subscribeToBlindDelivery,
-  startMixnetRelay,
-  stopMixnetRelay,
-  handleGlobalMixDelivery
+  stopBlindDeliverySubscription
 };

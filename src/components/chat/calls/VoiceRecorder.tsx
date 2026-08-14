@@ -1,6 +1,12 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { MAX_VOICE_NOTE_BYTES, MAX_VOICE_NOTE_DURATION_SECONDS } from '../../../lib/constants';
 import { Button } from '../../ui/button';
 import { Square, Play, Pause, Trash2, Send } from 'lucide-react';
+import { requireNativeMediaAccess } from '../../../lib/tauri-bindings';
+import { syncEncryptedStorage } from '../../../lib/database/encrypted-storage';
+import { isValidMediaDeviceId } from '../../../lib/utils/calling-utils';
+import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
+import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 
 // Props for the voice recorder control
 interface VoiceRecorderProps {
@@ -32,12 +38,22 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const recordStartRef = useRef(0);
   const finalDurationRef = useRef(0);
+  const recordedBytesRef = useRef(0);
+  const recordingRejectedRef = useRef(false);
 
   // Release media resources and reset state
   const cleanup = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
+    const recorder = mediaRecorderRef.current;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.onerror = null;
+      if (recorder.state !== 'inactive') recorder.stop();
+      mediaRecorderRef.current = null;
     }
+    chunksRef.current = [];
+    recordedBytesRef.current = 0;
+    recordingRejectedRef.current = false;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
@@ -67,6 +83,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     isRecordingRef.current = false;
     setIsPlaying(false);
     setAudioLevel(0);
+    setRecordedBlob(null);
   };
 
   useEffect(() => {
@@ -133,16 +150,11 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       // Load set microphone from settings
       let micDeviceId: string | undefined;
       try {
-        const { syncEncryptedStorage } = await import('../../../lib/database/encrypted-storage');
-        const stored = syncEncryptedStorage.getItem('app_settings_v1');
+        const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
         if (stored) {
           const parsed = JSON.parse(stored);
-          if (parsed.preferredMicId) {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const micAvailable = devices.some(d => d.kind === 'audioinput' && d.deviceId === parsed.preferredMicId);
-            if (micAvailable) {
-              micDeviceId = parsed.preferredMicId;
-            }
+          if (isValidMediaDeviceId(parsed.preferredMicId)) {
+            micDeviceId = parsed.preferredMicId;
           }
         }
       } catch { }
@@ -156,6 +168,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         audioConstraints.deviceId = { ideal: micDeviceId };
       }
 
+      await requireNativeMediaAccess('audio');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       streamRef.current = stream;
 
@@ -190,17 +203,33 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       const mediaRecorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 32000 });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
+      recordedBytesRef.current = 0;
+      recordingRejectedRef.current = false;
 
       mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
+        if (e.data.size === 0 || recordingRejectedRef.current) return;
+        if (recordedBytesRef.current + e.data.size > MAX_VOICE_NOTE_BYTES) {
+          recordingRejectedRef.current = true;
+          chunksRef.current = [];
+          recordedBytesRef.current = 0;
+          setError('Voice note is too large');
+          if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+          return;
+        }
+        recordedBytesRef.current += e.data.size;
+        chunksRef.current.push(e.data);
       };
 
       mediaRecorder.onstop = () => {
         finalDurationRef.current = recordStartRef.current > 0
           ? (Date.now() - recordStartRef.current) / 1000
           : 0;
-        const blob = new Blob(chunksRef.current, { type: mimeType });
-        setRecordedBlob(blob);
+        if (!recordingRejectedRef.current) {
+          const blob = new Blob(chunksRef.current, { type: mimeType });
+          setRecordedBlob(blob);
+        }
+        chunksRef.current = [];
+        recordedBytesRef.current = 0;
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
           streamRef.current = null;
@@ -221,14 +250,18 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         isRecordingRef.current = false;
       };
 
-      mediaRecorder.start();
       recordStartRef.current = Date.now();
+      mediaRecorder.start(1_000);
       setIsRecording(true);
       isRecordingRef.current = true;
       setDuration(0);
 
       intervalRef.current = setInterval(() => {
-        setDuration(prev => prev + 1);
+        const elapsed = Math.floor((Date.now() - recordStartRef.current) / 1000);
+        setDuration(Math.min(elapsed, MAX_VOICE_NOTE_DURATION_SECONDS));
+        if (elapsed >= MAX_VOICE_NOTE_DURATION_SECONDS && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
       }, 1000);
 
       drawVisualizer();
@@ -300,13 +333,6 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
-  // Format seconds into mm:ss
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
   return (
     <div className="flex items-center gap-3 w-full h-full animate-in fade-in duration-200">
       <Button
@@ -326,7 +352,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         <>
           <div className="flex items-center gap-2 text-destructive animate-pulse font-mono text-sm min-w-[3rem]">
             <div className="w-2 h-2 rounded-full bg-destructive" style={{ opacity: Math.max(0.25, Math.min(1, 0.25 + audioLevel)) }} />
-            {formatTime(duration)}
+            {formatClockDurationSeconds(duration)}
           </div>
 
           <div className="flex-1 h-8 flex items-center justify-center overflow-hidden mx-2">
@@ -368,7 +394,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
               />
             </div>
             <span className="text-xs font-mono text-muted-foreground min-w-[6rem] text-right whitespace-nowrap">
-              {formatTime(currentTime)} / {formatTime(duration)}
+              {formatClockDurationSeconds(currentTime)} / {formatClockDurationSeconds(duration)}
             </span>
           </div>
 

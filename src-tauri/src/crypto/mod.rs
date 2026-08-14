@@ -4,4 +4,5 @@ pub mod aead;
 pub mod hash;
 pub mod post_quantum;
 pub mod random;
+pub mod tls;
 pub mod utils;

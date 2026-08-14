@@ -1,0 +1,7 @@
+import { AUTH_CHANNEL_BINDING_BYTES } from './auth-channel-binding.js';
+
+export const PRIVATE_AUTH_ANONYMITY_SET_SIZE = 2048;
+export const PRIVATE_AUTH_OT_RECORD_BYTES = 1024;
+export const OPAQUE_AUTH_SIGNATURE_CONTEXT = 'OPAQUE-Auth-Sig-v4';
+export const PRIVATE_AUTH_TRANSCRIPT_BYTES =
+  new TextEncoder().encode(OPAQUE_AUTH_SIGNATURE_CONTEXT).length + 32 + AUTH_CHANNEL_BINDING_BYTES;

@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-/*
- * Self-signed TLS generator
- * - Writes cert/key to server/config/certs/<cn>.crt|.key
- */
 
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -16,7 +12,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const CERT_DIR = path.join(repoRoot, 'server', 'config', 'certs');
 const ENV_PATH = path.join(repoRoot, '.env');
 const DB_TLS_LINES = [
-  'DB_CA_CERT_PATH=postgres-certs/root.crt',
+  'PGSSLROOTCERT=postgres-certs/root.crt',
   'DB_TLS_SERVERNAME=postgres'
 ];
 
@@ -116,7 +112,7 @@ async function writeEnv(relCert, relKey) {
 
     const force = process.argv.includes('--force');
     if (fs.existsSync(certPath) && fs.existsSync(keyPath) && !force) {
-      console.log('[INFO] TLS certificate already exists; reusing (pass --force to regenerate):');
+      console.log('[INFO] TLS certificate already exists:');
       console.log(`  - ${certPath}`);
       console.log(`  - ${keyPath}`);
       await writeEnv(relCert, relKey);

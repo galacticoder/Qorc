@@ -2,24 +2,22 @@
  * WebSocket Connection Manager
  */
 
-import { SecurityAuditLogger } from '../cryptography/audit-logger';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumRandom } from '../cryptography/random';
 import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
-import { blockingSystem } from '../blocking/blocking-system';
-import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
-import type { ConnectionMetrics, ConnectionHealth, MessageHandler, SessionKeyMaterial } from '../types/websocket-types';
+import { hasExactKeys, isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
+import { PinnedServer } from '../utils/auth-utils';
+import type { MessageHandler, ServerKeyMaterial, SessionKeyMaterial } from '../types/websocket-types';
 import {
   INITIAL_RECONNECT_DELAY_MS,
   MAX_RECONNECT_DELAY_MS,
   RATE_LIMIT_BACKOFF_MS,
   SESSION_REKEY_INTERVAL_MS,
-  KEY_ROTATION_WARNING_MS,
-  MAX_MISSED_HEARTBEATS,
   WS_COVER_TRAFFIC_MIN_INTERVAL_MS,
   WS_COVER_TRAFFIC_MAX_INTERVAL_MS,
-  SESSION_FAILOVER_GRACE_PERIOD_MS,
+  KYBER_PUBLIC_KEY_LENGTH,
+  DILITHIUM_PUBLIC_KEY_LENGTH,
 } from '../constants';
 
 import { WebSocketRateLimiter } from './rate-limiter';
@@ -31,17 +29,158 @@ import { WebSocketHandshake } from './handshake';
 import { WebSocketMessageHandler } from './message-handler';
 import { websocket, events } from '../tauri-bindings';
 import { GatekeeperClient } from '../cryptography/gatekeeper-client';
-import { Base64 } from '../cryptography/base64';
+import { Base64, decodeCanonicalBase64 as decodeBase64 } from '../cryptography/base64';
+import { solvePowChallenge } from '../cryptography/proof-of-work';
+import { getCurrentServerScope } from '../security/local-account-scope';
+import { getBlindRoutingClient } from '../transport/blind-routing-client';
+import { replenishResumePool, takeResumeRedemption } from '../signals/resume-tokens';
+import { tokenVault } from '../database/token-vault';
+import {
+  createAuthChannelBinding,
+} from '../../../shared/auth-channel-binding.js';
+import { REQUEST_ID_RE } from '../../../shared/patterns.js';
 
 interface ConnectOptions {
   autoReconnectOnFailure?: boolean;
 }
 
+interface DispatchOptions {
+  isCoverTraffic?: boolean;
+  bypassStateCheck?: boolean;
+  signal?: AbortSignal;
+  authBindingRequestId?: string;
+}
+
+interface SecureControlSendOptions extends DispatchOptions {
+  failIfQueued?: boolean;
+}
+
+const SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS = 30_000;
+
 const SECURE_CHUNK_MAX_TOTAL_CHUNKS = 128;
-const SECURE_CHUNK_MAX_TOTAL_LENGTH = 48 * 1024 * 1024;
+const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
 const SECURE_CHUNK_MAX_DATA_LENGTH = 8 * 1024 * 1024;
 const SECURE_CHUNK_MAX_CONCURRENT = 4;
+const SECURE_CHUNK_MAX_RESERVED_LENGTH = 32 * 1024 * 1024;
+const SECURE_CHUNK_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+const WS_INBOUND_PENDING_MAX_COUNT = 128;
+const WS_INBOUND_PENDING_MAX_BYTES = 24 * 1024 * 1024;
+const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map<string, 'authRequestId' | 'requestId'>([
+  [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
+  [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
+]);
+const NON_QUEUEABLE_CONTROL_TYPES = new Set<string>([
+  SignalType.AUTH_OT_REGISTER_REQUEST,
+  SignalType.AUTH_OT_REGISTER_FINALIZE,
+  SignalType.AUTH_OT_REGISTER_CONFIRM,
+  SignalType.AUTH_OT_REQUEST,
+  SignalType.AUTH_OT_FINALIZE,
+  SignalType.SERVER_ENTRY_REQUEST,
+  SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
+  SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
+  SignalType.PRIVACY_PASS_REDEMPTION,
+  SignalType.TOKEN_VALIDATION,
+  SignalType.ACTIVATE_DELIVERY,
+]);
+const AUTHORIZED_TOKEN_REFRESH_BASE_TIMEOUT_MS = 45_000;
+const ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE = 1;
 const SECURE_CHUNK_TIMEOUT_MS = 200_000;
+const PLAINTEXT_WIRE_TYPES = new Set<string>([
+  SignalType.SERVER_PUBLIC_KEY,
+  SignalType.PQ_HANDSHAKE_ACK,
+  SignalType.PQ_ENVELOPE
+]);
+const UNLINKED_FORBIDDEN_ACCOUNT_TYPES = new Set<string>([
+  SignalType.AUTH_OT_REGISTER_REQUEST,
+  SignalType.AUTH_OT_REGISTER_FINALIZE,
+  SignalType.AUTH_OT_REGISTER_CONFIRM,
+  SignalType.AUTH_OT_REQUEST,
+  SignalType.AUTH_OT_FINALIZE,
+  SignalType.SERVER_ENTRY_REQUEST,
+  SignalType.SERVER_ENTRY_TOKEN_ISSUANCE
+]);
+const LINKED_FORBIDDEN_ANONYMOUS_TYPES = new Set<string>([
+  SignalType.TOKEN_VALIDATION,
+  SignalType.ACTIVATE_DELIVERY,
+  SignalType.BLIND_ROUTE,
+  SignalType.OPRF_DISCOVERY_PUBLIC_KEY,
+  SignalType.PUBLISH_DISCOVERY
+]);
+
+function operationAbortError(message = 'WebSocket operation was cancelled'): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfOperationAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw operationAbortError();
+}
+
+function waitForAbortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(operationAbortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onAbort = () => finish(operationAbortError());
+    const timer = setTimeout(() => finish(), Math.max(0, delayMs));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+export type ResumeAuthorizationResponse = Readonly<
+  | {
+    type: SignalType.TOKEN_VALIDATION_RESPONSE;
+    requestId: string;
+    valid: true;
+    serverEntryRequired: boolean;
+    serverEntryGranted: boolean;
+  }
+  | {
+    type: SignalType.TOKEN_VALIDATION_RESPONSE;
+    requestId: string;
+    valid: false;
+    error: string;
+  }
+>;
+
+export class UnlinkedAuthorizationError extends Error {
+  readonly response: ResumeAuthorizationResponse;
+
+  constructor(response: ResumeAuthorizationResponse) {
+    super(response.valid ? 'Server entry is required' : 'Anonymous session authorization was rejected');
+    this.name = 'UnlinkedAuthorizationError';
+    this.response = response;
+  }
+}
+
+const isTokenValidationResponse = (value: unknown): value is ResumeAuthorizationResponse => {
+  if (!isPlainObject(value) || hasPrototypePollutionKeys(value)) return false;
+  if (
+    value.type !== SignalType.TOKEN_VALIDATION_RESPONSE ||
+    typeof value.valid !== 'boolean' ||
+    typeof value.requestId !== 'string' ||
+    !REQUEST_ID_RE.test(value.requestId)
+  ) return false;
+  if (value.valid) {
+    return hasExactKeys(value, ['requestId', 'type', 'valid', 'serverEntryRequired', 'serverEntryGranted']) &&
+      typeof value.serverEntryRequired === 'boolean' &&
+      typeof value.serverEntryGranted === 'boolean' &&
+      value.serverEntryRequired !== value.serverEntryGranted;
+  }
+  return hasExactKeys(value, ['error', 'requestId', 'type', 'valid']) &&
+    typeof value.error === 'string' &&
+    value.error.length > 0 &&
+    value.error.length <= 128;
+};
 
 interface SecureChunkBuffer {
   totalChunks: number;
@@ -54,79 +193,167 @@ interface SecureChunkBuffer {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface InboundWsMessage {
+  payload: unknown;
+  bytes: number;
+  generation: number;
+  connectionToken: number;
+}
+
+interface OutboundTransportContext {
+  connectionToken: number | null;
+  operationGeneration: number;
+  isInUnlinkedMode: boolean;
+  username?: string;
+}
+
+interface PrivacyBoundaryTransition {
+  targetMode: 'linked' | 'unlinked';
+  promise: Promise<unknown>;
+}
+
+const secureRandomUnit = (): number => {
+  const word = globalThis.crypto.getRandomValues(new Uint32Array(1))[0];
+  return word / 0x1_0000_0000;
+};
+
+const secureRandomIntInclusive = (min: number, max: number): number => {
+  if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || max < min) return min;
+  return min + Math.floor(secureRandomUnit() * (max - min + 1));
+};
+
+const isNativeWsConnectionToken = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) > 0;
+
+const decodeServerResponseBase64 = (value: unknown, expectedLength: number): Uint8Array =>
+  decodeBase64(value, 'server response encoding', { exactBytes: expectedLength });
+
+const decodeCanonicalBase64List = (
+  values: unknown,
+  expectedLength: number,
+  maxItems: number
+): Uint8Array[] => {
+  if (!Array.isArray(values) || values.length < 1 || values.length > maxItems) {
+    throw new Error('Invalid server response batch');
+  }
+  const decoded: Uint8Array[] = [];
+  try {
+    for (const value of values) decoded.push(decodeServerResponseBase64(value, expectedLength));
+    return decoded;
+  } catch (error) {
+    for (const value of decoded) value.fill(0);
+    throw error;
+  }
+};
+
+interface ServerKeyBootstrap {
+  type: SignalType.SERVER_PUBLIC_KEY;
+  serverId: string;
+  serverTime: number;
+  requiresServerPassword: boolean;
+  hybridKeys: {
+    kyberPublicBase64: string;
+    dilithiumPublicBase64: string;
+    x25519PublicBase64: string;
+  };
+}
+
+const parseServerKeyBootstrap = (value: unknown): ServerKeyBootstrap | null => {
+  if (!isPlainObject(value) || hasPrototypePollutionKeys(value)) return null;
+  if (
+    Object.keys(value).sort().join(',') !== 'hybridKeys,requiresServerPassword,serverId,serverTime,type' ||
+    value.type !== SignalType.SERVER_PUBLIC_KEY ||
+    typeof value.serverId !== 'string' ||
+    !/^[A-Za-z0-9._-]{1,128}$/.test(value.serverId) ||
+    typeof value.requiresServerPassword !== 'boolean' ||
+    !Number.isSafeInteger(value.serverTime) ||
+    (value.serverTime as number) < 0 ||
+    !isPlainObject(value.hybridKeys) ||
+    hasPrototypePollutionKeys(value.hybridKeys) ||
+    Object.keys(value.hybridKeys).sort().join(',') !== 'dilithiumPublicBase64,kyberPublicBase64,x25519PublicBase64'
+  ) return null;
+
+  const keys = value.hybridKeys;
+  const decoded: Uint8Array[] = [];
+  try {
+    decoded.push(decodeServerResponseBase64(keys.kyberPublicBase64, KYBER_PUBLIC_KEY_LENGTH));
+    decoded.push(decodeServerResponseBase64(keys.dilithiumPublicBase64, DILITHIUM_PUBLIC_KEY_LENGTH));
+    decoded.push(decodeServerResponseBase64(keys.x25519PublicBase64, 32));
+  } catch {
+    return null;
+  } finally {
+    for (const key of decoded) key.fill(0);
+  }
+
+  return value as unknown as ServerKeyBootstrap;
+};
+
 // WebSocket Connection Manager
 export class WebSocketConnection {
-  lifecycleState: string = 'idle';
+  private _lifecycleState: string = 'idle';
+  get lifecycleState(): string { return this._lifecycleState; }
+  set lifecycleState(next: string) {
+    this._lifecycleState = next;
+  }
   private isManualClose = false;
-  private readonly maxReconnectionAttempts = 10;
   private isGatekeeperFlowActive = false;
   private secureChunkBuffers: Map<string, SecureChunkBuffer> = new Map();
-  private reconnectAttempts = 0;
+  private secureChunkReservedLength = 0;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private globalRateLimitUntil = 0;
-  private tokenValidationAttempted = false;
   private _username?: string;
   private lastAuthUsername?: string;
   private connectivityWatchdog?: ReturnType<typeof setInterval>;
+  private accountAuthReplacementConnectionToken: number | null = null;
   private bridgeReadyPromise: Promise<void>;
   private connectingPromise: Promise<void> | null = null;
+  private connectingPromiseGeneration: number | null = null;
+  private connectionOperationGeneration = 0;
+  private privacyBoundaryTransition: PrivacyBoundaryTransition | null = null;
   private transportEventReceived: boolean = false;
   private trustTransportUntil: number = 0;
   private isInUnlinkedMode: boolean = false;
   private coverTrafficTimer: ReturnType<typeof setTimeout> | null = null;
-  private coverTrafficInFlight = false;
+  private coverTrafficGeneration = 0;
+  private coverTrafficInFlightGeneration: number | null = null;
   private gatekeeper?: GatekeeperClient;
-  private gatekeeperPromise?: Promise<GatekeeperClient>;
+  private gatekeeperServerId?: string;
+  private gatekeeperLifecycleTail: Promise<void> = Promise.resolve();
+  private serverPasswordRequired = false;
   private serverAuthGranted = false;
+  private serverEntryPromptPending = false;
   private applicationAuthReady = false;
   private hasOpenedTransport = false;
   private unlinkedSessionReady = false;
+  private unlinkedAccountAuthorizationReady = false;
+  private unlinkedAuthorizationResponse: ResumeAuthorizationResponse | null = null;
+  private unlinkedAuthorizationBlocked = false;
+  private unlinkedAuthorizationPromise: Promise<boolean> | null = null;
+  private unlinkedDeliveryPromise: Promise<boolean> | null = null;
   private secureSendLane: Promise<void> = Promise.resolve();
+  private inboundMessages: InboundWsMessage[] = [];
+  private inboundMessageCount = 0;
+  private inboundMessageBytes = 0;
+  private inboundDrainActive = false;
+  private inboundGeneration = 0;
+  private nativeConnectionToken: number | null = null;
+  private retiredNativeConnectionToken = 0;
+  private connectionWaiterCancels = new Set<() => void>();
   private serverClockOffsetMs = 0;
+  private serverBootstrapConnectionToken: number | null = null;
   private timestampRecoveryInFlight: Promise<void> | null = null;
+  private timestampRecoveryGeneration = 0;
   private lastTimestampRecoveryAt = 0;
   private lastCoverBackpressureLogAt = 0;
-
-  private sessionMismatchCount = 0;
-  private lastMismatchTime = 0;
-  private readonly MAX_SESSION_MISMATCHES = 5;
-  private readonly SESSION_MISMATCH_WINDOW_MS = 60000;
-  private pendingReconnectEnvelopes: any[] = [];
 
   private deliveryReadyRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private deliveryReadyRetryAttempts = 0;
   private reconnectClaimListenerAttached = false;
-
-  // Connection metrics
-  metrics: ConnectionMetrics = {
-    lastConnectedAt: null,
-    totalReconnects: 0,
-    consecutiveFailures: 0,
-    lastFailureAt: null,
-    lastRateLimitAt: null,
-    messagesSent: 0,
-    messagesReceived: 0,
-    bytesSent: 0,
-    bytesReceived: 0,
-    averageLatencyMs: 0,
-    lastLatencyMs: null,
-    securityEvents: {
-      replayAttempts: 0,
-      signatureFailures: 0,
-      rateLimitHits: 0,
-      fingerprintMismatches: 0
-    }
-  };
-
-  private connectionStateCallbacks = new Set<(health: ConnectionHealth) => void>();
+  private sessionErrorHandlersRegistered = false;
 
   // Session key material
   sessionKeyMaterial?: SessionKeyMaterial;
-  private previousSessionKeyMaterial?: SessionKeyMaterial;
-  private previousSessionFingerprint?: string;
-  private sessionTransitionTime?: number;
-  signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array };
 
   rateLimiter: WebSocketRateLimiter;
   heartbeat: WebSocketHeartbeat;
@@ -137,50 +364,74 @@ export class WebSocketConnection {
   messageHandler: WebSocketMessageHandler;
 
   constructor() {
-    this.rateLimiter = new WebSocketRateLimiter(this.metrics);
+    this.rateLimiter = new WebSocketRateLimiter();
 
-    this.heartbeat = new WebSocketHeartbeat(this.metrics, {
+    this.heartbeat = new WebSocketHeartbeat({
       onSendHeartbeat: () => this.sendHeartbeatMessage(),
-      onConnectionLost: (error) => this.handleConnectionError(error, 'heartbeat-timeout'),
+      onConnectionLost: () => this.handleConnectionError(),
       onRehandshakeNeeded: () => { void this.performHandshake(true); },
       getLifecycleState: () => this.lifecycleState,
       getSessionId: () => this.sessionKeyMaterial?.sessionId
     });
 
-    this.torIntegration = new WebSocketTorIntegration(() => {
-      if (this.lifecycleState === 'connected') {
-        this.lifecycleState = 'paused';
+    this.torIntegration = new WebSocketTorIntegration((connected) => {
+      if (!connected) {
+        if (this.lifecycleState === 'connected') {
+          void (async () => {
+            const state = await websocket.getState().catch(() => null);
+            if (this.lifecycleState !== 'connected') return;
+            if (state?.connected) return;
+            this.lifecycleState = 'paused';
+          })();
+        }
+        return;
+      }
+
+      if (
+        this.lifecycleState === 'paused' &&
+        isNativeWsConnectionToken(this.nativeConnectionToken) &&
+        !!this.sessionKeyMaterial
+      ) {
+        this.lifecycleState = 'connected';
+        this.heartbeat.reset();
+        void this.queue.flush();
       }
     });
 
     this.queue = new WebSocketQueue(
-      (data, allowQueue) => this.dispatchPayload(data, allowQueue),
+      async (data, allowQueue) => { await this.dispatchPayload(data, allowQueue); },
       () => this.lifecycleState
     );
 
     const self = this;
     this.encryption = new WebSocketEncryption(
       {
-        get sessionKeyMaterial() { return self.sessionKeyMaterial; },
-        get previousSessionKeyMaterial() { return self.previousSessionKeyMaterial; },
-        get previousSessionFingerprint() { return self.previousSessionFingerprint; },
-        get sessionTransitionTime() { return self.sessionTransitionTime; },
-        get serverSignatureKey() { return self.handshake.getServerKeyMaterial()?.dilithiumPublicKey; },
-        get signingKeyPair() { return self.signingKeyPair; }
+        get sessionKeyMaterial() { return self.sessionKeyMaterial; }
       },
-      this.metrics,
       () => this.getTrustedNow()
     );
 
     this.handshake = new WebSocketHandshake({
       transmit: (msg) => this.transmit(msg),
+      transmitHandshake: async (message) => {
+        if (!this.sessionKeyMaterial) {
+          await this.transmit(JSON.stringify(message));
+          return;
+        }
+        const envelope = await this.encryption.prepareSecureEnvelope(message);
+        await this.transmit(envelope);
+      },
+      runOnSecureSendLane: (operation) => this.runOnSecureSendLane(operation),
       registerMessageHandler: (type, handler) => this.messageHandler.registerHandler(type, handler),
       unregisterMessageHandler: (type, handler) => this.messageHandler.unregisterHandler(type, handler),
-      getQueueLength: () => this.queue.getQueueLength(),
       getTorAdaptedTimeout: (timeout) => this.torIntegration.getAdaptedTimeout(timeout),
-      onSessionEstablished: (session, serverSigKey, signingKeyPair) =>
-        this.onSessionEstablished(session, serverSigKey, signingKeyPair),
-      onHandshakeError: (error) => this.handleConnectionError(error, 'handshake'),
+      onSessionEstablished: (session) => this.onSessionEstablished(session),
+      onHandshakeError: () => this.handleConnectionError(),
+      onAuthenticatedServerTime: (serverTime) => {
+        if (!this.updateServerClockOffset(serverTime)) {
+          throw new Error('Authenticated server time is outside the accepted clock window');
+        }
+      },
       getTrustedNow: () => this.getTrustedNow(),
       isConnected: async () => {
         const isInternalHealthy = this.lifecycleState !== 'disconnected' && this.lifecycleState !== 'idle' && this.lifecycleState !== SignalType.ERROR;
@@ -195,92 +446,293 @@ export class WebSocketConnection {
           return isHealthy;
         } catch (err) {
           console.warn('[WebSocket] Error in isConnected check:', err);
-          return true;
+          return isTrusted;
         }
       }
     });
 
-    this.messageHandler = new WebSocketMessageHandler({
-      decryptEnvelope: async (env) => {
-        const decrypted = await this.encryption.decryptEnvelope(env);
-
-        // Session auto recovery
-        if (!decrypted && env.sessionId && this.sessionKeyMaterial) {
-          const now = Date.now();
-          if (now - this.lastMismatchTime > this.SESSION_MISMATCH_WINDOW_MS) {
-            this.sessionMismatchCount = 0;
-          }
-
-          this.sessionMismatchCount++;
-          this.lastMismatchTime = now;
-
-          if (this.sessionMismatchCount >= this.MAX_SESSION_MISMATCHES) {
-            console.warn('[WebSocket] Detected persistent PQ decryption failures, forcing re-handshake', {
-              hasReceivedSessionId: typeof env.sessionId === 'string',
-              hasCurrentSession: !!this.sessionKeyMaterial?.sessionId,
-              count: this.sessionMismatchCount
-            });
-
-            // Force a fresh re handshake to recover from desync
-            this.sessionMismatchCount = 0;
-            this.performHandshake(true).catch(() => {
-              console.error('[WebSocket] PQ auto-recovery handshake failed');
-            });
-          }
-        } else if (decrypted) {
-          this.sessionMismatchCount = 0;
-        }
-
-        return decrypted;
-      },
-      handleHeartbeatResponse: (msg) => this.heartbeat.handleResponse(msg)
-    });
+    this.messageHandler = new WebSocketMessageHandler();
 
     this.bridgeReadyPromise = this.initializeBridge();
   }
 
+  getDiagnostics(): Record<string, unknown> {
+    let queueLength: number | string = 'n/a';
+    try { queueLength = ((this.queue as any).pendingQueue?.length) ?? 'n/a'; } catch { }
+    const now = Date.now();
+    return {
+      lifecycleState: this._lifecycleState,
+      nativeToken: this.nativeConnectionToken,
+      retiredToken: this.retiredNativeConnectionToken,
+      hasSessionKeys: !!this.sessionKeyMaterial,
+      sessionId: this.sessionKeyMaterial?.sessionId?.slice?.(0, 8),
+      connectingPromise: !!this.connectingPromise,
+      opGeneration: this.connectionOperationGeneration,
+      isManualClose: this.isManualClose,
+      handshakeInFlight: this.handshake?.isInFlight?.(),
+      queueLength,
+      rateLimitedForMs: Math.max(0, this.globalRateLimitUntil - now),
+      trustTransportForMs: Math.max(0, this.trustTransportUntil - now),
+      torReady: (() => { try { return this.torIntegration.isTorReady(); } catch { return 'err'; } })(),
+      torCircuitHealth: (() => { try { return this.torIntegration.getCircuitHealth(); } catch { return 'err'; } })(),
+      unlinkedMode: this.isInUnlinkedMode,
+      unlinkedSessionReady: this.unlinkedSessionReady,
+      serverAuthGranted: this.serverAuthGranted,
+    };
+  }
+
   private async getGatekeeper(): Promise<GatekeeperClient> {
-    if (this.gatekeeper) {
-      await this.gatekeeper.ensureReady();
-      return this.gatekeeper;
-    }
-
-    if (this.gatekeeperPromise) return this.gatekeeperPromise;
-
-    this.gatekeeperPromise = (async () => {
-      try {
-        const url = await websocket.getServerUrl() || 'default';
-        const gk = new GatekeeperClient(url);
-        await gk.ensureReady();
-        this.gatekeeper = gk;
-        return gk;
-      } finally {
-        this.gatekeeperPromise = undefined;
+    const serverScope = await getCurrentServerScope();
+    const previous = this.gatekeeperLifecycleTail;
+    let release!: () => void;
+    this.gatekeeperLifecycleTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      if (this.gatekeeper && this.gatekeeperServerId === serverScope) {
+        await this.gatekeeper.ensureReady();
+        return this.gatekeeper;
       }
-    })();
 
-    return this.gatekeeperPromise;
+      if (this.gatekeeper) {
+        const staleGatekeeper = this.gatekeeper;
+        await staleGatekeeper.dispose();
+        if (this.gatekeeper === staleGatekeeper) {
+          this.gatekeeper = undefined;
+          this.gatekeeperServerId = undefined;
+        }
+      }
+
+      const gatekeeper = new GatekeeperClient(serverScope);
+      try {
+        await gatekeeper.ensureReady();
+        if (await getCurrentServerScope() !== serverScope) {
+          const error = new Error('Gatekeeper server scope changed during initialization');
+          error.name = 'AbortError';
+          throw error;
+        }
+        this.gatekeeper = gatekeeper;
+        this.gatekeeperServerId = serverScope;
+        return gatekeeper;
+      } catch (error) {
+        await gatekeeper.dispose();
+        throw error;
+      }
+    } finally {
+      release();
+    }
   }
 
   private getTrustedNow(): number {
     return Date.now() + this.serverClockOffsetMs;
   }
 
-  private updateServerClockOffset(serverTime: unknown): void {
-    if (typeof serverTime !== 'number' || !Number.isFinite(serverTime)) return;
+  private updateServerClockOffset(serverTime: unknown): boolean {
+    if (!isNativeWsConnectionToken(this.nativeConnectionToken)) return false;
+    if (typeof serverTime !== 'number' || !Number.isFinite(serverTime)) return false;
     const offset = Math.trunc(serverTime - Date.now());
-    if (Math.abs(offset) > 24 * 60 * 60 * 1000) return;
+    if (Math.abs(offset) > 24 * 60 * 60 * 1000) return false;
     this.serverClockOffsetMs = offset;
+    return true;
+  }
+
+  private adoptNativeConnectionToken(connectionToken: number): void {
+    if (!isNativeWsConnectionToken(connectionToken)) {
+      throw new Error('Native WebSocket connection token unavailable');
+    }
+    if (
+      connectionToken <= this.retiredNativeConnectionToken &&
+      connectionToken !== this.nativeConnectionToken
+    ) {
+      throw operationAbortError('Refusing retired WebSocket connection generation');
+    }
+    if (connectionToken !== this.nativeConnectionToken) {
+      this.serverClockOffsetMs = 0;
+      this.serverBootstrapConnectionToken = null;
+      this.trustTransportUntil = 0;
+    }
+    this.nativeConnectionToken = connectionToken;
+  }
+
+  private clearCurrentConnectionClock(): void {
+    this.serverClockOffsetMs = 0;
+    this.serverBootstrapConnectionToken = null;
+    this.trustTransportUntil = 0;
+  }
+
+  private assertConnectionOperationCurrent(generation: number): void {
+    if (generation !== this.connectionOperationGeneration || this.isManualClose) {
+      throw operationAbortError('WebSocket connection operation was cancelled');
+    }
+  }
+
+  private async rejectStaleConnectionOperation(
+    generation: number,
+    possibleConnectionToken?: unknown
+  ): Promise<void> {
+    try {
+      this.assertConnectionOperationCurrent(generation);
+    } catch (error) {
+      if (isNativeWsConnectionToken(possibleConnectionToken)) {
+        this.retiredNativeConnectionToken = Math.max(
+          this.retiredNativeConnectionToken,
+          possibleConnectionToken
+        );
+        if (this.nativeConnectionToken === possibleConnectionToken) {
+          this.nativeConnectionToken = null;
+          this.clearCurrentConnectionClock();
+          this.invalidateInboundMessages();
+          this.resetSessionKeys(true);
+        }
+        await websocket.disconnect(possibleConnectionToken).catch(() => { });
+      }
+      throw error;
+    }
+  }
+
+  private captureOutboundTransportContext(): OutboundTransportContext {
+    return {
+      connectionToken: this.nativeConnectionToken,
+      operationGeneration: this.connectionOperationGeneration,
+      isInUnlinkedMode: this.isInUnlinkedMode,
+      username: this._username,
+    };
+  }
+
+  private isOutboundTransportContextCurrent(context: OutboundTransportContext): boolean {
+    return !this.isManualClose &&
+      context.connectionToken === this.nativeConnectionToken &&
+      context.operationGeneration === this.connectionOperationGeneration &&
+      context.isInUnlinkedMode === this.isInUnlinkedMode &&
+      context.username === this._username;
+  }
+
+  private assertOutboundTransportContextCurrent(context: OutboundTransportContext): void {
+    if (!this.isOutboundTransportContextCurrent(context)) {
+      throw operationAbortError('Outbound payload crossed a connection privacy boundary');
+    }
+  }
+
+  private async waitForCurrentServerBootstrap(connectionToken: number): Promise<void> {
+    const timeoutMs = Math.min(30_000, this.torIntegration.getAdaptedTimeout(5_000));
+    const startedAt = Date.now();
+    let lastRequestAt = 0;
+    while (this.serverBootstrapConnectionToken !== connectionToken) {
+      if (this.nativeConnectionToken !== connectionToken) {
+        throw operationAbortError('WebSocket connection generation changed before server bootstrap');
+      }
+      const now = Date.now();
+      if (now - startedAt >= timeoutMs) {
+        throw new Error('Current WebSocket generation did not provide a valid server bootstrap');
+      }
+      if (now - lastRequestAt >= 1_500) {
+        try {
+          await this.transmit(JSON.stringify({ type: SignalType.REQUEST_SERVER_PUBLIC_KEY }));
+        } catch { }
+        lastRequestAt = now;
+      }
+      await waitForAbortableDelay(100);
+    }
+  }
+
+  private invalidateInboundMessages(): void {
+    this.inboundGeneration += 1;
+    for (const entry of this.inboundMessages) {
+      this.inboundMessageCount = Math.max(0, this.inboundMessageCount - 1);
+      this.inboundMessageBytes = Math.max(0, this.inboundMessageBytes - entry.bytes);
+    }
+    this.inboundMessages = [];
+  }
+
+  private registerConnectionWaiterCancel(cancel: () => void): () => void {
+    this.connectionWaiterCancels.add(cancel);
+    return () => this.connectionWaiterCancels.delete(cancel);
+  }
+
+  private cancelConnectionWaiters(): void {
+    const waiters = Array.from(this.connectionWaiterCancels);
+    this.connectionWaiterCancels.clear();
+    for (const cancel of waiters) {
+      try { cancel(); } catch { }
+    }
+  }
+
+  private enqueueInboundMessage(payload: unknown, connectionToken: number): void {
+    let bytes: number;
+    try {
+      const serialized = JSON.stringify(payload);
+      if (typeof serialized !== 'string') throw new Error('Invalid WebSocket payload');
+      bytes = serialized.length;
+    } catch {
+      this.handleConnectionError();
+      void websocket.disconnect(connectionToken).catch(() => { });
+      return;
+    }
+
+    if (
+      this.inboundMessageCount + 1 > WS_INBOUND_PENDING_MAX_COUNT ||
+      this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES
+    ) {
+      this.invalidateInboundMessages();
+      this.handleConnectionError();
+      void websocket.disconnect(connectionToken).catch(() => { });
+      return;
+    }
+
+    this.inboundMessages.push({
+      payload,
+      bytes,
+      generation: this.inboundGeneration,
+      connectionToken,
+    });
+    this.inboundMessageCount += 1;
+    this.inboundMessageBytes += bytes;
+    void this.drainInboundMessages();
+  }
+
+  private async drainInboundMessages(): Promise<void> {
+    if (this.inboundDrainActive) return;
+    this.inboundDrainActive = true;
+    try {
+      while (this.inboundMessages.length > 0) {
+        const entry = this.inboundMessages.shift()!;
+        try {
+          if (
+            entry.generation === this.inboundGeneration &&
+            entry.connectionToken === this.nativeConnectionToken
+          ) {
+            await this.handleEdgeServerMessage(entry.payload, false, entry.connectionToken);
+          }
+        } catch {
+          this.handleConnectionError();
+          void websocket.disconnect(entry.connectionToken).catch(() => { });
+        } finally {
+          this.inboundMessageCount = Math.max(0, this.inboundMessageCount - 1);
+          this.inboundMessageBytes = Math.max(0, this.inboundMessageBytes - entry.bytes);
+        }
+      }
+    } finally {
+      this.inboundDrainActive = false;
+      if (this.inboundMessages.length > 0) {
+        void this.drainInboundMessages();
+      }
+    }
   }
 
   private async initializeBridge(): Promise<void> {
-    await this.initializeSigningKeys();
     await this.setupTauriBridge();
 
     // Check if already connected
     try {
       const state = await websocket.getState();
+      if (this.isManualClose) {
+        if (state.connected && isNativeWsConnectionToken(state.connectionToken)) {
+          await websocket.disconnect(state.connectionToken).catch(() => { });
+        }
+        return;
+      }
       if (state.connected && (this.lifecycleState === 'idle' || this.lifecycleState === 'disconnected')) {
+        if (!isNativeWsConnectionToken(state.connectionToken)) return;
+        this.adoptNativeConnectionToken(state.connectionToken);
         void this.handleConnectionOpened();
       }
     } catch {
@@ -292,14 +744,24 @@ export class WebSocketConnection {
   private async setupTauriBridge(): Promise<void> {
     if (typeof window === 'undefined') return;
     try {
-      await events.onWsMessage(async (payload) => {
-        await this.handleEdgeServerMessage(payload);
+      await events.onWsMessage((payload) => {
+        if (
+          !isPlainObject(payload) ||
+          hasPrototypePollutionKeys(payload) ||
+          Object.keys(payload).sort().join(',') !== 'connectionToken,data' ||
+          !isNativeWsConnectionToken(payload.connectionToken) ||
+          payload.connectionToken !== this.nativeConnectionToken
+        ) return;
+        this.enqueueInboundMessage(payload.data, payload.connectionToken);
+      });
+      await events.onWsLifecycle((payload) => {
+        this.handleNativeLifecycleEvent(payload);
       });
     } catch {
       console.error('[WebSocket] Failed to setup Tauri bridge');
     }
 
-    // after any reconnect the socket must reclaim inbox to keep receiving global mix broadcast
+    // reconnect creates a new socket which must be reactivated for global mix stream.
     if (!this.reconnectClaimListenerAttached) {
       this.reconnectClaimListenerAttached = true;
       window.addEventListener(EventType.WS_RECONNECTED, () => {
@@ -310,61 +772,105 @@ export class WebSocketConnection {
     }
   }
 
-  // Initialize signing keys
-  private async initializeSigningKeys(): Promise<void> {
-    const keys = await this.handshake.initializeSigningKeys();
-    if (keys) {
-      this.signingKeyPair = keys;
+  private handleNativeLifecycleEvent(message: unknown): void {
+    if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) return;
+    const type = message.type;
+
+    if (type === '__ws_connection_opened') {
+      if (
+        Object.keys(message).sort().join(',') !== 'connectionToken,type' ||
+        !isNativeWsConnectionToken(message.connectionToken)
+      ) return;
+      const connectionToken = message.connectionToken as number;
+      if (this.isManualClose) {
+        this.retiredNativeConnectionToken = Math.max(this.retiredNativeConnectionToken, connectionToken);
+        void websocket.disconnect(connectionToken).catch(() => { });
+        return;
+      }
+      if (
+        connectionToken <= this.retiredNativeConnectionToken ||
+        this.nativeConnectionToken !== null &&
+        connectionToken < this.nativeConnectionToken
+      ) return;
+      if (this.nativeConnectionToken === connectionToken) return;
+
+      const openedByCurrentDial =
+        this.lifecycleState === 'connecting' &&
+        this.connectingPromise !== null &&
+        this.connectingPromiseGeneration === this.connectionOperationGeneration;
+      if (!openedByCurrentDial) {
+        this.invalidateInboundMessages();
+        this.resetSessionKeys(true);
+      }
+      this.adoptNativeConnectionToken(connectionToken);
+      if (!openedByCurrentDial) {
+        this.lifecycleState = 'disconnected';
+      }
+      const wasReconnect = this.hasOpenedTransport;
+      this.hasOpenedTransport = true;
+      this.handleConnectionOpened(openedByCurrentDial);
+      this.dispatchToFrontend(message, false);
+      if (wasReconnect) {
+        window.dispatchEvent(new Event(EventType.WS_RECONNECTED));
+      }
+      return;
+    }
+
+    if (type === '__ws_connection_closed') {
+      if (
+        Object.keys(message).sort().join(',') !== 'connectionToken,type' ||
+        !isNativeWsConnectionToken(message.connectionToken)
+      ) return;
+      if (message.connectionToken !== this.nativeConnectionToken) return;
+      this.retiredNativeConnectionToken = Math.max(
+        this.retiredNativeConnectionToken,
+        message.connectionToken as number
+      );
+      this.nativeConnectionToken = null;
+      this.clearCurrentConnectionClock();
+      this.invalidateInboundMessages();
+      this.resetSessionKeys(this.isManualClose);
+      this.lifecycleState = 'disconnected';
+      this.dispatchToFrontend(message, false);
+      if (!this.isManualClose) this.attemptReconnect();
+      return;
+    }
+
+    if (type === '__ws_connection_error') {
+      if (
+        Object.keys(message).sort().join(',') !== 'connectionToken,error,type' ||
+        !isNativeWsConnectionToken(message.connectionToken) ||
+        typeof message.error !== 'string' ||
+        message.error.length > 512
+      ) return;
+      if (message.connectionToken !== this.nativeConnectionToken) return;
+      this.retiredNativeConnectionToken = Math.max(
+        this.retiredNativeConnectionToken,
+        message.connectionToken as number
+      );
+      this.nativeConnectionToken = null;
+      this.clearCurrentConnectionClock();
+      this.invalidateInboundMessages();
+      this.resetSessionKeys(this.isManualClose);
+      this.lifecycleState = SignalType.ERROR;
+      this.dispatchToFrontend({
+        type: '__ws_connection_error',
+        error: 'Transport connection failed'
+      }, false);
+      if (!this.isManualClose) this.attemptReconnect();
     }
   }
 
   // Handle session established
-  private async onSessionEstablished(
-    session: SessionKeyMaterial,
-    _serverSignatureKey?: Uint8Array,
-    signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array }
-  ): Promise<void> {
-    if (signingKeyPair) {
-      this.signingKeyPair = signingKeyPair;
-      session.clientSigningPublicKey = signingKeyPair.publicKey;
-    }
-
-    if (this.sessionKeyMaterial?.sessionId && this.sessionKeyMaterial.sessionId !== session.sessionId) {
-      this.previousSessionKeyMaterial = this.sessionKeyMaterial;
-      this.sessionTransitionTime = Date.now();
-      const previousSessionId = this.previousSessionKeyMaterial.sessionId;
-      const transitionTime = this.sessionTransitionTime;
-      setTimeout(() => {
-        if (this.sessionTransitionTime === transitionTime &&
-          this.previousSessionKeyMaterial?.sessionId === previousSessionId) {
-          this.previousSessionKeyMaterial = undefined;
-        }
-      }, SESSION_FAILOVER_GRACE_PERIOD_MS);
-    }
-    if (this.sessionKeyMaterial?.fingerprint &&
-      this.sessionKeyMaterial.fingerprint !== session.fingerprint) {
-      this.previousSessionFingerprint = this.sessionKeyMaterial.fingerprint;
-      this.sessionTransitionTime = Date.now();
+  private onSessionEstablished(session: SessionKeyMaterial): void {
+    const previousSession = this.sessionKeyMaterial;
+    if (previousSession && previousSession !== session) {
+      PostQuantumUtils.clearMemory(previousSession.sendKey);
+      PostQuantumUtils.clearMemory(previousSession.recvKey);
     }
 
     this.sessionKeyMaterial = session;
     this.encryption.resetCounters();
-    this.encryption.clearReplayCache();
-    this.sessionMismatchCount = 0;
-
-    // Flush PQ envelopes queued during reconnect
-    if (this.pendingReconnectEnvelopes.length > 0) {
-      const queued = this.pendingReconnectEnvelopes;
-      this.pendingReconnectEnvelopes = [];
-      for (const envelope of queued) {
-        try {
-          const decrypted = await this.decryptIncomingEnvelope(envelope);
-          if (decrypted) {
-            await this.handleEdgeServerMessage(decrypted, true);
-          }
-        } catch { }
-      }
-    }
   }
 
   // Set and get username
@@ -375,94 +881,69 @@ export class WebSocketConnection {
   getUsername(): string | undefined { return this._username; }
 
   // Handle edge server message
-  async handleEdgeServerMessage(message: any, isSecure: boolean = false): Promise<boolean> {
-    const now = Date.now();
-    this.metrics.messagesReceived += 1;
-    this.metrics.bytesReceived += typeof message === 'string' ? message.length : JSON.stringify(message).length;
-
+  async handleEdgeServerMessage(
+    message: any,
+    isSecure: boolean = false,
+    expectedConnectionToken: number | null = this.nativeConnectionToken
+  ): Promise<boolean> {
+    if (expectedConnectionToken !== this.nativeConnectionToken) return true;
     if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
-      console.warn('[WebSocket] Malformed message received:', message);
+      console.warn('[WebSocket] Malformed message rejected');
       return false;
     }
 
     const messageType = typeof message.type === 'string' ? message.type : '';
-    this.updateServerClockOffset((message as any).serverTime);
-    if (messageType === SignalType.PQ_HANDSHAKE_ACK) {
-      this.updateServerClockOffset((message as any).timestamp);
+    if (!isSecure && !PLAINTEXT_WIRE_TYPES.has(messageType)) {
+      return true;
     }
-
-    if (this.isGatekeeperDebugType(messageType)) {
-      this.logGatekeeperDebug('received-message', {
-        type: messageType,
-        isSecure,
-        hasInternalHandler: this.messageHandler.hasHandler(messageType)
-      });
-    }
-
     // Reassemble chunked secure messages
     if (isSecure && messageType === SignalType.SECURE_CHUNK) {
       const reassembled = this.ingestSecureChunk(message);
       if (!reassembled) return true;
-      return await this.handleEdgeServerMessage(reassembled, true);
-    }
-
-    if (this.trustTransportUntil > now) {
-      void websocket.getState().then(_s => { });
+      return await this.handleEdgeServerMessage(reassembled, true, expectedConnectionToken);
     }
 
     // Handle handshake signals internally
     if (messageType === SignalType.SERVER_PUBLIC_KEY) {
-      const hybridKeys = (message as any).hybridKeys;
-      const sid = (message as any).serverId;
+      const bootstrap = parseServerKeyBootstrap(message);
+      if (!bootstrap) return true;
+      if (!this.updateServerClockOffset(bootstrap.serverTime)) return true;
 
-      if (hybridKeys) {
-        this.setServerKeyMaterial(hybridKeys, sid);
-      } else {
-        console.warn('[WebSocket] server-public-key message missing hybridKeys');
+      const connectionEpoch = expectedConnectionToken;
+      const isCurrent = () => this.isConnectionPrivacyEpochCurrent(connectionEpoch);
+      try {
+        await PinnedServer.establish(bootstrap.hybridKeys, isCurrent);
+        if (!isCurrent()) return true;
+        if (this.setServerKeyMaterial(bootstrap.hybridKeys, bootstrap.serverId) !== 'activated') {
+          throw new Error('Server identity activation failed');
+        }
+        this.serverPasswordRequired = bootstrap.requiresServerPassword;
+      } catch {
+        if (!isCurrent()) return true;
+        await this.close({ killSession: true }).catch(() => { });
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+            detail: {
+              type: 'SERVER_IDENTITY_REJECTED',
+              code: 'SERVER_IDENTITY_REJECTED',
+              message: 'Server identity verification failed. Connection blocked.'
+            }
+          }));
+        }
+        return true;
       }
 
-      // Check if server requires password and no tokens
-      if ((message as any).requiresServerPassword) {
-        void this.getGatekeeper().then(gk => {
-          if (!gk.hasTokens) {
-            window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
-              detail: {
-                type: 'SERVER_ENTRY_REQUIRED',
-                message: 'This server requires an entry token. Please provide the server password.'
-              }
-            }));
-          }
-        });
-      }
-
-      this.dispatchToFrontend(message, isSecure);
+      if (!isCurrent()) return true;
+      this.serverBootstrapConnectionToken = expectedConnectionToken;
+      this.dispatchToFrontend(bootstrap, false);
       return true;
     }
 
     // Handle PQ envelope internally
     if (messageType === SignalType.PQ_ENVELOPE) {
-      if (this.isGatekeeperFlowActive) {
-        this.logGatekeeperDebug('received-pq-envelope', {
-          hasReceivedSessionId: typeof message.sessionId === 'string',
-          receivedSessionMatches: message.sessionId === this.sessionKeyMaterial?.sessionId,
-          hasReceivedFingerprint: typeof message.sessionFingerprint === 'string',
-          receivedFingerprintMatches: message.sessionFingerprint === this.sessionKeyMaterial?.fingerprint,
-          hasSignature: typeof message.signature === 'string',
-          hasAad: typeof message.aad === 'string'
-        });
-      }
       const decrypted = await this.decryptIncomingEnvelope(message);
       if (decrypted) {
-        const decryptedType = this.getMessageTypeForDebug(decrypted);
-        if (this.isGatekeeperDebugType(decryptedType)) {
-          this.logGatekeeperDebug('decrypted-pq-envelope', {
-            decryptedType,
-            hasInternalHandler: this.messageHandler.hasHandler(decryptedType),
-            receivedSessionMatches: message.sessionId === this.sessionKeyMaterial?.sessionId,
-            receivedFingerprintMatches: message.sessionFingerprint === this.sessionKeyMaterial?.fingerprint
-          });
-        }
-        return await this.handleEdgeServerMessage(decrypted, true);
+        return await this.handleEdgeServerMessage(decrypted, true, expectedConnectionToken);
       }
       console.warn('[WebSocket] PQ envelope decryption FAILED (returned null)', {
         hasReceivedFingerprint: typeof message.sessionFingerprint === 'string',
@@ -471,12 +952,6 @@ export class WebSocketConnection {
         hasCurrentSession: !!this.sessionKeyMaterial?.sessionId
       });
       if (this.isGatekeeperFlowActive) {
-        this.logGatekeeperDebug('pq-envelope-decrypt-failed', {
-          hasReceivedSessionId: typeof message.sessionId === 'string',
-          receivedSessionMatches: message.sessionId === this.sessionKeyMaterial?.sessionId,
-          hasReceivedFingerprint: typeof message.sessionFingerprint === 'string',
-          receivedFingerprintMatches: message.sessionFingerprint === this.sessionKeyMaterial?.fingerprint
-        });
         this.dispatchToFrontend({
           type: SignalType.ERROR,
           code: 'SERVER_ENTRY_DECRYPT_FAILED',
@@ -491,57 +966,9 @@ export class WebSocketConnection {
       return true;
     }
 
-    if (messageType === '__ws_connection_closed') {
-      this.resetSessionKeys(this.isManualClose);
-      this.lifecycleState = 'disconnected';
-      this.dispatchToFrontend(message, isSecure);
-      if (!this.isManualClose) {
-        this.attemptReconnect();
-      }
-      return true;
-    }
-
-    if (messageType === '__ws_connection_error') {
-      SecurityAuditLogger.log(SignalType.ERROR, 'ws-connection-error-from', { error: message.error });
-      this.resetSessionKeys(this.isManualClose);
-      this.lifecycleState = SignalType.ERROR;
-      this.dispatchToFrontend(message, isSecure);
-      if (!this.isManualClose) {
-        this.attemptReconnect();
-      }
-      return true;
-    }
-
-    if (messageType === '__ws_connection_opened') {
-      const wasReconnect = this.hasOpenedTransport;
-      this.hasOpenedTransport = true;
-      void this.handleConnectionOpened();
-      this.dispatchToFrontend(message, isSecure);
-      if (wasReconnect) {
-        try {
-          window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, {
-            detail: { timestamp: Date.now() }
-          }));
-        } catch { }
-      }
-      return true;
-    }
-
     // Pass through to internal handlers
     if (messageType === SignalType.PQ_HEARTBEAT_PONG || this.messageHandler.hasHandler(messageType)) {
-      if (this.isGatekeeperDebugType(messageType)) {
-        this.logGatekeeperDebug('dispatching-internal-handler', {
-          type: messageType,
-          isSecure
-        });
-      }
       await this.messageHandler.handleMessage(message);
-      if (this.isGatekeeperDebugType(messageType)) {
-        this.logGatekeeperDebug('internal-handler-finished', {
-          type: messageType,
-          isSecure
-        });
-      }
       if (
         messageType === SignalType.SERVER_ENTRY_CHALLENGE ||
         messageType === SignalType.SERVER_ENTRY_TOKEN_ISSUANCE
@@ -565,58 +992,9 @@ export class WebSocketConnection {
     window.dispatchEvent(new CustomEvent(eventType, { detail: message }));
   }
 
-  private getMessageTypeForDebug(message: unknown): string {
-    if (typeof message === 'string') {
-      try {
-        const parsed = JSON.parse(message);
-        return typeof parsed?.type === 'string' ? parsed.type : 'raw-string';
-      } catch {
-        return 'raw-string';
-      }
-    }
-    if (message && typeof message === 'object' && typeof (message as any).type === 'string') {
-      return (message as any).type;
-    }
-    return typeof message;
-  }
-
-  private isGatekeeperDebugType(type: string): boolean {
-    return this.isGatekeeperFlowActive || [
-      SignalType.SERVER_ENTRY_REQUEST,
-      SignalType.SERVER_ENTRY_CHALLENGE,
-      SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
-      SignalType.PRIVACY_PASS_REDEMPTION,
-      SignalType.AUTH_OT_REGISTER_REQUEST,
-      SignalType.AUTH_OT_REGISTER_RESPONSE,
-      SignalType.AUTH_OT_REGISTER_FINALIZE,
-      SignalType.AUTH_OT_REQUEST,
-      SignalType.AUTH_OT_RESPONSE,
-      SignalType.AUTH_OT_FINALIZE,
-      SignalType.AUTH_FULL_SUCCESS,
-      SignalType.PQ_ENVELOPE,
-      SignalType.PQ_HANDSHAKE_ACK,
-      SignalType.AUTH_ERROR,
-      SignalType.ERROR
-    ].includes(type as SignalType);
-  }
-
-  private logGatekeeperDebug(event: string, detail: Record<string, unknown> = {}): void {
-    console.info('[GK-CLIENT]', event, {
-      ...detail,
-      lifecycleState: this.lifecycleState,
-      gatekeeperFlowActive: this.isGatekeeperFlowActive,
-      pqSessionEstablished: this.isPQSessionEstablished(),
-      hasSessionId: !!this.sessionKeyMaterial?.sessionId,
-      hasChallengeHandler: this.messageHandler.hasHandler(SignalType.SERVER_ENTRY_CHALLENGE),
-      hasIssuanceHandler: this.messageHandler.hasHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE),
-      hasAuthErrorHandler: this.messageHandler.hasHandler(SignalType.AUTH_ERROR),
-      queueLength: this.queue.getQueueLength()
-    });
-  }
-
   // Handle connection opened
-  private handleConnectionOpened(): void {
-    this.transportEventReceived = true;
+  private handleConnectionOpened(openedByCurrentDial = false): void {
+    this.transportEventReceived = !openedByCurrentDial;
     this.trustTransportUntil = Date.now() + 5000;
 
     if (this.connectingPromise) {
@@ -628,39 +1006,48 @@ export class WebSocketConnection {
 
   private startCoverTraffic(): void {
     if (this.coverTrafficTimer) return;
-    this.scheduleCoverTraffic();
+    this.scheduleCoverTraffic(this.coverTrafficGeneration);
   }
 
   private stopCoverTraffic(): void {
+    this.coverTrafficGeneration += 1;
+    this.coverTrafficInFlightGeneration = null;
     if (this.coverTrafficTimer) {
       clearTimeout(this.coverTrafficTimer);
       this.coverTrafficTimer = null;
     }
   }
 
-  private scheduleCoverTraffic(): void {
-    if (this.coverTrafficTimer) return;
+  private scheduleCoverTraffic(generation: number): void {
+    if (generation !== this.coverTrafficGeneration || this.coverTrafficTimer) return;
     const minDelay = Math.max(500, WS_COVER_TRAFFIC_MIN_INTERVAL_MS);
     const maxDelay = Math.max(minDelay, WS_COVER_TRAFFIC_MAX_INTERVAL_MS);
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+    const delay = secureRandomIntInclusive(minDelay, maxDelay);
 
     this.coverTrafficTimer = setTimeout(async () => {
+      if (generation !== this.coverTrafficGeneration) return;
       this.coverTrafficTimer = null;
-      await this.sendCoverTraffic();
-      if (this.lifecycleState === 'connected' && this.sessionKeyMaterial) {
-        this.scheduleCoverTraffic();
+      await this.sendCoverTraffic(generation);
+      if (
+        generation === this.coverTrafficGeneration &&
+        this.lifecycleState === 'connected' &&
+        this.sessionKeyMaterial
+      ) {
+        this.scheduleCoverTraffic(generation);
       }
     }, delay);
   }
 
-  private async sendCoverTraffic(): Promise<void> {
-    if (this.coverTrafficInFlight) return;
+  private async sendCoverTraffic(generation: number): Promise<void> {
+    if (generation !== this.coverTrafficGeneration) return;
+    if (this.coverTrafficInFlightGeneration === generation) return;
     if (this.lifecycleState !== 'connected' || !this.sessionKeyMaterial) return;
     if (!this.isApplicationAuthReady()) return;
 
-    this.coverTrafficInFlight = true;
+    this.coverTrafficInFlightGeneration = generation;
     try {
       const state = await websocket.getState().catch(() => null);
+      if (generation !== this.coverTrafficGeneration) return;
       if (state && Number(state.queue_size || 0) > 0) {
         const now = Date.now();
         if (now - this.lastCoverBackpressureLogAt > 60000) {
@@ -672,22 +1059,37 @@ export class WebSocketConnection {
         return;
       }
 
-      const { getBlindRoutingClient } = await import('../transport/blind-routing-client');
+      if (generation !== this.coverTrafficGeneration) return;
       const blindClient = getBlindRoutingClient(this.lastAuthUsername);
       const sealedEnvelope = blindClient.createCoverSealedEnvelope();
 
       await this.dispatchPayload({
         type: SignalType.BLIND_ROUTE,
+        requestId: crypto.randomUUID(),
         sealedEnvelope
       }, false, { isCoverTraffic: true });
     } catch {
     } finally {
-      this.coverTrafficInFlight = false;
+      if (this.coverTrafficInFlightGeneration === generation) {
+        this.coverTrafficInFlightGeneration = null;
+      }
     }
   }
 
   // Connect to WebSocket
   async connect(options: ConnectOptions = {}): Promise<void> {
+    const transition = this.privacyBoundaryTransition;
+    if (transition) {
+      await transition.promise;
+      if (this.lifecycleState !== 'connected') {
+        throw new Error('Tor privacy-boundary transition did not establish a connection');
+      }
+      return;
+    }
+    return this.connectTransport(options);
+  }
+
+  private async connectTransport(options: ConnectOptions = {}): Promise<void> {
     const autoReconnectOnFailure = options.autoReconnectOnFailure !== false;
 
     if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
@@ -703,158 +1105,383 @@ export class WebSocketConnection {
       return;
     }
 
-    if (this.connectingPromise) {
-      return this.connectingPromise;
+    if (
+      this.lifecycleState === 'paused' &&
+      isNativeWsConnectionToken(this.nativeConnectionToken) &&
+      !!this.sessionKeyMaterial
+    ) {
+      const resumed = await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(3000));
+      if (resumed) return;
     }
 
-    this.connectingPromise = (async () => {
-      this.isManualClose = false;
+    if (this.connectingPromise) {
+      const pending = this.connectingPromise;
+      if (
+        this.connectingPromiseGeneration === this.connectionOperationGeneration &&
+        !this.isManualClose
+      ) {
+        return pending;
+      }
+      try { await pending; } catch { }
+      return this.connectTransport(options);
+    }
+
+    this.isManualClose = false;
+    const operationGeneration = ++this.connectionOperationGeneration;
+    const operation = (async () => {
 
       try {
+        await PinnedServer.load();
+        this.assertConnectionOperationCurrent(operationGeneration);
         this.torIntegration.ensureTorListener();
 
         if (!await this.torIntegration.ensureTorReadyAsync()) {
           throw new Error('Tor network not ready');
         }
+        this.assertConnectionOperationCurrent(operationGeneration);
+
+        if (
+          this.lifecycleState === 'connected' &&
+          isNativeWsConnectionToken(this.nativeConnectionToken) &&
+          !!this.sessionKeyMaterial
+        ) {
+          return;
+        }
 
         await this.bridgeReadyPromise;
+        this.assertConnectionOperationCurrent(operationGeneration);
         const state = await websocket.getState();
+        await this.rejectStaleConnectionOperation(
+          operationGeneration,
+          state.connected ? state.connectionToken : undefined
+        );
         const hasGhost = this.transportEventReceived || state.connected;
 
         if (state.connected) {
+          if (!isNativeWsConnectionToken(state.connectionToken)) {
+            throw new Error('Native WebSocket connection token unavailable');
+          }
+          this.adoptNativeConnectionToken(state.connectionToken);
           this.transportEventReceived = false;
-          await this.establishConnection({ forceConnect: false });
+          await this.establishConnection({ forceConnect: false }, operationGeneration);
         } else if (hasGhost) {
           this.transportEventReceived = false;
           this.lifecycleState = 'connecting';
-          await this.establishConnection({ forceConnect: true });
+          await this.establishConnection({ forceConnect: true }, operationGeneration);
         } else {
           this.lifecycleState = 'connecting';
-          await this.establishConnection({ forceConnect: true });
+          await this.establishConnection({ forceConnect: true }, operationGeneration);
         }
-      } catch (_error) {
+      } catch (_error: unknown) {
+        if (
+          operationGeneration !== this.connectionOperationGeneration ||
+          this.isManualClose
+        ) {
+          throw operationAbortError('WebSocket connection operation was cancelled');
+        }
         if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
           this.lifecycleState = SignalType.ERROR;
         }
-        this.handleConnectionError(_error as Error, 'connect', { autoReconnect: autoReconnectOnFailure });
+        this.handleConnectionError({ autoReconnect: autoReconnectOnFailure });
         throw _error;
       } finally {
-        this.connectingPromise = null;
+        if (this.connectingPromise === operation) {
+          this.connectingPromise = null;
+          this.connectingPromiseGeneration = null;
+        }
       }
     })();
+    this.connectingPromise = operation;
+    this.connectingPromiseGeneration = operationGeneration;
 
-    return this.connectingPromise;
+    return operation;
   }
 
-  private async establishConnection(options: { forceConnect?: boolean } = {}): Promise<void> {
+  private async establishConnection(
+    options: { forceConnect?: boolean } = {},
+    operationGeneration: number
+  ): Promise<void> {
     const { forceConnect = true } = options;
+    this.assertConnectionOperationCurrent(operationGeneration);
 
     if (forceConnect) {
       const state = await websocket.getState();
-      if (!state.connected) {
-        await this.connectNativeTransport();
+      await this.rejectStaleConnectionOperation(
+        operationGeneration,
+        state.connected ? state.connectionToken : undefined
+      );
+      if (state.connected) {
+        if (!isNativeWsConnectionToken(state.connectionToken)) {
+          throw new Error('Native WebSocket connection token unavailable');
+        }
+        this.adoptNativeConnectionToken(state.connectionToken);
+      } else {
+        await this.connectNativeTransport(operationGeneration);
       }
     }
 
+    const connectionToken = this.nativeConnectionToken;
+    const assertConnectionCurrent = () => {
+      if (
+        operationGeneration !== this.connectionOperationGeneration ||
+        this.isManualClose ||
+        !isNativeWsConnectionToken(connectionToken) ||
+        this.nativeConnectionToken !== connectionToken
+      ) {
+        const error = new Error('WebSocket connection generation changed');
+        error.name = 'AbortError';
+        throw error;
+      }
+    };
+    assertConnectionCurrent();
+
     this.lifecycleState = 'handshaking';
-    this.metrics.lastConnectedAt = Date.now();
-    this.metrics.consecutiveFailures = 0;
-    this.reconnectAttempts = 0;
-    this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 
     await this.bridgeReadyPromise;
+    assertConnectionCurrent();
+
+    await this.waitForCurrentServerBootstrap(connectionToken);
+    assertConnectionCurrent();
 
     await this.performHandshake(false);
+    assertConnectionCurrent();
 
-    let hasResumeTokenAvailable = false;
-    try {
-      const { hasResumeToken } = await import('../signals/resume-tokens');
-      hasResumeTokenAvailable = await hasResumeToken();
-    } catch { }
-    try {
-      const gkProbe = await this.getGatekeeper();
-      console.log('[AUTOLOGIN] reopen connect decision', {
-        unlinkedMode: this.isInUnlinkedMode,
-        hasResumeTokenAvailable,
-        gatekeeperHasTokens: gkProbe.hasTokens,
-        gatekeeperCount: gkProbe.tokenCount
-      });
-    } catch { }
-
-    // Always attempt automatic server-entry on (re)connect; redemption is a no-op when the gatekeeper
-    // has no tokens. There is no stored access token any more — autologin is resume-pool only.
     {
       try {
         const gk = await this.getGatekeeper();
+        assertConnectionCurrent();
         if (gk.hasTokens) {
           let entryGranted = false;
-          for (let attempt = 0; attempt < 2 && !entryGranted; attempt++) {
+          for (let attempt = 0; attempt < 3 && !entryGranted; attempt++) {
             const redemption = await gk.getRedemptionPayload();
+            assertConnectionCurrent();
             if (!redemption) break;
-            await this.sendSecureControlMessage(redemption, { bypassStateCheck: true });
-            const grantResult = await this.waitForServerEntryGrant(this.torIntegration.getAdaptedTimeout(10000));
+            const redemptionRequestId = crypto.randomUUID();
+            const grantWaiter = this.createServerEntryGrantWaiter(
+              this.torIntegration.getAdaptedTimeout(SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS),
+              undefined,
+              redemptionRequestId
+            );
+            try {
+              await this.sendSecureControlMessage({
+                ...redemption,
+                requestId: redemptionRequestId
+              }, { bypassStateCheck: true });
+              assertConnectionCurrent();
+            } catch (error) {
+              grantWaiter.cancel();
+              try { await gk.commitPendingTokenUsage(); } catch { }
+              throw error;
+            }
+            const grantResult = await grantWaiter.promise;
+            assertConnectionCurrent();
             if (grantResult === 'granted') {
               entryGranted = true;
             } else if (grantResult === 'rejected') {
-              // Explicit server rejection: this token is invalid/already spent, so
-              // burn it and try a fresh one.
               try { await gk.commitPendingTokenUsage(); } catch { }
+              assertConnectionCurrent();
               if (attempt === 0) {
                 console.warn('[WebSocket] Entry token rejected, retrying with fresh token');
                 await new Promise(r => setTimeout(r, 300));
+                assertConnectionCurrent();
               }
             } else {
-              // Transient timeout (no decryptable grant — usually a session reset
-              // mid-redemption). Do NOT burn the token; release it for reuse and
-              // stop churning this connection. A later reconnect retries once the
-              // PQ session is stable.
-              try { await gk.releasePendingTokenUsage(); } catch { }
-              break;
+              try { await gk.commitPendingTokenUsage(); } catch { }
+              assertConnectionCurrent();
+              if (attempt === 0) {
+                await new Promise(r => setTimeout(r, 300));
+                assertConnectionCurrent();
+              }
             }
           }
 
           if (entryGranted) {
             await gk.commitPendingTokenUsage();
+            assertConnectionCurrent();
             this.serverAuthGranted = true;
             window.dispatchEvent(new CustomEvent(EventType.SERVER_ENTRY_GRANTED));
           }
         }
       } catch {
+        assertConnectionCurrent();
         console.warn('[WebSocket] Automatic entry token redemption failed');
       }
     }
 
+    assertConnectionCurrent();
     this.lifecycleState = 'connected';
+    
+    this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
     this.unlinkedSessionReady = false;
-
-    // If in unlinked mode then reclaim inbox
+    this.unlinkedAccountAuthorizationReady = false;
+    this.unlinkedAuthorizationResponse = null;
+    this.unlinkedAuthorizationBlocked = false;
+    this.unlinkedAuthorizationPromise = null;
+    this.unlinkedDeliveryPromise = null;
+    
     if (this.isInUnlinkedMode) {
-      const deliveryReady = await this.ensureUnlinkedDeliveryReady();
-      if (!deliveryReady) {
-        this.scheduleDeliveryReadyRetry();
+      if (this.serverPasswordRequired && !this.serverAuthGranted) {
+        this.unlinkedAuthorizationBlocked = true;
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+          detail: {
+            type: 'SERVER_ENTRY_REQUIRED',
+            code: 'SERVER_ENTRY_REQUIRED',
+            message: 'This server requires its password before account recovery.'
+          }
+        }));
+      } else {
+        const deliveryReady = await this.ensureUnlinkedDeliveryReady();
+        assertConnectionCurrent();
+        if (!deliveryReady) {
+          this.scheduleDeliveryReadyRetry();
+        } else {
+          void this.replaceConsumedAccountAuthorizationToken().catch(() => { });
+        }
       }
     }
 
+    assertConnectionCurrent();
     this.registerSessionErrorHandler();
     this.queue.scheduleFlush();
     this.startConnectivityWatchdog();
     this.heartbeat.start();
     this.torIntegration.attachCircuitListener(() => { if (this.lifecycleState === 'connected') this.heartbeat.reset(); });
-    void blockingSystem.processQueuedMessages();
   }
 
-  // Claim inbox route on the current socket
+  // Redeem one unlinkable authorization token on the current socket.
+  private async authorizeUnlinkedConnection(): Promise<boolean> {
+    if (this.unlinkedAccountAuthorizationReady) return true;
+    if (this.unlinkedAuthorizationPromise) return this.unlinkedAuthorizationPromise;
+    const operation = this.performAuthorizeUnlinkedConnection();
+    this.unlinkedAuthorizationPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.unlinkedAuthorizationPromise === operation) {
+        this.unlinkedAuthorizationPromise = null;
+      }
+    }
+  }
+
+  private async performAuthorizeUnlinkedConnection(): Promise<boolean> {
+    if (this.unlinkedAccountAuthorizationReady) return true;
+    const connectionToken = this.nativeConnectionToken;
+    if (!isNativeWsConnectionToken(connectionToken)) return false;
+    const isCurrent = () => this.nativeConnectionToken === connectionToken;
+
+    if (!isCurrent()) return false;
+    const account = this._username;
+    if (typeof account !== 'string' || !account) return false;
+    const resumeRedemption = await takeResumeRedemption(account);
+    if (!isCurrent() || !resumeRedemption) return false;
+    const requestId = crypto.randomUUID();
+    if (!REQUEST_ID_RE.test(requestId)) return false;
+
+    const timeoutMs = this.torIntegration.getAdaptedTimeout(30000);
+    let cancelWait = () => {};
+    const response = new Promise<boolean>((resolve) => {
+      let settled = false;
+      let cleanup = () => {};
+      let unregisterCancel = () => {};
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const handler = (message: any) => {
+        if (message?.type !== SignalType.TOKEN_VALIDATION_RESPONSE) return;
+        if (message?.requestId !== requestId) return;
+        if (!isCurrent()) {
+          finish(false);
+          return;
+        }
+        if (!isTokenValidationResponse(message)) {
+          this.unlinkedAuthorizationBlocked = true;
+          finish(false);
+          return;
+        }
+        let response: ResumeAuthorizationResponse;
+        if (message.valid === true) {
+          response = Object.freeze({
+            type: SignalType.TOKEN_VALIDATION_RESPONSE,
+            requestId: message.requestId,
+            valid: true,
+            serverEntryRequired: message.serverEntryRequired,
+            serverEntryGranted: message.serverEntryGranted
+          });
+        } else {
+          const rejection = message as Extract<ResumeAuthorizationResponse, { valid: false }>;
+          response = Object.freeze({
+            type: SignalType.TOKEN_VALIDATION_RESPONSE,
+            requestId: rejection.requestId,
+            valid: false,
+            error: rejection.error
+          });
+        }
+        this.unlinkedAuthorizationResponse = response;
+        const authorized = response.valid === true && response.serverEntryRequired !== true;
+        if (!authorized) {
+          this.unlinkedAuthorizationBlocked = true;
+        }
+        finish(authorized);
+      };
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      cleanup = () => {
+        clearTimeout(timeout);
+        this.messageHandler.unregisterHandler(SignalType.TOKEN_VALIDATION_RESPONSE, handler);
+        unregisterCancel();
+      };
+      cancelWait = () => finish(false);
+      this.messageHandler.registerHandler(SignalType.TOKEN_VALIDATION_RESPONSE, handler);
+      unregisterCancel = this.registerConnectionWaiterCancel(cancelWait);
+    });
+
+    try {
+      await this.sendSecureControlMessage({
+        type: SignalType.TOKEN_VALIDATION,
+        requestId,
+        resumeRedemption
+      }, { failIfQueued: true });
+    } catch {
+      cancelWait();
+      return false;
+    }
+
+    const authorized = await response;
+    if (!isCurrent()) return false;
+    this.unlinkedAccountAuthorizationReady = authorized;
+    return this.unlinkedAccountAuthorizationReady;
+  }
+
   private async ensureUnlinkedDeliveryReady(): Promise<boolean> {
+    if (this.unlinkedSessionReady) return true;
+    if (this.unlinkedAuthorizationBlocked) return false;
+    if (this.unlinkedDeliveryPromise) return this.unlinkedDeliveryPromise;
+    const operation = this.performEnsureUnlinkedDeliveryReady();
+    this.unlinkedDeliveryPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.unlinkedDeliveryPromise === operation) {
+        this.unlinkedDeliveryPromise = null;
+      }
+    }
+  }
+
+  private async performEnsureUnlinkedDeliveryReady(): Promise<boolean> {
     if (!this.isInUnlinkedMode) return false;
     if (this.lifecycleState !== 'connected' || !this.sessionKeyMaterial) return false;
+    const connectionToken = this.nativeConnectionToken;
+    if (!isNativeWsConnectionToken(connectionToken)) return false;
+    const isCurrent = () => this.nativeConnectionToken === connectionToken;
     try {
-      const { getBlindRoutingClient } = await import('../transport/blind-routing-client');
-      const bc = getBlindRoutingClient(this.lastAuthUsername);
-
-      // Restore credentials from storage if not already in memory
-      if (!bc.hasCredentials()) {
-        await bc.loadPersistentCredentials();
+      if (!await this.authorizeUnlinkedConnection()) {
+        return false;
       }
+      if (!isCurrent()) return false;
+      if (!isCurrent()) return false;
+      const bc = getBlindRoutingClient(this.lastAuthUsername);
 
       // Reset send function for the new PQ session
       const self = this;
@@ -862,97 +1489,81 @@ export class WebSocketConnection {
         await self.sendSecureControlMessage(message);
       });
 
-      const claimTimeoutMs = this.torIntegration.getAdaptedTimeout(30000);
-      let claimFailureReason = 'claim-timeout';
-
-      // Wait for claim response before publishing bundle
-      const waitForClaimResponse = new Promise<boolean>((resolve) => {
-        const timeout = setTimeout(() => {
-          window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
-          window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as any);
-          resolve(false);
-        }, claimTimeoutMs);
-
-        const handler = (ev: Event) => {
-          const detail = (ev as CustomEvent).detail;
-          if (detail?.type === SignalType.CLAIM_INBOX_RESPONSE) {
-            clearTimeout(timeout);
-            window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
-            window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as any);
-
-            // Adopt server refreshed capability token
-            if (detail?.success && typeof detail?.capabilityToken === 'string') {
-              void bc.refreshCapabilityToken(detail.capabilityToken).catch(() => { });
-            }
-            claimFailureReason = detail?.error ? String(detail.error) : (detail?.success ? '' : 'claim-rejected');
-            resolve(!!detail.success);
+      const activationTimeoutMs = this.torIntegration.getAdaptedTimeout(30000);
+      const activationRequestId = crypto.randomUUID();
+      let cancelActivationWait = () => {};
+      const waitForActivationResponse = new Promise<boolean>((resolve) => {
+        let settled = false;
+        let unregisterCancel = () => {};
+        const cleanup = () => {
+          clearTimeout(timeout);
+          this.messageHandler.unregisterHandler(SignalType.ACTIVATE_DELIVERY_RESPONSE, handler);
+          unregisterCancel();
+        };
+        const finish = (success: boolean) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(success);
+        };
+        const handler = (detail: any) => {
+          if (!isCurrent()) {
+            finish(false);
             return;
           }
-          if (
-            (detail?.type === SignalType.ERROR || detail?.type === SignalType.AUTH_ERROR)
-            && typeof detail?.message === 'string'
-          ) {
-            const msg = detail.message.toLowerCase();
-            if (msg.includes('claim') || msg.includes('inbox')) {
-              clearTimeout(timeout);
-              window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
-              window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as any);
-              claimFailureReason = detail.message;
-              resolve(false);
-            }
-          }
+          if (detail?.requestId !== activationRequestId) return;
+          finish(detail?.success === true);
         };
-        window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
-        window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handler as any);
+        const timeout = setTimeout(() => finish(false), activationTimeoutMs);
+        cancelActivationWait = () => finish(false);
+        this.messageHandler.registerHandler(SignalType.ACTIVATE_DELIVERY_RESPONSE, handler);
+        unregisterCancel = this.registerConnectionWaiterCancel(cancelActivationWait);
       });
 
-      const claimSent = await bc.claimInbox();
-      if (!claimSent) {
-        claimFailureReason = 'claim-send-skipped';
+      let activationSent = false;
+      try {
+        activationSent = await bc.activateDelivery(activationRequestId);
+        if (!isCurrent()) {
+          cancelActivationWait();
+          return false;
+        }
+      } catch (error) {
+        cancelActivationWait();
+        throw error;
+      }
+      if (!activationSent) {
+        cancelActivationWait();
       }
 
-      // Only wait for server response if the claim message was actually sent
-      const claimSuccess = claimSent ? await waitForClaimResponse : false;
+      const activationSuccess = activationSent ? await waitForActivationResponse : false;
+      if (!isCurrent()) return false;
 
-      if (claimSuccess) {
-        // Prekey bundles are distributed via the discovery blob (and in-band) — there is no separate
-        // server-side bundle publish. Keep driving automatic route rotation + its commitment event.
-        bc.startAutomaticRouteRotation((rotation) => {
-          try {
-            window.dispatchEvent(new CustomEvent(EventType.ROUTE_COMMITMENTS_ROTATED, { detail: rotation }));
-          } catch { }
-        });
-
+      if (activationSuccess) {
         this.unlinkedSessionReady = true;
         this.startCoverTraffic();
         window.dispatchEvent(new CustomEvent(EventType.UNLINKED_SESSION_READY));
-        console.info('[DELIVERY] inbox claimed - socket is delivery-ready for global-mix broadcast', {
-          retried: this.deliveryReadyRetryAttempts > 0
-        });
         return true;
       }
 
       this.unlinkedSessionReady = false;
-      console.warn('[DELIVERY] inbox claim failed/timed out - receiver will NOT get broadcast until re-claim', {
-        reason: claimFailureReason,
-        timeoutMs: claimTimeoutMs
-      });
       return false;
     } catch {
+      if (!isCurrent()) return false;
       this.unlinkedSessionReady = false;
-      console.warn('[WebSocket] Failed to claim inbox in unlinked mode');
+      console.warn('[WebSocket] Failed to activate anonymous delivery');
       return false;
     }
   }
 
-  // Retry the delivery ready inbox claim
+  // Retry anonymous delivery activation.
   private scheduleDeliveryReadyRetry(): void {
     if (this.deliveryReadyRetryTimer) return;
     if (!this.isInUnlinkedMode) return;
+    if (this.unlinkedAuthorizationBlocked) return;
 
     const attempt = this.deliveryReadyRetryAttempts++;
     const baseDelay = Math.min(3000 * Math.pow(1.6, attempt), 30000);
-    const jitter = Math.floor(Math.random() * 1000);
+    const jitter = secureRandomIntInclusive(0, 999);
 
     this.deliveryReadyRetryTimer = setTimeout(async () => {
       this.deliveryReadyRetryTimer = null;
@@ -964,11 +1575,12 @@ export class WebSocketConnection {
         this.deliveryReadyRetryAttempts = 0;
         return;
       }
+      if (this.unlinkedAuthorizationBlocked) return;
 
       const ready = await this.ensureUnlinkedDeliveryReady().catch(() => false);
       if (ready) {
         this.deliveryReadyRetryAttempts = 0;
-      } else {
+      } else if (!this.unlinkedAuthorizationBlocked) {
         this.scheduleDeliveryReadyRetry();
       }
     }, baseDelay + jitter);
@@ -978,58 +1590,68 @@ export class WebSocketConnection {
     return typeof error === 'string' && error.toLowerCase().includes('connection in progress');
   }
 
-  private async connectNativeTransport(): Promise<void> {
+  private async connectNativeTransport(operationGeneration: number): Promise<void> {
     let result = await websocket.connect();
+    await this.rejectStaleConnectionOperation(operationGeneration, result?.connectionToken);
     if (result?.success === false && this.isNativeConnectionInProgress(result.error)) {
       await new Promise(resolve => setTimeout(resolve, 500));
+      this.assertConnectionOperationCurrent(operationGeneration);
       const nativeState = await websocket.getState().catch(() => null);
+      await this.rejectStaleConnectionOperation(
+        operationGeneration,
+        nativeState?.connected ? nativeState.connectionToken : undefined
+      );
       if (nativeState?.connected) {
+        if (!isNativeWsConnectionToken(nativeState.connectionToken)) {
+          throw new Error('Native WebSocket connection token unavailable');
+        }
+        this.adoptNativeConnectionToken(nativeState.connectionToken);
         return;
       }
       if (nativeState?.connecting) {
         await websocket.disconnect().catch(() => { });
+        this.assertConnectionOperationCurrent(operationGeneration);
         await new Promise(resolve => setTimeout(resolve, 250));
+        this.assertConnectionOperationCurrent(operationGeneration);
       }
       result = await websocket.connect();
+      await this.rejectStaleConnectionOperation(operationGeneration, result?.connectionToken);
     }
 
     if (result?.success === false) {
+      if (typeof result.error === 'string' && /tor setup not complete/i.test(result.error)) {
+        try { this.torIntegration.markTorNotReady(); } catch { }
+      }
       throw new Error(result.error || 'Failed to establish WebSocket connection');
     }
+    if (!isNativeWsConnectionToken(result?.connectionToken)) {
+      throw new Error('Native WebSocket connection token unavailable');
+    }
+    this.adoptNativeConnectionToken(result.connectionToken);
+    this.transportEventReceived = false;
   }
 
   // Register session error handler
   private registerSessionErrorHandler(): void {
+    if (this.sessionErrorHandlersRegistered) return;
+    this.sessionErrorHandlersRegistered = true;
     this.messageHandler.registerHandler(SignalType.ERROR, async (message: any) => {
       const errorMsg = message.message || '';
       if (message.code === 'ENVELOPE_TIMESTAMP_INVALID' || message.code === 'HANDSHAKE_TIMESTAMP_INVALID') {
-        await this.recoverFromTimestampReject(message);
+        void this.recoverFromTimestampReject(message).catch(() => { });
         return;
       }
       if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
         this.resetSessionKeys(true);
-        try {
-          await this.performHandshake(false);
-          void this.queue.flush();
-        } catch { }
+        void this.performHandshake(false)
+          .then(() => this.queue.flush())
+          .catch(() => { });
       }
     });
 
-    this.messageHandler.registerHandler(SignalType.AUTH_ERROR, async (message: any) => {
-      if (message.code === 'SERVER_ENTRY_REQUIRED') {
-        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
-          detail: {
-            type: 'SERVER_ENTRY_REQUIRED',
-            message: 'This server requires an entry token. Please provide the server password.'
-          }
-        }));
-      }
-    });
   }
 
   private async recoverFromTimestampReject(message: any): Promise<void> {
-    this.updateServerClockOffset(message?.serverTime);
-
     if (this.timestampRecoveryInFlight) {
       return this.timestampRecoveryInFlight;
     }
@@ -1039,9 +1661,12 @@ export class WebSocketConnection {
       return;
     }
     this.lastTimestampRecoveryAt = now;
+    const recoveryGeneration = ++this.timestampRecoveryGeneration;
+    const isCurrentRecovery = () =>
+      this.timestampRecoveryGeneration === recoveryGeneration && !this.isManualClose;
 
-    this.timestampRecoveryInFlight = (async () => {
-      console.warn('[WebSocket] Server rejected a stale PQ envelope; reconnecting to drop queued ciphertext', {
+    const recovery = (async () => {
+      console.warn('[WebSocket] Server rejected a stale PQ envelope, reconnecting to drop queued ciphertext', {
         code: message?.code,
         replayWindowMs: message?.replayWindowMs
       });
@@ -1053,30 +1678,38 @@ export class WebSocketConnection {
 
       this.stopCoverTraffic();
       this.resetSessionKeys(true);
-      this.encryption.clearReplayCache();
       this.handshake.reset();
       this.transportEventReceived = false;
       this.lifecycleState = 'disconnected';
       this.isManualClose = false;
+      const connectionToken = this.nativeConnectionToken;
+      if (connectionToken !== null) {
+        this.retiredNativeConnectionToken = Math.max(this.retiredNativeConnectionToken, connectionToken);
+      }
+      this.nativeConnectionToken = null;
+      this.clearCurrentConnectionClock();
+      this.invalidateInboundMessages();
 
       try {
-        await websocket.disconnect().catch(() => { });
+        await websocket.disconnect(connectionToken ?? undefined).catch(() => { });
       } catch { }
+      if (!isCurrentRecovery()) return;
 
       await new Promise(resolve => setTimeout(resolve, 250));
+      if (!isCurrentRecovery()) return;
       await this.connect();
-      try {
-        const { hasResumeToken } = await import('../signals/resume-tokens');
-        if (await hasResumeToken()) {
-          await this.attemptTokenValidationOnce('timestamp-recovery', true);
-        }
-      } catch { }
+      if (!isCurrentRecovery()) return;
       void this.queue.flush();
-    })().finally(() => {
-      this.timestampRecoveryInFlight = null;
-    });
+    })();
+    this.timestampRecoveryInFlight = recovery;
 
-    return this.timestampRecoveryInFlight;
+    try {
+      await recovery;
+    } finally {
+      if (this.timestampRecoveryInFlight === recovery) {
+        this.timestampRecoveryInFlight = null;
+      }
+    }
   }
 
   // Start connectivity watchdog
@@ -1084,8 +1717,6 @@ export class WebSocketConnection {
     if (this.connectivityWatchdog) return;
     this.connectivityWatchdog = setInterval(() => {
       if (this.lifecycleState === 'connected') void this.queue.flush();
-      this.encryption.pruneReplayCache();
-      this.notifyConnectionStateCallbacks();
     }, 5000);
   }
 
@@ -1098,15 +1729,35 @@ export class WebSocketConnection {
   }
 
   // Handle connection error
-  handleConnectionError(error: Error, stage: string, options: { autoReconnect?: boolean } = {}): void {
-    SecurityAuditLogger.log(SignalType.ERROR, `ws-${stage}-failure`, { message: error.message });
-    this.metrics.lastFailureAt = Date.now();
+  handleConnectionError(options: { autoReconnect?: boolean } = {}): void {
     this.lifecycleState = SignalType.ERROR;
     this.resetSessionKeys(this.isManualClose);
     if (!this.isManualClose && options.autoReconnect !== false) this.attemptReconnect();
   }
 
+  terminateCurrentConnection(): void {
+    const connectionToken = this.nativeConnectionToken;
+    if (!isNativeWsConnectionToken(connectionToken)) return;
+    this.handleConnectionError();
+    void websocket.disconnect(connectionToken).catch(() => { });
+  }
+
   private ingestSecureChunk(chunk: any): any | null {
+    if (
+      !isPlainObject(chunk) ||
+      hasPrototypePollutionKeys(chunk) ||
+      !hasExactKeys(chunk, [
+        'type',
+        'messageId',
+        'chunkIndex',
+        'totalChunks',
+        'totalLength',
+        'payloadType',
+        'data'
+      ]) ||
+      chunk.type !== SignalType.SECURE_CHUNK
+    ) return null;
+
     const messageId = chunk?.messageId;
     const chunkIndex = chunk?.chunkIndex;
     const totalChunks = chunk?.totalChunks;
@@ -1114,31 +1765,30 @@ export class WebSocketConnection {
     const payloadType = chunk?.payloadType;
     const data = chunk?.data;
 
-    if (typeof messageId !== 'string' || messageId.length === 0 || messageId.length > 128) return null;
-    if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > SECURE_CHUNK_MAX_TOTAL_CHUNKS) return null;
-    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) return null;
-    if (!Number.isInteger(totalLength) || totalLength < 1 || totalLength > SECURE_CHUNK_MAX_TOTAL_LENGTH) return null;
-    if (typeof payloadType !== 'string' || payloadType.length === 0 || payloadType.length > 100) return null;
+    if (typeof messageId !== 'string' || !SECURE_CHUNK_MESSAGE_ID_RE.test(messageId)) return null;
+    if (typeof totalChunks !== 'number' || !Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > SECURE_CHUNK_MAX_TOTAL_CHUNKS) return null;
+    if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) return null;
+    if (typeof totalLength !== 'number' || !Number.isInteger(totalLength) || totalLength < 1 || totalLength > SECURE_CHUNK_MAX_TOTAL_LENGTH) return null;
+    if (payloadType !== SignalType.AUTH_OT_RESPONSE) return null;
     if (typeof data !== 'string' || data.length === 0 || data.length > SECURE_CHUNK_MAX_DATA_LENGTH) return null;
 
     let buf = this.secureChunkBuffers.get(messageId);
     if (!buf) {
-      // Bound concurrent reassemblies by evicting oldest if at capacity.
-      if (this.secureChunkBuffers.size >= SECURE_CHUNK_MAX_CONCURRENT) {
+      while (
+        this.secureChunkBuffers.size >= SECURE_CHUNK_MAX_CONCURRENT ||
+        this.secureChunkReservedLength + totalLength > SECURE_CHUNK_MAX_RESERVED_LENGTH
+      ) {
         let oldestKey: string | null = null;
         let oldestAt = Infinity;
         for (const [k, v] of this.secureChunkBuffers) {
           if (v.createdAt < oldestAt) { oldestAt = v.createdAt; oldestKey = k; }
         }
-        if (oldestKey) {
-          const ev = this.secureChunkBuffers.get(oldestKey);
-          if (ev) clearTimeout(ev.timer);
-          this.secureChunkBuffers.delete(oldestKey);
-        }
+        if (!oldestKey) return null;
+        this.discardSecureChunkBuffer(oldestKey);
       }
       const timer = setTimeout(() => {
-        this.secureChunkBuffers.delete(messageId);
-        console.warn('[SECURE-CHUNK] Reassembly timed out; discarded', { payloadType });
+        this.discardSecureChunkBuffer(messageId);
+        console.warn('[SECURE-CHUNK] Reassembly timed out', { payloadType });
       }, SECURE_CHUNK_TIMEOUT_MS);
       buf = {
         totalChunks, totalLength, payloadType,
@@ -1146,19 +1796,17 @@ export class WebSocketConnection {
         createdAt: Date.now(), timer
       };
       this.secureChunkBuffers.set(messageId, buf);
+      this.secureChunkReservedLength += totalLength;
     } else if (buf.totalChunks !== totalChunks || buf.totalLength !== totalLength || buf.payloadType !== payloadType) {
-      clearTimeout(buf.timer);
-      this.secureChunkBuffers.delete(messageId);
-      console.warn('[SECURE-CHUNK] Inconsistent chunk metadata; discarded', { payloadType });
+      this.discardSecureChunkBuffer(messageId);
+      console.warn('[SECURE-CHUNK] Inconsistent chunk metadata', { payloadType });
       return null;
     }
 
-    // Idempotent placement (a duplicate index is ignored; a different value at a filled index drops).
     const existing = buf.parts[chunkIndex];
     if (existing === undefined) {
       if (buf.receivedLength + data.length > buf.totalLength) {
-        clearTimeout(buf.timer);
-        this.secureChunkBuffers.delete(messageId);
+        this.discardSecureChunkBuffer(messageId);
         console.warn('[SECURE-CHUNK] Accumulated length exceeds declared total; discarded', { payloadType });
         return null;
       }
@@ -1174,16 +1822,14 @@ export class WebSocketConnection {
         } catch { }
       }
     } else if (existing !== data) {
-      clearTimeout(buf.timer);
-      this.secureChunkBuffers.delete(messageId);
+      this.discardSecureChunkBuffer(messageId);
       console.warn('[SECURE-CHUNK] Conflicting duplicate chunk. discarded', { payloadType });
       return null;
     }
 
     if (buf.receivedCount < buf.totalChunks) return null;
 
-    clearTimeout(buf.timer);
-    this.secureChunkBuffers.delete(messageId);
+    this.discardSecureChunkBuffer(messageId);
 
     for (let i = 0; i < buf.totalChunks; i++) {
       if (typeof buf.parts[i] !== 'string') {
@@ -1215,19 +1861,38 @@ export class WebSocketConnection {
     return parsed;
   }
 
+  private discardSecureChunkBuffer(messageId: string): void {
+    const buffer = this.secureChunkBuffers.get(messageId);
+    if (!buffer) return;
+    clearTimeout(buffer.timer);
+    this.secureChunkBuffers.delete(messageId);
+    this.secureChunkReservedLength = Math.max(
+      0,
+      this.secureChunkReservedLength - buffer.totalLength
+    );
+  }
+
   // Drop all inflight reassemblies
   private clearSecureChunkBuffers(): void {
     for (const buf of this.secureChunkBuffers.values()) {
       try { clearTimeout(buf.timer); } catch { }
     }
     this.secureChunkBuffers.clear();
+    this.secureChunkReservedLength = 0;
   }
 
   resetSessionKeys(preserveServerKeys: boolean = true): void {
-    this.tokenValidationAttempted = false;
+    this.invalidateInboundMessages();
+    this.cancelConnectionWaiters();
+    this.heartbeat.reset();
     this.serverAuthGranted = false;
     this.applicationAuthReady = false;
     this.unlinkedSessionReady = false;
+    this.unlinkedAccountAuthorizationReady = false;
+    this.unlinkedAuthorizationResponse = null;
+    this.unlinkedAuthorizationBlocked = false;
+    this.unlinkedAuthorizationPromise = null;
+    this.unlinkedDeliveryPromise = null;
     if (this.deliveryReadyRetryTimer) {
       clearTimeout(this.deliveryReadyRetryTimer);
       this.deliveryReadyRetryTimer = null;
@@ -1239,20 +1904,10 @@ export class WebSocketConnection {
       PostQuantumUtils.clearMemory(this.sessionKeyMaterial.recvKey);
     }
     this.sessionKeyMaterial = undefined;
-    this.pendingReconnectEnvelopes = [];
     this.clearSecureChunkBuffers();
     this.encryption.resetCounters();
     if (!preserveServerKeys) this.handshake.clearServerKeyMaterial();
-    this.previousSessionFingerprint = undefined;
-    this.sessionTransitionTime = undefined;
-    this.handshake.cancelRekeyTimer();
-  }
-
-  // Clear session
-  private clearSession(): void {
-    this.resetSessionKeys(false);
-    this.encryption.clearReplayCache();
-    this.heartbeat.reset();
+    this.handshake.reset();
   }
 
   // Attempt reconnect
@@ -1260,9 +1915,6 @@ export class WebSocketConnection {
     if (this.isManualClose) return;
     if (this.reconnectTimeout) return;
 
-    this.reconnectAttempts += 1;
-    this.metrics.totalReconnects += 1;
-    this.metrics.consecutiveFailures += 1;
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
 
     const jitterBytes = PostQuantumRandom.randomBytes(4);
@@ -1272,7 +1924,7 @@ export class WebSocketConnection {
 
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
-      void this.connect().catch((e) => this.handleConnectionError(e as Error, 'connect-retry'));
+      void this.connect().catch(() => this.handleConnectionError());
     }, delayWithJitter);
   }
 
@@ -1283,6 +1935,23 @@ export class WebSocketConnection {
     });
   }
 
+  async sendReliable(
+    data: unknown,
+    options: { queueOnFailure?: boolean } = {},
+  ): Promise<boolean> {
+    const context = this.captureOutboundTransportContext();
+    try {
+      await this.dispatchPayload(data, false);
+      return true;
+    } catch {
+      if (!this.isOutboundTransportContextCurrent(context)) return false;
+      if (options.queueOnFailure !== false) {
+        try { void this.dispatchPayload(data, true).catch(() => { }); } catch { }
+      }
+      return false;
+    }
+  }
+
   private runOnSecureSendLane<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.secureSendLane.then(operation, operation);
     this.secureSendLane = run.then(() => undefined, () => undefined);
@@ -1290,34 +1959,36 @@ export class WebSocketConnection {
   }
 
   // Dispatch payload
-  async dispatchPayload(data: unknown, allowQueue: boolean, options: { isCoverTraffic?: boolean, bypassStateCheck?: boolean } = {}): Promise<void> {
+  async dispatchPayload(
+    data: unknown,
+    allowQueue: boolean,
+    options: DispatchOptions = {}
+  ): Promise<string | null | undefined> {
+    throwIfOperationAborted(options.signal);
     const msgObj = typeof data === 'string' ? ((): any => { try { return JSON.parse(data); } catch { return {}; } })() : (data as any);
-    const debugType = typeof msgObj?.type === 'string' ? msgObj.type : this.getMessageTypeForDebug(data);
-
-    if (this.isGatekeeperDebugType(debugType)) {
-      this.logGatekeeperDebug('dispatch-payload-start', {
-        type: debugType,
-        allowQueue,
-        bypassStateCheck: !!options.bypassStateCheck,
-        isCoverTraffic: !!options.isCoverTraffic
-      });
+    const payloadType = typeof msgObj?.type === 'string' ? msgObj.type : 'unknown';
+    if (options.authBindingRequestId && allowQueue) {
+      throw new Error('Channel-bound authentication requests cannot be queued');
     }
 
-    // Identity leak protection for unlinked mode
+    if (!this.isInUnlinkedMode && LINKED_FORBIDDEN_ANONYMOUS_TYPES.has(msgObj.type)) {
+      throw new Error('Anonymous-only message rejected on linked socket');
+    }
     if (this.isInUnlinkedMode) {
       if (
-        msgObj.type === SignalType.TOKEN_VALIDATION ||
+        UNLINKED_FORBIDDEN_ACCOUNT_TYPES.has(msgObj.type) ||
         msgObj.username
       ) {
-        console.warn(`[WebSocket] Blocking account-linked message in unlinked mode: ${msgObj.type || 'unknown'}`);
-        return;
+        throw new Error('Account-linked message rejected on unlinked socket');
       }
     }
 
 
     if (!this.rateLimiter.checkRateLimit()) {
       if (allowQueue) {
-        this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + RATE_LIMIT_BACKOFF_MS));
+        if (!this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + RATE_LIMIT_BACKOFF_MS))) {
+          throw new Error('WebSocket queue is full');
+        }
       } else {
         throw new Error('WebSocket local rate limit exceeded');
       }
@@ -1337,9 +2008,11 @@ export class WebSocketConnection {
         'server-entry-request',
         SignalType.AUTH_OT_REGISTER_REQUEST,
         SignalType.AUTH_OT_REGISTER_FINALIZE,
+        SignalType.AUTH_OT_REGISTER_CONFIRM,
         SignalType.AUTH_OT_REQUEST,
         SignalType.AUTH_OT_FINALIZE,
         SignalType.SERVER_ENTRY_REQUEST,
+        SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
         SignalType.PRIVACY_PASS_REDEMPTION
       ].includes(msgType as SignalType);
       if (isAuthMessage) {
@@ -1350,7 +2023,9 @@ export class WebSocketConnection {
         return;
       }
       if (allowQueue) {
-        this.queue.enqueuePending(this.queue.createEntry(data, this.globalRateLimitUntil));
+        if (!this.queue.enqueuePending(this.queue.createEntry(data, this.globalRateLimitUntil))) {
+          throw new Error('WebSocket queue is full');
+        }
       } else {
         throw new Error(`WebSocket globally rate limited for ${remainingSeconds}s`);
       }
@@ -1358,76 +2033,95 @@ export class WebSocketConnection {
     }
 
     if (this.lifecycleState !== 'connected' && !options.bypassStateCheck) {
-      if (this.isGatekeeperDebugType(debugType)) {
-        this.logGatekeeperDebug('dispatch-payload-queued-not-connected', {
-          type: debugType,
-          allowQueue
-        });
+      if (allowQueue) {
+        if (!this.queue.enqueuePending(this.queue.createEntry(data, Date.now()))) {
+          throw new Error('WebSocket queue is full');
+        }
       }
-      if (allowQueue) this.queue.enqueuePending(this.queue.createEntry(data, Date.now()));
       else throw new Error('WebSocket not connected');
       return;
     }
 
     if (!this.torIntegration.isCircuitHealthy()) {
       const circuitHealth = this.torIntegration.getCircuitHealth();
-      if (this.isGatekeeperDebugType(debugType)) {
-        this.logGatekeeperDebug('dispatch-payload-blocked-tor-circuit', {
-          type: debugType,
-          circuitHealth,
-          allowQueue
-        });
-      }
       if (allowQueue) {
-        this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + 5000));
+        if (!this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + 5000))) {
+          throw new Error('WebSocket queue is full');
+        }
       } else {
-        throw new Error(`Tor circuit is not healthy enough to send ${debugType} (${circuitHealth})`);
+        throw new Error(`Tor circuit is not healthy enough to send ${payloadType} (${circuitHealth})`);
       }
       return;
     }
 
+    const outboundContext = this.captureOutboundTransportContext();
+    if (!isNativeWsConnectionToken(outboundContext.connectionToken)) {
+      throw new Error('Native WebSocket connection unavailable');
+    }
+
     if (options.isCoverTraffic) {
       const state = await websocket.getState().catch(() => null);
+      throwIfOperationAborted(options.signal);
+      this.assertOutboundTransportContextCurrent(outboundContext);
       if (state && Number(state.queue_size || 0) > 0) {
         return;
       }
     }
 
     try {
-      await this.runOnSecureSendLane(async () => {
+      await this.ensureSessionKeys(false);
+      throwIfOperationAborted(options.signal);
+      this.assertOutboundTransportContextCurrent(outboundContext);
+      return await this.runOnSecureSendLane(async () => {
+        throwIfOperationAborted(options.signal);
+        this.assertOutboundTransportContextCurrent(outboundContext);
         if (this.lifecycleState !== 'connected' && !options.bypassStateCheck) {
           throw new Error('WebSocket not connected');
         }
 
-        await this.ensureSessionKeys(false);
         if (!this.sessionKeyMaterial) {
           throw new Error('Post-quantum session not established');
         }
 
-        if (this.isGatekeeperDebugType(debugType)) {
-          this.logGatekeeperDebug('dispatch-payload-encrypting', {
-            type: debugType
+        let boundData = data;
+        let authChannelBinding: string | null = null;
+        if (options.authBindingRequestId) {
+          const requestField = AUTH_CHANNEL_BOUND_REQUEST_FIELDS.get(payloadType);
+          if (
+            !requestField ||
+            !isPlainObject(msgObj) ||
+            hasPrototypePollutionKeys(msgObj) ||
+            msgObj[requestField] !== options.authBindingRequestId ||
+            !REQUEST_ID_RE.test(options.authBindingRequestId) ||
+            Object.prototype.hasOwnProperty.call(msgObj, 'authChannelBinding')
+          ) {
+            throw new Error('Invalid channel-bound authentication request');
+          }
+
+          const bindingBytes = createAuthChannelBinding({
+            sessionId: this.sessionKeyMaterial.sessionId,
+            sessionFingerprint: this.sessionKeyMaterial.fingerprint,
+            requestId: options.authBindingRequestId,
           });
+          try {
+            authChannelBinding = Base64.arrayBufferToBase64(bindingBytes);
+          } finally {
+            bindingBytes.fill(0);
+          }
+          boundData = {
+            ...msgObj,
+            authChannelBinding,
+          };
         }
-        const message = await this.encryption.prepareSecureEnvelope(data);
-        this.metrics.messagesSent += 1;
-        this.metrics.bytesSent += message.length;
+
+        const message = await this.encryption.prepareSecureEnvelope(boundData);
+        throwIfOperationAborted(options.signal);
+        this.assertOutboundTransportContextCurrent(outboundContext);
         await this.transmit(message);
-        if (this.isGatekeeperDebugType(debugType)) {
-          this.logGatekeeperDebug('dispatch-payload-transmitted', {
-            type: debugType,
-            bytes: message.length
-          });
-        }
+        return authChannelBinding;
       });
     } catch (err: any) {
       const reason = err instanceof Error ? err.message : String(err);
-      if (this.isGatekeeperDebugType(debugType)) {
-        this.logGatekeeperDebug('dispatch-payload-error', {
-          type: debugType,
-          error: reason
-        });
-      }
       const isSessionNotReady =
         reason.includes('Post-quantum session not established') ||
         reason.includes('PQ session not established');
@@ -1437,7 +2131,9 @@ export class WebSocketConnection {
         if (isSigningBindingMismatch) {
           this.resetSessionKeys();
         }
-        this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + 500));
+        if (!this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + 500))) {
+          throw new Error('WebSocket queue is full');
+        }
         void this.performHandshake(isSigningBindingMismatch).catch(() => { });
         return;
       }
@@ -1451,7 +2147,6 @@ export class WebSocketConnection {
     if (!force && this.sessionKeyMaterial) {
       const age = Date.now() - this.sessionKeyMaterial.establishedAt;
       if (age < SESSION_REKEY_INTERVAL_MS) {
-        if (age > KEY_ROTATION_WARNING_MS) SecurityAuditLogger.log('warn', 'ws-handshake-aging-session', { age });
         return;
       }
     }
@@ -1465,15 +2160,15 @@ export class WebSocketConnection {
 
   // Send heartbeat message
   private async sendHeartbeatMessage(): Promise<void> {
-    if (this.sessionKeyMaterial) {
-      await this.dispatchPayload({
-        type: SignalType.PQ_HEARTBEAT_PING,
-        timestamp: Date.now(),
-        sessionId: this.sessionKeyMaterial.sessionId
-      }, false);
-      return;
+    const sessionKeyMaterial = this.sessionKeyMaterial;
+    if (!sessionKeyMaterial) {
+      throw new Error('Post-quantum session not established');
     }
-    await this.transmit(JSON.stringify({ type: SignalType.PQ_HEARTBEAT_PING, timestamp: Date.now(), sessionId: this.sessionKeyMaterial?.sessionId }));
+    await this.dispatchPayload({
+      type: SignalType.PQ_HEARTBEAT_PING,
+      timestamp: Date.now(),
+      sessionId: sessionKeyMaterial.sessionId
+    }, false);
   }
 
   markServerAuthGranted(): void {
@@ -1482,6 +2177,18 @@ export class WebSocketConnection {
 
   isServerAuthGranted(): boolean {
     return this.serverAuthGranted;
+  }
+
+  setServerEntryPromptPending(pending: boolean): void {
+    this.serverEntryPromptPending = pending;
+  }
+
+  isServerEntryPromptPending(): boolean {
+    return this.serverEntryPromptPending;
+  }
+
+  isServerPasswordRequired(): boolean {
+    return this.serverPasswordRequired;
   }
 
   markApplicationAuthReady(): void {
@@ -1497,14 +2204,38 @@ export class WebSocketConnection {
     return this.unlinkedSessionReady;
   }
 
+  async ensureDeliveryReadyForSend(): Promise<boolean> {
+    if (!this.isInUnlinkedMode) return true;
+    if (this.unlinkedSessionReady) return true;
+    if (this.unlinkedAuthorizationBlocked) return false;
+    if (this.lifecycleState !== 'connected') return false;
+    return await this.ensureUnlinkedDeliveryReady().catch(() => false);
+  }
+
   async transmit(message: string): Promise<void> {
     if (this.isManualClose) {
       console.warn('[WebSocket] Suppressing transmit during manual close to avoid write errors', { messageLength: message.length });
       throw new Error('WebSocket is manually closing');
     }
+    const connectionToken = this.nativeConnectionToken;
+    if (!isNativeWsConnectionToken(connectionToken)) {
+      throw new Error('Native WebSocket connection unavailable');
+    }
     try {
-      const result = await websocket.send(message);
+      const result = await websocket.send(message, connectionToken);
+      if (this.nativeConnectionToken !== connectionToken) {
+        throw new Error('WebSocket connection generation changed during send');
+      }
       if (result?.success === false) {
+        if (
+          result.error?.includes('connection generation changed') &&
+          this.nativeConnectionToken === connectionToken
+        ) {
+          this.retiredNativeConnectionToken = Math.max(this.retiredNativeConnectionToken, connectionToken);
+          this.nativeConnectionToken = null;
+          this.clearCurrentConnectionClock();
+          this.resetSessionKeys(true);
+        }
         throw new Error(result.error || 'Unknown error');
       }
     } catch (err: any) {
@@ -1516,7 +2247,6 @@ export class WebSocketConnection {
   setGlobalRateLimit(seconds: number) {
     const ms = Math.max(0, Math.floor(seconds * 1000));
     this.globalRateLimitUntil = Math.max(this.globalRateLimitUntil, Date.now() + ms);
-    if (seconds > 0) this.metrics.lastRateLimitAt = Date.now();
   }
 
   // Check if globally rate limited
@@ -1531,103 +2261,276 @@ export class WebSocketConnection {
   // Note heartbeat pong
   noteHeartbeatPong(message: any): void { this.heartbeat.handleResponse(message); }
 
-  // Attempt token validation once
-  async attemptTokenValidationOnce(
-    _source: string = 'auto',
-    force: boolean = false,
-    requestExtras: Record<string, unknown> = {}
-  ): Promise<void> {
-    if (this.isInUnlinkedMode) return;
-    if (this.tokenValidationAttempted && !force) return;
-    this.tokenValidationAttempted = true;
-
-    try {
-      // redeem a fresh one time anonymous token
-      const { takeResumeRedemption } = await import('../signals/resume-tokens');
-      const resumeRedemption = await takeResumeRedemption();
-
-      if (!resumeRedemption) {
-        this.tokenValidationAttempted = false;
-        return;
-      }
-
-      if (!this.isPQSessionEstablished() && this.lifecycleState === 'connected') {
-        try {
-          await this.performHandshake(false);
-        } catch {
-        }
-      }
-
-      await this.sendSecureControlMessage({
-        type: SignalType.TOKEN_VALIDATION,
-        resumeRedemption,
-        ...requestExtras
-      });
-    } catch (_err) {
-      this.tokenValidationAttempted = false;
-      console.warn('[WebSocket] Token validation send failed', {
-        source: _source,
-        error: _err instanceof Error ? _err.message : String(_err)
-      });
-    }
-  }
-
   /**
    * Switch to unlinked mode
    */
-  async switchToUnlinkedMode(): Promise<void> {
-    this.isInUnlinkedMode = true;
+  async switchToUnlinkedMode(abortSignal?: AbortSignal): Promise<ResumeAuthorizationResponse> {
+    throwIfOperationAborted(abortSignal);
+    if (this.serverEntryPromptPending) {
+      throw operationAbortError('Server entry resolution is pending');
+    }
+
+    while (this.privacyBoundaryTransition) {
+      const active = this.privacyBoundaryTransition;
+      try {
+        await active.promise;
+      } catch (error) {
+        if (active.targetMode === 'unlinked') throw error;
+      }
+      throwIfOperationAborted(abortSignal);
+      if (this.serverEntryPromptPending) {
+        throw operationAbortError('Server entry resolution is pending');
+      }
+      if (
+        active.targetMode === 'unlinked' &&
+        this.lifecycleState === 'connected' &&
+        this.isInUnlinkedMode &&
+        this.unlinkedSessionReady
+      ) {
+        const response = this.unlinkedAuthorizationResponse;
+        if (!response || !response.valid || response.serverEntryRequired) {
+          throw new Error('Verified anonymous authorization receipt unavailable');
+        }
+        return response;
+      }
+    }
 
     if (this.lifecycleState === 'connected' && this.unlinkedSessionReady) {
-      return;
+      throwIfOperationAborted(abortSignal);
+      if (this.serverEntryPromptPending) {
+        throw operationAbortError('Server entry resolution is pending');
+      }
+      const response = this.unlinkedAuthorizationResponse;
+      if (!response || !response.valid || response.serverEntryRequired) {
+        throw new Error('Verified anonymous authorization receipt unavailable');
+      }
+      return response;
+    }
+
+    const operation = this.isInUnlinkedMode
+      ? this.resumeExistingUnlinkedMode(abortSignal)
+      : this.performSwitchToUnlinkedMode(abortSignal);
+    const transition: PrivacyBoundaryTransition = {
+      targetMode: 'unlinked',
+      promise: operation
+    };
+    this.privacyBoundaryTransition = transition;
+    try {
+      return await operation;
+    } finally {
+      if (this.privacyBoundaryTransition === transition) {
+        this.privacyBoundaryTransition = null;
+      }
+    }
+  }
+
+  private async resumeExistingUnlinkedMode(
+    abortSignal?: AbortSignal
+  ): Promise<ResumeAuthorizationResponse> {
+    await this.connectTransport({ autoReconnectOnFailure: false });
+    throwIfOperationAborted(abortSignal);
+
+    if (this.unlinkedAuthorizationBlocked && this.unlinkedAuthorizationResponse) {
+      throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
+    }
+    if (!this.unlinkedSessionReady && this.lifecycleState === 'connected') {
+      await this.ensureUnlinkedDeliveryReady();
+      throwIfOperationAborted(abortSignal);
+    }
+    if (!this.unlinkedSessionReady) {
+      if (this.unlinkedAuthorizationResponse) {
+        throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
+      }
+      throw new Error('Unlinked session not ready after reconnect');
+    }
+    const response = this.unlinkedAuthorizationResponse;
+    if (!response || !response.valid || response.serverEntryRequired) {
+      throw new Error('Verified anonymous authorization receipt unavailable');
+    }
+    return response;
+  }
+
+  private async performSwitchToUnlinkedMode(
+    abortSignal?: AbortSignal
+  ): Promise<ResumeAuthorizationResponse> {
+    if (this.serverEntryPromptPending) {
+      throw operationAbortError('Server entry resolution is pending');
     }
 
     // Disconnect with reset
     await this.close();
+    throwIfOperationAborted(abortSignal);
+    if (this.serverEntryPromptPending) {
+      throw operationAbortError('Server entry resolution is pending');
+    }
 
-    const jitter = 500 + Math.random() * 1500;
-    await new Promise(resolve => setTimeout(resolve, jitter));
+    const jitter = secureRandomIntInclusive(500, 2000);
+    await waitForAbortableDelay(jitter, abortSignal);
+    if (this.serverEntryPromptPending) {
+      throw operationAbortError('Server entry resolution is pending');
+    }
 
-    // Reconnect
-    await this.connect();
+    this.isInUnlinkedMode = true;
+    await websocket.rotateSocksIdentity();
+    throwIfOperationAborted(abortSignal);
+    if (this.serverEntryPromptPending) {
+      this.isInUnlinkedMode = false;
+      throw operationAbortError('Server entry resolution is pending');
+    }
+    await this.connectTransport({ autoReconnectOnFailure: false });
+    throwIfOperationAborted(abortSignal);
     if (!this.unlinkedSessionReady) {
+      if (this.unlinkedAuthorizationResponse) {
+        throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
+      }
       throw new Error('Unlinked session not ready after switch');
     }
+    const response = this.unlinkedAuthorizationResponse;
+    if (!response || !response.valid || response.serverEntryRequired) {
+      throw new Error('Verified anonymous authorization receipt unavailable');
+    }
+    return response;
+  }
+
+  async switchToLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
+    throwIfOperationAborted(abortSignal);
+
+    while (this.privacyBoundaryTransition) {
+      const active = this.privacyBoundaryTransition;
+      try {
+        await active.promise;
+      } catch (error) {
+        if (active.targetMode === 'linked') throw error;
+      }
+      throwIfOperationAborted(abortSignal);
+      if (
+        active.targetMode === 'linked' &&
+        this.lifecycleState === 'connected' &&
+        !this.isInUnlinkedMode
+      ) {
+        return;
+      }
+    }
+
+    const operation = this.performSwitchToLinkedAuthenticationMode(abortSignal);
+    const transition: PrivacyBoundaryTransition = {
+      targetMode: 'linked',
+      promise: operation
+    };
+    this.privacyBoundaryTransition = transition;
+    try {
+      await operation;
+    } finally {
+      if (this.privacyBoundaryTransition === transition) {
+        this.privacyBoundaryTransition = null;
+      }
+    }
+  }
+
+  async ensureLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
+    throwIfOperationAborted(abortSignal);
+    const transition = this.privacyBoundaryTransition;
+    if (transition) {
+      try {
+        await transition.promise;
+      } catch (error) {
+        if (transition.targetMode === 'linked') throw error;
+      }
+      throwIfOperationAborted(abortSignal);
+    }
+    if (this.lifecycleState === 'connected' && !this.isInUnlinkedMode) {
+      return;
+    }
+    await this.switchToLinkedAuthenticationMode(abortSignal);
+  }
+
+  private async performSwitchToLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
+    await this.close();
+    throwIfOperationAborted(abortSignal);
+    this.isInUnlinkedMode = false;
+    const jitter = secureRandomIntInclusive(500, 2000);
+    await waitForAbortableDelay(jitter, abortSignal);
+    
+    await websocket.rotateSocksIdentity();
+    await this.connectTransport({ autoReconnectOnFailure: false });
+    throwIfOperationAborted(abortSignal);
+  }
+
+  resetConnectionPrivacyMode(): void {
+    if (this.lifecycleState !== 'idle' && this.lifecycleState !== 'disconnected') {
+      throw new Error('Connection privacy mode can only reset while disconnected');
+    }
+    this.isInUnlinkedMode = false;
+    this.unlinkedAuthorizationBlocked = false;
   }
 
   /**
    * Start the server gatekeeper flow to get entry tokens
    */
-  async startServerGatekeeperFlow(password: string, onProgress?: (status: string) => void): Promise<boolean> {
+  async startServerGatekeeperFlow(
+    password: string,
+    gatekeeperRequestId: string,
+    onProgress?: (status: string) => void,
+    abortSignal?: AbortSignal
+  ): Promise<boolean> {
+    if (this.isInUnlinkedMode) {
+      throw new Error('Server-password authentication requires a linked socket');
+    }
     if (this.isGatekeeperFlowActive) {
       console.warn('[WebSocket] Gatekeeper flow already active, ignoring request');
       return false;
     }
     this.isGatekeeperFlowActive = true;
+    let operationGatekeeper: GatekeeperClient | null = null;
+    let gatekeeperAuthChannelBinding: Uint8Array | null = null;
+    const connectionToken = this.nativeConnectionToken;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(gatekeeperRequestId)) {
+      this.isGatekeeperFlowActive = false;
+      throw new Error('Invalid server entry request identifier');
+    }
+
+    const abortError = () => {
+      const error = new Error('Server entry operation was cancelled');
+      error.name = 'AbortError';
+      return error;
+    };
+    const throwIfAborted = () => {
+      if (
+        abortSignal?.aborted ||
+        !isNativeWsConnectionToken(connectionToken) ||
+        this.nativeConnectionToken !== connectionToken
+      ) throw abortError();
+    };
 
     try {
+      throwIfAborted();
       if (onProgress) onProgress("Initializing gatekeeper...");
       const gk = await this.getGatekeeper();
+      operationGatekeeper = gk;
+      throwIfAborted();
       if (onProgress) onProgress("Preparing entry request...");
       const request = await gk.startEntryRequest(password);
+      throwIfAborted();
 
       const challengeTimeoutMs = this.torIntegration.getAdaptedTimeout(10000);
-      const responsePromise = new Promise<any>((resolve, reject) => {
+      const waitForChallenge = (): { promise: Promise<any>; cancel: () => void } => {
+        let cancel = () => {};
+        const promise = new Promise<any>((resolve, reject) => {
         let timeout: ReturnType<typeof setTimeout>;
         let settled = false;
+        let unregisterConnectionCancel = () => {};
 
         const cleanup = () => {
           clearTimeout(timeout);
           this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_CHALLENGE, onChallenge);
           this.messageHandler.unregisterHandler(SignalType.AUTH_ERROR, onGatekeeperError);
-          if (typeof window !== 'undefined') {
-            window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-            window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-          }
+          abortSignal?.removeEventListener('abort', onAbort);
+          unregisterConnectionCancel();
         };
 
         const onGatekeeperError = async (msg: any) => {
           if (settled) return;
+          if (msg?.requestId !== gatekeeperRequestId) return;
           settled = true;
           console.warn('[GK-FLOW] Error received during challenge wait:', msg.message || msg.code);
           cleanup();
@@ -1636,73 +2539,127 @@ export class WebSocketConnection {
 
         const onChallenge = async (msg: any) => {
           if (settled) return;
+          if (msg?.requestId !== gatekeeperRequestId) return;
           settled = true;
           cleanup();
           resolve(msg);
         };
 
-        const onGatekeeperEvent = (ev: Event) => {
-          const detail = (ev as CustomEvent).detail;
-          if (detail?.type === SignalType.SERVER_ENTRY_CHALLENGE) {
-            void onChallenge(detail);
-          } else if (detail?.type === SignalType.AUTH_ERROR || detail?.type === SignalType.ERROR) {
-            void onGatekeeperError(detail);
-          }
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(abortError());
+        };
+
+        cancel = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(abortError());
         };
 
         timeout = setTimeout(() => {
           if (settled) return;
           settled = true;
-          this.logGatekeeperDebug('challenge-timeout-state', {
-            timeoutMs: challengeTimeoutMs
-          });
           cleanup();
           reject(new Error('Gatekeeper challenge timeout'));
         }, challengeTimeoutMs);
 
         this.messageHandler.registerHandler(SignalType.AUTH_ERROR, onGatekeeperError);
         this.messageHandler.registerHandler(SignalType.SERVER_ENTRY_CHALLENGE, onChallenge);
-        if (typeof window !== 'undefined') {
-          window.addEventListener(EventType.EDGE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-          window.addEventListener(EventType.SECURE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-        }
-        this.logGatekeeperDebug('challenge-wait-registered', {
-          timeoutMs: challengeTimeoutMs
+        unregisterConnectionCancel = this.registerConnectionWaiterCancel(onAbort);
+        abortSignal?.addEventListener('abort', onAbort, { once: true });
+        if (abortSignal?.aborted) onAbort();
         });
-      });
+        return { promise, cancel };
+      };
 
+      let challenge: any = null;
+      let preflightPowSolution: string | undefined;
+      for (let round = 0; round < 3; round += 1) {
+        const responseWaiter = waitForChallenge();
+        let roundAuthChannelBinding: string | null = null;
+        try {
+          roundAuthChannelBinding = await this.sendSecureControlMessage({
+            ...request,
+            requestId: gatekeeperRequestId,
+            preflightPowSolution
+          }, {
+            authBindingRequestId: gatekeeperRequestId,
+            failIfQueued: true,
+            signal: abortSignal
+          });
+        } catch (error) {
+          responseWaiter.cancel();
+          await responseWaiter.promise.catch(() => { });
+          throw error;
+        }
+        const response = await responseWaiter.promise;
+        throwIfAborted();
+        if (!response?.preflightRequired) {
+          if (!roundAuthChannelBinding) {
+            throw new Error('Server entry channel binding was not transmitted');
+          }
+          gatekeeperAuthChannelBinding?.fill(0);
+          gatekeeperAuthChannelBinding = decodeServerResponseBase64(roundAuthChannelBinding, 64);
+          challenge = response;
+          break;
+        }
+        if (onProgress) onProgress("Securing entry request...");
+        preflightPowSolution = await solvePowChallenge(response.powChallenge, abortSignal);
+        throwIfAborted();
+      }
+      if (!challenge) throw new Error('Gatekeeper preflight could not be completed');
+      if (!gatekeeperAuthChannelBinding) {
+        throw new Error('Server entry channel binding is unavailable');
+      }
       if (onProgress) onProgress("Verifying challenge...");
-      await this.sendSecureControlMessage(request);
-      const challenge = await responsePromise;
 
       if (onProgress) onProgress("Requesting tokens...");
-      // Prepare issuance
-      const issuanceRequest = await gk.prepareTokenIssuance(password, {
-        evaluatedElement: Base64.base64ToUint8Array(challenge.evaluatedElement),
-        serverNonce: Base64.base64ToUint8Array(challenge.serverNonce),
-        envelope: Base64.base64ToUint8Array(challenge.envelope),
-        maskedResponse: Base64.base64ToUint8Array(challenge.maskedResponse),
-        salt: challenge.salt ? Base64.base64ToUint8Array(challenge.salt) : undefined
-      });
-      console.log('[GK-FLOW] Step 3 complete: token issuance prepared (password correct)');
-
+      let challengeEvaluated: Uint8Array | null = null;
+      let challengeNonce: Uint8Array | null = null;
+      let challengeEnvelope: Uint8Array | null = null;
+      let challengeSalt: Uint8Array | null = null;
+      let issuanceRequest: Record<string, any>;
+      try {
+        challengeEvaluated = decodeServerResponseBase64(challenge.evaluatedElement, 32);
+        challengeNonce = decodeServerResponseBase64(challenge.serverNonce, 32);
+        challengeEnvelope = decodeServerResponseBase64(challenge.envelope, 72);
+        challengeSalt = decodeServerResponseBase64(challenge.salt, 32);
+        issuanceRequest = await gk.prepareTokenIssuance({
+          evaluatedElement: challengeEvaluated,
+          serverNonce: challengeNonce,
+          envelope: challengeEnvelope,
+          salt: challengeSalt,
+          powChallenge: challenge.powChallenge,
+          authChannelBinding: gatekeeperAuthChannelBinding
+        }, abortSignal);
+        throwIfAborted();
+      } finally {
+        challengeEvaluated?.fill(0);
+        challengeNonce?.fill(0);
+        challengeEnvelope?.fill(0);
+        challengeSalt?.fill(0);
+      }
       const issuanceTimeoutMs = this.torIntegration.getAdaptedTimeout(15000);
+      let cancelIssuanceWait = () => {};
       const issuancePromise = new Promise<any>((resolve, reject) => {
         let timeout: ReturnType<typeof setTimeout>;
         let settled = false;
+        let unregisterConnectionCancel = () => {};
 
         const cleanup = () => {
           clearTimeout(timeout);
           this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE, onIssuance);
           this.messageHandler.unregisterHandler(SignalType.AUTH_ERROR, onGatekeeperError);
-          if (typeof window !== 'undefined') {
-            window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-            window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-          }
+          abortSignal?.removeEventListener('abort', onAbort);
+          unregisterConnectionCancel();
         };
 
         const onGatekeeperError = async (msg: any) => {
           if (settled) return;
+          if (msg?.requestId !== gatekeeperRequestId) return;
           settled = true;
           console.warn('[GK-FLOW] Error received during issuance wait:', msg.message || msg.code);
           cleanup();
@@ -1711,78 +2668,119 @@ export class WebSocketConnection {
 
         const onIssuance = async (msg: any) => {
           if (settled) return;
+          if (msg?.requestId !== gatekeeperRequestId) return;
           settled = true;
-          console.log('[GK-FLOW] Step 4: SERVER_ENTRY_TOKEN_ISSUANCE received');
           cleanup();
           resolve(msg);
         };
 
-        const onGatekeeperEvent = (ev: Event) => {
-          const detail = (ev as CustomEvent).detail;
-          if (detail?.type === SignalType.SERVER_ENTRY_TOKEN_ISSUANCE) {
-            void onIssuance(detail);
-          } else if (detail?.type === SignalType.AUTH_ERROR || detail?.type === SignalType.ERROR) {
-            void onGatekeeperError(detail);
-          }
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(abortError());
+        };
+
+        cancelIssuanceWait = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(abortError());
         };
 
         timeout = setTimeout(() => {
           if (settled) return;
           settled = true;
           console.error('[GK-FLOW] no issuance received before timeout');
-          this.logGatekeeperDebug('issuance-timeout-state', {
-            timeoutMs: issuanceTimeoutMs
-          });
           cleanup();
           reject(new Error('Token issuance timeout'));
         }, issuanceTimeoutMs);
 
         this.messageHandler.registerHandler(SignalType.AUTH_ERROR, onGatekeeperError);
         this.messageHandler.registerHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE, onIssuance);
-        if (typeof window !== 'undefined') {
-          window.addEventListener(EventType.EDGE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-          window.addEventListener(EventType.SECURE_SERVER_MESSAGE, onGatekeeperEvent as EventListener);
-        }
-        this.logGatekeeperDebug('issuance-wait-registered', {
-          timeoutMs: issuanceTimeoutMs
-        });
+        unregisterConnectionCancel = this.registerConnectionWaiterCancel(onAbort);
+        abortSignal?.addEventListener('abort', onAbort, { once: true });
+        if (abortSignal?.aborted) onAbort();
       });
 
       if (onProgress) onProgress("Issuing entry tokens...");
-      await this.sendSecureControlMessage(issuanceRequest);
+      try {
+        await this.sendSecureControlMessage({
+          ...issuanceRequest,
+          requestId: gatekeeperRequestId
+        }, { failIfQueued: true, signal: abortSignal });
+      } catch (error) {
+        cancelIssuanceWait();
+        await issuancePromise.catch(() => { });
+        throw error;
+      }
       const tokenBatch = await issuancePromise;
+      throwIfAborted();
 
       if (onProgress) onProgress("Finalizing entry...");
       // Step 3: Finalize
-      await gk.finalizeEntry(
-        tokenBatch.signedBlindedTokens.map((t: string) => Base64.base64ToUint8Array(t)),
-        Base64.base64ToUint8Array(tokenBatch.proof),
-        Base64.base64ToUint8Array(tokenBatch.publicKey)
-      );
-      console.log('[GK-FLOW] Step 5: Tokens finalized, redeeming...');
-
+      let signedBlindedTokens: Uint8Array[] = [];
+      let issuanceProof: Uint8Array | null = null;
+      let issuerPublicKey: Uint8Array | null = null;
+      try {
+        if (!Array.isArray(tokenBatch.signedBlindedTokens) || tokenBatch.signedBlindedTokens.length !== 1000) {
+          throw new Error('Invalid server-entry issuance batch size');
+        }
+        signedBlindedTokens = decodeCanonicalBase64List(tokenBatch.signedBlindedTokens, 32, 1000);
+        issuanceProof = decodeServerResponseBase64(tokenBatch.proof, 64);
+        issuerPublicKey = decodeServerResponseBase64(tokenBatch.publicKey, 32);
+        if (!Number.isSafeInteger(tokenBatch.issuerEpoch)) {
+          throw new Error('Invalid server-entry token issuer epoch');
+        }
+        await gk.finalizeEntry(
+          signedBlindedTokens,
+          issuanceProof,
+          issuerPublicKey,
+          tokenBatch.issuerEpoch
+        );
+        throwIfAborted();
+      } finally {
+        for (const token of signedBlindedTokens) token.fill(0);
+        issuanceProof?.fill(0);
+        issuerPublicKey?.fill(0);
+      }
       // Auto-redeem to fully establish connection
       const redemption = await gk.getRedemptionPayload();
-      if (redemption) {
-        await this.sendSecureControlMessage(redemption);
-        const grantResult = await this.waitForServerEntryGrant(this.torIntegration.getAdaptedTimeout(10000));
-        if (grantResult !== 'granted') {
-          console.error('[GK-FLOW] server entry grant not received', { grantResult });
-          // Burn only on an explicit rejection; a transient timeout keeps the
-          // freshly-issued token for reuse instead of leaking it as stuck-pending.
-          try {
-            if (grantResult === 'rejected') await gk.commitPendingTokenUsage();
-            else await gk.releasePendingTokenUsage();
-          } catch { }
-          return false;
-        }
-        await gk.commitPendingTokenUsage();
-        this.serverAuthGranted = true;
-        window.dispatchEvent(new CustomEvent(EventType.SERVER_ENTRY_GRANTED));
+      throwIfAborted();
+      if (!redemption) {
+        throw new Error('Server entry token issuance produced no redeemable credential');
       }
+
+      const redemptionRequestId = crypto.randomUUID();
+      const grantWaiter = this.createServerEntryGrantWaiter(
+        this.torIntegration.getAdaptedTimeout(SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS),
+        abortSignal,
+        redemptionRequestId
+      );
+      try {
+        await this.sendSecureControlMessage({
+          ...redemption,
+          requestId: redemptionRequestId
+        }, { failIfQueued: true, signal: abortSignal });
+      } catch (error) {
+        grantWaiter.cancel();
+        try { await gk.commitPendingTokenUsage(); } catch { }
+        throw error;
+      }
+      const grantResult = await grantWaiter.promise;
+      throwIfAborted();
+      if (grantResult !== 'granted') {
+        console.error('[GK-FLOW] server entry grant not received', { grantResult });
+        try { await gk.commitPendingTokenUsage(); } catch { }
+        return false;
+      }
+      await gk.commitPendingTokenUsage();
+      this.serverAuthGranted = true;
+      window.dispatchEvent(new CustomEvent(EventType.SERVER_ENTRY_GRANTED));
 
       return true;
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error;
       console.error('[GK-FLOW] FLOW FAILED at:', error);
       const message = error instanceof Error ? error.message : String(error);
       if (/invalid server password|incorrect password|failed to derive server entry proof/i.test(message)) {
@@ -1790,53 +2788,274 @@ export class WebSocketConnection {
       }
       throw error;
     } finally {
+      if (operationGatekeeper) {
+        try { await operationGatekeeper.cancelPendingEntry(); } catch { }
+      }
+      gatekeeperAuthChannelBinding?.fill(0);
       this.isGatekeeperFlowActive = false;
     }
   }
 
-  private waitForServerEntryGrant(timeoutMs: number = 5000): Promise<'granted' | 'rejected' | 'timeout'> {
-    return new Promise<'granted' | 'rejected' | 'timeout'>((resolve) => {
+  // Replace exactly the account credential consumed by this native connection.
+  async replaceConsumedAccountAuthorizationToken(): Promise<void> {
+    if (
+      !tokenVault.isVaultUnlocked() ||
+      !this.isInUnlinkedMode ||
+      !this.unlinkedSessionReady ||
+      !this.unlinkedAccountAuthorizationReady ||
+      this.lifecycleState !== 'connected'
+    ) return;
+
+    const connectionToken = this.nativeConnectionToken;
+    const operationGeneration = this.connectionOperationGeneration;
+    if (
+      !isNativeWsConnectionToken(connectionToken) ||
+      this.accountAuthReplacementConnectionToken === connectionToken
+    ) return;
+
+    this.accountAuthReplacementConnectionToken = connectionToken;
+    const assertConnectionCurrent = () => {
+      if (
+        this.nativeConnectionToken !== connectionToken ||
+        this.connectionOperationGeneration !== operationGeneration ||
+        this.lifecycleState !== 'connected' ||
+        !this.unlinkedSessionReady
+      ) {
+        throw operationAbortError();
+      }
+    };
+    await this.issueAccountAuthorizationReplacement(assertConnectionCurrent);
+  }
+
+  private async issueAccountAuthorizationReplacement(
+    assertConnectionCurrent: () => void
+  ): Promise<void> {
+    const requestId = crypto.randomUUID();
+    let cancelResponseWait = () => {};
+    let refreshPrepared = false;
+    let finalized = false;
+    try {
+      const request = await tokenVault.prepareAuthorizedRefresh(ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE);
+      refreshPrepared = true;
+      assertConnectionCurrent();
+
+      const timeoutMs = this.torIntegration.getAdaptedTimeout(
+        AUTHORIZED_TOKEN_REFRESH_BASE_TIMEOUT_MS
+      );
+      const responsePromise = new Promise<any>((resolve, reject) => {
+        let settled = false;
+        let unregisterConnectionCancel = () => {};
+        const cleanup = () => {
+          clearTimeout(timeout);
+          this.messageHandler.unregisterHandler(
+            SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE,
+            onResponse
+          );
+          this.messageHandler.unregisterHandler(SignalType.AUTH_ERROR, onError);
+          unregisterConnectionCancel();
+        };
+        const finish = (error: Error | null, value?: any) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (error) reject(error);
+          else resolve(value);
+        };
+        const onResponse = async (message: any) => {
+          if (message?.requestId !== requestId) return;
+          finish(null, message);
+        };
+        const onError = async (message: any) => {
+          if (message?.requestId !== requestId) return;
+          finish(new Error(message?.message || 'Account-auth refresh rejected'));
+        };
+        const timeout = setTimeout(
+          () => finish(new Error('Account-auth refresh timeout')),
+          timeoutMs
+        );
+        cancelResponseWait = () => finish(operationAbortError());
+        this.messageHandler.registerHandler(
+          SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE,
+          onResponse
+        );
+        this.messageHandler.registerHandler(SignalType.AUTH_ERROR, onError);
+        unregisterConnectionCancel = this.registerConnectionWaiterCancel(
+          cancelResponseWait
+        );
+      });
+
+      try {
+        await this.sendSecureControlMessage({
+          type: SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
+          blindedTokens: request.blindedTokens,
+          tokenEpoch: request.tokenEpoch,
+          requestId
+        }, {
+          bypassStateCheck: true,
+          failIfQueued: true
+        });
+      } catch (error) {
+        cancelResponseWait();
+        await responsePromise.catch(() => { });
+        throw error;
+      }
+
+      const response = await responsePromise;
+      assertConnectionCurrent();
+      if (
+        !isPlainObject(response) ||
+        hasPrototypePollutionKeys(response) ||
+        !hasExactKeys(response, [
+          'issuerEpoch',
+          'proof',
+          'publicKey',
+          'requestId',
+          'signedBlindedTokens',
+          'type'
+        ]) ||
+        response.type !== SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE ||
+        response.requestId !== requestId ||
+        !Array.isArray(response.signedBlindedTokens) ||
+        response.signedBlindedTokens.length !== ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE ||
+        !Number.isSafeInteger(response.issuerEpoch)
+      ) {
+        throw new Error('Invalid account-auth refresh response');
+      }
+
+      let signedBlindedTokens: Uint8Array[] = [];
+      let issuanceProof: Uint8Array | null = null;
+      let issuerPublicKey: Uint8Array | null = null;
+      try {
+        signedBlindedTokens = decodeCanonicalBase64List(
+          response.signedBlindedTokens,
+          32,
+          ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE
+        );
+        issuanceProof = decodeServerResponseBase64(response.proof, 64);
+        issuerPublicKey = decodeServerResponseBase64(response.publicKey, 32);
+        await tokenVault.finalizeAuthorizedRefresh(
+          signedBlindedTokens,
+          issuanceProof,
+          issuerPublicKey,
+          Number(response.issuerEpoch)
+        );
+        finalized = true;
+        assertConnectionCurrent();
+        const account = this._username;
+        if (typeof account !== 'string' || !account) {
+          throw new Error('Account identity unavailable for resume-token replacement');
+        }
+        await replenishResumePool(account);
+        assertConnectionCurrent();
+      } finally {
+        for (const token of signedBlindedTokens) token.fill(0);
+        issuanceProof?.fill(0);
+        issuerPublicKey?.fill(0);
+      }
+    } catch (error) {
+      console.warn('[WebSocket] Account-auth credential replacement failed', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      cancelResponseWait();
+      if (refreshPrepared && !finalized) {
+        try { await tokenVault.discardPendingTokens(); } catch { }
+      }
+    }
+  }
+
+  private createServerEntryGrantWaiter(
+    timeoutMs: number = 5000,
+    abortSignal?: AbortSignal,
+    requestId?: string
+  ): {
+    promise: Promise<'granted' | 'rejected' | 'timeout' | 'aborted'>;
+    cancel: () => void;
+  } {
+    const connectionToken = this.nativeConnectionToken;
+    const isCurrent = () =>
+      isNativeWsConnectionToken(connectionToken) && this.nativeConnectionToken === connectionToken;
+    let cancel = () => {};
+    const promise = new Promise<'granted' | 'rejected' | 'timeout' | 'aborted'>((resolve) => {
+      let settled = false;
+      let unregisterConnectionCancel = () => {};
       const cleanup = () => {
         clearTimeout(timeout);
         window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+        abortSignal?.removeEventListener('abort', onAbort);
+        unregisterConnectionCancel();
       };
 
-      const timeout = setTimeout(() => {
+      const settle = (result: 'granted' | 'rejected' | 'timeout' | 'aborted') => {
+        if (settled) return;
+        settled = true;
         cleanup();
-        resolve('timeout');
+        resolve(result);
+      };
+
+      cancel = () => settle('timeout');
+
+      const timeout = setTimeout(() => {
+        settle('timeout');
       }, timeoutMs);
 
       const handler = (ev: Event) => {
+        if (!isCurrent()) {
+          settle('aborted');
+          return;
+        }
         const detail = (ev as CustomEvent).detail;
-        if (detail?.type === 'ok') {
-          cleanup();
-          resolve('granted');
-        } else if (detail?.type === 'auth-error' || detail?.type === 'error') {
+        if (requestId && detail?.requestId !== requestId) return;
+        if (detail?.type === SignalType.OK) {
+          settle('granted');
+        } else if (detail?.type === SignalType.AUTH_ERROR || detail?.type === SignalType.ERROR) {
           console.warn('[WebSocket] Server entry grant rejected:', detail.message || detail.code || 'unknown');
-          cleanup();
-          resolve('rejected');
+          settle('rejected');
         }
       };
 
+      const onAbort = () => settle('aborted');
+
       window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+      unregisterConnectionCancel = this.registerConnectionWaiterCancel(() => settle('aborted'));
+      abortSignal?.addEventListener('abort', onAbort, { once: true });
+      if (abortSignal?.aborted || !isCurrent()) onAbort();
     });
+    return { promise, cancel };
   }
 
   // Close connection
   async close(options: { killSession?: boolean } = {}): Promise<void> {
     this.isManualClose = true;
+    this.connectionOperationGeneration += 1;
+    this.timestampRecoveryGeneration += 1;
+    this.timestampRecoveryInFlight = null;
+    this.lastTimestampRecoveryAt = 0;
     this.lifecycleState = 'idle';
+    const connectionToken = this.nativeConnectionToken;
+    if (connectionToken !== null) {
+      this.retiredNativeConnectionToken = Math.max(this.retiredNativeConnectionToken, connectionToken);
+    }
+    this.nativeConnectionToken = null;
+    this.clearCurrentConnectionClock();
+    this.invalidateInboundMessages();
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
-    this.messageHandler.clearHandlers();
+    if (options.killSession) {
+      this.messageHandler.clearHandlers();
+      this.sessionErrorHandlersRegistered = false;
+      this.hasOpenedTransport = false;
+      this.transportEventReceived = false;
+      this._username = undefined;
+      this.lastAuthUsername = undefined;
+    }
     this.globalRateLimitUntil = 0;
     this.queue.clear();
     
     if (options.killSession) {
       this.resetSessionKeys(false);
-      this.encryption.clearReplayCache();
     } else {
       this.resetSessionKeys(true);
     }
@@ -1844,15 +3063,9 @@ export class WebSocketConnection {
     this.heartbeat.stop();
     this.torIntegration.cleanup();
     this.rateLimiter.reset();
-    this.connectionStateCallbacks.clear();
     this.handshake.reset();
     try {
-      const { getBlindRoutingClient } = await import('../transport/blind-routing-client');
-      getBlindRoutingClient(this.lastAuthUsername).stopAutomaticRouteRotation();
-    } catch { }
-
-    try {
-      await websocket.disconnect().catch(() => { });
+      await websocket.disconnect(connectionToken ?? undefined).catch(() => { });
     } catch { }
   }
 
@@ -1865,13 +3078,77 @@ export class WebSocketConnection {
   // Check if PQ session established
   isPQSessionEstablished(): boolean { return !!this.sessionKeyMaterial; }
 
+  getAnonymousHttpServerKeyMaterial(): ServerKeyMaterial | null {
+    const material = this.handshake.getServerKeyMaterial();
+    if (
+      this.lifecycleState !== 'connected' ||
+      !this.sessionKeyMaterial ||
+      !material ||
+      !material.dilithiumPublicKey ||
+      !material.x25519PublicKey ||
+      material.fingerprint !== this.sessionKeyMaterial.fingerprint
+    ) return null;
+
+    return {
+      kyberPublicKey: new Uint8Array(material.kyberPublicKey),
+      dilithiumPublicKey: new Uint8Array(material.dilithiumPublicKey),
+      x25519PublicKey: new Uint8Array(material.x25519PublicKey),
+      fingerprint: material.fingerprint,
+      serverId: material.serverId,
+    };
+  }
+
+  getAuthenticatedServerNow(): number | null {
+    return this.lifecycleState === 'connected' && this.sessionKeyMaterial
+      ? this.getTrustedNow()
+      : null;
+  }
+
+  // Bind caller work to one native socket without exposing account material.
+  captureConnectionPrivacyEpoch(): number | null { return this.nativeConnectionToken; }
+
+  isConnectionPrivacyEpochCurrent(epoch: number | null): boolean {
+    return !this.isManualClose &&
+      isNativeWsConnectionToken(epoch) &&
+      epoch === this.nativeConnectionToken;
+  }
+
+  private isTransientlyUnavailable(): boolean {
+    return (
+      (this.lifecycleState === 'paused' || this.lifecycleState === 'handshaking' || this.lifecycleState === 'connecting') &&
+      isNativeWsConnectionToken(this.nativeConnectionToken)
+    );
+  }
+
+  private async waitForConnectedSettle(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.lifecycleState === 'connected') return true;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.isManualClose || signal?.aborted) return false;
+      if (this.lifecycleState === 'connected') return true;
+      if (!this.isTransientlyUnavailable()) return false;
+      try {
+        await waitForAbortableDelay(50, signal);
+      } catch {
+        return false;
+      }
+    }
+    return this.lifecycleState === 'connected';
+  }
+
   // Wait until the socket is fully connected with an established PQ session
-  async waitUntilReady(timeoutMs: number = 30000): Promise<boolean> {
+  async waitUntilReady(timeoutMs: number = 30000, signal?: AbortSignal): Promise<boolean> {
     const ready = () => this.isConnectedToServer() && this.isPQSessionEstablished();
+    if (signal?.aborted) return false;
     if (ready()) return true;
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      await new Promise(resolve => setTimeout(resolve, 150));
+      try {
+        await waitForAbortableDelay(150, signal);
+      } catch (error) {
+        if (signal?.aborted) return false;
+        throw error;
+      }
       if (ready()) return true;
     }
     return ready();
@@ -1880,77 +3157,92 @@ export class WebSocketConnection {
   // Send secure control message
   async sendSecureControlMessage(
     message: any,
-    options: { bypassStateCheck?: boolean; failIfQueued?: boolean } = {}
-  ): Promise<void> {
-    const controlType = this.getMessageTypeForDebug(message);
-    if (this.isGatekeeperDebugType(controlType)) {
-      this.logGatekeeperDebug('send-secure-control-start', {
-        type: controlType,
-        bypassStateCheck: !!options.bypassStateCheck,
-        failIfQueued: !!options.failIfQueued
-      });
+    options: SecureControlSendOptions = {}
+  ): Promise<string | null> {
+    throwIfOperationAborted(options.signal);
+    const entryContext = this.captureOutboundTransportContext();
+    let messageType = typeof message?.type === 'string' ? message.type : '';
+    if (!messageType && typeof message === 'string') {
+      try {
+        const parsed = JSON.parse(message);
+        messageType = typeof parsed?.type === 'string' ? parsed.type : '';
+      } catch { }
     }
-
+    const failIfQueued = options.failIfQueued === true || NON_QUEUEABLE_CONTROL_TYPES.has(messageType);
     if (!this.isPQSessionEstablished()) {
       if (this.lifecycleState === 'connected' || options.bypassStateCheck) {
         try {
-          if (this.isGatekeeperDebugType(controlType)) {
-            this.logGatekeeperDebug('send-secure-control-performing-handshake', {
-              type: controlType
-            });
-          }
           await this.performHandshake(false);
-        } catch {
-        }
+        } catch { }
+        throwIfOperationAborted(options.signal);
+        this.assertOutboundTransportContextCurrent(entryContext);
       }
       if (this.lifecycleState !== 'connected' && !options.bypassStateCheck) {
-        if (this.isGatekeeperDebugType(controlType)) {
-          this.logGatekeeperDebug('send-secure-control-queued-not-connected', {
-            type: controlType
-          });
-        }
-        if (options.failIfQueued) {
+        if (failIfQueued) {
           throw new Error('WebSocket not connected');
         }
-        this.queue.enqueuePending({ ...this.queue.createEntry(message, Date.now()), highPriority: true });
-        return;
+        if (!this.queue.enqueuePending({ ...this.queue.createEntry(message, Date.now()), highPriority: true })) {
+          throw new Error('WebSocket queue is full');
+        }
+        return null;
       }
       const maxWaitTime = 10000;
       const startTime = Date.now();
       while (!this.isPQSessionEstablished() && (Date.now() - startTime) < maxWaitTime) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await waitForAbortableDelay(100, options.signal);
       }
       if (!this.isPQSessionEstablished()) {
-        if (this.isGatekeeperDebugType(controlType)) {
-          this.logGatekeeperDebug('send-secure-control-queued-no-session', {
-            type: controlType,
-            waitedMs: Date.now() - startTime
-          });
-        }
-        if (options.failIfQueued) {
+        if (failIfQueued) {
           throw new Error('PQ session not established');
         }
-        this.queue.enqueuePending({ ...this.queue.createEntry(message, Date.now() + 500), highPriority: true });
+        if (!this.queue.enqueuePending({ ...this.queue.createEntry(message, Date.now() + 500), highPriority: true })) {
+          throw new Error('WebSocket queue is full');
+        }
         void this.performHandshake(false).catch(() => { });
-        return;
+        return null;
       }
     }
-    if (this.isGatekeeperDebugType(controlType)) {
-      this.logGatekeeperDebug('send-secure-control-dispatching', {
-        type: controlType
-      });
+    throwIfOperationAborted(options.signal);
+    
+    if (
+      this.lifecycleState !== 'connected' &&
+      !options.bypassStateCheck &&
+      this.isTransientlyUnavailable()
+    ) {
+      await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(15000), options.signal);
+      throwIfOperationAborted(options.signal);
     }
-    await this.dispatchPayload(typeof message === 'string' ? message : JSON.stringify(message), !options.failIfQueued, options);
+    const authChannelBinding = await this.dispatchPayload(
+      typeof message === 'string' ? message : JSON.stringify(message),
+      !failIfQueued,
+      options
+    );
+    if (options.authBindingRequestId && typeof authChannelBinding !== 'string') {
+      throw new Error('Authentication request channel binding was not transmitted');
+    }
+    return typeof authChannelBinding === 'string' ? authChannelBinding : null;
   }
 
   // Set server key material
   setServerKeyMaterial(
     hybridKeys: { kyberPublicBase64: string; dilithiumPublicBase64?: string; x25519PublicBase64?: string },
     serverId?: string
-  ): void {
+  ): 'activated' | 'rejected' {
     try {
       if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64 || !hybridKeys?.x25519PublicBase64) {
         throw new Error('Incomplete server key material for authenticated PQ transport');
+      }
+      
+      const pinned = this.getPinnedServerPQKeys();
+      if (!pinned) {
+        return 'rejected';
+      }
+      if (
+        pinned.kyber !== hybridKeys.kyberPublicBase64 ||
+        pinned.dilithium !== hybridKeys.dilithiumPublicBase64 ||
+        pinned.x25519 !== hybridKeys.x25519PublicBase64
+      ) {
+        return 'rejected';
       }
       const kyberPublicKey = PostQuantumUtils.base64ToUint8Array(hybridKeys.kyberPublicBase64);
       const dilithiumPublicKey = PostQuantumUtils.base64ToUint8Array(hybridKeys.dilithiumPublicBase64);
@@ -1963,42 +3255,28 @@ export class WebSocketConnection {
         fingerprint,
         serverId
       });
-    } catch (err) {
-      console.error('[WebSocket] setServerKeyMaterial failed:', err);
+      return 'activated';
+    } catch {
+      console.error('[WebSocket] setServerKeyMaterial failed');
+      return 'rejected';
     }
   }
 
-  // On connection state change
-  onConnectionStateChange(callback: (health: ConnectionHealth) => void): () => void {
-    this.connectionStateCallbacks.add(callback);
-    return () => this.connectionStateCallbacks.delete(callback);
-  }
-
-  // Notify connection state callbacks
-  private notifyConnectionStateCallbacks(): void {
-    const health = this.getConnectionHealth();
-    for (const callback of Array.from(this.connectionStateCallbacks)) {
-      try { callback(health); } catch { }
-    }
-  }
-
-  // Get connection health
-  getConnectionHealth(): ConnectionHealth {
-    const sessionAge = this.sessionKeyMaterial ? Date.now() - this.sessionKeyMaterial.establishedAt : null;
-    return {
-      state: this.lifecycleState as any,
-      isHealthy: this.lifecycleState === 'connected' && this.heartbeat.getMissedHeartbeats() < MAX_MISSED_HEARTBEATS,
-      metrics: { ...this.metrics },
-      queueDepth: this.queue.getQueueLength(),
-      sessionAge,
-      torStatus: { ready: this.torIntegration.isTorReady(), circuitHealth: this.torIntegration.getCircuitHealth() as 'unknown' | 'good' | 'degraded' | 'poor' },
-      lastHeartbeat: this.heartbeat.getLastHeartbeatReceived(),
-      quality: this.heartbeat.assessConnectionQuality(this.lifecycleState)
-    };
+  private getPinnedServerPQKeys(): { kyber: string; dilithium: string; x25519: string } | null {
+    const pinned = PinnedServer.get();
+    return pinned ? {
+      kyber: pinned.kyberPublicBase64,
+      dilithium: pinned.dilithiumPublicBase64,
+      x25519: pinned.x25519PublicBase64
+    } : null;
   }
 
   async decryptIncomingEnvelope(envelope: any): Promise<any | null> { return this.encryption.decryptEnvelope(envelope); }
   async flushPendingQueue(): Promise<void> { return this.queue.flush(); }
+  async reserveServerEntryAuthorization(): Promise<Record<string, any> | null> {
+    const gatekeeper = await this.getGatekeeper();
+    return gatekeeper.reserveRedemptionPayload();
+  }
 }
 
 const websocketClient = new WebSocketConnection();

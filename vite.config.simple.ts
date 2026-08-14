@@ -48,6 +48,8 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
       'lucide-react$': 'lucide-react/dist/esm/icons/index.js',
+      fs: path.resolve(__dirname, './src/lib/cryptography/browser-node-shim.ts'),
+      path: path.resolve(__dirname, './src/lib/cryptography/browser-node-shim.ts'),
     },
   },
   build: {
@@ -58,10 +60,23 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: (id) => {
-          if (id.includes('node_modules')) {
-            return 'vendor';
+          const normalizedId = id.replaceAll('\\', '/');
+          if (!normalizedId.includes('/node_modules/')) {
+            if (normalizedId.includes('/src/lib/cryptography/') || normalizedId.includes('/src/lib/crypto/')) {
+              return 'crypto-core';
+            }
+            if (normalizedId.includes('/src/lib/transport/') || normalizedId.includes('/src/lib/websocket/')) {
+              return 'transport-core';
+            }
+            return undefined;
           }
-          return undefined;
+          if (/\/node_modules\/(react|react-dom|scheduler|react-compiler-runtime)\//.test(normalizedId)) {
+            return 'react-vendor';
+          }
+          if (/\/node_modules\/@noble\//.test(normalizedId)) {
+            return 'noble-vendor';
+          }
+          return 'vendor';
         },
         chunkFileNames: (chunkInfo) => {
           const facadeModuleId = chunkInfo.facadeModuleId 
@@ -76,9 +91,8 @@ export default defineConfig({
     minify: 'terser',
     terserOptions: {
       compress: {
-        // SET FALSE LATER, FOR NOW DEBUG IS ON
         drop_console: false,
-        drop_debugger: true,
+        drop_debugger: false,
       },
       mangle: {
         safari10: true
@@ -89,6 +103,5 @@ export default defineConfig({
     global: 'globalThis',
   },
   optimizeDeps: {
-    exclude: ['electron']
   }
 })

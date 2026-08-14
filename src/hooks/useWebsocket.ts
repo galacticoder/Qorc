@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useCallback } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
 import { SignalType } from "@/lib/types/signal-types";
 import { EventType } from "../lib/types/event-types";
 import websocketClient from "@/lib/websocket/websocket";
@@ -6,7 +6,9 @@ import { WEBSOCKET_RATE_LIMIT_MAX_MESSAGES, WEBSOCKET_RATE_LIMIT_WINDOW_MS } fro
 import { isPlainObject, hasPrototypePollutionKeys } from "@/lib/sanitizers";
 import { BaseMessage, WebSocketMessageSchema, DEFAULT_ALLOWED_TYPES, DEFAULT_ENCRYPTED_TYPES, DEFAULT_SCHEMAS, WebSocketHookOptions } from "@/lib/types/websocket-types";
 
-type MessageHandler = (data: BaseMessage) => Promise<void>;
+type MessageHandler = (data: BaseMessage) => Promise<boolean | void>;
+const ROUTE_QUEUE_MAX_COUNT = 128;
+const ROUTE_QUEUE_MAX_BYTES = 24 * 1024 * 1024;
 
 const sanitizeIncomingMessage = (
   payload: unknown,
@@ -35,6 +37,7 @@ export const useWebSocket = (
   handleServerMessage: MessageHandler,
   handleEncryptedMessage: MessageHandler,
   setLoginError: (error: string) => void,
+  accountIdentity: string,
   options: WebSocketHookOptions = {},
 ) => {
   const { schemas: customSchemas, onAudit } = options;
@@ -49,6 +52,23 @@ export const useWebSocket = (
   }, [customSchemas]);
 
   const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+  const routeQueueRef = useRef<{
+    items: Array<{ detail: unknown; isSecure: boolean; bytes: number; generation: number }>;
+    bytes: number;
+    draining: boolean;
+    generation: number;
+  }>({ items: [], bytes: 0, draining: false, generation: 0 });
+  const routeAccountRef = useRef(accountIdentity);
+
+  useLayoutEffect(() => {
+    if (routeAccountRef.current === accountIdentity) return;
+    routeAccountRef.current = accountIdentity;
+    const queue = routeQueueRef.current;
+    queue.generation += 1;
+    queue.items = [];
+    queue.bytes = 0;
+    rateLimitRef.current = { windowStart: Date.now(), count: 0 };
+  }, [accountIdentity]);
 
   const routeMessage = useMemo(
     () =>
@@ -87,7 +107,6 @@ export const useWebSocket = (
       // Enforce encrypted only mode after PQ session establishment
       const sessionEstablished = websocketClient.isPQSessionEstablished();
       const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
-        data.type === SignalType.SESSION_ESTABLISHED ||
         data.type === SignalType.PQ_HANDSHAKE_ACK;
       const isEncryptedTransport = data.type === SignalType.PQ_ENVELOPE || data.type === SignalType.PQ_HEARTBEAT_PONG;
       const isErrorMessage = data.type === SignalType.ERROR;
@@ -99,13 +118,6 @@ export const useWebSocket = (
         return;
       }
 
-      if (data.type === SignalType.USER_EXISTS_RESPONSE) {
-        try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data })); } catch { }
-      }
-      if (data.type === SignalType.P2P_PEER_CERT) {
-        try { window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: data })); } catch { }
-      }
-
       await routeMessage(data);
     } catch (_error) {
       console.error('[useWebSocket] Message handler error:', _error instanceof Error ? _error.message : 'Unknown error');
@@ -113,7 +125,30 @@ export const useWebSocket = (
     }
   }, [allowedTypes, encryptedTypes, routeMessage, schemas, setLoginError]);
 
+  const handlerRef = useRef(handler);
+  useLayoutEffect(() => {
+    handlerRef.current = handler;
+  }, [handler]);
+
   useEffect(() => {
+    let mounted = true;
+    const drain = async () => {
+      const queue = routeQueueRef.current;
+      if (queue.draining) return;
+      queue.draining = true;
+      try {
+        while (mounted && queue.items.length > 0) {
+          const item = queue.items.shift()!;
+          queue.bytes = Math.max(0, queue.bytes - item.bytes);
+          if (item.generation !== queue.generation) continue;
+          await handlerRef.current(item.detail, item.isSecure);
+        }
+      } finally {
+        queue.draining = false;
+        if (mounted && queue.items.length > 0) void drain();
+      }
+    };
+
     const listener = (evt: Event) => {
       try {
         const detail = (evt as CustomEvent).detail;
@@ -125,11 +160,46 @@ export const useWebSocket = (
           }
         }
 
-        const isSecure = evt.type === EventType.SECURE_SERVER_MESSAGE;
+        const detailType = isPlainObject(detail) && typeof detail.type === 'string'
+          ? detail.type
+          : '';
+        if (
+          detailType === '__ws_connection_opened' ||
+          detailType === '__ws_connection_closed' ||
+          detailType === '__ws_connection_error'
+        ) {
+          const queue = routeQueueRef.current;
+          queue.generation += 1;
+          queue.items = [];
+          queue.bytes = 0;
+          rateLimitRef.current = { windowStart: Date.now(), count: 0 };
+          return;
+        }
 
-        handler(detail, isSecure).catch((error) => {
-          console.error('[useWebSocket] Handler error:', error instanceof Error ? error.message : 'Unknown error');
-        });
+        const isSecure = evt.type === EventType.SECURE_SERVER_MESSAGE;
+        let bytes = 0;
+        try {
+          const serialized = JSON.stringify(detail);
+          if (typeof serialized !== 'string') return;
+          bytes = serialized.length;
+        } catch {
+          return;
+        }
+        const queue = routeQueueRef.current;
+        if (
+          queue.items.length + 1 > ROUTE_QUEUE_MAX_COUNT ||
+          queue.bytes + bytes > ROUTE_QUEUE_MAX_BYTES
+        ) {
+          queue.generation += 1;
+          queue.items = [];
+          queue.bytes = 0;
+          setLoginError('Secure transport overloaded; reconnecting.');
+          websocketClient.terminateCurrentConnection();
+          return;
+        }
+        queue.items.push({ detail, isSecure, bytes, generation: queue.generation });
+        queue.bytes += bytes;
+        void drain();
       } catch (_error) {
         console.error('[useWebSocket] Listener exception:', _error instanceof Error ? _error.message : 'Unknown error');
       }
@@ -138,8 +208,13 @@ export const useWebSocket = (
     window.addEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
     window.addEventListener(EventType.SECURE_SERVER_MESSAGE, listener as EventListener);
     return () => {
+      mounted = false;
+      const queue = routeQueueRef.current;
+      queue.generation += 1;
+      queue.items = [];
+      queue.bytes = 0;
       window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
       window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, listener as EventListener);
     };
-  }, [handler]);
+  }, [setLoginError]);
 };

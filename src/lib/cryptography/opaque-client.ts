@@ -2,96 +2,62 @@
  * OPAQUE Protocol Client
  */
 
-import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
-import { hkdf } from '@noble/hashes/hkdf.js';
-import { blake3 } from '@noble/hashes/blake3.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { randomBytes } from '@noble/hashes/utils.js';
 import { Base64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
 import { computeBlindUserId } from '../utils/auth-utils';
+import { ML_KEM_1024_CIPHERTEXT_BYTES } from '../../../shared/crypto-sizes.js';
+import {
+    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+    PRIVATE_AUTH_OT_RECORD_BYTES
+} from '../../../shared/private-auth-protocol.js';
 
 // OPAQUE configuration
 const OPAQUE_CONFIG = {
-    NONCE_SIZE: 24,
-    AUTH_TAG_SIZE: 16,
-    EXPORT_KEY_SIZE: 32,
-    SESSION_KEY_SIZE: 32,
-    ENVELOPE_NONCE_SIZE: 24,
-    PRIVATE_AUTH_SHARD_SIZE: 2048,
+    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
 };
 
-// Domain separation labels
-const LABELS = {
-    OPRF_INPUT: 'OPAQUE-OPRF-Input-v1',
-    ENVELOPE_KEY: 'OPAQUE-Envelope-Key-v1',
-    EXPORT_KEY: 'OPAQUE-Export-Key-v1',
-    SESSION_KEY: 'OPAQUE-Session-Key-v1',
-    AUTH_KEY: 'OPAQUE-Auth-Key-v1',
-    CLIENT_SECRET: 'OPAQUE-Client-Secret-v1',
-};
+const OT_CIPHERTEXT_BYTES = ML_KEM_1024_CIPHERTEXT_BYTES;
+const OT_MASKED_RECORD_BYTES = PRIVATE_AUTH_OT_RECORD_BYTES;
+
+function base64LengthForBytes(byteLength: number): number {
+    return 4 * Math.ceil(byteLength / 3);
+}
 
 /**
  * OPAQUE Client
- * 
- * Handles password blinding, envelope creation/decryption, and session key derivation
  */
 export class OPAQUEClient {
     private blindingFactor: Uint8Array | null = null;
-    private clientSecretKey: Uint8Array | null = null;
-    private clientPublicKey: Uint8Array | null = null;
+    private otState: { myIndex: number; myPrivKey: Uint8Array; blindingFactor: Uint8Array } | null = null;
+    private generation = 0;
+
+    private wipeState(): void {
+        this.blindingFactor?.fill(0);
+        this.blindingFactor = null;
+        if (this.otState) {
+            this.otState.myPrivKey.fill(0);
+            this.otState.blindingFactor.fill(0);
+            this.otState = null;
+        }
+    }
 
     /**
      * Start registration
      */
     async startRegistration(password: Uint8Array): Promise<{
         blindedElement: Uint8Array;
-        clientPublicKey: Uint8Array;
     }> {
-        try {
-            const result = await PostQuantumWorker.opaqueStartRegistration(password);
-            this.blindingFactor = result.blindingFactor;
-            this.clientSecretKey = result.clientSecretKey;
-            this.clientPublicKey = result.clientPublicKey;
-
-            return {
-                blindedElement: result.blindedElement,
-                clientPublicKey: result.clientPublicKey,
-            };
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker startRegistration failed, falling back to local', err);
-            return this.startRegistrationLocal(password);
+        this.wipeState();
+        const generation = ++this.generation;
+        const result = await PostQuantumWorker.opaqueStartRegistration(password);
+        if (generation !== this.generation) {
+            result.blindingFactor.fill(0);
+            result.blindedElement.fill(0);
+            throw new Error('Registration operation was cancelled');
         }
-    }
-
-    async startRegistrationLocal(password: Uint8Array): Promise<{
-        blindedElement: Uint8Array;
-        clientPublicKey: Uint8Array;
-        blindingFactor: Uint8Array;
-        clientSecretKey: Uint8Array;
-    }> {
-        // Derive OPRF input from password bytes
-        const oprfInput = hkdf(
-            blake3,
-            password,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.OPRF_INPUT),
-            32
-        );
-
-        // Blind the OPRF input
-        const blindResult = oprf.oprf.blind(oprfInput);
-        this.blindingFactor = blindResult.blind;
-
-        // Generate client keypair
-        this.clientSecretKey = randomBytes(32);
-        this.clientPublicKey = blake3(this.clientSecretKey, { dkLen: 32 });
-
+        this.blindingFactor = result.blindingFactor;
         return {
-            blindedElement: blindResult.blinded,
-            clientPublicKey: this.clientPublicKey,
-            blindingFactor: this.blindingFactor,
-            clientSecretKey: this.clientSecretKey
+            blindedElement: result.blindedElement,
         };
     }
 
@@ -102,110 +68,32 @@ export class OPAQUEClient {
         password: Uint8Array,
         serverResponse: {
             evaluatedElement: Uint8Array;
-            serverPublicKey: Uint8Array;
             serverNonce: Uint8Array;
         }
     ): Promise<{
         envelope: Uint8Array;
         exportKey: Uint8Array;
-        maskedResponse: Uint8Array;
+        authPublicKey: Uint8Array;
     }> {
-        if (!this.blindingFactor || !this.clientSecretKey) {
+        const blindingFactor = this.blindingFactor;
+        if (!blindingFactor) {
             throw new Error('Registration not started');
         }
+        this.blindingFactor = null;
+        const generation = this.generation;
 
         try {
-            const result = await PostQuantumWorker.opaqueFinishRegistration(
-                password,
-                this.blindingFactor,
-                this.clientSecretKey,
-                serverResponse
-            );
-
-            this.blindingFactor = null;
+            const result = await PostQuantumWorker.opaqueFinishRegistration(password, blindingFactor, serverResponse);
+            if (generation !== this.generation) {
+                result.envelope.fill(0);
+                result.exportKey.fill(0);
+                result.authPublicKey.fill(0);
+                throw new Error('Registration operation was cancelled');
+            }
             return result;
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker finishRegistration failed, falling back to local', err);
-            return this.finishRegistrationLocal(password, serverResponse);
+        } finally {
+            blindingFactor.fill(0);
         }
-    }
-
-    async finishRegistrationLocal(
-        password: Uint8Array,
-        serverResponse: {
-            evaluatedElement: Uint8Array;
-            serverPublicKey: Uint8Array;
-            serverNonce: Uint8Array;
-        },
-        providedBlindingFactor?: Uint8Array,
-        providedClientSecretKey?: Uint8Array
-    ): Promise<{
-        envelope: Uint8Array;
-        exportKey: Uint8Array;
-        maskedResponse: Uint8Array;
-    }> {
-        const blindingFactor = providedBlindingFactor || this.blindingFactor;
-        const clientSecretKey = providedClientSecretKey || this.clientSecretKey;
-
-        if (!blindingFactor || !clientSecretKey) {
-            throw new Error('Registration not started');
-        }
-
-        // Derive OPRF input from password bytes
-        const oprfInput = hkdf(
-            blake3,
-            password,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.OPRF_INPUT),
-            32
-        );
-
-        // Finalize OPRF
-        const oprfOutput = oprf.oprf.finalize(
-            oprfInput,
-            blindingFactor,
-            serverResponse.evaluatedElement
-        );
-
-        // Derive envelope key from OPRF output
-        const envelopeKey = hkdf(
-            blake3,
-            oprfOutput,
-            serverResponse.serverNonce,
-            new TextEncoder().encode(LABELS.ENVELOPE_KEY),
-            32
-        );
-
-        // Create envelope contents
-        const envelopeContents = new Uint8Array([
-            ...clientSecretKey,
-            ...serverResponse.serverPublicKey,
-        ]);
-
-        // Encrypt envelope
-        const envelopeNonce = randomBytes(OPAQUE_CONFIG.ENVELOPE_NONCE_SIZE);
-        const cipher = xchacha20poly1305(envelopeKey, envelopeNonce);
-        const encryptedEnvelope = cipher.encrypt(envelopeContents);
-
-        const envelope = new Uint8Array([...envelopeNonce, ...encryptedEnvelope]);
-
-        // Derive export key
-        const exportKey = hkdf(
-            blake3,
-            oprfOutput,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.EXPORT_KEY),
-            OPAQUE_CONFIG.EXPORT_KEY_SIZE
-        );
-
-        // Create masked response for server storage
-        const maskedResponse = await this.createMaskedResponse(
-            clientSecretKey,
-            serverResponse.serverPublicKey
-        );
-
-        if (!providedBlindingFactor) this.blindingFactor = null;
-        return { envelope, exportKey, maskedResponse };
     }
 
     /**
@@ -214,39 +102,18 @@ export class OPAQUEClient {
     async startLogin(password: Uint8Array): Promise<{
         blindedElement: Uint8Array;
     }> {
-        try {
-            const result = await PostQuantumWorker.opaqueStartLogin(password);
-            this.blindingFactor = result.blindingFactor;
-
-            return {
-                blindedElement: result.blindedElement,
-            };
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker startLogin failed, falling back to local', err);
-            return this.startLoginLocal(password);
+        this.wipeState();
+        const generation = ++this.generation;
+        const result = await PostQuantumWorker.opaqueStartLogin(password);
+        if (generation !== this.generation) {
+            result.blindingFactor.fill(0);
+            result.blindedElement.fill(0);
+            throw new Error('Login operation was cancelled');
         }
-    }
-
-    async startLoginLocal(password: Uint8Array): Promise<{
-        blindedElement: Uint8Array;
-        blindingFactor: Uint8Array;
-    }> {
-        // Derive OPRF input from password bytes
-        const oprfInput = hkdf(
-            blake3,
-            password,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.OPRF_INPUT),
-            32
-        );
-
-        // Blind the OPRF input
-        const blindResult = oprf.oprf.blind(oprfInput);
-        this.blindingFactor = blindResult.blind;
+        this.blindingFactor = result.blindingFactor;
 
         return {
-            blindedElement: blindResult.blinded,
-            blindingFactor: this.blindingFactor
+            blindedElement: result.blindedElement,
         };
     }
 
@@ -258,203 +125,44 @@ export class OPAQUEClient {
         serverResponse: {
             evaluatedElement: Uint8Array;
             envelope: Uint8Array;
-            maskedResponse: Uint8Array;
             serverNonce: Uint8Array;
-            salt?: Uint8Array;
-        }
+            salt: Uint8Array;
+        },
+        authChannelBinding: Uint8Array
     ): Promise<{
         success: boolean;
-        sessionKey?: Uint8Array;
         exportKey?: Uint8Array;
         authMessage?: Uint8Array;
         error?: string;
     }> {
-        if (!this.blindingFactor) {
+        const blindingFactor = this.blindingFactor;
+        if (!blindingFactor) {
             throw new Error('Login not started');
         }
+        this.blindingFactor = null;
+        const generation = this.generation;
 
         try {
             const result = await PostQuantumWorker.opaqueFinishLogin(
                 password,
-                this.blindingFactor,
-                serverResponse
+                blindingFactor,
+                serverResponse,
+                authChannelBinding
             );
-
-            if (result.success && result.clientSecretKey) {
-                this.clientSecretKey = result.clientSecretKey;
+            if (generation !== this.generation) {
+                result.exportKey?.fill(0);
+                result.authMessage?.fill(0);
+                throw new Error('Login operation was cancelled');
             }
-
-            this.blindingFactor = null;
             return {
                 success: result.success,
-                sessionKey: result.sessionKey,
                 exportKey: result.exportKey,
                 authMessage: result.authMessage,
-                error: (result as any).error
+                error: result.error
             };
-        } catch (error: any) {
-            console.warn('[OPAQUEClient] Worker finishLogin failed, falling back to local', error);
-            try {
-                const localResult = await this.finishLoginLocal(password, serverResponse);
-                this.blindingFactor = null;
-                return {
-                    success: localResult.success,
-                    sessionKey: localResult.sessionKey,
-                    exportKey: localResult.exportKey,
-                    authMessage: localResult.authMessage
-                };
-            } catch (localError: any) {
-                this.blindingFactor = null;
-                return { success: false, error: localError.message || String(localError) };
-            }
+        } finally {
+            blindingFactor.fill(0);
         }
-    }
-
-    async finishLoginLocal(
-        password: Uint8Array,
-        serverResponse: {
-            evaluatedElement: Uint8Array;
-            envelope: Uint8Array;
-            maskedResponse: Uint8Array;
-            serverNonce: Uint8Array;
-            salt?: Uint8Array;
-        },
-        providedBlindingFactor?: Uint8Array
-    ): Promise<{
-        success: boolean;
-        sessionKey?: Uint8Array;
-        exportKey?: Uint8Array;
-        authMessage?: Uint8Array;
-        clientSecretKey?: Uint8Array;
-    }> {
-        const blindingFactor = providedBlindingFactor || this.blindingFactor;
-        if (!blindingFactor) {
-            throw new Error('Login not started');
-        }
-
-        try {
-            // Derive OPRF input from password bytes
-            const oprfInput = hkdf(
-                blake3,
-                password,
-                new Uint8Array(0),
-                new TextEncoder().encode(LABELS.OPRF_INPUT),
-                32
-            );
-
-            // Finalize OPRF
-            const oprfOutput = oprf.oprf.finalize(
-                oprfInput,
-                blindingFactor,
-                serverResponse.evaluatedElement
-            );
-
-            // Derive envelope key
-            const salt = serverResponse.salt;
-            const envelopeKey = hkdf(
-                blake3,
-                oprfOutput,
-                salt,
-                new TextEncoder().encode(LABELS.ENVELOPE_KEY),
-                32
-            );
-
-            // Try to decrypt envelope
-            const envelopeNonce = serverResponse.envelope.slice(0, OPAQUE_CONFIG.ENVELOPE_NONCE_SIZE);
-            const encryptedEnvelope = serverResponse.envelope.slice(OPAQUE_CONFIG.ENVELOPE_NONCE_SIZE);
-
-            const cipher = xchacha20poly1305(envelopeKey, envelopeNonce);
-            const envelopeContents = cipher.decrypt(encryptedEnvelope);
-
-            // Extract credentials
-            const clientSecretKey = envelopeContents.slice(0, 32);
-            if (!providedBlindingFactor) this.clientSecretKey = clientSecretKey;
-            const serverPublicKey = envelopeContents.slice(32, 64);
-
-            // Re-derive maskedResponse to use as shared secret for auth MAC
-            const maskedKey = hkdf(
-                blake3,
-                clientSecretKey,
-                serverPublicKey,
-                new TextEncoder().encode('OPAQUE-MaskedResponse-v1'),
-                32
-            );
-            const recoveredMaskedResponse = blake3(maskedKey, { dkLen: 64 });
-
-            // Derive session key
-            const sessionKey = hkdf(
-                blake3,
-                oprfOutput,
-                serverResponse.serverNonce,
-                new TextEncoder().encode(LABELS.SESSION_KEY),
-                OPAQUE_CONFIG.SESSION_KEY_SIZE
-            );
-
-            // Derive export key
-            const exportKey = hkdf(
-                blake3,
-                oprfOutput,
-                new Uint8Array(0),
-                new TextEncoder().encode(LABELS.EXPORT_KEY),
-                OPAQUE_CONFIG.EXPORT_KEY_SIZE
-            );
-
-            // Generate auth message for server using maskedResponse as shared secret
-            const authKey = hkdf(
-                blake3,
-                recoveredMaskedResponse,
-                serverResponse.serverNonce,
-                new TextEncoder().encode(LABELS.AUTH_KEY),
-                32
-            );
-
-            const authMessage = blake3(authKey, { dkLen: 32 });
-
-            // Clear blinding factor
-            if (!providedBlindingFactor) this.blindingFactor = null;
-
-            return {
-                success: true,
-                sessionKey,
-                exportKey,
-                authMessage,
-                clientSecretKey
-            };
-        } catch (error) {
-            console.error('[OPAQUE] Login failed during crypto operations:', error);
-            if (!providedBlindingFactor) this.blindingFactor = null;
-            return { success: false };
-        }
-    }
-
-    /**
-     * Create masked response for server to store
-     */
-    private async createMaskedResponse(
-        clientSecretKey: Uint8Array,
-        serverPublicKey: Uint8Array
-    ): Promise<Uint8Array> {
-        const key = hkdf(
-            blake3,
-            clientSecretKey,
-            serverPublicKey,
-            new TextEncoder().encode('OPAQUE-MaskedResponse-v1'),
-            32
-        );
-        return blake3(key, { dkLen: 64 });
-    }
-
-    /**
-     * Compute credential ID from OPRF output
-     */
-    computeCredentialId(oprfOutput: Uint8Array): Uint8Array {
-        return hkdf(
-            blake3,
-            oprfOutput,
-            new Uint8Array(0),
-            new TextEncoder().encode('OPAQUE-CredentialId-v1'),
-            32
-        );
     }
 
     /**
@@ -462,11 +170,9 @@ export class OPAQUEClient {
      */
     async startOTRegistration(password: Uint8Array): Promise<{
         blindedElement: Uint8Array;
-        clientPublicKey: Uint8Array;
         blindingFactor: Uint8Array;
-        clientSecretKey: Uint8Array;
     }> {
-        return this.startRegistrationLocal(password);
+        return PostQuantumWorker.opaqueStartRegistration(password);
     }
 
     /**
@@ -475,117 +181,42 @@ export class OPAQUEClient {
     async finishOTRegistration(
         password: Uint8Array,
         blindingFactor: Uint8Array,
-        clientSecretKey: Uint8Array,
         serverResponse: {
             evaluatedElement: Uint8Array;
-            serverPublicKey: Uint8Array;
             serverNonce: Uint8Array;
         }
     ): Promise<{
         envelope: Uint8Array;
         exportKey: Uint8Array;
-        maskedResponse: Uint8Array;
-        credentialId: Uint8Array;
+        authPublicKey: Uint8Array;
     }> {
-        // Derive OPRF input from password bytes
-        const oprfInput = hkdf(
-            blake3,
-            password,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.OPRF_INPUT),
-            32
-        );
-
-        // Finalize OPRF
-        const oprfOutput = oprf.oprf.finalize(
-            oprfInput,
-            blindingFactor,
-            serverResponse.evaluatedElement
-        );
-
-        // Compute credential ID from OPRF output
-        const credentialId = this.computeCredentialId(oprfOutput);
-
-        // Derive envelope key from OPRF output
-        const envelopeKey = hkdf(
-            blake3,
-            oprfOutput,
-            serverResponse.serverNonce,
-            new TextEncoder().encode(LABELS.ENVELOPE_KEY),
-            32
-        );
-
-        // Create envelope contents
-        const envelopeContents = new Uint8Array([
-            ...clientSecretKey,
-            ...serverResponse.serverPublicKey,
-        ]);
-
-        // Encrypt envelope
-        const envelopeNonce = randomBytes(OPAQUE_CONFIG.ENVELOPE_NONCE_SIZE);
-        const cipher = xchacha20poly1305(envelopeKey, envelopeNonce);
-        const encryptedEnvelope = cipher.encrypt(envelopeContents);
-
-        const envelope = new Uint8Array([...envelopeNonce, ...encryptedEnvelope]);
-
-        // Derive export key
-        const exportKey = hkdf(
-            blake3,
-            oprfOutput,
-            new Uint8Array(0),
-            new TextEncoder().encode(LABELS.EXPORT_KEY),
-            OPAQUE_CONFIG.EXPORT_KEY_SIZE
-        );
-
-        // Create masked response for server storage
-        const maskedResponse = await this.createMaskedResponse(
-            clientSecretKey,
-            serverResponse.serverPublicKey
-        );
-
-        return { envelope, exportKey, maskedResponse, credentialId };
+        try {
+            return await PostQuantumWorker.opaqueFinishRegistration(password, blindingFactor, serverResponse);
+        } finally {
+            blindingFactor.fill(0);
+        }
     }
 
     /**
      * Start OT Login
      */
-    async startOTLogin(password: Uint8Array, shardSize: number, myIndex: number): Promise<{
+    async startOTLogin(password: Uint8Array, anonymitySetSize: number, myIndex: number): Promise<{
         pubKeys: Uint8Array[];
         blindedElement: Uint8Array;
     }> {
-        try {
-            const { pubKeys, blindedElement, blindingFactor, myPrivKey } = await PostQuantumWorker.opaqueStartOTLogin(password, shardSize, myIndex);
-
-            (this as any).otState = { myIndex, myPrivKey, blindingFactor };
-
-            return { pubKeys, blindedElement };
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker startOTLogin failed, falling back to local', err);
-            return this.startOTLoginLocalFallback(password, shardSize, myIndex);
+        this.wipeState();
+        const generation = ++this.generation;
+        const { pubKeys, blindedElement, blindingFactor, myPrivKey } =
+            await PostQuantumWorker.opaqueStartOTLogin(password, anonymitySetSize, myIndex);
+        if (generation !== this.generation) {
+            for (const publicKey of pubKeys) publicKey.fill(0);
+            blindedElement.fill(0);
+            blindingFactor.fill(0);
+            myPrivKey.fill(0);
+            throw new Error('Private authentication operation was cancelled');
         }
-    }
-
-    async startOTLoginLocalFallback(password: Uint8Array, shardSize: number, myIndex: number): Promise<{
-        pubKeys: Uint8Array[];
-        blindedElement: Uint8Array;
-        blindingFactor: Uint8Array;
-        myPrivKey: Uint8Array;
-    }> {
-        const { OPAQUEOps } = await import('./crypto-ops');
-        const result = OPAQUEOps.startOTLogin(password, shardSize, myIndex);
-
-        (this as any).otState = {
-            myIndex,
-            myPrivKey: result.myPrivKey,
-            blindingFactor: result.blindingFactor
-        };
-
-        return {
-            pubKeys: result.pubKeys,
-            blindedElement: result.blindedElement,
-            blindingFactor: result.blindingFactor,
-            myPrivKey: result.myPrivKey!
-        };
+        this.otState = { myIndex, myPrivKey, blindingFactor };
+        return { pubKeys, blindedElement };
     }
 
     /**
@@ -595,74 +226,78 @@ export class OPAQUEClient {
         password: Uint8Array,
         otRecords: any[],
         evaluatedElement: Uint8Array,
-        serverNonce?: Uint8Array
+        serverNonce: Uint8Array,
+        authChannelBinding: Uint8Array
     ): Promise<any> {
-        const { myIndex, myPrivKey, blindingFactor } = (this as any).otState;
-
-        const normalizedRecords = otRecords.map(r => ({
-            ct: typeof r.ct === 'string' ? Base64.base64ToUint8Array(r.ct) : r.ct,
-            masked: typeof r.masked === 'string' ? Base64.base64ToUint8Array(r.masked) : r.masked
-        }));
-
-        const nonce = serverNonce || randomBytes(32);
+        const otState = this.otState;
+        if (!otState) throw new Error('Private authentication not started');
+        this.otState = null;
+        const generation = this.generation;
+        const { myIndex, myPrivKey, blindingFactor } = otState;
+        let ct: Uint8Array | null = null;
+        let masked: Uint8Array | null = null;
 
         try {
+            if (!Array.isArray(otRecords) || otRecords.length !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE) {
+                throw new Error('Invalid private-auth response size');
+            }
+            const selected = otRecords[myIndex];
+            if (
+                !selected ||
+                typeof selected !== 'object' ||
+                Array.isArray(selected) ||
+                Object.getPrototypeOf(selected) !== Object.prototype ||
+                Object.keys(selected).sort().join(',') !== 'ct,masked'
+            ) {
+                throw new Error('Private-auth record missing');
+            }
+            if (
+                typeof selected.ct !== 'string' ||
+                selected.ct.length !== base64LengthForBytes(OT_CIPHERTEXT_BYTES) ||
+                typeof selected.masked !== 'string' ||
+                selected.masked.length !== base64LengthForBytes(OT_MASKED_RECORD_BYTES)
+            ) {
+                throw new Error('Private-auth record encoding is invalid');
+            }
+            ct = Base64.base64ToUint8Array(selected.ct);
+            masked = Base64.base64ToUint8Array(selected.masked);
+            if (
+                ct.length !== OT_CIPHERTEXT_BYTES ||
+                masked.length !== OT_MASKED_RECORD_BYTES ||
+                Base64.arrayBufferToBase64(ct) !== selected.ct ||
+                Base64.arrayBufferToBase64(masked) !== selected.masked
+            ) {
+                throw new Error('Private-auth record encoding is invalid');
+            }
             const result = await PostQuantumWorker.opaqueFinishOTLogin(
                 password,
                 blindingFactor,
                 myPrivKey,
-                normalizedRecords,
-                myIndex,
+                { ct, masked },
                 evaluatedElement,
-                nonce
+                serverNonce,
+                authChannelBinding
             );
-
-            (this as any).otState = null;
+            if (generation !== this.generation) {
+                result.exportKey?.fill(0);
+                result.authMessage?.fill(0);
+                throw new Error('Private authentication operation was cancelled');
+            }
             return result;
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker finishOTLogin failed, falling back to local', err);
-            return this.finishOTLoginLocalFallback(password, blindingFactor, myPrivKey, normalizedRecords, myIndex, evaluatedElement, nonce);
+        } finally {
+            ct?.fill(0);
+            masked?.fill(0);
+            myPrivKey.fill(0);
+            blindingFactor.fill(0);
         }
-    }
-
-    async finishOTLoginLocalFallback(
-        password: Uint8Array,
-        blindingFactor: Uint8Array,
-        myPrivKey: Uint8Array,
-        otRecords: { ct: Uint8Array; masked: Uint8Array }[],
-        myIndex: number,
-        evaluatedElement: Uint8Array,
-        serverNonce: Uint8Array
-    ): Promise<any> {
-        const { OPAQUEOps } = await import('./crypto-ops');
-        const result = OPAQUEOps.finishOTLogin(
-            password,
-            blindingFactor,
-            myPrivKey,
-            otRecords,
-            myIndex,
-            evaluatedElement,
-            serverNonce
-        );
-
-        (this as any).otState = null;
-        return result;
     }
 
     /**
      * Clear all sensitive state
      */
     clear(): void {
-        if (this.blindingFactor) {
-            this.blindingFactor.fill(0);
-            this.blindingFactor = null;
-        }
-        if (this.clientSecretKey) {
-            this.clientSecretKey.fill(0);
-            this.clientSecretKey = null;
-        }
-        this.clientPublicKey = null;
-        (this as any).otState = null;
+        this.generation += 1;
+        this.wipeState();
     }
 }
 
@@ -670,21 +305,17 @@ export class OPAQUEClient {
  * Helper functions for encoding/decoding
  */
 export const OPAQUEClientHelpers = {
-    /**
-     * Compute a blinded user ID from a username
-     */
+    // Compute a blinded user ID from a username
     computeBlindUserId(username: string): string {
         return computeBlindUserId(username);
     },
 
-    /**
-     * Encode request for sending to server
-     */
+    // Encode request for sending to server
     encodeRequest(data: Record<string, Uint8Array | string | number>): Record<string, string | number> {
         const encoded: Record<string, string | number> = {};
         for (const [key, value] of Object.entries(data)) {
-            if (value !== null && (value instanceof Uint8Array || (typeof value === 'object' && 'buffer' in (value as any)))) {
-                encoded[key] = Base64.arrayBufferToBase64(value as Uint8Array);
+            if (value instanceof Uint8Array) {
+                encoded[key] = Base64.arrayBufferToBase64(value);
             } else if (typeof value === 'string' || typeof value === 'number') {
                 encoded[key] = value;
             }
@@ -692,23 +323,42 @@ export const OPAQUEClientHelpers = {
         return encoded;
     },
 
-    /**
-     * Decode response from server
-     */
+    // Decode response from server
     decodeResponse<T extends Record<string, unknown>>(
         data: Record<string, string | number>,
-        uint8Fields: string[]
+        uint8Fields: Record<string, number>
     ): T {
         const decoded: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(data)) {
-            if (uint8Fields.includes(key) && typeof value === 'string' && value.length > 0) {
-                decoded[key] = Base64.base64ToUint8Array(value);
-            } else {
-                decoded[key] = value;
+        const decodedBytes: Uint8Array[] = [];
+        try {
+            for (const [key, value] of Object.entries(data)) {
+                const expectedLength = uint8Fields[key];
+                if (expectedLength !== undefined) {
+                    if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
+                        throw new Error(`Invalid ${key} encoding`);
+                    }
+                    const bytes = Base64.base64ToUint8Array(value);
+                    if (bytes.length !== expectedLength || Base64.arrayBufferToBase64(bytes) !== value) {
+                        bytes.fill(0);
+                        throw new Error(`Invalid ${key} encoding`);
+                    }
+                    decoded[key] = bytes;
+                    decodedBytes.push(bytes);
+                } else {
+                    decoded[key] = value;
+                }
             }
+            for (const requiredField of Object.keys(uint8Fields)) {
+                if (!(decoded[requiredField] instanceof Uint8Array)) {
+                    throw new Error(`Missing ${requiredField}`);
+                }
+            }
+            return decoded as T;
+        } catch (error) {
+            for (const bytes of decodedBytes) bytes.fill(0);
+            throw error;
         }
-        return decoded as T;
     },
 };
 
-export { OPAQUE_CONFIG, LABELS };
+export { OPAQUE_CONFIG };

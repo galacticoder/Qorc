@@ -1,8 +1,9 @@
-import * as pako from "pako";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
+import { MAX_CHUNK_SIZE_BYTES } from "../../lib/constants";
 import { decodeBase64Chunk, validateEnvelope, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { resolveTrustedPeerDilithiumPublicKey, type PeerIdentityLike } from "../../lib/utils/signal-bundle-utils";
+import { HashingService } from '../../lib/cryptography/hashing';
 
 export interface DecryptionContext {
   fileEntry: ExtendedFileState;
@@ -27,20 +28,26 @@ export const parseEncryptedChunk = (chunkData: string): { iv: Uint8Array; authTa
     const encrypted = parsed?.encrypted as Uint8Array | undefined;
 
     if (!(iv instanceof Uint8Array && authTag instanceof Uint8Array && encrypted instanceof Uint8Array) ||
-      iv.length === 0 || authTag.length === 0 || encrypted.length === 0) {
+      iv.length !== 12 || authTag.length !== 16 || encrypted.length === 0 ||
+      encrypted.length > MAX_CHUNK_SIZE_BYTES + 1024) {
+      iv?.fill(0);
+      authTag?.fill(0);
+      encrypted?.fill(0);
       return null;
     }
 
     return { iv, authTag, encrypted };
   } catch {
     return null;
+  } finally {
+    encryptedBytes.fill(0);
   }
 };
 
 // Decrypt hybrid envelope to get AES/MAC keys
 export const decryptEnvelope = async (
   envelope: any,
-  hybridKeys: { x25519: { private: any }; kyber: { secretKey: Uint8Array } },
+  accountUsername: string,
   senderUsername: string,
   users?: PeerIdentityLike[] | null,
   findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
@@ -49,22 +56,24 @@ export const decryptEnvelope = async (
     return null;
   }
 
+  let aesKeyBytes: Uint8Array | null = null;
+  let macKey: Uint8Array | null = null;
   try {
-    const senderDilithiumPk = (envelope as any)?.metadata?.sender?.dilithiumPublicKey;
+    const senderDilithiumPk = (envelope as any)?.routing?.from;
     const senderIdentity = await resolveTrustedPeerDilithiumPublicKey(
+      accountUsername,
       senderUsername,
       senderDilithiumPk,
       users,
       findUser
     );
     if (!senderIdentity.valid || !senderIdentity.expectedDilithium) {
+      console.error('[FILE-ENVELOPE-IDENTITY]', senderIdentity.reason || 'UNAUTHORIZED_SENDER_KEY');
       return null;
     }
     const decrypted = await (CryptoUtils as any).Hybrid.decryptIncoming(
       envelope,
       {
-        kyberSecretKey: hybridKeys.kyber?.secretKey,
-        x25519SecretKey: hybridKeys.x25519?.private,
         senderDilithiumPublicKey: senderIdentity.expectedDilithium
       }
     );
@@ -74,14 +83,39 @@ export const decryptEnvelope = async (
       return null;
     }
 
-    const aesKeyBytes = CryptoUtils.Base64.base64ToUint8Array(aesPayload.aesKey);
-    const aesKey = await CryptoUtils.Keys.importAESKey(aesKeyBytes);
-    const macKey = CryptoUtils.Base64.base64ToUint8Array(aesPayload.macKey);
-
-    return { aesKey, macKey };
+    aesKeyBytes = CryptoUtils.Base64.base64ToUint8Array(aesPayload.aesKey);
+    macKey = CryptoUtils.Base64.base64ToUint8Array(aesPayload.macKey);
+    if (
+      aesKeyBytes.length !== 32 ||
+      macKey.length !== 32 ||
+      CryptoUtils.Base64.arrayBufferToBase64(aesKeyBytes) !== aesPayload.aesKey ||
+      CryptoUtils.Base64.arrayBufferToBase64(macKey) !== aesPayload.macKey
+    ) {
+      return null;
+    }
+    const ownedAesKeyBytes = new Uint8Array(aesKeyBytes.length);
+    ownedAesKeyBytes.set(aesKeyBytes);
+    let aesKey: CryptoKey;
+    try {
+      aesKey = await crypto.subtle.importKey(
+          'raw',
+          ownedAesKeyBytes,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+    } finally {
+      ownedAesKeyBytes.fill(0);
+    }
+    const result = { aesKey, macKey };
+    macKey = null;
+    return result;
   } catch (e) {
     console.error('[chunk-decryption] Failed to decrypt envelope:', e);
     return null;
+  } finally {
+    aesKeyBytes?.fill(0);
+    macKey?.fill(0);
   }
 };
 
@@ -107,9 +141,23 @@ export const verifyChunkMac = async (
   macInput.set(msgIdBytes, mo); mo += msgIdBytes.length;
   macInput.set(nameBytes, mo);
 
-  const computedMac = await CryptoUtils.Hash.generateBlake3Mac(macInput, new Uint8Array(macKey));
-  const computedMacB64 = CryptoUtils.Base64.arrayBufferToBase64(computedMac);
-  return computedMacB64 === chunkMac;
+  let expectedMac: Uint8Array | null = null;
+  try {
+    expectedMac = CryptoUtils.Base64.base64ToUint8Array(chunkMac);
+    if (
+      expectedMac.length !== 32 ||
+      CryptoUtils.Base64.arrayBufferToBase64(expectedMac) !== chunkMac
+    ) return false;
+    return await HashingService.verifyBlake3Mac(macInput, macKey, expectedMac);
+  } catch {
+    return false;
+  } finally {
+    idxBuf.fill(0);
+    msgIdBytes.fill(0);
+    nameBytes.fill(0);
+    macInput.fill(0);
+    expectedMac?.fill(0);
+  }
 };
 
 // Decrypt chunk with AES
@@ -121,9 +169,9 @@ export const decryptChunk = async (
 ): Promise<Uint8Array | null> => {
   try {
     const decryptedBytes = await CryptoUtils.AES.decryptBinaryWithAES(
-      new Uint8Array(iv),
-      new Uint8Array(authTag),
-      new Uint8Array(encrypted),
+      iv,
+      authTag,
+      encrypted,
       aesKey
     );
 
@@ -138,15 +186,6 @@ export const decryptChunk = async (
   }
 };
 
-// Decompress chunk
-export const decompressChunk = (decryptedBytes: Uint8Array): Uint8Array => {
-  try {
-    return pako.inflate(decryptedBytes);
-  } catch {
-    return decryptedBytes;
-  }
-};
-
 // Cleanup helper for failed transfers
 export const cleanupFailedTransfer = (
   fileEntry: ExtendedFileState,
@@ -154,7 +193,6 @@ export const cleanupFailedTransfer = (
   store: Record<string, any>,
   macState: Map<string, any>,
   cleanupTimers: Map<string, ReturnType<typeof setTimeout>>,
-  blobCache: { clear: () => void },
   from: string,
   filename: string,
   reason: string,
@@ -163,13 +201,14 @@ export const cleanupFailedTransfer = (
 ): void => {
   releaseFileEntry(fileEntry);
   delete store[fileKey];
+  const macEntry = macState.get(fileKey);
+  if (macEntry?.macKey instanceof Uint8Array) macEntry.macKey.fill(0);
   macState.delete(fileKey);
   const timer = cleanupTimers.get(fileKey);
   if (timer) {
     clearTimeout(timer);
     cleanupTimers.delete(fileKey);
   }
-  blobCache.clear();
   setLoginError(errorMessage);
   dispatchCanceledEvent({ from, filename, reason });
 };

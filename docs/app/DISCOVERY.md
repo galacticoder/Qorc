@@ -1,344 +1,260 @@
-# OPRF-Based Discovery System
+# Discovery
 
-## Overview
+## Scope
 
-Discovery enables anonymous handle lookup. Clients derive a discovery token from an OPRF output and store an encrypted advertisement in a billboard database. The server cannot compute tokens for guessed handles and cannot decrypt advertisements.
+Discovery maps a user handle to an encrypted, certified peer bundle without
+sending the plaintext handle or peer bundle to the server. It uses a verifiable
+OPRF, fixed-size encrypted records, fixed-count bucket requests, Tor circuit
+isolation, delayed publication, and local identity verification.
+The account root inside a candidate must also match Qor's append-only private
+key-transparency state before any Signal, Hybrid, or P2P key is installed.
 
-Guarantees:
-- Server cannot enumerate users by guessing handles.
-- Encrypted discovery blobs are opaque to the server.
-- Clients can discover each other only when they know the handle.
+This is not fully oblivious retrieval. The server sees publication bucket sets,
+lookup bucket sets, request timing, and traffic volume. The server also operates
+both the OPRF service and the billboard in the default deployment. The exact
+limits are documented below and in
+`docs/app/USERNAME_ENUMERATION_RESISTANCE.md`.
 
----
+## Cryptographic Inputs
 
-## 1. Cryptographic Foundation
+The client normalizes a valid handle and hashes it with BLAKE3 to a 32-byte
+pseudonym. It blinds that pseudonym with RFC 9497 VOPRF over Ristretto255 and
+sends only the blinded point as the encrypted `oprf/evaluate` operation inside
+`POST /api/anonymous`. The outer request is a 64 KiB hybrid-PQ envelope sent on
+a fresh Tor SOCKS-isolated connection.
 
-### 1.1 RFC 9497 VOPRF
-The system uses RFC 9497 VOPRF with the `ristretto255` ciphersuite.
+The response includes a DLEQ proof and public key. The client verifies both and
+derives:
 
-Code references:
-- Server: `server/crypto/oprf-discovery.js`
-- Client: `src/lib/crypto/oprf-discovery-crypto.ts`
+- a stable discovery encryption key from the VOPRF output,
+- a different 32-byte token for each six-hour discovery epoch.
 
-### 1.2 Key storage and protection
-OPRF secret keys are encrypted at rest using AES-256-GCM:
-- KEK derived from `KEY_ENCRYPTION_SECRET` or `DB_FIELD_KEY`.
-- AAD label `oprf-discovery-v1`.
+The OPRF HTTP request requires an epoch-bound proof of work. Redis rejects reuse
+of the same blinded-point proof. A process-local HTTP rate cap, concurrency cap,
+and server-wide OPRF evaluation ceiling bound anonymous CPU use.
 
-Code references:
-- Key storage: `server/crypto/oprf-discovery.js`
+Ristretto255 VOPRF and its proof are classical cryptography. The anonymous HTTP
+tunnel protects their captured wire bytes with ML-KEM-1024 + X25519 and a
+responder ML-KEM contribution, but it does not remove the VOPRF's discrete-log
+assumption. Discovery records can contain post-quantum identity and prekey
+material without making the complete lookup construction post-quantum-secure.
 
-### 1.3 Anytrust model
-Separation between:
-- OPRF key server (evaluates blinded points).
-- Discovery blob store (Postgres table).
+Code:
 
-In this repo both components run in the same server process, but the cryptographic split is preserved in the code and data model.
+- `src/lib/utils/auth-utils.ts`
+- `src/lib/crypto/oprf-discovery-crypto.ts`
+- `server/crypto/oprf-discovery.js`
+- `server/routes/api-routes.js`
+- `server/routes/pq-anonymous-http.js`
 
----
+## Encrypted Record
 
-## 2. Data Model
+The discovery plaintext contains only the peer's Signal prekey bundle, certified
+identity chain, and optional encrypted-avatar reference. Routing identifiers and
+avatar bytes are not part of the record.
 
-### 2.1 Discovery billboard
-Table: `discovery_billboard` (k-anonymous. The server stores no exact per-user marker)
-- `epochId`
-- `bucketId` — the client-derived k-anonymity bucket. Narrows a handle to K users, never to one
-- `publishId` — random-looking per-(epoch, bucket) upsert key, not derived from the handle, rotating each epoch (so a user's bucket trajectory cannot be fingerprinted across epochs)
-- `encryptedBlob`
-- `expiresAt`
-- `publishedAt`
-- PRIMARY KEY (`epochId`, `publishId`)
+The client pads this plaintext to a fixed capacity and encrypts it with the
+OPRF-derived key. Every wire record is exactly 64 KiB of canonical base64 text.
+The encrypted true length is inside the ciphertext. A server cannot decrypt the
+bundle or distinguish valid records from random cover records by shape.
 
-There is deliberately no exact `token` or `pirSlotKey` column: a database dump reveals only "bucket *b* holds *N* blobs", never "handle *X* is registered". See `docs/app/USERNAME_ENUMERATION_RESISTANCE.md`.
+On lookup, the client decrypts candidate records locally and rejects any record
+that fails exact schema validation, certified identity validation, handle
+binding, key binding, or key-transparency authorization. The client derives the
+handle's stable opaque transparency label from the same VOPRF-derived discovery
+key, verifies the signed map and append-log proofs anonymously, and requires the
+record's account-root commitment to match the current verified state.
 
-Code references:
-- Schema: `server/database/schema.js`
-- DB: `server/database/discovery-db.js`
+This prevents the current server from silently returning one account root to
+one established client and an attacker root to another without producing a
+detectable inconsistent history. It does not prove real-world identity: the
+first valid account that registers a transparency label controls that Qor
+handle. A fresh install also pins the first server ML-DSA signer it sees for the
+configured endpoint. See `docs/app/KEY_TRANSPARENCY.md`.
 
-### 2.2 Discovery material (plaintext, client-only)
-`OPRFDiscoveryMaterial` contains:
-- `inboxId`
-- `routeId`
-- `mailboxLookupId`
-- `bundleLookupId`
-- `blockListLookupId`
-- `publicKeys` (kyber, dilithium, x25519)
-- `fullBundle` (Signal prekey bundle)
-- `peerCertificate` (P2P cert)
-- `certifiedPeerBundle` (account-root/device/subkey identity chain)
-- `peerCertificateFingerprint`
-- `identityRootFingerprint`
-- `identityBundleFingerprint`
-- `avatar` (optional)
+Code:
 
-Code references:
-- Type definition: `src/lib/crypto/oprf-discovery-crypto.ts`
-- Rendezvous derivation: `src/lib/transport/rendezvous-routing.ts`
+- `src/lib/crypto/oprf-discovery-crypto.ts`
+- `src/lib/utils/certified-identity-utils.ts`
+- `src/lib/security/identity-change-store.ts`
+- `src/lib/key-transparency/client.ts`
+- `src/hooks/discovery/useDiscovery.ts`
 
-The server cannot decrypt these fields because they live inside the encrypted discovery blob. Peers use the encrypted `routeId` and mailbox/bundle commitments for authorization, bundle use, and local validation. Active server sends do not submit the raw `inboxId`, exact `routeId`, `mailboxLookupId`, or any destination bucket.
+## Publication
 
-When route commitments rotate, the client republishes encrypted discovery material with the new `inboxId`, `routeId`, `mailboxLookupId`, `bundleLookupId`, and `blockListLookupId`. Peers learn the new destination only through the encrypted discovery path. The server only sees fresh opaque billboard writes and fresh committed claim IDs.
+The authenticated account opens a separate unlinked WebSocket session before
+publishing. A publication has one exact wire shape:
 
-### 2.3 Certified identity chain
-Discovery material must validate as one signed identity chain. The keys do not all have to be identical key material, but they must be bound to the same account root:
-- `accountRoot` signs the device certificate.
-- The device certificate attests the peer certificate and device Kyber, Dilithium, and hybrid/P2P X25519 keys.
-- The device Dilithium key signs the subkey binding.
-- The subkey binding carries both the hybrid/P2P X25519 key and the LibSignal identity X25519 key as separate signed fields.
-
-The LibSignal identity X25519 key and the hybrid/P2P X25519 key are expected to be different in normal operation. Validation must not force those two keys to be equal. Instead:
-- discovery `publicKeys` must match the signed hybrid keys in the subkey binding
-- `fullBundle.identityKeyBase64` must match the signed `signalIdentityX25519PublicKey`
-- advertised `peerCertificateFingerprint`, `identityRootFingerprint`, and `identityBundleFingerprint` must match the recomputed certified chain values
-- previously pinned peer certificate/root fingerprints must not silently change.
-
-This is a pinned/TOFU model unless an external root verification channel is added. First valid discovery pins the peer identity root. Later discovery material for that peer must remain on the same root or be treated as an identity change.
-
-Code references:
-- Build/validate chain: `src/lib/utils/certified-identity-utils.ts`
-- Discovery material validation: `src/hooks/discovery/useDiscovery.ts`
-- Trusted key extraction: `src/lib/utils/signal-bundle-utils.ts`
-
----
-
-## 3. Token Derivation
-
-Client steps:
-1. Normalize handle and compute blinded point.
-2. Send blinded point to server for evaluation.
-3. Verify proof and finalize OPRF output.
-4. Derive:
-- `token = BLAKE3("discovery-token-v1" || oprfOutput || epoch)`
-- `encryptionKey = BLAKE3("discovery-encryption-key-v1" || oprfOutput)`
-
-Code references:
-- Client finalize: `src/lib/crypto/oprf-discovery-crypto.ts`
-- Server helpers: `server/crypto/oprf-discovery.js`
-
----
-
-## 4. Epoch Rotation
-
-The server rotates discovery epochs every 6 hours. Clients publish to both the current and previous epoch tokens to allow a grace period.
-
-Code references:
-- Epoch manager: `server/server.js` (`DiscoveryEpochManager`)
-- Client publish: `src/hooks/discovery/useDiscovery.ts`
-
----
-
-## 5. Blob Encryption
-
-Discovery blobs are encrypted client-side using `PostQuantumAEAD`:
-- Key: derived from OPRF output
-- Nonce: 36 bytes
-- Tag: 32 bytes
-- AAD: `oprf-discovery-blob-v1`
-
-The client encodes `nonce || tag || ciphertext` as base64.
-
-Code references:
-- Client encrypt/decrypt: `src/lib/crypto/oprf-discovery-crypto.ts`
-
----
-
-## 6. Protocol Signals
-
-Signal types:
-- `oprf-discovery-public-key`
-- `oprf-blind-evaluate`
-- `oprf-blind-evaluate-response`
-- `publish-discovery`
-- `discovery-snapshot-request`
-- `discovery-snapshot`
-- `pir-manifest-request`
-- `pir-manifest`
-- `pir-query`
-- `pir-response`
-
-### 6.1 OPRF public key
-Client sends:
-```json
-{ "type": "oprf-discovery-public-key" }
-```
-Server responds with public key and epoch info.
-
-Code references:
-- Server handler: `server/server.js`
-
-### 6.2 Blind evaluate
-Client sends:
-```json
-{ "type": "oprf-blind-evaluate", "blindedPoint": "hex" }
-```
-Server responds with `evaluated`, `proof`, and `publicKey`.
-
-### 6.3 Publish
-Client sends:
 ```json
 {
   "type": "publish-discovery",
-  "requestId": "random",
-  "bucketBatch": [ { "epochId": "...", "bucketId": 42, "publishId": "hex" }, "..." ],
-  "encryptedBlob": "base64"
-}
-```
-The client derives each `bucketId` locally from its OPRF token (`bucketId = sha256(domain || epoch || slotKey) mod bucketCount`). The server never sees the token. `publishId = sha256(dilithiumPub || epochId || bucketId)` is random-looking, server-invisible, and rotates per epoch. There is no raw `token`/`tokenBatch` on the wire.
-
-The server does not write the blob immediately. It queues the opaque publication into the Redis delayed publication pool, acknowledges only ingress acceptance, then a relay releases shuffled batches with cover publications. Cover publications use the same server-visible shape: a `bucketBatch` of `{epochId, bucketId, publishId}` plus an opaque encrypted blob.
-
-Client behavior:
-- Publishes previous/current/forward epoch bucket batches.
-- Sends fixed-rate cover publications while connected, discoverable, and PQ-ready.
-- Sizes cover blobs at least as large as the most recent real discovery blob.
-
-Server behavior:
-- Delays real writes by `DISCOVERY_PUBLICATION_DELAY_MIN_MS` to `DISCOVERY_PUBLICATION_DELAY_MAX_MS`.
-- Flushes random-size batches.
-- Injects `DISCOVERY_PUBLICATION_COVER_WRITES_MIN` to `DISCOVERY_PUBLICATION_COVER_WRITES_MAX` cover writes.
-- Stores only opaque blobs keyed by `(epochId, bucketId, random publishId)`.
-- Logs only coarse publication shape classes, not exact bucket counts, exact blob lengths, exact release delays, or exact batch sizes.
-
-### 6.4 Private snapshot retrieval
-Client sends:
-```json
-{ "type": "discovery-snapshot-request", "requestId": "random", "snapshotMode": "full" }
-```
-Server returns a compressed, padded, epoch-scoped snapshot object:
-```json
-{
-  "type": "discovery-snapshot",
-  "requestId": "random",
-  "snapshot": {
-    "version": "qor-discovery-snapshot-gzip-v1",
-    "encoding": "base64url+gzip",
-    "compression": "gzip",
-    "digestAlgorithm": "sha256-uncompressed-snapshot",
-    "digest": "base64url",
-    "epochId": "opaque",
-    "epochStart": 1710000000000,
-    "epochEndsAt": 1710000600000,
-    "realCountHidden": true,
-    "sourceCountHidden": true,
-    "paddedEntryCount": 1024,
-    "compressed": "base64url"
-  }
+  "requestId": "pub-<uuid>",
+  "publication": {
+    "epochId": "<manifest start time>",
+    "publishId": "<64 lowercase hex characters>",
+    "bucketIds": [0, 1, 2, 3, 4, 5]
+  },
+  "encryptedBlob": "<exactly 65536 canonical base64 characters>"
 }
 ```
 
-The request contains no target handle, no OPRF token, no previous-epoch token, and no shard selector. The client tries to decrypt each returned blob locally with its OPRF-derived key and accepts only a blob whose certified identity material validates for the requested handle.
+The six distinct bucket IDs contain token-derived buckets for the current and
+next three six-hour epochs, then deterministic filler buckets until the fixed
+count is reached. This lets one accepted publication remain discoverable for a
+24-hour offline window. `publishId` is derived from the device publication key
+and the 24-hour publication window, so it rotates between windows and is not
+derived from the handle.
 
-- The server sees only an epoch snapshot request and returns padded compressed bytes. It does not send a raw top-level `entries` list or exact active count.
-- Snapshot size is rounded to a privacy floor and power-of-two padding with opaque decoys, so small deployments do not expose exact population.
-- Bandwidth and client CPU scale with the padded snapshot size.
+The server validates the current manifest epoch and exact shape, then queues the
+publication in Redis. It acknowledges only after durable queue admission. A
+relay delays and shuffles accepted writes, injects same-shape cover writes, and
+stores a coarse expiry. A publication accepted just before an epoch boundary is
+still committed after the boundary, the epoch check is deliberately performed
+only at ingress.
 
-This target-free snapshot is a no-selector cover/ceiling path: the request contains no handle, token, bucket, slot, candidate index, or profile category. It must not compete with the reviewed PIR result path, and it is not an exact-query fallback.
+The database stores only:
 
-### 6.5 Reviewed PIR worker path
-Discovery has its own PIR database, separate from the volatile global message spool. Clients ask for a fixed-size PIR database manifest by kind:
-```json
-{ "type": "pir-manifest-request", "requestId": "random", "prepareWorker": true, "kind": "discovery" }
+```text
+publishId, bucketIds[6], encryptedBlob, expiresAt
 ```
 
-`kind: "discovery"` is the discovery database, and it is the **only** computational-PIR kind: the global message spool is no longer served by PIR (the `opaque` PIR kind was retired in favor of the uniform encrypted spool snapshot — see `docs/app/COMPUTATIONAL_PIR.md` §2.2). Discovery keeps its own independent epoch/setup, so unrelated message traffic does not churn it. The server sees query timing/volume but, within the discovery kind, never the searched handle, slot, record index, or decrypt result. The discovery query path carries cover traffic.
+It stores no plaintext handle, OPRF token, account ID, connection ID, exact
+publication time, or discovery epoch. The row and its opaque publish ID remain
+stable for the lease, so they are ephemeral metadata, not a claim of zero
+metadata.
 
-The server responds with a manifest containing:
-- `kind` (`"discovery"` here)
-- `epochId`
-- `recordSize`
-- `recordCount`
-- `paddingFloor`
-- `databaseDigest`
-- `schemeId`
-- `parameterId`
-- `workerConfigured`
-- `workerReady`
+Code:
 
-If a reviewed external PIR worker is configured and has accepted the epoch database, clients may submit the worker-specific opaque query:
-```json
-{ "type": "pir-query", "epochId": "...", "kind": "discovery", "query": "base64", "requestId": "random" }
-```
+- `server/server.js`
+- `server/discovery/publication-privacy.js`
+- `server/database/discovery-db.js`
+- `server/database/schema.js`
 
-The server does not interpret the query contents. It routes by `kind`/`epochId` to the matching PIR database (only `discovery` exists), forwards the opaque query to the isolated worker, and returns the opaque response. The server learns timing/volume, but not the handle, slot, record index, or whether a record decrypted.
+## Bucket Lookup
 
-In the default Docker server profile, the pinned hintless-SimplePIR worker (scheme `hintless-simplepir`, parameter id `hintless-simplepir-rlwe64-v1`) is started automatically and `PIR_REQUIRE_WORKER=true` makes server startup fail if the worker is missing or reports the wrong source commit/parameter id. This is the normal posture. There is no weaker missing-worker app mode.
+The client obtains a strict manifest through the encrypted
+`discovery/manifest` operation and derives one real bucket from the current
+epoch token. It adds three cryptographically random, distinct cover buckets and
+sends exactly four IDs through the encrypted `discovery/bucket` operation. Both
+use the same outer `/api/anonymous` route but a fresh Tor isolation credential
+and connection for every call.
 
-The client uses this reviewed PIR path as the strict indexed lookup path (two-tier — see `COMPUTATIONAL_PIR.md` §3.1):
-1. Derive the current and previous OPRF epoch tokens for the requested handle.
-2. Derive `pirSlotKey = SHA-256("qor-discovery-pir-slot-key-v1" || token)` locally.
-3. Derive deterministic candidate slots from the public manifest epoch and record count.
-4. Read the hint-free per-epoch public params delivered inline in the manifest.
-5. For a candidate slot, build an opaque request (`query-record`), send `pir-query`, and recover the tiny **handle record** (`recover-record`).
-6. Fetch the encrypted **keys-blob via a k-anonymous BUCKET fetch**: the client derives its target's bucket id from the OPRF token (`bucketId = sha256(domain || epoch || slotKey) mod bucketCount`, identical on both sides), fetches that whole bucket (K=32 blobs, padded with decoys) over the dedicated Tor circuit, and **decrypt-filters locally** — the blob that decrypts with the OPRF key is the target. The server learns only the bucket id (the target is one of K users in it), never the exact user.
-7. Accept only material whose certified identity validates for the requested handle. A wrong slot fails to decrypt and the client tries the next candidate.
+The server returns all four requested buckets in request order. Each bucket has
+the configured target count, 64 by default. Real records are selected with a
+secret-keyed deterministic rank when a bucket is overloaded, remaining entries
+are fixed-size deterministic decoys. Ordering is also deterministic and
+secret-keyed for the manifest epoch. Responses have strict schema and byte
+limits.
 
-If this reviewed PIR path fails, active lookup fails closed. The client does not ask the server for the handle, token, selected slot, bundle id, bucket, shard, or any exact lookup selector.
+Only one token-derived bucket is requested. Looking up both current and previous
+epoch buckets in the same request would let the server intersect the two sets
+and identify the matching publication much more easily.
 
-The per-epoch public params are tiny and ride inline in the PIR manifest. Query generation and recovery run against a persistent `qor-pir-client serve` daemon (record-major: `query-record` keeps the client secret under a handle, `recover-record` consumes it). See `docs/app/PIR_WORKER.md`.
+The bucket index is built from bounded active database rows, single-flighted,
+revision-checked, and cached. A small LRU caches fully padded buckets to avoid
+recomputing megabytes of deterministic cover data on repeated requests.
 
-Because HintlessPIR cost scales with record SIZE, the tier-1 discovery record is a tiny 24-byte handle, not the inlined bundle — which is what lets the discovery database grow to millions of records at sub-second query time. The full post-quantum keys-blob (about 131 KB) is then delivered by a **k-anonymous bucket fetch** rather than PIR. The bucket fetch trades full obliviousness for K-anonymity (the server learns the target's bucket = one of K=32 users, never the exact user), which is the same privacy class already used for avatars. The keys-blob content is unchanged.
+Code:
 
-Avatars are not carried inside the discovery advertisement. PIR/buckets can't carry a 1 MB avatar cheaply, so the keys-blob holds only a small `avatarRef` (opaque blobId + E2E key + hash). The avatar bytes live in a separate **unlinkable content store** as a uniform-size E2E-encrypted PURB, uploaded anonymously and fetched by opaque id with cover traffic. The server cannot link an avatar blob to a user, cannot read it, and cannot learn its size. See `docs/app/AVATARS.md` §5.
+- `src/lib/discovery/bucket-client.ts`
+- `src-tauri/src/commands/discovery.rs`
+- `server/discovery/bucket-layout.js`
+- `server/discovery/bucket-index.js`
+- `server/routes/api-routes.js`
 
-Large encrypted discovery/profile records are chunked (this primarily mattered for the old avatar-bearing blobs. The avatar-less keys-blob fits in one record). Chunk 0 is placed at the normal token-derived slot. Later chunks use:
-```txt
-SHA-256("qor-pir-chunk-slot-v1" || pirSlotKey || chunkIndex)
-```
+## Avoiding The Lookup
 
-The client retrieves chunk 0, learns the chunk count from the encrypted-record wrapper, derives the remaining chunk slots locally, retrieves them through PIR, and verifies the encrypted blob digest before decrypting.
+A lookup is expensive , four buckets of 64 blobs each, 60-100s over Tor in
+practice , so the result is saved per peer and reused when it is provably
+still current.
 
-The discovery hook runs one light, deferring cover round against the `discovery` database while connected and PQ-ready, using the opaque `pir-query` path and discarding recovered words locally. The cover is scheduled as a **Poisson process** (a fresh exponential inter-cover delay each tick, mean `DISCOVERY_PIR_COVER_INTERVAL_MS`, clamped to `[MIN, MAX]`), **not a fixed period**. A fixed cadence is a grid an observer could fingerprint, which would let a real (off-grid) lookup be picked out by timing. A memoryless interval has no grid to break, so a real query at any moment looks like it could be the next cover tick. (Cover yields to an in-flight interactive lookup — that real query provides the round's timing cover — and the timer re-arms with a fresh randomized delay afterward, so there is no grid to "resume". The query *rate* still rises under heavy active searching, which is inherent without latency-adding query queuing. The looker stays anonymous on the dedicated Tor circuit regardless.)
+`src/lib/discovery/saved-discovery-material.ts` stores the validated material
+in the same account-scoped native secure store the P2P dial path uses for peer
+certificates. Two rules make that safe:
 
-Cover must stay minimal over Tor: each PIR query frame is large (about 768 KiB-class for this parameter set), so constant-rate cover floods the Tor circuit and resets the connection. (The global message spool is no longer a PIR kind, so there is no cross-kind PIR category for the server to distinguish. The spool is served by a separate uniform snapshot endpoint.) After an active PIR lookup, the client may also schedule a target-free snapshot cover request. That request contains no searched handle or token and is cover/no-selector traffic.
+- **A saved record is never authoritative.** It is replayed through
+  `resolveTrustedPeerHybridPublicKeys` exactly as freshly fetched material is, so
+  a stale or tampered record fails the same certificate, fingerprint, and
+  transparency checks and falls through to the lookup that would have happened
+  anyway.
+- **Revocation clears it.** Dropping only the in-memory copies would let a
+  revoked peer's keys return from disk on the next start , precisely the state
+  revocation exists to prevent.
 
-Code references:
-- Server handlers: `server/server.js`
-- Client hook: `src/hooks/discovery/useDiscovery.ts`
-- Worker deployment: `docs/app/PIR_WORKER.md`
+Verifying an inbound peer's Signal bundle used to force a full lookup
+unconditionally, most often triggered by nothing more meaningful than a failed
+P2P dial. A refetch is a blunt way to answer a narrow question , *is what I
+already hold still current?* , and key transparency answers that directly from
+data already synced. `validateSignalBundleForPeerIdentity` now reuses the
+saved record only when all of the following hold:
 
----
+1. the record carries the transparency state it was accepted under,
+2. that root commitment and version still match the peer's live authorized state,
+   and
+3. its key set and all three fingerprints still match the live authorization.
 
-## 7. Client Discovery Hook
+Any drift, any missing piece, and it falls through to the forced lookup. The
+check is therefore never weaker , only cheaper when the answer is already known.
 
-`useDiscovery`:
-- Requests OPRF public key and epoch.
-- Computes tokens for current and previous epochs.
-- Publishes self advertisement through delayed, batched publication ingress.
-- Sends cover publications with the same token-batch/blob shape as real publications.
-- Uses deterministic-slot computational PIR (tier 1 HintlessPIR) for the private match-check/cover + a k-anonymous bucket fetch for the keys-blob. Avatars use the separate unlinkable content store.
-- Assembles chunked encrypted blobs when records exceed one fixed PIR page.
-- Sends **Poisson-scheduled** (randomized, memoryless) cover PIR queries for discovery timing privacy.
-- Decodes and verifies compressed padded discovery snapshots for explicit no-selector retrieval and cover traffic.
-- Uses target-free encrypted billboard snapshots as the bandwidth-heavy privacy ceiling.
-- Decrypt-filters peer advertisements locally.
+A deliberately rejected alternative: publishing a per-record hash alongside the
+blob and fetching it by PIR as a version check. It would have worked, but a
+plaintext per-user hash is a stable identifier until the user rotates keys, a PIR
+query costs ~1.2 MB uploaded regardless of how small the record is, and a
+server-asserted hash is a freshness oracle the operator can freeze. Key
+transparency already provides the same signal, is anchored to a rolling
+hash-chain root the operator cannot forge, and is already being fetched , a
+second source of truth about identity freshness would only give an attacker a
+choice of which one to make stale.
 
-Code references:
-- Hook: `src/hooks/discovery/useDiscovery.ts`
+## Server Visibility
 
----
+The service does not receive a plaintext handle, unblinded OPRF token,
+decryption key, decrypted record, or local match result. It does observe:
 
-## 8. Rate Limiting
+- the six buckets associated with each delayed publication row,
+- the four buckets in each lookup request,
+- the opaque publication ID for the row's lease,
+- request and connection timing, traffic volume, and coarse expiry,
+- the number of active rows up to configured capacity classes.
 
-The OPRF server uses an in-memory rate limiter:
-- Per client id: 30 requests per minute.
-- Global (server-wide): `OPRF_GLOBAL_MAX_PER_MIN` evaluations per rolling minute (default 1200), enforced on top of the per-client limit. This bounds online username probing through the live OPRF service even by an attacker holding many anonymous tokens (a per-token limit does not bind a token-rich attacker, but a global cap does). See `docs/app/USERNAME_ENUMERATION_RESISTANCE.md`.
+Before decryption, the outer route exposes only request timing and a 64 KiB
+request class for discovery operations. The destination server decrypts the
+operation and therefore still learns whether it is evaluating OPRF, serving a
+manifest, or serving a bucket, plus the operation body described above. A bucket
+response is always 18 MiB and a manifest/OPRF response is always 64 KiB, so the
+response class remains observable to the network path.
 
-Code references:
-- `server/crypto/oprf-discovery.js`
+The three cover lookup buckets hide which single requested bucket is real from
+an observer that cannot derive the token. They do not protect against an
+operator that uses the co-located OPRF secret to evaluate candidate handles.
+Because a publication links four forward token buckets, a malicious operator
+that guesses a handle can often match that combination to a specific row. This
+protocol therefore limits passive and database-only disclosure, but it does not
+provide private information retrieval or malicious-server username-enumeration
+resistance.
 
----
+Key transparency does not remove that enumeration boundary. The combined VOPRF
+operator can derive a guessed handle's discovery key and stable transparency
+label, then inspect that label's public map history. Transparency limits silent
+key substitution after the signer/handle history is established, it is not a
+private-membership protocol against the authority that computes the label.
 
-## 9. Implementation Reference
+Every anonymous HTTP call uses a new random Tor SOCKS authentication identity,
+which prevents deliberate circuit reuse across OPRF, discovery, avatar, and
+spool calls. It reduces direct request linkage but cannot eliminate timing,
+volume, fixed size-class, endpoint, or global-observer correlation.
 
-### Server-Side
-- `server/crypto/oprf-discovery.js`: OPRF key server and rate limiter
-- `server/server.js`: discovery handlers and epoch manager
-- `server/database/discovery-db.js`: billboard storage
-- `server/discovery/snapshot-service.js`: compressed padded epoch snapshots
-- `server/discovery/publication-privacy.js`: delayed publication relay and cover writes
+## Availability And Capacity
 
-### Client-Side
-- `src/lib/crypto/oprf-discovery-crypto.ts`: OPRF client and blob crypto
-- `src/hooks/discovery/useDiscovery.ts`: delayed publish ingress, cover publish traffic, PIR, and compressed snapshot retrieval
-- `src/lib/transport/blind-routing-client.ts`: route claims and sealed envelopes
-- `docs/app/COMPUTATIONAL_PIR.md`: reviewed PIR backend policy and target-free privacy ceiling
+- Epochs are six hours and publication leases are 24 hours.
+- The previous manifest index is retained for ten minutes for in-flight bucket
+  requests, clients do not perform previous-epoch target lookups.
+- Active source rows and source bytes are bounded before index construction.
+- A bucket contains at most the configured target count. Secret-keyed ranking
+  makes overload selection deterministic, but records that lose the rank are
+  temporarily undiscoverable. Capacity must be sized for expected occupancy.
+- The fixed anonymous route and each decrypted operation are globally rate
+  limited. An abusive client can
+  consume shared capacity or churn anonymous storage, proof of work and fixed
+  global caps limit cost but cannot provide fair per-user quotas without adding
+  identity metadata.

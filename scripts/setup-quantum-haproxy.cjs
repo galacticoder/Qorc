@@ -158,17 +158,13 @@ async function hasOqsProvider(env) {
     const combined = path.join(baseDir, 'cert.pem');
     await fsp.writeFile(combined, (await fsp.readFile(ecdsaCrt)).toString() + (await fsp.readFile(ecdsaKey)).toString());
 
-    const pqcGroups = [
-      'X25519MLKEM768',
-      'SecP256r1MLKEM768',
-      'SecP384r1MLKEM1024'
-    ];
+    const pqcGroups = ['X25519MLKEM768'];
     const groupsOut = pqcGroups.join(':');
     console.log('[SETUP] Using PQC TLS groups:', groupsOut);
 
     const hapCfgPath = path.join('server', 'config', 'haproxy-quantum.cfg');
     const absCert = path.resolve(combined);
-    const hapCfg = `global\n  daemon\n  maxconn 1000\n  tune.ssl.default-dh-param 2048\n  # deny non-TLS1.3\n  ssl-default-bind-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3\n  ssl-default-server-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3\n  # TLS1.3 AEADs only\n  ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256\n  ssl-default-server-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256\n\ndefaults\n  mode http\n  timeout connect 5s\n  timeout client 30s\n  timeout server 30s\n\nfrontend https_in\n  bind *:8443 ssl crt ${absCert} curves ${groupsOut}\n  http-request set-header X-Forwarded-Proto https\n  default_backend app\n\nbackend app\n  server s1 127.0.0.1:3000 check\n`;
+    const hapCfg = `global\n  daemon\n  maxconn 1000\n  tune.ssl.default-dh-param 2048\n  # deny non-TLS1.3\n  ssl-default-bind-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3\n  ssl-default-server-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3\n  # TLS1.3 AEADs and the required hybrid group only\n  ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256\n  ssl-default-server-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256\n  ssl-default-bind-curves ${groupsOut}\n  ssl-default-server-curves ${groupsOut}\n\ndefaults\n  mode http\n  timeout connect 5s\n  timeout client 30s\n  timeout server 30s\n\nfrontend https_in\n  bind *:8443 ssl crt ${absCert} curves ${groupsOut}\n  http-request set-header X-Forwarded-Proto https\n  default_backend app\n\nbackend app\n  server s1 127.0.0.1:3000 check\n`;
     await fsp.mkdir(path.dirname(hapCfgPath), { recursive: true });
     await fsp.writeFile(hapCfgPath, hapCfg, 'utf8');
 

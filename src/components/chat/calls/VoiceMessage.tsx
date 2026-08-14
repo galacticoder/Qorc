@@ -1,72 +1,80 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { cn } from '../../../lib/utils/shared-utils';
-import { Play, Pause, Mic } from 'lucide-react';
+import { Play, Pause, Mic, LoaderCircle } from 'lucide-react';
 import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
 import type { SecureDB } from '../../../lib/database/secureDB';
+import { MAX_VOICE_NOTE_DURATION_SECONDS } from '../../../lib/constants';
+import { isSafeFileUrl } from '../../../lib/utils/file-utils';
+import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 
 interface VoiceMessageProps {
-  audioUrl: string;
   timestamp: Date;
   isCurrentUser: boolean;
   filename?: string;
-  originalBase64Data?: string;
   mimeType?: string;
   messageId?: string;
   secureDB?: SecureDB | null;
   onRendered?: () => void;
+  loadFile?: boolean;
 }
 
 const WAVEFORM_BARS = 48;
-
-// Format seconds as M:SS
-const formatTime = (seconds: number): string => {
-  if (!isFinite(seconds) || seconds < 0) seconds = 0;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-};
+const DEFAULT_WAVEFORM = Array.from({ length: WAVEFORM_BARS }, (_, index) => (
+  0.2 + Math.abs(Math.sin((index + 1) * 1.37)) * 0.62
+));
 
 const parseFilenameDuration = (filename?: string): number => {
   const m = /voice-note-(\d+)s/i.exec(filename || '');
-  return m ? parseInt(m[1], 10) : 0;
+  const parsed = m ? Number(m[1]) : 0;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_VOICE_NOTE_DURATION_SECONDS
+    ? parsed
+    : 0;
 };
 
 export function VoiceMessage({
-  audioUrl,
   timestamp: _timestamp,
   isCurrentUser,
   filename,
-  originalBase64Data,
   mimeType,
   messageId,
   secureDB,
-  onRendered
+  onRendered,
+  loadFile = true,
 }: VoiceMessageProps) {
   const filenameDuration = parseFilenameDuration(filename);
-  const { url: resolvedUrl, error: urlError } = useFileUrl({
+  const [mediaRequested, setMediaRequested] = useState(false);
+  const { url: resolvedUrl, error: urlError, loading: fileLoading } = useFileUrl({
     secureDB: secureDB || null,
     fileId: messageId,
     mimeType: mimeType || 'audio/webm',
-    initialUrl: audioUrl,
-    originalBase64Data: originalBase64Data || null,
+    enabled: loadFile && mediaRequested,
+    previewKind: mediaRequested ? 'voice' : undefined,
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(filenameDuration);
   const [error, setError] = useState<string | null>(urlError);
-  const [peaks, setPeaks] = useState<number[] | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const onRenderedRef = useRef(onRendered);
+  onRenderedRef.current = onRendered;
 
-  const safeAudioUrl = audioUrl && !audioUrl.startsWith('blob:') ? audioUrl : '';
-  const effectiveAudioUrl = resolvedUrl || safeAudioUrl;
+  const effectiveAudioUrl = isSafeFileUrl(resolvedUrl);
+
+  useEffect(() => {
+    onRenderedRef.current?.();
+  }, [messageId]);
 
   const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
   const remaining = isPlaying ? Math.max(0, duration - currentTime) : duration;
 
   // Play / pause — the <audio> element drives isPlaying via its events
   const togglePlayback = useCallback(async () => {
+    if (!mediaRequested) {
+      setMediaRequested(true);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio || !effectiveAudioUrl) return;
     try {
@@ -83,13 +91,50 @@ export function VoiceMessage({
     } catch {
       setError('Failed to play audio');
     }
-  }, [effectiveAudioUrl]);
+  }, [effectiveAudioUrl, mediaRequested]);
 
   const handleLoadedMetadata = useCallback(() => {
-    if (filenameDuration > 0) return;
     const d = audioRef.current?.duration;
-    if (d && isFinite(d) && d > 0) setDuration(d);
+
+    if (typeof d !== 'number' || !Number.isFinite(d) || d <= 0) {
+      if (filenameDuration > 0) {
+        setDuration(filenameDuration);
+        setError(null);
+        return;
+      }
+
+      audioRef.current?.pause();
+      setError('Voice message duration is invalid');
+      return;
+    }
+
+    if (d > MAX_VOICE_NOTE_DURATION_SECONDS) {
+      audioRef.current?.pause();
+      setError('Voice message duration is invalid');
+      return;
+    }
+
+    setDuration(d);
+    setError(null);
   }, [filenameDuration]);
+
+  const handleTimeUpdate = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (
+      !Number.isFinite(audio.currentTime)
+      || audio.currentTime < 0
+      || audio.currentTime > MAX_VOICE_NOTE_DURATION_SECONDS
+    ) {
+      audio.pause();
+      setIsPlaying(false);
+      setError('Voice message duration is invalid');
+      return;
+    }
+
+    setCurrentTime(audio.currentTime);
+  }, []);
 
   // Seek by clicking the waveform
   const seekTo = useCallback(async (ratio: number) => {
@@ -104,67 +149,15 @@ export function VoiceMessage({
   }, [duration]);
 
   const handleBarsClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!mediaRequested) {
+      setMediaRequested(true);
+      return;
+    }
     const rect = e.currentTarget.getBoundingClientRect();
     void seekTo((e.clientX - rect.left) / rect.width);
-  }, [seekTo]);
+  }, [mediaRequested, seekTo]);
 
-  // Decode audio once to compute waveform
-  useEffect(() => {
-    let cancelled = false;
-    setPeaks(null);
-
-    const run = async () => {
-      try {
-        const arrayBuffer = originalBase64Data
-          ? (() => {
-            const clean = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
-            const bin = atob(clean);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            return bytes.buffer;
-          })()
-          : effectiveAudioUrl
-            ? await (await fetch(effectiveAudioUrl)).arrayBuffer()
-            : null;
-
-        if (!arrayBuffer) return;
-
-        const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-        const ctx = new AudioCtx();
-        const buffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-        try { ctx.close(); } catch { /* ignore */ }
-        if (cancelled) return;
-
-        if (!filenameDuration && buffer.duration && buffer.duration > 0) setDuration(buffer.duration);
-
-        const data = buffer.getChannelData(0);
-        const per = Math.max(1, Math.floor(data.length / WAVEFORM_BARS));
-        const out = new Array<number>(WAVEFORM_BARS);
-        let max = 0;
-        for (let i = 0; i < WAVEFORM_BARS; i++) {
-          const start = i * per;
-          const end = Math.min(start + per, data.length);
-          let peak = 0;
-          for (let j = start; j < end; j++) peak = Math.max(peak, Math.abs(data[j]));
-          out[i] = peak;
-          if (peak > max) max = peak;
-        }
-        const norm = max > 0.01 ? 1 / max : 1;
-        for (let i = 0; i < WAVEFORM_BARS; i++) out[i] = Math.min(1, Math.max(0.08, out[i] * norm));
-
-        if (!cancelled) setPeaks(out);
-      } catch {
-        if (!cancelled) setPeaks(new Array(WAVEFORM_BARS).fill(0.18));
-      } finally {
-        onRendered?.();
-      }
-    };
-
-    void run();
-    return () => { cancelled = true; };
-  }, [effectiveAudioUrl, originalBase64Data, onRendered, filenameDuration]);
-
-  const bars = peaks ?? new Array(WAVEFORM_BARS).fill(0.18);
+  const bars = DEFAULT_WAVEFORM;
   const playedColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'var(--qor-accent)';
   const restColor = isCurrentUser ? 'rgba(255,255,255,0.38)' : 'color-mix(in srgb, var(--qor-accent) 32%, transparent)';
 
@@ -180,9 +173,10 @@ export function VoiceMessage({
       <audio
         ref={audioRef}
         src={effectiveAudioUrl || undefined}
-        preload="metadata"
+        preload="none"
         onLoadedMetadata={handleLoadedMetadata}
-        onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime ?? 0)}
+        onDurationChange={handleLoadedMetadata}
+        onTimeUpdate={handleTimeUpdate}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={() => { setIsPlaying(false); setCurrentTime(0); }}
@@ -196,7 +190,11 @@ export function VoiceMessage({
         onClick={togglePlayback}
         aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
       >
-        {isPlaying ? <Pause className="w-[18px] h-[18px]" /> : <Play className="w-[18px] h-[18px] translate-x-[1px]" />}
+        {fileLoading && mediaRequested
+          ? <LoaderCircle className="w-[18px] h-[18px] animate-spin" />
+          : isPlaying
+            ? <Pause className="w-[18px] h-[18px]" />
+            : <Play className="w-[18px] h-[18px] translate-x-[1px]" />}
       </button>
 
       <div className="qor-voice-body">
@@ -213,7 +211,7 @@ export function VoiceMessage({
         </div>
         <div className="qor-voice-foot">
           <Mic className="w-3 h-3 opacity-70" />
-          <span className="qor-voice-time">{formatTime(remaining)}</span>
+          <span className="qor-voice-time">{formatClockDurationSeconds(remaining)}</span>
         </div>
       </div>
     </div>

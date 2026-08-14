@@ -1,0 +1,11 @@
+{
+  "version": "0.4.9.11",
+  "tag": "tor-0.4.9.11",
+  "commit": "f3d28b2e0978ca075ec324834bec077673478ded",
+  "source_url": "https://dist.torproject.org/tor-0.4.9.11.tar.gz",
+  "source_sha256": "2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed",
+  "source_max_bytes": 16777216,
+  "patch": "patches/0001-retry-hsdesc-upload.patch",
+  "patch_sha256": "0e1f8eea86ba7ce2798c11cd4656b1e6a8d5b9d5eaaaa8349102c787040a1b51",
+  "upstream_issue": "https://gitlab.torproject.org/tpo/core/tor/-/work_items/31632"
+}

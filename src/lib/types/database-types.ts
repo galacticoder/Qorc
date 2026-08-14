@@ -1,4 +1,4 @@
-import type { Message } from '../../components/chat/messaging/types';
+import type { Message, MessageReceipt, MessageReply } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
 
 // SecureDB hook props
@@ -20,96 +20,6 @@ export interface UseSecureDBReturn {
   flushPendingSaves: () => Promise<void>;
 }
 
-// Username display hook props
-export interface UseUnifiedUsernameDisplayProps {
-  username: string;
-  getDisplayUsername?: (username: string) => Promise<string>;
-  originalUsername?: string;
-  resolveTimeoutMs?: number;
-}
-
-// Username display hook return type
-export interface UseUnifiedUsernameDisplayReturn {
-  displayName: string;
-  isLoading: boolean;
-  error: string | null;
-  retry: () => void;
-}
-
-// Username display component props
-export interface UsernameDisplayProps {
-  username: string;
-  getDisplayUsername?: (username: string) => Promise<string>;
-  className?: string;
-  loadingText?: string;
-  errorText?: string;
-  showRetry?: boolean;
-  onRetry?: () => void;
-}
-
-// Mapping payload for username mappings
-export interface MappingPayload {
-  hashed: string;
-  original: string;
-}
-
-// Resolve cache entry
-export interface ResolveCache {
-  displayName: string;
-  expiresAt: number;
-}
-
-// Rate limit bucket
-export interface RateLimitBucket {
-  windowStart: number;
-  count: number;
-}
-
-// Key manager types --
-export interface EncryptedKeyData {
-  bundleCiphertext: string;
-  bundleNonce: string;
-  bundleTag: string;
-  bundleAad: string;
-  bundleMac: string;
-  kyberPublicBase64: string;
-  dilithiumPublicBase64: string;
-  x25519PublicBase64: string;
-  accountRootPublicBase64: string;
-  salt: string;
-  version: number;
-  argon2Params: {
-    version: number;
-    algorithm: string;
-    memoryCost: number;
-    timeCost: number;
-    parallelism: number;
-  };
-  createdAt: number;
-  expiresAt: number;
-  sequence: number;
-  payloadSize: number;
-}
-
-export interface DecryptedKeys {
-  kyber: {
-    publicKeyBase64: string;
-    secretKey: Uint8Array;
-  };
-  dilithium: {
-    publicKeyBase64: string;
-    secretKey: Uint8Array;
-  };
-  x25519: {
-    publicKeyBase64: string;
-    private: Uint8Array;
-  };
-  accountRoot: {
-    publicKeyBase64: string;
-    secretKey: Uint8Array;
-  };
-}
-
 // SecureDB
 export interface EphemeralConfig {
   enabled: boolean;
@@ -128,30 +38,26 @@ export interface EphemeralData {
 
 export interface StoredMessage {
   id?: string;
+  wireMessageId?: string;
   timestamp?: number;
+  content?: string;
+  secureContentId?: string;
+  sender?: string;
+  recipient?: string;
+  isDeliberateUserAction?: true;
+  replyTo?: MessageReply;
+  receipt?: MessageReceipt;
   [key: string]: unknown;
 }
 
-export interface StoredUser {
-  id?: string;
-  username?: string;
-  [key: string]: unknown;
-}
+export type StoredUser = User;
 
 export interface ConversationMetadata {
   peerUsername: string;
   lastMessage: StoredMessage;
-  unreadCount: number;
   lastReadTimestamp: number;
+  firstSegment: number;
+  lastSegment: number;
   isPinned?: boolean;
   pinnedAt?: number;
 }
-
-export type PostQuantumAEADLike = {
-  encrypt(plaintext: Uint8Array, key: Uint8Array, aad?: Uint8Array, nonce?: Uint8Array): {
-    ciphertext: Uint8Array;
-    nonce: Uint8Array;
-    tag: Uint8Array;
-  };
-  decrypt(ciphertext: Uint8Array, nonce: Uint8Array, tag: Uint8Array, key: Uint8Array, aad?: Uint8Array): Uint8Array;
-};

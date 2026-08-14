@@ -4,23 +4,28 @@ version = "1.0.0"
 description = "Secure messaging application"
 authors = ["galacticoderr"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
+autobins = false
 
 [lib]
 name = "qor_chat_lib"
+path = "src/main.rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "qor"
+path = "src/desktop.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+blake3 = "1"
+sha2 = "0.10"
 
 [dependencies]
 # Tauri core
 tauri = { version = "2", features = ["tray-icon", "devtools", "image-png"] }
-tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-process = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -28,51 +33,43 @@ serde_json = "1"
 
 # Async runtime
 tokio = { version = "1", features = ["full", "sync", "time", "process", "fs", "io-util", "net", "rt-multi-thread", "macros"] }
-futures = "0.3"
 async-trait = "0.1"
 
 # Cryptography
 aes-gcm = { version = "0.10", features = ["aes"] }
 chacha20poly1305 = "0.10"
+argon2 = { version = "0.5", features = ["std"] }
 sha3 = "0.10"
 sha2 = "0.10"
 blake3 = { version = "1", features = ["traits-preview"] }
 hkdf = "0.12"
-pqcrypto-kyber = "0.8"
-pqcrypto-traits = "0.3"
-fips204 = "0.4"
+libcrux-ml-kem = { version = "0.0.8", default-features = false, features = ["mlkem1024", "std"] }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "zeroize"] }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["precomputed-tables", "zeroize"] }
 
-# Random number generation
 rand = "0.9"
 getrandom = { version = "0.3", features = ["std"] }
 
-# Constant-time operations
 subtle = { version = "2", features = ["std"] }
-
-# Secure memory zeroing
 zeroize = { version = "1", features = ["derive", "std"] }
 
 # Networking
-tokio-tungstenite = { version = "0.24", features = ["native-tls", "rustls-tls-native-roots"] }
-native-tls = "0.2"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-socks = "0.5"
 socket2 = { version = "0.5", features = ["all"] }
 libc = "0.2"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-iroh = "0.96"
-n0-future = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+rustls-native-certs = "0.8"
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "socks", "gzip"] }
 url = "2"
 
 # System integration
 notify-rust = "4"
 open = "5"
-dirs = "5"
-hostname = "0.4"
 
 # Database
-rusqlite = { version = "0.32.1", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.32.1", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Utilities
 tracing = "0.1"
@@ -88,23 +85,21 @@ parking_lot = "0.12"
 regex = "1"
 lazy_static = "1"
 futures-util = "0.3"
-whoami = "1"
 tar = "0.4"
-scraper = "0.22"
 sysinfo = "0.30"
+cosmic-text = "0.14"
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+arboard = { version = "3.6", default-features = false }
 
 # Signal Protocol
 [dependencies.libsignal-protocol]
 git = "https://github.com/signalapp/libsignal"
-branch = "main"
+rev = "7c8cb0c5fce1d01805199de992bf4323f4765f1f"
+features = ["mlkem1024"]
 
-[dependencies.libsignal-core]
-git = "https://github.com/signalapp/libsignal"
-branch = "main"
-
-[dependencies.signal-crypto]
-git = "https://github.com/signalapp/libsignal"
-branch = "main"
+[dependencies.spqr]
+git = "https://github.com/signalapp/SparsePostQuantumRatchet.git"
+tag = "v1.5.1"
 
 # Platform-specific screen capture
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -114,7 +109,7 @@ webkit2gtk = "=2.0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 scrap = "0.5"
-windows = { version = "0.58", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 scrap = "0.5"
@@ -132,6 +127,13 @@ features = ["libloaderapi", "winuser", "winbase"]
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[patch.crates-io]
+libcrux-ml-kem = { path = "../vendor/libcrux-ml-kem-0.0.8" }
+libcrux-traits = { path = "../vendor/libcrux-traits-0.0.6" }
+libcrux-intrinsics = { path = "../vendor/libcrux-intrinsics-0.0.6" }
+hpke-rs = { path = "../vendor/hpke-rs-0.6.1" }
+glib = { path = "../vendor/glib-0.18.5" }
 
 [profile.release]
 opt-level = 3

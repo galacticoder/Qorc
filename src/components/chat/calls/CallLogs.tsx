@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Phone, Video, Search, Clock, Trash2, MoreVertical, ShieldOff } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { Input } from '../../ui/input';
@@ -7,14 +7,7 @@ import { ScrollArea } from '../../ui/scroll-area';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
-import { blockStatusCache } from '../../../lib/blocking/block-status-cache';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../../lib/sanitizers';
-import { EventType } from '@/lib/types/event-types';
-import {
-    DEFAULT_EVENT_RATE_WINDOW_MS,
-    DEFAULT_EVENT_RATE_MAX,
-    MAX_EVENT_USERNAME_LENGTH
-} from '../../../lib/constants';
+import { useBlockStatus } from '../../../hooks/useBlockStatus';
 import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/utils/date-utils';
 
 interface CallLogItemProps {
@@ -35,48 +28,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
         username: log.peerUsername
     });
 
-    const [isBlocked, setIsBlocked] = useState<boolean>(false);
-    const eventRateRef = useRef({ windowStart: Date.now(), count: 0 });
-
-    // Check if user is blocked
-    useEffect(() => {
-        const checkBlockedStatus = () => {
-            const blocked = blockStatusCache.get(log.peerUsername);
-            setIsBlocked(blocked === true);
-        };
-
-        checkBlockedStatus();
-
-        const handleBlockStatusChange = (event: Event) => {
-            try {
-                const now = Date.now();
-                const bucket = eventRateRef.current;
-                if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
-                    bucket.windowStart = now;
-                    bucket.count = 0;
-                }
-                bucket.count += 1;
-                if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
-                    return;
-                }
-
-                if (!(event instanceof CustomEvent)) return;
-                const detail = event.detail;
-                if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-                const username = sanitizeUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
-                if (!username) return;
-                const newBlockedState = (detail as any).isBlocked === true;
-
-                if (username === log.peerUsername) {
-                    setIsBlocked(newBlockedState);
-                }
-            } catch { }
-        };
-
-        window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
-        return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
-    }, [log.peerUsername]);
+    const isBlocked = useBlockStatus(log.peerUsername, { load: false });
 
     return (
         <React.Fragment>

@@ -1,3 +1,8 @@
+FROM rust:1-bookworm AS pir-builder
+WORKDIR /build
+COPY workers/ ./workers/
+RUN cd workers/ypir && cargo build --release --offline --bin qor-pir-worker
+
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,6 +35,9 @@ RUN node scripts/install-deps.cjs --server
 RUN npm install
 
 COPY server/ ./server/
+COPY shared/ ./shared/
+COPY --from=pir-builder /build/workers/ypir/target/release/qor-pir-worker \
+     /app/workers/ypir/target/release/qor-pir-worker
 
 EXPOSE 3000
 

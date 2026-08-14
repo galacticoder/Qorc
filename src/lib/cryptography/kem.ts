@@ -2,7 +2,6 @@
  * Post-Quantum Key Encapsulation Mechanism
  */
 
-import { PostQuantumUtils } from '../utils/pq-utils';
 import {
   PQ_KEM_PUBLIC_KEY_SIZE,
   PQ_KEM_SECRET_KEY_SIZE,
@@ -13,30 +12,13 @@ import { PostQuantumWorker } from './worker-bridge';
 
 export class PostQuantumKEM {
   static async generateKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    try {
-      return await PostQuantumWorker.generateKemKeyPair();
-    } catch (err) {
-      console.warn('[PostQuantumKEM] Worker failed, falling back to local keygen', err);
-      return this.generateKeyPairLocal();
+    const result = await PostQuantumWorker.generateKemKeyPair();
+    if (result.publicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE || result.secretKey.length !== PQ_KEM_SECRET_KEY_SIZE) {
+      result.publicKey.fill(0);
+      result.secretKey.fill(0);
+      throw new Error('Worker returned an invalid ML-KEM key pair');
     }
-  }
-
-  static async generateKeyPairLocal(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
-    const kp = ml_kem1024.keygen();
-    const publicKey = PostQuantumUtils.asUint8Array(kp.publicKey);
-    const secretKey = PostQuantumUtils.asUint8Array(kp.secretKey);
-    if (publicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
-      throw new Error('Invalid public key size generated');
-    }
-    if (secretKey.length !== PQ_KEM_SECRET_KEY_SIZE) {
-      throw new Error('Invalid secret key size generated');
-    }
-    return { publicKey, secretKey };
-  }
-
-  static generateKeyPairFromSeed(_seed: Uint8Array): { publicKey: Uint8Array; secretKey: Uint8Array } {
-    throw new Error('Deterministic ML-KEM key generation is not supported by the underlying library');
+    return result;
   }
 
   static async encapsulate(publicKey: Uint8Array): Promise<{ ciphertext: Uint8Array; sharedSecret: Uint8Array }> {

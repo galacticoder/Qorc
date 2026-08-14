@@ -5,7 +5,7 @@
 import { Base64 } from './base64';
 import { KeyService } from './keys';
 import { CRYPTO_IV_LENGTH, CRYPTO_AUTH_TAG_LENGTH } from '../constants';
-import { concatUint8Arrays } from '../utils/shared-utils';
+import { concatUint8Arrays } from '../utils/byte-utils';
 
 const subtle = (globalThis as any).crypto?.subtle as SubtleCrypto | undefined;
 
@@ -23,14 +23,26 @@ export class AES {
       throw new Error('SubtleCrypto not available');
     }
     const iv = crypto.getRandomValues(new Uint8Array(CRYPTO_IV_LENGTH));
-    const params: AesGcmParams = { name: 'AES-GCM', iv, tagLength: CRYPTO_AUTH_TAG_LENGTH * 8 } as AesGcmParams;
-    if (aad && aad.byteLength) {
-      (params as any).additionalData = aad;
+    const ivView = new Uint8Array(iv);
+    const aadView = aad?.byteLength ? new Uint8Array(aad) : null;
+    const params: AesGcmParams = { name: 'AES-GCM', iv: ivView.buffer, tagLength: CRYPTO_AUTH_TAG_LENGTH * 8 };
+    if (aadView) params.additionalData = aadView.buffer;
+    const dataView = new Uint8Array(data);
+    let ciphertextWithTag: Uint8Array | null = null;
+    let succeeded = false;
+    try {
+      ciphertextWithTag = new Uint8Array(await subtle.encrypt(params, aesKey, dataView.buffer));
+      const authTag = ciphertextWithTag.slice(-CRYPTO_AUTH_TAG_LENGTH);
+      const encrypted = ciphertextWithTag.slice(0, -CRYPTO_AUTH_TAG_LENGTH);
+      succeeded = true;
+      return { iv, authTag, encrypted };
+    } finally {
+      ciphertextWithTag?.fill(0);
+      dataView.fill(0);
+      ivView.fill(0);
+      aadView?.fill(0);
+      if (!succeeded) iv.fill(0);
     }
-    const ciphertextWithTag = new Uint8Array(await subtle.encrypt(params, aesKey, data.buffer as ArrayBuffer));
-    const authTag = ciphertextWithTag.slice(-CRYPTO_AUTH_TAG_LENGTH);
-    const encrypted = ciphertextWithTag.slice(0, -CRYPTO_AUTH_TAG_LENGTH);
-    return { iv, authTag, encrypted };
   }
 
   static async decryptBinaryWithAES(
@@ -43,13 +55,23 @@ export class AES {
     if (!subtle) {
       throw new Error('SubtleCrypto not available');
     }
-    const params: AesGcmParams = { name: 'AES-GCM', iv, tagLength: CRYPTO_AUTH_TAG_LENGTH * 8 } as AesGcmParams;
-    if (aad && aad.byteLength) {
-      (params as any).additionalData = aad;
-    }
+    const ivView = new Uint8Array(iv);
+    const aadView = aad?.byteLength ? new Uint8Array(aad) : null;
+    const params: AesGcmParams = { name: 'AES-GCM', iv: ivView.buffer, tagLength: CRYPTO_AUTH_TAG_LENGTH * 8 };
+    if (aadView) params.additionalData = aadView.buffer;
     const ciphertextWithTag = concatUint8Arrays(encrypted, authTag);
-    const plaintext = new Uint8Array(await subtle.decrypt(params, aesKey, ciphertextWithTag.buffer as ArrayBuffer));
-    return plaintext;
+    try {
+      const ownedCiphertext = new Uint8Array(ciphertextWithTag);
+      try {
+        return new Uint8Array(await subtle.decrypt(params, aesKey, ownedCiphertext.buffer));
+      } finally {
+        ownedCiphertext.fill(0);
+      }
+    } finally {
+      ciphertextWithTag.fill(0);
+      ivView.fill(0);
+      aadView?.fill(0);
+    }
   }
 
   static async decryptWithAesGcmRaw(
@@ -60,7 +82,11 @@ export class AES {
     aad?: Uint8Array
   ): Promise<string> {
     const plaintext = await this.decryptBinaryWithAES(iv, authTag, encrypted, aesKey, aad);
-    return new TextDecoder().decode(plaintext);
+    try {
+      return new TextDecoder().decode(plaintext);
+    } finally {
+      plaintext.fill(0);
+    }
   }
 
   static serializeEncryptedData(iv: Uint8Array, authTag: Uint8Array, encrypted: Uint8Array): string {
@@ -79,6 +105,10 @@ export class AES {
     output[offset++] = (encrypted.length >> 8) & 0xff;
     output[offset++] = encrypted.length & 0xff;
     output.set(encrypted, offset);
-    return Base64.arrayBufferToBase64(output);
+    try {
+      return Base64.arrayBufferToBase64(output);
+    } finally {
+      output.fill(0);
+    }
   }
 }

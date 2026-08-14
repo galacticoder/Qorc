@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useCallback, useState } from "react";
+import React, { useRef, useMemo, useCallback, useEffect, useState } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
 import { format, isSameMinute } from "date-fns";
 import { formatMessageTimestamp } from "../../../lib/utils/date-utils.ts";
@@ -12,14 +12,13 @@ import { FileContent } from "./ChatMessage/FileMessage";
 import { VoiceMessage } from "../calls/VoiceMessage";
 import { MessageReceipt } from "./MessageReceipt";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
-import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
-import { LinkExtractor } from "../../../lib/link-extraction.ts";
-import { copyTextToClipboard } from "../../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../../ui/UserAvatar";
 import { EventType } from "../../../lib/types/event-types.ts";
 import { SignalType } from "../../../lib/types/signal-types.ts";
 import { SecureCanvasText } from "./SecureCanvasText";
+import { createDownloadLink } from "../../../lib/utils/file-utils";
+import { nativeMessageContent } from "../../../lib/tauri-bindings";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -38,7 +37,7 @@ const isValidJson = (str: string): boolean => {
 };
 
 // Parse system message content
-const parseSystemMessage = (content: string, message: any): { label: string; actions?: SystemAction[]; isError?: boolean } => {
+const parseSystemMessage = (content: string, message: any, currentUsername?: string): { label: string; actions?: SystemAction[]; isError?: boolean } => {
   if (!isValidJson(content)) {
     return { label: content };
   }
@@ -59,7 +58,9 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
           label: 'Call back',
           onClick: () => {
             try {
-              window.dispatchEvent(new CustomEvent(EventType.UI_CALL_REQUEST, { detail: { peer, type: 'audio' } }));
+              window.dispatchEvent(new CustomEvent(EventType.UI_CALL_REQUEST, {
+                detail: { account: currentUsername, peer, type: 'audio' }
+              }));
             } catch { }
           }
         }];
@@ -105,22 +106,17 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [isContentRendered, setIsContentRendered] = useState(false);
-
-  const { isUrlOnly, urls } = useMemo(() => {
-    const urlOnly = LinkExtractor.isUrlOnlyMessage(content);
-    const extractedUrls = LinkExtractor.extractUrlStrings(content);
-
-    return {
-      isUrlOnly: urlOnly,
-      urls: extractedUrls
-    };
-  }, [content]);
+  const downloadGenerationRef = useRef(0);
+  useEffect(() => {
+    downloadGenerationRef.current += 1;
+    return () => { downloadGenerationRef.current += 1; };
+  }, [message.id, secureDB]);
 
   const { systemLabel, systemActions, systemIsError } = useMemo(() => {
     if (!isSystemMessage) return { systemLabel: '', systemActions: undefined, systemIsError: undefined };
-    const { label, actions, isError } = parseSystemMessage(content, message);
+    const { label, actions, isError } = parseSystemMessage(content, message, currentUsername);
     return { systemLabel: label, systemActions: actions, systemIsError: isError };
-  }, [isSystemMessage, content, message]);
+  }, [isSystemMessage, content, message, currentUsername]);
 
   const isFileMessageType =
     type === SignalType.FILE_MESSAGE ||
@@ -132,11 +128,28 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     return name.includes('voice-note');
   }, [isFileMessageType, message.filename]);
 
+  const [loadFile, setLoadFile] = useState(false);
+  useEffect(() => {
+    if (!isFileMessageType) return;
+    const node = bubbleRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setLoadFile(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setLoadFile(true);
+      observer.disconnect();
+    }, { rootMargin: '600px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isFileMessageType, message.id]);
+
   const timestampDisplay = useMemo(() => formatMessageTimestamp(timestamp), [timestamp]);
 
   // Handle emoji selection
   const handlePickEmoji = useCallback((emoji: string) => {
-    recordEmojiUsage(emoji, secureDB);
+    void recordEmojiUsage(emoji, secureDB);
     if (currentUsername && message.reactions) {
       for (const [e, users] of Object.entries(message.reactions)) {
         if (users.includes(currentUsername) && e !== emoji) {
@@ -149,8 +162,9 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   // Handle message copy
   const handleCopyMessage = useCallback(() => {
-    void copyTextToClipboard(content);
-  }, [content]);
+    const contentId = message.secureContentId || message.id;
+    void nativeMessageContent.copy(contentId).catch(() => { });
+  }, [message.id, message.secureContentId]);
 
   // Handle message reply
   const handleReply = useCallback(() => {
@@ -169,47 +183,27 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   // Handle file download
   const handleDownload = useCallback(async () => {
+    const generation = downloadGenerationRef.current;
+    const database = secureDB;
     try {
-      const { originalBase64Data, mimeType, filename } = message;
-      const audioUrl = typeof content === 'string' ? content : '';
-
-      if (originalBase64Data) {
-        try {
-          const cleanBase64 = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
-          const binaryString = atob(cleanBase64);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-          const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
-          const downloadUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = downloadUrl;
-          link.download = filename || `file-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}`;
-          link.style.display = 'none';
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-          return;
-        } catch { }
+      if (!database || !message.id) throw new Error('Encrypted file storage is unavailable');
+      const blob = await database.getFile(message.id);
+      if (
+        generation !== downloadGenerationRef.current ||
+        !blob
+      ) return;
+      const typedBlob = new Blob([blob], { type: message.mimeType || 'application/octet-stream' });
+      const url = URL.createObjectURL(typedBlob);
+      try {
+        createDownloadLink(url, message.filename || `file-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}`);
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 0);
       }
-
-      if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') {
-        alert('Cannot download file: Invalid data');
-        return;
-      }
-
-      const link = document.createElement('a');
-      link.href = audioUrl;
-      link.download = filename || `file-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}`;
-      link.style.display = 'none';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
     } catch (error) {
       console.error('Failed to download file:', error);
       alert('Failed to download file');
     }
-  }, [message, content, timestamp]);
+  }, [message, secureDB, timestamp]);
 
   // Handle context menu
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -224,13 +218,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   }, [safeIsCurrentUser]);
 
   const isDownloadable = useMemo(() => {
-    if (!isFileMessageType) return false;
-    const { originalBase64Data } = message;
-    const audioUrl = typeof content === 'string' ? content : '';
-    if (originalBase64Data) return true;
-    if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') return false;
-    return true;
-  }, [isFileMessageType, message, content]);
+    return !!(isFileMessageType && secureDB && message.id);
+  }, [isFileMessageType, message.id, secureDB]);
 
   if (isSystemMessage) {
     return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} />;
@@ -249,6 +238,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   return (
     <div
+      data-emoji-trigger={messageTriggerId}
       className={cn(
         "flex gap-3 mb-4",
         safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
@@ -301,63 +291,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           </div>
         )}
 
-        {message.replyTo && (
-          <div
-            className="mb-1 p-3 rounded text-sm max-w-full select-none cursor-pointer hover:opacity-90 transition-opacity relative overflow-hidden"
-            style={{
-              backgroundColor: 'hsl(var(--secondary))',
-              borderLeft: `4px solid ${safeIsCurrentUser ? 'hsl(var(--primary-foreground))' : 'hsl(var(--primary))'}`,
-            }}
-            role="note"
-            aria-label={`Reply to ${displayReplyToSender}`}
-            onClick={() => onReplyClick?.(message.replyTo!.id)}
-          >
-            <div className="flex items-center gap-2 mb-0.5">
-              <span className="font-medium text-xs text-foreground/80">{displayReplyToSender}</span>
-            </div>
-            <div className="text-xs text-muted-foreground truncate opacity-90">
-              <SecureCanvasText
-                messageId={message.replyTo.secureContentId || message.replyTo.id}
-                maxWidth={250}
-                fontSize={12}
-                color="inherit"
-                onContextMenu={handleContextMenu}
-              />
-            </div>
-          </div>
-        )}
-
-        {message.encrypted && (message.ciphertext || message.mac || message.kemCiphertext) && (
-          <details className="mb-2 w-full">
-            <summary className="text-[11px] text-accent cursor-pointer select-none">
-              Encryption details
-            </summary>
-            <div className="mt-1 p-2 rounded-md bg-[var(--color-muted-panel)] text-[10px] leading-relaxed break-words" role="region" aria-label="Encryption metadata">
-              {message.kemCiphertext && typeof message.kemCiphertext === 'string' && (
-                <div><strong>KEM</strong>: {message.kemCiphertext.slice(0, 32)}…</div>
-              )}
-              {message.ciphertext && typeof message.ciphertext === 'string' && (
-                <div><strong>CT</strong>: {message.ciphertext.slice(0, 32)}…</div>
-              )}
-              {message.nonce && typeof message.nonce === 'string' && (
-                <div><strong>Nonce</strong>: {message.nonce}</div>
-              )}
-              {message.tag && typeof message.tag === 'string' && (
-                <div><strong>Tag</strong>: {message.tag}</div>
-              )}
-              {message.mac && typeof message.mac === 'string' && (
-                <div><strong>MAC</strong>: {message.mac}</div>
-              )}
-              {message.aad && typeof message.aad === 'string' && (
-                <div><strong>AAD</strong>: {message.aad}</div>
-              )}
-              {message.pqContext && typeof message.pqContext === 'object' && (
-                <div><strong>Context</strong>: {JSON.stringify(message.pqContext)}</div>
-              )}
-            </div>
-          </details>
-        )}
-
         {/* Message body container (bubbles, previews, etc) */}
         <div
           style={{
@@ -392,28 +325,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
             </div>
           )}
 
-          {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== SignalType.FILE_MESSAGE && type !== SignalType.FILE && (
-            <div
-              className="mb-3"
-              style={{
-                alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-                width: '100%',
-                maxWidth: 'min(360px, 85vw)'
-              }}
-            >
-              <LinkifyWithPreviews
-                options={{ rel: "noopener noreferrer" }}
-                showPreviews={true}
-                isCurrentUser={safeIsCurrentUser}
-                previewsOnly={true}
-                urls={urls}
-                onRendered={() => setIsContentRendered(true)}
-              >
-                {content}
-              </LinkifyWithPreviews>
-            </div>
-          )}
-
           {/* Message bubble */}
           <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
             {/* Render file content or text content */}
@@ -421,54 +332,25 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
               <div className="relative" ref={bubbleRef} onContextMenu={handleContextMenu}>
                 {isVoiceNote ? (
                   <VoiceMessage
-                    audioUrl={typeof content === 'string' ? content : ''}
                     timestamp={timestamp}
                     isCurrentUser={safeIsCurrentUser}
                     filename={message.filename}
-                    originalBase64Data={message.originalBase64Data}
                     mimeType={message.mimeType}
                     messageId={message.id}
                     secureDB={secureDB}
                     onRendered={() => setIsContentRendered(true)}
+                    loadFile={loadFile}
                   />
                 ) : (
                   <FileContent
                     message={message}
-                    isCurrentUser={safeIsCurrentUser}
                     secureDB={secureDB}
                     onRendered={() => setIsContentRendered(true)}
+                    loadFile={loadFile}
                   />
                 )}
               </div>
-            ) : (() => {
-              const showPreviews = !isSystemMessage && !isDeleted;
-
-              if (isUrlOnly && showPreviews) {
-                return (
-                  <div
-                    className="relative mb-1"
-                    style={{
-                      alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-                      width: '100%',
-                      maxWidth: 'min(360px, 85vw)'
-                    }}
-                    ref={bubbleRef}
-                    onContextMenu={handleContextMenu}
-                  >
-                    <LinkifyWithPreviews
-                      options={{ rel: "noopener noreferrer" }}
-                      showPreviews={true}
-                      isCurrentUser={safeIsCurrentUser}
-                      urls={urls}
-                      onRendered={() => setIsContentRendered(true)}
-                    >
-                      {content}
-                    </LinkifyWithPreviews>
-                  </div>
-                );
-              }
-
-              return (
+            ) : (
                 <div className="relative max-w-full" ref={bubbleRef}>
                   <div
                     className="px-4 py-3 text-sm transition-opacity duration-200"
@@ -491,8 +373,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                     />
                   </div>
                 </div>
-              );
-            })()}
+              )}
           </div>
         </div>
 
@@ -569,7 +450,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
-          onCopy={handleCopyMessage}
+          onCopy={!isFileMessageType ? handleCopyMessage : undefined}
           onEdit={!isFileMessageType && safeIsCurrentUser ? handleEdit : undefined}
           onReply={handleReply}
           onDelete={safeIsCurrentUser ? handleDelete : undefined}

@@ -6,11 +6,14 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync, execSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 const tauriDir = path.join(repoRoot, 'src-tauri');
+const protocVersion = process.env.QOR_PROTOC_VERSION || '33.0';
+const strawberryPerlUrl = process.env.QOR_STRAWBERRY_PERL_URL ||
+    'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip';
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only]');
@@ -76,6 +79,208 @@ function clientRuntimeEnv() {
     return env;
 }
 
+function commandPath(cmd) {
+    try {
+        const checkCmd = process.platform === 'win32' ? 'where' : 'command -v';
+        const output = execSync(`${checkCmd} ${cmd}`, {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        return output.split(/\r?\n/).map(line => line.trim()).find(Boolean) || null;
+    } catch {
+        return null;
+    }
+}
+
+function ensureProtocEnv() {
+    if (process.env.PROTOC && fs.existsSync(process.env.PROTOC)) {
+        return;
+    }
+
+    const found = commandPath(process.platform === 'win32' ? 'protoc.exe' : 'protoc') || commandPath('protoc');
+    if (found) {
+        process.env.PROTOC = found;
+        return;
+    }
+
+    if (process.platform !== 'win32') {
+        logErr('Missing required dependency: protoc');
+        logErr('Install protobuf-compiler/protobuf, or set PROTOC to a protoc binary.');
+        process.exit(1);
+    }
+
+    const protocExe = ensureWindowsProtoc();
+    process.env.PROTOC = protocExe;
+    process.env.PATH = `${path.dirname(protocExe)}${path.delimiter}${process.env.PATH || ''}`;
+}
+
+function ensureWindowsProtoc() {
+    const cacheDir = path.join(repoRoot, '.cache', 'protoc', `v${protocVersion}`);
+    const protocExe = path.join(cacheDir, 'bin', 'protoc.exe');
+    if (fs.existsSync(protocExe)) {
+        return protocExe;
+    }
+
+    const zipPath = path.join(repoRoot, '.cache', 'protoc', `protoc-${protocVersion}-win64.zip`);
+    const url = process.env.QOR_PROTOC_URL ||
+        `https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip`;
+    console.log(`[CLIENT] protoc not found; downloading ${url}`);
+
+    const script = [
+        '& { param([string]$url, [string]$zipPath, [string]$cacheDir)',
+        "$ErrorActionPreference = 'Stop'",
+        '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+        'New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipPath) | Out-Null',
+        'Invoke-WebRequest -Uri $url -OutFile $zipPath',
+        'if (Test-Path -LiteralPath $cacheDir) { Remove-Item -LiteralPath $cacheDir -Recurse -Force }',
+        'Expand-Archive -LiteralPath $zipPath -DestinationPath $cacheDir -Force',
+        '}'
+    ].join('; ');
+
+    try {
+        execFileSync('powershell.exe', [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            script,
+            url,
+            zipPath,
+            cacheDir
+        ], { stdio: 'inherit', cwd: repoRoot, windowsHide: true });
+    } catch (error) {
+        logErr(`Failed to download protoc ${protocVersion}: ${error.message}`);
+        logErr('Install protoc manually or set PROTOC to a protoc.exe path.');
+        process.exit(1);
+    }
+
+    if (!fs.existsSync(protocExe)) {
+        logErr('Downloaded protoc archive did not contain the expected binary:', protocExe);
+        process.exit(1);
+    }
+    return protocExe;
+}
+
+function ensureWindowsPerlEnv() {
+    if (process.platform !== 'win32') {
+        return;
+    }
+
+    const existingPerl = commandPath('perl.exe') || commandPath('perl');
+    if (existingPerl && perlUsable(existingPerl)) {
+        prependPerlPath(existingPerl);
+        return;
+    }
+
+    prependPerlPath(ensurePortableStrawberryPerl());
+}
+
+function perlPathEntries(perlExe) {
+    const perlBin = path.dirname(perlExe);
+    const perlDir = path.dirname(perlBin);
+    const rootDir = path.dirname(perlDir);
+    return [
+        perlBin,
+        path.join(perlDir, 'site', 'bin'),
+        path.join(rootDir, 'c', 'bin')
+    ].filter((entry) => fs.existsSync(entry));
+}
+
+function prependPerlPath(perlExe) {
+    process.env.PATH = `${perlPathEntries(perlExe).join(path.delimiter)}${path.delimiter}${process.env.PATH || ''}`;
+}
+
+function perlUsable(perlExe) {
+    try {
+        execFileSync(perlExe, [
+            '-MLocale::Maketext::Simple',
+            '-MIPC::Cmd',
+            '-e',
+            'print "ok"'
+        ], {
+            stdio: 'ignore',
+            windowsHide: true,
+            env: {
+                ...process.env,
+                PATH: `${perlPathEntries(perlExe).join(path.delimiter)}${path.delimiter}${process.env.PATH || ''}`
+            }
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function ensurePortableStrawberryPerl() {
+    const cacheDir = path.join(repoRoot, '.cache', 'strawberry-perl', 'portable');
+    const existing = findUsablePerl(cacheDir);
+    if (existing) {
+        return existing;
+    }
+
+    const zipPath = path.join(repoRoot, '.cache', 'strawberry-perl', 'strawberry-perl-portable.zip');
+    console.log('[CLIENT] usable Perl not found; downloading portable Strawberry Perl...');
+
+    const script = [
+        '& { param([string]$url, [string]$zipPath, [string]$cacheDir)',
+        "$ErrorActionPreference = 'Stop'",
+        '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+        'New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipPath) | Out-Null',
+        'Write-Host "[CLIENT] Downloading $url"',
+        'Invoke-WebRequest -Uri $url -OutFile $zipPath',
+        'if (Test-Path -LiteralPath $cacheDir) { Remove-Item -LiteralPath $cacheDir -Recurse -Force }',
+        'Expand-Archive -LiteralPath $zipPath -DestinationPath $cacheDir -Force',
+        '}'
+    ].join('; ');
+
+    try {
+        execFileSync('powershell.exe', [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            script,
+            strawberryPerlUrl,
+            zipPath,
+            cacheDir
+        ], { stdio: 'inherit', cwd: repoRoot, windowsHide: true });
+    } catch (error) {
+        logErr(`Failed to download portable Strawberry Perl: ${error.message}`);
+        logErr('Install Strawberry Perl manually or add a complete Perl to PATH.');
+        process.exit(1);
+    }
+
+    const perlExe = findUsablePerl(cacheDir);
+    if (!perlExe) {
+        logErr('Portable Strawberry Perl did not contain a usable perl.exe.');
+        process.exit(1);
+    }
+    return perlExe;
+}
+
+function findUsablePerl(rootDir) {
+    if (!fs.existsSync(rootDir)) return null;
+    const stack = [rootDir];
+    while (stack.length > 0) {
+        const dir = stack.pop();
+        let entries = [];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                stack.push(fullPath);
+            } else if (entry.name.toLowerCase() === 'perl.exe' && perlUsable(fullPath)) {
+                return fullPath;
+            }
+        }
+    }
+    return null;
+}
+
 const criticalDeps = ['pnpm', 'cargo'];
 const missing = criticalDeps.filter(cmd => {
     try {
@@ -121,7 +326,6 @@ function launchApp() {
         env: clientRuntimeEnv()
     });
 
-    // Tee both streams: terminal stays live, file captures everything.
     runProc.stdout.pipe(process.stdout);
     runProc.stdout.pipe(logStream);
     runProc.stderr.pipe(process.stderr);
@@ -198,23 +402,31 @@ function printBundleArtifacts() {
     }
 }
 
+function buildPirSidecars() {
+    const buildScript = path.join(repoRoot, 'scripts', 'build-pir-sidecars.cjs');
+    console.log('[CLIENT] Building and staging PIR sidecars...');
+    try {
+        execFileSync(process.execPath, [buildScript], {
+            cwd: repoRoot,
+            stdio: 'inherit',
+            env: clientRuntimeEnv(),
+            windowsHide: true
+        });
+    } catch (error) {
+        const code = Number.isInteger(error?.status) ? error.status : 1;
+        logErr(`PIR sidecar build failed with code ${code}`);
+        process.exit(code || 1);
+    }
+}
+
 if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
 } else {
-    try {
-        execSync(`node ${JSON.stringify(path.join(repoRoot, 'scripts', 'ensure-pir-worker-binaries.cjs'))}`, {
-            stdio: 'inherit',
-            cwd: repoRoot,
-            env: process.env
-        });
-    } catch (error) {
-        logErr('Failed to build the PIR client binary.');
-        logErr('(Override the binary path with QOR_PIR_CLIENT_BIN, or build manually: node scripts/build-pir-client.cjs)');
-        process.exit(1);
-    }
-
     console.log('[CLIENT] Building Tauri app...');
+    ensureProtocEnv();
+    ensureWindowsPerlEnv();
+    buildPirSidecars();
     removeOldBundleArtifacts();
     const buildProc = spawn('pnpm tauri build', {
         stdio: 'inherit',
@@ -230,7 +442,7 @@ if (runOnly) {
         }
         printBundleArtifacts();
         if (bundleOnly) {
-            console.log('[CLIENT] --bundle-only: build complete, not launching app.');
+            console.log('[CLIENT] --bundle-only: build complete.');
             process.exit(0);
         }
         launchApp();

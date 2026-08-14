@@ -1,24 +1,15 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { BlockIcon, UnblockIcon } from '../assets/icons';
 import { blockingSystem } from '@/lib/blocking/blocking-system';
 import { blockStatusCache } from '@/lib/blocking/block-status-cache';
 import { truncateUsername } from '@/lib/utils/avatar-utils';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername } from '../../../lib/sanitizers';
-import {
-  DEFAULT_EVENT_RATE_WINDOW_MS,
-  DEFAULT_EVENT_RATE_MAX,
-  MAX_EVENT_USERNAME_LENGTH
-} from '../../../lib/constants';
-import { EventType } from '@/lib/types/event-types';
+import { useBlockStatus } from '@/hooks/useBlockStatus';
 
 interface BlockUserButtonProps {
   readonly username: string;
-  readonly passphraseRef?: React.RefObject<string>;
-  readonly kyberSecretRef?: React.RefObject<Uint8Array | null>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
-  readonly onPassphraseRequired?: () => void;
   readonly variant?: 'default' | 'outline' | 'ghost' | 'destructive' | 'secondary' | 'link';
   readonly size?: 'default' | 'sm' | 'lg' | 'icon';
   readonly className?: string;
@@ -29,8 +20,6 @@ interface BlockUserButtonProps {
 
 export function BlockUserButton({
   username,
-  passphraseRef,
-  kyberSecretRef,
   getDisplayUsername,
   variant = 'outline',
   size = 'sm',
@@ -39,36 +28,23 @@ export function BlockUserButton({
   onBlockStatusChange,
   initialBlocked,
 }: BlockUserButtonProps) {
-  const [isBlocked, setIsBlocked] = useState(false);
+  const isBlocked = useBlockStatus(username, { initialBlocked, refreshOnVisible: true });
   const [loading, setLoading] = useState(false);
-  const blockStatusEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
   const [resolvedName, setResolvedName] = useState<string>(username);
-
-  const checkBlockStatus = useCallback(async () => {
-    if (!username) return;
-
-    const passphrase = passphraseRef?.current;
-    const kyber = kyberSecretRef?.current || null;
-    await new Promise((r) => setTimeout(r, 0));
-    try {
-      const keyArg: any = passphrase ? passphrase : (kyber ? { kyberSecret: kyber } : '');
-      const blocked = await blockingSystem.isUserBlocked(username, keyArg);
-      setIsBlocked(blocked);
-      blockStatusCache.set(username, blocked);
-    } catch {
-      const cached = blockStatusCache.get(username);
-      if (cached !== null) {
-        setIsBlocked(cached);
-      }
-    }
-  }, [username, passphraseRef, kyberSecretRef]);
+  const mountedRef = useRef(true);
+  const usernameRef = useRef(username);
+  const mutationRef = useRef<object | null>(null);
+  usernameRef.current = username;
 
   useEffect(() => {
-    if (typeof initialBlocked === 'boolean') {
-      setIsBlocked(initialBlocked);
-    }
-    checkBlockStatus();
-  }, [username, initialBlocked, checkBlockStatus]);
+    mountedRef.current = true;
+    mutationRef.current = null;
+    setLoading(false);
+    return () => {
+      mountedRef.current = false;
+      mutationRef.current = null;
+    };
+  }, [username]);
 
   useEffect(() => {
     let canceled = false;
@@ -83,114 +59,69 @@ export function BlockUserButton({
           setResolvedName(truncateUsername(username));
         }
       } catch {
-        setResolvedName(truncateUsername(username));
+        if (!canceled) setResolvedName(truncateUsername(username));
       }
     })();
     return () => { canceled = true; };
   }, [username, getDisplayUsername]);
 
-  const handleVisibilityChange = useCallback(() => {
-    if (document.visibilityState === 'visible') {
-      checkBlockStatus();
-    }
-  }, [checkBlockStatus]);
-
-  useEffect(() => {
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [handleVisibilityChange]);
-
-  const handleBlockStatusChangeEvent = useCallback((event: Event) => {
-    try {
-      const now = Date.now();
-      const bucket = blockStatusEventRateRef.current;
-      if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
-        bucket.windowStart = now;
-        bucket.count = 0;
-      }
-      bucket.count += 1;
-      if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
-        return;
-      }
-
-      if (!(event instanceof CustomEvent)) return;
-      const detail = event.detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-      const changedUsername = sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
-      if (!changedUsername) return;
-      const newBlockedState = (detail as any).isBlocked === true;
-
-      if (changedUsername === username) {
-        setIsBlocked(newBlockedState);
-      }
-    } catch { }
-  }, [username]);
-
-  useEffect(() => {
-    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChangeEvent as EventListener);
-    return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChangeEvent as EventListener);
-  }, [handleBlockStatusChangeEvent]);
-
-
   const handleBlockUser = useCallback(async () => {
-    if (!username) return;
+    if (!username || mutationRef.current) return;
 
-    const passphrase = passphraseRef?.current;
-    const kyber = kyberSecretRef?.current || null;
-    if (!passphrase && !kyber) {
-      toast.error('Please log in.');
-      return;
-    }
-
+    const target = username;
+    const operation = {};
+    mutationRef.current = operation;
+    const isCurrent = () => (
+      mountedRef.current &&
+      usernameRef.current === target &&
+      mutationRef.current === operation
+    );
     setLoading(true);
 
     try {
-      const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
-      await blockingSystem.blockUser(username, keyArg);
-      setIsBlocked(true);
-      blockStatusCache.set(username, true);
-      onBlockStatusChange?.(username, true);
+      await blockingSystem.blockUser(target);
+      if (!isCurrent()) return;
+      blockStatusCache.set(target, true);
+      onBlockStatusChange?.(target, true);
       toast.success(`Blocked ${resolvedName}`);
     } catch {
+      if (!isCurrent()) return;
       toast.error('Failed to block user. Please try again.');
     } finally {
-      setLoading(false);
+      if (mutationRef.current === operation) mutationRef.current = null;
+      if (mountedRef.current && usernameRef.current === target) setLoading(false);
     }
-  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange, resolvedName]);
+  }, [username, onBlockStatusChange, resolvedName]);
 
   const handleUnblockUser = useCallback(async () => {
-    if (!username) return;
+    if (!username || mutationRef.current) return;
 
-    const passphrase = passphraseRef?.current;
-    const kyber = kyberSecretRef?.current || null;
-    if (!passphrase && !kyber) {
-      toast.error('Please log in.');
-      return;
-    }
-
+    const target = username;
+    const operation = {};
+    mutationRef.current = operation;
+    const isCurrent = () => (
+      mountedRef.current &&
+      usernameRef.current === target &&
+      mutationRef.current === operation
+    );
     setLoading(true);
 
     try {
-      const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
-      await blockingSystem.unblockUser(username, keyArg);
-      setIsBlocked(false);
-      blockStatusCache.set(username, false);
-      onBlockStatusChange?.(username, false);
+      await blockingSystem.unblockUser(target);
+      if (!isCurrent()) return;
+      blockStatusCache.set(target, false);
+      onBlockStatusChange?.(target, false);
       toast.success(`Unblocked ${resolvedName}`);
     } catch {
+      if (!isCurrent()) return;
       toast.error('Failed to unblock user. Please try again.');
     } finally {
-      setLoading(false);
+      if (mutationRef.current === operation) mutationRef.current = null;
+      if (mountedRef.current && usernameRef.current === target) setLoading(false);
     }
-  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange, resolvedName]);
+  }, [username, onBlockStatusChange, resolvedName]);
 
-  const buttonClassName = useMemo(() => {
-    if (isBlocked) {
-      return `${className} flex items-center gap-1`;
-    }
-    return `${className} flex items-center gap-1`;
-  }, [isBlocked, className]);
+  const buttonClassName = `${className} flex items-center gap-1`;
 
   if (isBlocked) {
     return (

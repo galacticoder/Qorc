@@ -2,62 +2,34 @@
  * Signal Handler Types
  */
 
+import type { AuthLifecycle } from '../auth/auth-lifecycle';
+
 export interface SignalHandlers {
   Authentication: any;
-  Database: any;
-  handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
-  handleEncryptedMessagePayload: (message: any) => Promise<void>;
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
+  handleEncryptedMessagePayload: (message: any) => Promise<boolean | void>;
 }
 
 export interface AuthRefs {
   setServerHybridPublic?: (keys: any) => void;
-  serverHybridPublic?: any;
   serverHybridPublicRef?: React.RefObject<any>;
-  handleAuthSuccess?: (username: string, recovered: boolean) => void;
+  handleAuthSuccess?: (username: string) => void;
   loginUsernameRef?: React.RefObject<string>;
   originalUsernameRef?: React.RefObject<string>;
-  aesKeyRef?: React.RefObject<CryptoKey | null>;
   setAccountAuthenticated?: (val: boolean) => void;
   setIsLoggedIn?: (val: boolean) => void;
   setLoginError?: (msg: string) => void;
-  setPassphraseHashParams?: (params: any) => void;
   passphrasePlaintextRef?: React.RefObject<string>;
-  passphraseRef?: React.RefObject<string>;
   setShowPassphrasePrompt?: (val: boolean) => void;
   setShowPasswordPrompt?: (val: boolean) => void;
   passwordRef?: React.RefObject<string>;
   setIsSubmittingAuth?: (val: boolean) => void;
   setAuthStatus?: (status: string) => void;
   setTokenValidationInProgress?: (val: boolean) => void;
-  setServerTrustRequest?: (val: any) => void;
-  keyManagerRef?: React.RefObject<any>;
+  keyManagerOwnerRef?: React.RefObject<string>;
   setUsername?: (name: string) => void;
-  setMaxStepReached?: (step: string) => void;
   setRecoveryActive?: (val: boolean) => void;
   setVaultReady?: (val: boolean) => void;
   getKeysOnDemand?: () => Promise<any>;
   hybridKeysRef?: React.RefObject<any>;
-  accountAuthenticated?: boolean;
-  isLoggedIn?: boolean;
-  isRegistrationMode?: boolean;
-  blindCredentialRef?: React.RefObject<{
-    message: string;
-    inboxId?: string;
-    routeId?: string;
-    blindedMsg: string;
-    blindingFactor: string;
-    n: string;
-    kid: string;
-    modulusLength: number;
-    hash: string;
-    saltLength: number;
-    scheme: string;
-    used?: boolean;
-  } | null>;
-}
-
-export interface DatabaseRefs {
-  setUsers?: (fn: any) => void;
-  users?: any[];
+  authLifecycle?: AuthLifecycle;
 }

@@ -4,14 +4,10 @@ export function createInitialState(): AvatarSystemState {
     return {
         secureDB: null,
         ownAvatar: null,
-        settings: { shareWithOthers: true, lastUpdated: 0 },
+        settings: { shareWithOthers: false, lastUpdated: 0 },
         avatarCache: new Map(),
-        pendingRequests: new Set(),
-        initialized: false,
-        handlerRegistered: false,
-        serverFetchTimestamps: new Map(),
-        ownKyberPublicKey: null,
-        ownKyberSecretKey: null,
-        ownAvatarFetchTimestamp: 0
+        cacheSaveInFlight: null,
+        cacheSavePending: false,
+        initialized: false
     };
 }

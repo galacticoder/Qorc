@@ -1,6 +1,7 @@
 import { SecureDB } from './secureDB';
 import { hasPrototypePollutionKeys } from '../sanitizers';
-import { STORAGE_MAX_QUEUE_SIZE, STORAGE_RATE_LIMIT_WINDOW_MS, STORAGE_RATE_LIMIT_MAX_OPS } from '../constants';
+import { STORAGE_RATE_LIMIT_WINDOW_MS, STORAGE_RATE_LIMIT_MAX_OPS } from '../constants';
+import { STORAGE_KEYS, STORAGE_STORES } from './storage-keys';
 
 const validateKey = (key: string): void => {
   if (typeof key !== 'string' || key.length === 0 || key.length > 256) {
@@ -16,12 +17,14 @@ const validateKey = (key: string): void => {
 
 class EncryptedStorageManager {
   private secureDB: SecureDB | null = null;
-  private preInitQueue: Array<{ operation: 'set' | 'remove', key: string, value?: any }> = [];
   private initialized = false;
   private initializationPromise: Promise<void>;
   private resolveInitialization: () => void = () => { };
   private rateLimitWindowStart = 0;
   private rateLimitCount = 0;
+  private generation = 0;
+  private mutationChain: Promise<void> = Promise.resolve();
+  private bindingListeners = new Set<() => void>();
 
   constructor() {
     this.initializationPromise = new Promise((resolve) => {
@@ -31,23 +34,28 @@ class EncryptedStorageManager {
 
   // Initialize storage manager with SecureDB instance
   async initialize(secureDB: SecureDB): Promise<void> {
+    if (!secureDB?.isInitialized()) {
+      throw new Error('Cannot bind uninitialized encrypted storage');
+    }
+    this.generation += 1;
     this.secureDB = secureDB;
     this.initialized = true;
+    this.mutationChain = Promise.resolve();
+    this.rateLimitWindowStart = 0;
+    this.rateLimitCount = 0;
     this.resolveInitialization();
+    this.notifyBindingChange();
+  }
 
-    // Process queued operations
-    const queue = this.preInitQueue.slice(0, STORAGE_MAX_QUEUE_SIZE);
-    this.preInitQueue = [];
+  subscribeBinding(listener: () => void): () => void {
+    this.bindingListeners.add(listener);
+    return () => { this.bindingListeners.delete(listener); };
+  }
 
-    for (const op of queue) {
-      try {
-        if (op.operation === 'set') {
-          await this.setItem(op.key, op.value);
-        } else if (op.operation === 'remove') {
-          await this.removeItem(op.key);
-        }
-      } catch (_error) {
-        console.error('[EncryptedStorage] Failed to process queued operation:', _error);
+  private notifyBindingChange(): void {
+    for (const listener of this.bindingListeners) {
+      try { listener(); } catch (error) {
+        console.error('[EncryptedStorage] Binding listener failed', error);
       }
     }
   }
@@ -55,6 +63,23 @@ class EncryptedStorageManager {
   // Check if storage manager is initialized
   isInitialized(): boolean {
     return this.initialized && this.secureDB !== null;
+  }
+
+  private captureBinding(): { secureDB: SecureDB; generation: number } {
+    if (!this.isInitialized() || !this.secureDB) {
+      throw new Error('Encrypted storage is not initialized');
+    }
+    return { secureDB: this.secureDB, generation: this.generation };
+  }
+
+  private isCurrentBinding(secureDB: SecureDB, generation: number): boolean {
+    return this.initialized && this.secureDB === secureDB && this.generation === generation;
+  }
+
+  private async enqueueMutation(operation: () => Promise<void>): Promise<void> {
+    const queued = this.mutationChain.catch(() => undefined).then(operation);
+    this.mutationChain = queued;
+    await queued;
   }
 
   // Set an item in storage
@@ -68,20 +93,16 @@ class EncryptedStorageManager {
       }
     }
 
-    if (!this.isInitialized()) {
-      if (this.preInitQueue.length >= STORAGE_MAX_QUEUE_SIZE) {
-        throw new Error('Pre-initialization queue is full');
+    const { secureDB, generation } = this.captureBinding();
+    await this.enqueueMutation(async () => {
+      if (!this.isCurrentBinding(secureDB, generation)) {
+        throw new Error('Encrypted storage account changed before write');
       }
-      this.preInitQueue.push({ operation: 'set', key, value });
-      return;
-    }
-
-    try {
-      await this.secureDB!.store('encrypted_storage', key, value);
-    } catch (_error) {
-      console.error('[EncryptedStorage] Failed to store item:', _error);
-      throw _error;
-    }
+      await secureDB.store(STORAGE_STORES.ENCRYPTED_STORAGE, key, value);
+      if (!this.isCurrentBinding(secureDB, generation)) {
+        throw new Error('Encrypted storage account changed during write');
+      }
+    });
   }
 
   // Retrieve an item from storage
@@ -89,25 +110,17 @@ class EncryptedStorageManager {
     this.enforceRateLimit();
     validateKey(key);
 
-    if (!this.isInitialized()) {
-      return null;
+    const { secureDB, generation } = this.captureBinding();
+    const value = await secureDB.retrieve(STORAGE_STORES.ENCRYPTED_STORAGE, key);
+    if (!this.isCurrentBinding(secureDB, generation)) {
+      throw new Error('Encrypted storage account changed during read');
     }
 
-    try {
-      const value = await this.secureDB!.retrieve('encrypted_storage', key);
-
-      if (value != null && typeof value === 'object') {
-        if (hasPrototypePollutionKeys(value)) {
-          console.error('[EncryptedStorage] Retrieved value contains prototype pollution keys');
-          return null;
-        }
-      }
-
-      return value;
-    } catch (_error) {
-      console.error('[EncryptedStorage] Failed to retrieve item:', _error);
-      return null;
+    if (value != null && typeof value === 'object' && hasPrototypePollutionKeys(value)) {
+      throw new Error('Encrypted storage value failed structural validation');
     }
+
+    return value;
   }
 
   // Remove an item from storage
@@ -115,53 +128,39 @@ class EncryptedStorageManager {
     this.enforceRateLimit();
     validateKey(key);
 
-    if (!this.isInitialized()) {
-      if (this.preInitQueue.length >= STORAGE_MAX_QUEUE_SIZE) {
-        throw new Error('Pre-initialization queue is full');
+    const { secureDB, generation } = this.captureBinding();
+    await this.enqueueMutation(async () => {
+      if (!this.isCurrentBinding(secureDB, generation)) {
+        throw new Error('Encrypted storage account changed before remove');
       }
-      this.preInitQueue.push({ operation: 'remove', key });
-      return;
-    }
-
-    try {
-      await this.secureDB!.delete('encrypted_storage', key);
-    } catch (_error) {
-      console.error('[EncryptedStorage] Failed to remove item:', _error);
-      throw _error;
-    }
-  }
-
-  // Clear all items from storage
-  async clear(): Promise<void> {
-    if (!this.isInitialized()) {
-      this.preInitQueue = [];
-      return;
-    }
-
-    try {
-      await this.secureDB!.store('encrypted_storage', '_cleared_at', Date.now());
-    } catch (_error) {
-      console.error('[EncryptedStorage] Failed to clear storage:', _error);
-      throw _error;
-    }
+      await secureDB.delete(STORAGE_STORES.ENCRYPTED_STORAGE, key);
+      if (!this.isCurrentBinding(secureDB, generation)) {
+        throw new Error('Encrypted storage account changed during remove');
+      }
+    });
   }
 
   // Reset the storage manager
   reset(): void {
+    this.generation += 1;
     this.secureDB = null;
     this.initialized = false;
+    this.mutationChain = Promise.resolve();
+    this.resolveInitialization();
     this.initializationPromise = new Promise((resolve) => {
       this.resolveInitialization = resolve;
     });
-    this.preInitQueue = [];
     this.rateLimitWindowStart = 0;
     this.rateLimitCount = 0;
+    this.notifyBindingChange();
   }
   
   // Wait for storage manager to be initialized
   async waitForInitialization(): Promise<void> {
-    if (this.initialized) return;
-    return this.initializationPromise;
+    while (!this.isInitialized()) {
+      const pending = this.initializationPromise;
+      await pending;
+    }
   }
 
   private enforceRateLimit(): void {
@@ -181,13 +180,15 @@ class EncryptedStorageManager {
 
 export const encryptedStorage = new EncryptedStorageManager();
 
-// Sync adapter for SvelteKit's storage API
 class SyncEncryptedStorageAdapter {
   private memoryCache = new Map<string, any>();
   private pendingGets = new Map<string, Promise<any>>();
+  private mutationVersions = new Map<string, number>();
   private selfInitialized = false;
   private selfInitializationPromise: Promise<void>;
   private resolveSelfInitialization: () => void = () => { };
+  private changeListeners = new Set<() => void>();
+  private generation = 0;
 
   constructor() {
     this.selfInitializationPromise = new Promise((resolve) => {
@@ -195,56 +196,91 @@ class SyncEncryptedStorageAdapter {
     });
   }
 
+  subscribe(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
+  }
+
+  private notifyChange(): void {
+    for (const listener of this.changeListeners) {
+      try { listener(); } catch (e) { console.error('[SyncEncryptedStorage] listener failed', e); }
+    }
+  }
+
   // Initialize the sync adapter
   async initialize(): Promise<void> {
     if (!encryptedStorage.isInitialized()) {
-      return;
+      throw new Error('Encrypted storage is not initialized');
     }
 
+    const generation = ++this.generation;
+    this.selfInitialized = false;
+    this.resolveSelfInitialization();
+    this.selfInitializationPromise = new Promise((resolve) => {
+      this.resolveSelfInitialization = resolve;
+    });
+    
+    this.memoryCache.clear();
+    this.pendingGets.clear();
+    this.mutationVersions.clear();
+
     const syncAccessKeys = [
-      'last_authenticated_username',
-      'qorchat_server_pin_v2',
-      'call_history_v1',
-      'app_settings_v1',
-      'offlineQueueDeviceId',
-      'tor_enabled'
+      STORAGE_KEYS.CALL_HISTORY,
+      STORAGE_KEYS.APP_SETTINGS
     ];
+    const loaded = new Map<string, any>();
 
     for (const key of syncAccessKeys) {
-      try {
-        const value = await encryptedStorage.getItem(key);
-        if (value !== null) {
-          this.memoryCache.set(key, value);
-        }
-      } catch (_error) {
-        console.error('[SyncEncryptedStorage] Failed to pre-load key:', _error);
+      const value = await encryptedStorage.getItem(key);
+      if (generation !== this.generation) {
+        throw new Error('Encrypted storage account changed during cache initialization');
+      }
+      if (value !== null) {
+        loaded.set(key, value);
       }
     }
 
+    if (generation !== this.generation || !encryptedStorage.isInitialized()) {
+      throw new Error('Encrypted storage account changed during cache initialization');
+    }
+    this.memoryCache = loaded;
     this.selfInitialized = true;
     this.resolveSelfInitialization();
+    this.notifyChange();
   }
 
   // Get an item from the sync adapter
   getItem(key: string): string | null {
+    validateKey(key);
     if (this.memoryCache.has(key)) {
       const value = this.memoryCache.get(key);
       return typeof value === 'string' ? value : JSON.stringify(value);
     }
 
-    if (encryptedStorage.isInitialized()) {
+    if (this.selfInitialized && encryptedStorage.isInitialized()) {
       if (!this.pendingGets.has(key)) {
-        const promise = encryptedStorage.getItem(key).then(value => {
-          if (value !== null) {
-            this.memoryCache.set(key, value);
-          }
-          this.pendingGets.delete(key);
-          return value;
-        }).catch(error => {
-          console.error('[SyncEncryptedStorage] Failed to load key:', error);
-          this.pendingGets.delete(key);
-          return null;
-        });
+        const generation = this.generation;
+        const mutationVersion = this.mutationVersions.get(key) || 0;
+        let promise: Promise<any>;
+        promise = encryptedStorage.getItem(key)
+          .then(value => {
+            if (
+              generation !== this.generation ||
+              !this.selfInitialized ||
+              (this.mutationVersions.get(key) || 0) !== mutationVersion
+            ) return null;
+            if (value !== null) this.memoryCache.set(key, value);
+            return value;
+          })
+          .catch(error => {
+            if (generation === this.generation) {
+              console.error('[SyncEncryptedStorage] Failed to load key:', error);
+            }
+            return null;
+          })
+          .finally(() => {
+            if (this.pendingGets.get(key) === promise) this.pendingGets.delete(key);
+          });
         this.pendingGets.set(key, promise);
       }
     }
@@ -254,36 +290,69 @@ class SyncEncryptedStorageAdapter {
 
   // Set an item in the sync adapter
   setItem(key: string, value: string): void {
+    validateKey(key);
+    if (!this.selfInitialized || !encryptedStorage.isInitialized()) {
+      throw new Error('Encrypted storage is not initialized');
+    }
+    const generation = this.generation;
+    const version = (this.mutationVersions.get(key) || 0) + 1;
+    this.mutationVersions.set(key, version);
+    const hadPrevious = this.memoryCache.has(key);
+    const previous = this.memoryCache.get(key);
     this.memoryCache.set(key, value);
 
     encryptedStorage.setItem(key, value).catch(error => {
+      if (generation !== this.generation || this.mutationVersions.get(key) !== version) return;
+      if (hadPrevious) this.memoryCache.set(key, previous);
+      else this.memoryCache.delete(key);
       console.error('[SyncEncryptedStorage] Failed to store key:', error);
+      this.notifyChange();
     });
   }
 
   // Remove an item from the sync adapter
   removeItem(key: string): void {
+    validateKey(key);
+    if (!this.selfInitialized || !encryptedStorage.isInitialized()) {
+      throw new Error('Encrypted storage is not initialized');
+    }
+    const generation = this.generation;
+    const version = (this.mutationVersions.get(key) || 0) + 1;
+    this.mutationVersions.set(key, version);
+    const hadPrevious = this.memoryCache.has(key);
+    const previous = this.memoryCache.get(key);
     this.memoryCache.delete(key);
     encryptedStorage.removeItem(key).catch(error => {
+      if (generation !== this.generation || this.mutationVersions.get(key) !== version) return;
+      if (hadPrevious) this.memoryCache.set(key, previous);
       console.error('[SyncEncryptedStorage] Failed to remove key:', error);
+      this.notifyChange();
     });
   }
 
   // Reset the sync adapter
   reset(): void {
+    this.generation += 1;
+    encryptedStorage.reset();
     this.memoryCache.clear();
     this.pendingGets.clear();
+    this.mutationVersions.clear();
     this.selfInitialized = false;
+    this.resolveSelfInitialization();
     this.selfInitializationPromise = new Promise((resolve) => {
       this.resolveSelfInitialization = resolve;
     });
+    this.notifyChange();
   }
 
   // Wait for the sync adapter to be initialized
   async waitForInitialization(): Promise<void> {
-    await encryptedStorage.waitForInitialization();
-    if (this.selfInitialized) return;
-    return this.selfInitializationPromise;
+    while (!this.selfInitialized) {
+      await encryptedStorage.waitForInitialization();
+      if (this.selfInitialized) return;
+      const pending = this.selfInitializationPromise;
+      await pending;
+    }
   }
 }
 

@@ -1,18 +1,3 @@
-// Convert hex string to Uint8Array
-export const hexToBytes = (hex: string): Uint8Array => {
-  const len = hex.length;
-  const bytes = new Uint8Array(len >>> 1);
-  for (let i = 0; i < len; i += 2) {
-    bytes[i >>> 1] = parseInt(hex.slice(i, i + 2), 16);
-  }
-  return bytes;
-};
-
-// Convert Uint8Array to hex string
-export const bytesToHex = (bytes: Uint8Array): string => {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-};
-
 // Validate username format
 export const validateUsername = (username: string): void => {
   if (typeof username !== 'string' || username.length < 3 || username.length > 128) {

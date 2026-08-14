@@ -8,12 +8,14 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { PostQuantumRandom } from './random';
+import { PostQuantumWorker } from './worker-bridge';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import {
   PQ_AEAD_NONCE_SIZE,
   PQ_AEAD_GCM_IV_SIZE,
   PQ_AEAD_MAC_SIZE
 } from '../constants';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export class PostQuantumAEAD {
   static extractNonceContext(nonce: Uint8Array): Uint8Array {
@@ -27,16 +29,30 @@ export class PostQuantumAEAD {
     if (inputKey.length !== 32) {
       throw new Error('Input key must be 32 bytes');
     }
-    const expanded = sha3_512(inputKey);
-    const k1 = expanded.slice(0, 32);
-    const k2 = expanded.slice(32, 64);
-
-    const macKey = blake3(PostQuantumUtils.concatBytes(
-      new TextEncoder().encode('quantum-secure-mac-v1'),
-      inputKey
-    ), { dkLen: 32 });
-
-    return { k1, k2, macKey };
+    let expanded: Uint8Array | null = null;
+    let k1: Uint8Array | null = null;
+    let k2: Uint8Array | null = null;
+    let macInput: Uint8Array | null = null;
+    let macKey: Uint8Array | null = null;
+    try {
+      expanded = sha3_512(inputKey);
+      k1 = expanded.slice(0, 32);
+      k2 = expanded.slice(32, 64);
+      macInput = PostQuantumUtils.concatBytes(
+        new TextEncoder().encode(PROTOCOL_KEYS.UNIFIED_CRYPTO_MAC),
+        inputKey
+      );
+      macKey = blake3(macInput, { dkLen: 32 });
+      return { k1, k2, macKey };
+    } catch (error) {
+      k1?.fill(0);
+      k2?.fill(0);
+      macKey?.fill(0);
+      throw error;
+    } finally {
+      expanded?.fill(0);
+      macInput?.fill(0);
+    }
   }
 
   static encrypt(
@@ -45,42 +61,64 @@ export class PostQuantumAEAD {
     additionalData?: Uint8Array,
     explicitNonce?: Uint8Array
   ): { ciphertext: Uint8Array; nonce: Uint8Array; tag: Uint8Array } {
-    const nonce = explicitNonce ?? PostQuantumAEAD.generateNonce();
     if (key.length !== 32) {
       throw new Error('PostQuantumAEAD requires a 32-byte key');
     }
-    if (nonce.length !== PQ_AEAD_NONCE_SIZE) {
+    if (explicitNonce && explicitNonce.length !== PQ_AEAD_NONCE_SIZE) {
       throw new Error(`PostQuantumAEAD requires a ${PQ_AEAD_NONCE_SIZE}-byte nonce`);
     }
 
     const aadBytes = additionalData || new Uint8Array(0);
-    const { k1, k2, macKey } = PostQuantumAEAD.deriveDoubleKey(key);
-
+    let nonce: Uint8Array | null = null;
+    let k1: Uint8Array | null = null;
+    let k2: Uint8Array | null = null;
+    let macKey: Uint8Array | null = null;
+    let iv: Uint8Array | null = null;
+    let layer1: Uint8Array | null = null;
+    let xnonce: Uint8Array | null = null;
+    let layer2: Uint8Array | null = null;
+    let macInput: Uint8Array | null = null;
+    let mac: Uint8Array | null = null;
+    let succeeded = false;
     try {
-      const iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
+      const derived = PostQuantumAEAD.deriveDoubleKey(key);
+      k1 = derived.k1;
+      k2 = derived.k2;
+      macKey = derived.macKey;
+      nonce = explicitNonce ?? PostQuantumAEAD.generateNonce();
+
+      iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
       const cipher = gcm(k1, iv, aadBytes);
-      const layer1 = cipher.encrypt(plaintext);
+      layer1 = cipher.encrypt(plaintext);
 
-      const xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
+      xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
       const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
-      const layer2 = xchacha.encrypt(layer1);
+      layer2 = xchacha.encrypt(layer1);
 
-      const macInput = PostQuantumUtils.concatBytes(layer2, aadBytes, nonce);
-      const mac = blake3(macInput, { key: macKey });
+      macInput = PostQuantumUtils.concatBytes(layer2, aadBytes, nonce);
+      mac = blake3(macInput, { key: macKey });
 
+      succeeded = true;
       return { ciphertext: layer2, nonce, tag: mac };
     } finally {
-      PostQuantumUtils.clearMemory(k1);
-      PostQuantumUtils.clearMemory(k2);
-      PostQuantumUtils.clearMemory(macKey);
+      k1?.fill(0);
+      k2?.fill(0);
+      macKey?.fill(0);
+      iv?.fill(0);
+      layer1?.fill(0);
+      xnonce?.fill(0);
+      macInput?.fill(0);
+      if (!succeeded) {
+        layer2?.fill(0);
+        mac?.fill(0);
+        if (!explicitNonce) nonce?.fill(0);
+      }
+      if (!additionalData) aadBytes.fill(0);
     }
   }
 
   private static generateNonce(): Uint8Array {
-    const nonce = new Uint8Array(PQ_AEAD_NONCE_SIZE);
-    const randomBytes = PostQuantumRandom.randomBytes(PQ_AEAD_NONCE_SIZE);
-    nonce.set(randomBytes, 0);
-    return nonce;
+    return PostQuantumRandom.randomBytes(PQ_AEAD_NONCE_SIZE);
   }
 
   static decrypt(
@@ -102,20 +140,24 @@ export class PostQuantumAEAD {
 
     const aadBytes = additionalData || new Uint8Array(0);
     const { k1, k2, macKey } = PostQuantumAEAD.deriveDoubleKey(key);
-
+    let macInput: Uint8Array | null = null;
+    let expectedMac: Uint8Array | null = null;
+    let xnonce: Uint8Array | null = null;
+    let layer1: Uint8Array | null = null;
+    let iv: Uint8Array | null = null;
     try {
-      const macInput = PostQuantumUtils.concatBytes(ciphertext, aadBytes, nonce);
-      const expectedMac = blake3(macInput, { key: macKey });
+      macInput = PostQuantumUtils.concatBytes(ciphertext, aadBytes, nonce);
+      expectedMac = blake3(macInput, { key: macKey });
 
       if (!PostQuantumUtils.timingSafeEqual(tag, expectedMac)) {
         throw new Error('BLAKE3 MAC verification failed');
       }
 
-      const xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
+      xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
       const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
-      const layer1 = xchacha.decrypt(ciphertext);
+      layer1 = xchacha.decrypt(ciphertext);
 
-      const iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
+      iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
       const decipher = gcm(k1, iv, aadBytes);
       const plaintext = decipher.decrypt(layer1);
 
@@ -124,6 +166,12 @@ export class PostQuantumAEAD {
       PostQuantumUtils.clearMemory(k1);
       PostQuantumUtils.clearMemory(k2);
       PostQuantumUtils.clearMemory(macKey);
+      macInput?.fill(0);
+      expectedMac?.fill(0);
+      xnonce?.fill(0);
+      layer1?.fill(0);
+      iv?.fill(0);
+      if (!additionalData) aadBytes.fill(0);
     }
   }
 
@@ -136,13 +184,7 @@ export class PostQuantumAEAD {
     additionalData?: Uint8Array,
     explicitNonce?: Uint8Array
   ): Promise<{ ciphertext: Uint8Array; nonce: Uint8Array; tag: Uint8Array }> {
-    try {
-      const { PostQuantumWorker } = await import('./worker-bridge');
-      if (PostQuantumWorker.supportsWorkers()) {
-        return await PostQuantumWorker.aeadEncrypt(plaintext, key, additionalData, explicitNonce);
-      }
-    } catch { }
-    return PostQuantumAEAD.encrypt(plaintext, key, additionalData, explicitNonce);
+    return await PostQuantumWorker.aeadEncrypt(plaintext, key, additionalData, explicitNonce);
   }
 
   /**
@@ -155,12 +197,6 @@ export class PostQuantumAEAD {
     key: Uint8Array,
     additionalData?: Uint8Array
   ): Promise<Uint8Array> {
-    try {
-      const { PostQuantumWorker } = await import('./worker-bridge');
-      if (PostQuantumWorker.supportsWorkers()) {
-        return await PostQuantumWorker.aeadDecrypt(ciphertext, nonce, tag, key, additionalData);
-      }
-    } catch { }
-    return PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, additionalData);
+    return await PostQuantumWorker.aeadDecrypt(ciphertext, nonce, tag, key, additionalData);
   }
 }

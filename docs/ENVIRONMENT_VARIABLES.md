@@ -1,271 +1,323 @@
 # Environment variables
 
-This document lists environment variables recognized by the app
+This is the inventory of supported Qor Chat runtime and deployment environment
+variables. Defaults are the values used after parsing.
 
-Values shown in parentheses indicate typical defaults when the variable is unset.
+## Required security material
 
----
+| Name | Requirement | Owner | Purpose |
+| ---- | ----------- | ----- | ------- |
+| `SERVER_PASSWORD` | Required: 12-512 characters | `server/authentication/auth-utils.js` | Password for the anonymous server entry OPAQUE gate. Startup fails on invalid input and deletes the plaintext from `process.env` after initialization.|
+| `AUTH_ROOT_SEED` | Required: exactly 32 random bytes as 64 hex characters | `server/crypto/auth-root.js` | Root seed for deriving authentication, discovery, privacy-pass, routing, decoy, and avatar privacy keys. It must remain consistent across authorized nodes and restarts. The first derivation copies it to private process memory and deletes it from `process.env`. |
+| `SERVER_TRANSPORT_IDENTITY_SEED` | Required: exactly 32 random bytes as 64 hex characters | `server/server.js` | Deterministically derives the server's ML-KEM-1024, ML-DSA-87, and X25519 transport identity. Nodes behind one advertised identity must share it. Startup deletes the environment copy after derivation. Rotating it intentionally changes the client visible server fingerprint. |
+| `TLS_CERT_PATH` | Required | `server/bootstrap/server-bootstrap.js`, launchers | HTTPS certificate path. Relative paths are resolved from the repository by the launchers. |
+| `TLS_KEY_PATH` | Required | `server/bootstrap/server-bootstrap.js`, launchers  | Private key corresponding to `TLS_CERT_PATH`. |
+| `REDIS_URL` | Required by the runtime and must use `rediss://` | `server/session/redis-client.js` | TLS Redis endpoint used for anonymous coordination, routing, rate limits, discovery relay, and clustering. `scripts/start-server.cjs` and `scripts/start-loadbalancer.cjs` default to local `rediss://127.0.0.1:6379` while preparing a local deployment. Plaintext `redis://` is rejected by runtime clients. |
+| `PGSSLROOTCERT` | One of this or `DATABASE_CA_CERT` is required | `server/database/core.js` | Path to an explicitly trusted PostgreSQL CA bundle. The launcher validates the file but never learns a CA from the endpoint it is about to trust. |
+| `DATABASE_CA_CERT` | One of this or `PGSSLROOTCERT` is required | `server/database/core.js` | Inline PEM alternative to `PGSSLROOTCERT`. PostgreSQL always uses `rejectUnauthorized: true`. |
 
-## Server core and networking
+Use independent random values for `AUTH_ROOT_SEED` and
+`SERVER_TRANSPORT_IDENTITY_SEED`. Do not derive either from `SERVER_PASSWORD`.
+The Docker startup helper generates independent values when either variable is
+absent and saves them to `.env`. It never replaces a
+present malformed value or rotates an existing value. Every authorized node
+behind the same logical server identity must use the same values.
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `PORT` | `(8443)` or `dynamic` | `server/config/config.js`, `server/server.js`, `scripts/start-server.cjs`, `server/cluster/cluster-manager.js` | HTTPS listen port. `dynamic` is treated as port `0` (kernel-assigned). When started via `scripts/start-server.cjs`, a free port is auto-selected if `PORT` is empty. |
-| `BIND_ADDRESS` | `(127.0.0.1)` | `server/bootstrap/server-bootstrap.js`, `server/server.js`, `scripts/start-server.cjs` | IP/interface the HTTPS server binds to. Must be a loopback address (`127.0.0.1`, `::1`, or `localhost`) or startup will fail. |
-| `ALLOWED_CORS_ORIGINS` | `('http://localhost:5173,http://127.0.0.1:5173')` | `scripts/start-server.cjs`, `server/config/constants.js` | Comma-separated list of allowed CORS origins for HTTP and WebSocket requests. Parsed into `CORS_CONFIG.ALLOWED_ORIGINS`. When unset, the launcher provides localhost defaults. |
-| `WS_BANDWIDTH_QUOTA_BYTES` | `(536870912)` | `server/config/constants.js`, `server/websocket/gateway.js` | Per-window WebSocket byte budget. The minimum is clamped to 512 MiB because active opaque PIR sends many large encrypted query envelopes. |
-| `WS_BANDWIDTH_WINDOW_MS` | `(60000)` ms | same as above | Window duration for the WebSocket byte budget. |
-| `SERVER_ID` | auto-generated (`server-<hostname>-<timestamp>` when using `start-server.cjs`) | `server/server.js`, `server/session/pq-session-storage.js`, `server/messaging/pq-envelope-handler.js`, `server/websocket/gateway.js`, `server/cluster/*` | Logical identifier for this server instance, used in logs, PQ envelopes, WebSocket delivery, and cluster registration. |
-| `SERVER_HOST` | empty  auto-detected IP | `scripts/start-server.cjs`, `server/cluster/cluster-manager.js` | Public host/IP advertised to the cluster and HAProxy. When empty, `start-server.cjs` resolves the first non-loopback address or falls back to `127.0.0.1`. |
-| `HOST` | OS hostname | `server/cluster/cluster-manager.js` | Fallback hostname used when `SERVER_HOST` is not set. |
-| `HOSTNAME` | OS hostname | `server/cluster/cluster-integration.js` | Used when generating a random server ID for clustering if `SERVER_ID` is not provided. |
-| `ENABLE_CLUSTERING` | `('true')` | `scripts/start-server.cjs`, `server/server.js`, `server/authentication/auth-utils.js` | Enables Redis-backed clustering and HAProxy integration when set to `'true'`. |
-| `CLUSTER_WORKERS` | `('1')` | `scripts/start-server.cjs`, `server/bootstrap/server-bootstrap.js` | Number of Node worker processes. Values >1 enable clustered workers on a single machine. |
-| `CLUSTER_PRIMARY` | empty | `scripts/start-server.cjs`, `server/cluster/cluster-integration.js`, `server/server.js` | When `'true'`, forces this node to act as primary cluster node. If unset, primary status is chosen based on Redis state. |
-| `CLUSTER_AUTO_APPROVE` | `('true')` | `scripts/start-server.cjs`, `server/cluster/cluster-integration.js`, `server/server.js` | When `'true'`, new cluster nodes are automatically approved instead of requiring manual approval. |
-| `SERVER_ROLE` | empty | `server/cluster/cluster-integration.js` | Optional alternative for marking a node as `primary` (`SERVER_ROLE=primary`) during cluster initialization. |
-| `NO_GUI` | `('false')` | `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs` | When `'true'`, disables the interactive TUI for the server or load balancer. Processes run in standard console mode. |
-| `USE_REDIS` | `('true')` | `scripts/start-server.cjs` | Launcher flag read by `scripts/start-server.cjs` and forwarded into the server environment for Redis-related configuration. |
-| `DISABLE_CONNECTION_LIMIT` | `('true')` | `scripts/start-server.cjs` | Launcher flag forwarded into the server environment. Named for configuration of global connection limiting. |
-| `MAX_CONNECTIONS` | `(1000)` | `server/authentication/auth-utils.js` | Upper bound on concurrent connections enforced via a Redis-backed connection counter. |
+## Server and HTTPS
 
----
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `PORT` | `8443`, `dynamic` selects port `0`, Docker runtime uses `3000` | `server/config/config.js`, launchers | HTTPS listen port. `scripts/start-server.cjs` selects an available port beginning at 8443 when unset. |
+| `BIND_ADDRESS` | `127.0.0.1` | `server/bootstrap/server-bootstrap.js` | HTTPS bind interface. Docker sets `0.0.0.0`. |
+| `ALLOWED_CORS_ORIGINS` | Empty in the runtime, launcher supplies localhost development origins | `server/config/constants.js` | Comma separated browser origins. The fixed first-party Tauri origins are always included. Unknown browser origins receive no CORS grant and websocket upgrades with an unknown `Origin` are rejected. |
+| `HTTPS_REQUEST_TIMEOUT_MS` | `180000`, 5000-300000 | `server/bootstrap/server-bootstrap.js` | Complete HTTPS request timeout. The default admits a fixed 2 MiB anonymous PIR upload over a fresh Tor circuit. |
+| `HTTPS_HEADERS_TIMEOUT_MS` | `15000`, 5000 to request timeout | same | Header receive timeout. |
+| `HTTPS_KEEP_ALIVE_TIMEOUT_MS` | `5000`, 1000-30000 | same | Idle keep-alive timeout. |
+| `HTTPS_SOCKET_IDLE_TIMEOUT_MS` | `120000`, 30000-600000 | same | General socket idle timeout. |
+| `HTTPS_MAX_HEADER_COUNT` | `64`, 16-256 | same | Maximum headers per request. |
+| `HTTPS_MAX_REQUESTS_PER_SOCKET` | `128`, 1-1024 | same | Maximum requests accepted on one socket. |
+| `HTTPS_MAX_CONNECTIONS` | `8192`, 64-100000 | same | Process level HTTPS connection ceiling. |
+| `MAX_NEW_CONNECTIONS_PER_MIN` | `600`, 1-100000 | `server/config/config.js` | Anonymous global new websocket connection ceiling. |
+| `CONNECTION_BLOCK_MS` | `1000`, 1000-60000 | same | Global connection admission block after the ceiling is exceeded. |
 
-## TLS and certificates
+## websocket and PQ envelope admission
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `TLS_CERT_PATH` | **required** | `scripts/start-server.cjs`, `server/bootstrap/server-bootstrap.js`, `server/server.js`, `scripts/start-loadbalancer.cjs`, `scripts/simple-tunnel.cjs` | Absolute or project-relative path to the HTTPS certificate for the server (and for the local TLS Redis helper). Required for the server to start. |
-| `TLS_KEY_PATH` | **required** | same as above | Path to the private key corresponding to `TLS_CERT_PATH`. Required for server startup and TLS Redis auto-start. |
-| `DB_CA_CERT_PATH` | auto-generated to `server/config/certs/postgres-root-cas.pem` when using `scripts/start-server.cjs` | `server/database/database.js`, `scripts/start-server.cjs` | Optional PEM bundle of Postgres root CAs. When set, Postgres connections use this bundle instead of system CAs. `start-server.cjs` can generate this by probing the remote TLS chain. |
-| `PGSSLROOTCERT` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Alternative to `DB_CA_CERT_PATH` for specifying the Postgres root CA bundle. |
-| `DB_TLS_SERVERNAME` | derived or unset | `server/database/database.js`, `scripts/start-server.cjs` | SNI/hostname used for Postgres TLS hostname verification. Auto-set by `ensureDbCaBundleEnv()` when probing the remote certificate. |
-| `DB_CONNECT_HOST` | derived or `(localhost)` | `server/database/database.js`, `scripts/start-server.cjs` | Host used for TCP connections to Postgres when `DATABASE_URL` is not set. Auto-populated by `scripts/start-server.cjs` when generating the CA bundle. |
-| `REDIS_TLS_SERVERNAME` | derived from HTTPS certificate when possible | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs` | SNI hostname used for TLS connections to Redis. When unset and a local TLS Redis is used, `start-server.cjs` derives it from the HTTPS certificate CN. |
-| `OPENSSL_CONF` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs`, `scripts/start-server.cjs`, `server/load-balancer/auto-loadbalancer.js` | OpenSSL configuration file. Quantum scripts set this to a local `openssl-oqs.cnf` that loads the OQS provider for PQ TLS. |
-| `OPENSSL_MODULES` | unset | same as above | Directory containing OpenSSL provider modules. Set by quantum setup scripts so the `oqsprovider` module can be loaded. |
-| `LD_LIBRARY_PATH` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Library search path used when invoking `haproxy` or OpenSSL with the PQ provider installed in non-standard locations. |
-| `LB_OPENSSL_CONF` | derived from `OPENSSL_CONF` | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | OpenSSL configuration used by the load balancer process. Normally set by `scripts/start-loadbalancer.cjs` to point at `server/config/openssl-oqs.cnf`. |
-| `LB_HAPROXY_CFG` | derived (`server/config/haproxy-quantum.cfg`) | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Path to the quantum-enabled HAProxy configuration used by the auto-loadbalancer. |
-| `TLS_REDIS_SERVER` | auto-written by `scripts/install-deps.cjs` | `scripts/start-server.cjs` | Path to a project-local `redis-server` binary compiled with TLS support. When set, `start-server.cjs` prefers this over the system Redis. |
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `WS_MAX_PAYLOAD_BYTES` | 16 MiB, 64 KiB-16 MiB | `server/server.js` | Protocol level `ws` frame cap applied during receive. |
+| `WS_BANDWIDTH_QUOTA_BYTES` | 64 MiB, 8-512 MiB | `server/config/constants.js` | Per connection inbound byte budget. |
+| `WS_BANDWIDTH_WINDOW_MS` | `60000`, 5000-600000 | same | Bandwidth budget window. |
+| `WS_FRAME_MAX_PER_WINDOW` | `500`, 50-100000 | same | Per connection inbound frame count. |
+| `WS_FRAME_WINDOW_MS` | `60000`, 5000-600000 | same | Frame count window. |
+| `WS_HEARTBEAT_MISSED_LIMIT` | `6`, 3-20 | `server/websocket/gateway.js` | Missed heartbeat limit before disconnect. |
+| `WS_LARGE_FRAME_WINDOW_MS` | `60000`, 1000-600000 | same | Large frame admission window. |
+| `WS_LARGE_FRAME_MAX_COUNT` | `64`, 1-10000 | same | Large frames admitted in one window. |
+| `WS_LARGE_FRAME_MAX_BYTES` | 32 MiB, 1 MiB-1 GiB | same | Aggregate large frame bytes in one window. |
+| `WS_PENDING_MESSAGE_MAX_COUNT` | `64`, 4-4096 | same | Messages waiting behind the ordered per-socket handler. |
+| `WS_PENDING_MESSAGE_MAX_BYTES` | 16 MiB, 1-256 MiB | same | Bytes waiting behind the ordered per-socket handler. |
+| `WS_MAX_CONCURRENT_CONNECTIONS` | `4096`, 64-100000 | same | Per process websocket ceiling. |
+| `WS_MESSAGE_HANDLER_TIMEOUT_MS` | `30000`, 1000-120000 | same | Timeout for one ordered application message handler. |
+| `WS_MAX_ENCRYPTED_RESPONSE_BYTES` | 12 MiB, 1-64 MiB | `server/messaging/pq-envelope-handler.js` | Maximum serialized encrypted server response. |
+| `WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES` | 8 MiB, 1-16 MiB | same | Maximum request ciphertext before decode/decryption. |
+| `WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT` | `64`, 4-1024 | same | Per socket encrypted response queue count. |
+| `WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES` | 24 MiB, 4-256 MiB | same | Per socket encrypted response queue bytes. |
+| `WS_DELIVERY_TIMEOUT_MS` | `30000`, 1000-120000 | same | Maximum wait for encrypted websocket delivery/drain. |
+| `SECURE_CHUNK_BYTES` | 1 MiB, 256 KiB-6 MiB | same | Chunk target for oversized encrypted responses. |
+| `SECURE_CHUNK_SINGLE_MAX_BYTES` | 4 MiB, 64 KiB-8 MiB | same | Largest response sent without chunking. |
+| `PQ_HANDSHAKE_MAX_PER_MIN` | `20`, 1-600 | same | Per connection PQ handshake/rehandshake ceiling. |
+| `PQ_HANDSHAKE_MAX_CONCURRENCY` | `2`, 1-16 | same | Process level concurrent ML-KEM handshake work. |
+| `PQ_HANDSHAKE_MAX_QUEUE` | `16`, 0-64 | same | Bounded handshake waiters. |
+| `PQ_HANDSHAKE_QUEUE_TIMEOUT_MS` | `15000`, 1000-60000 | same | Maximum wait for a handshake slot. |
+| `PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS` | `45000`, 5000-120000 | same | Maximum time a staged session may wait for encrypted peer confirmation before the socket is closed and its pending/current transport state is wiped. |
 
----
+## PostgreSQL
 
-## Database (Postgres)
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `DATABASE_URL` | Optional alternative to discrete credentials | `server/database/core.js` | `postgres://` or `postgresql://` URL supplying port, user, password, database, and default certificate name. `DB_CONNECT_HOST`, `DB_TLS_SERVERNAME`, and the explicit CA configuration still apply. |
+| `DB_CONNECT_HOST` | URL host, otherwise unset | same | TCP destination override. Useful when connecting to an IP while verifying a DNS certificate name. |
+| `PGHOST`, `DB_HOST` | Required in discrete mode, `PGHOST` wins | same | PostgreSQL host and default TLS certificate name. |
+| `PGPORT`, `DB_PORT` | Required in discrete mode, `PGPORT` wins, 1-65535 | same | PostgreSQL port. |
+| `PGUSER`, `DATABASE_USER` | Required in discrete mode, `PGUSER` wins | same | PostgreSQL user. |
+| `PGPASSWORD`, `DATABASE_PASSWORD` | Required in discrete mode, `PGPASSWORD` wins | same | PostgreSQL password. |
+| `PGDATABASE`, `DB_NAME` | Required in discrete mode, `PGDATABASE` wins | same | PostgreSQL database name. |
+| `DB_TLS_SERVERNAME` | URL/host certificate name | same | Explicit SNI and hostname verification name. Required when the connect host is not the certificate identity. |
+| `PG_STATEMENT_TIMEOUT_MS` | `15000`, 1000-30000 | same | Server-side statement timeout. |
+| `PG_QUERY_TIMEOUT_MS` | `20000`, statement timeout to 30000 | same | Client-side query timeout. |
+| `PG_POOL_MAX` | `20`, 2-100 | same | PostgreSQL pool size. |
+| `PG_IDLE_TIMEOUT_MS` | `30000`, 10000-600000 | same | Idle pooled connection timeout. |
+| `PG_CONNECTION_TIMEOUT_MS` | `10000`, 1000-30000 | same | Connection establishment timeout. |
+| `PG_LOCK_TIMEOUT_MS` | `5000`, 500 to statement timeout | same | PostgreSQL lock wait timeout. |
+| `PG_IDLE_TRANSACTION_TIMEOUT_MS` | `20000`, 1000-30000 | same | Idle-in-transaction timeout. |
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `DATABASE_URL` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Primary Postgres connection string. When set, all other DB connection parameters are ignored and this URL is used directly. |
-| `PGHOST` | `(localhost)` | `server/database/database.js`, `scripts/start-server.cjs` | Host for Postgres when `DATABASE_URL` is not set. |
-| `PGPORT` | `(5432)` | same as above | Port for Postgres when `DATABASE_URL` is not set. |
-| `PGDATABASE` | `(Qor)` | `server/database/database.js`, `scripts/start-server.cjs` | Database name in fallback/local mode. Also used when auto-creating a database via `sudo -u postgres`. |
-| `PGUSER` | current OS user | `server/database/database.js`, `scripts/start-server.cjs` | Fallback Postgres user when `DATABASE_USER` is not set. |
-| `PGPASSWORD` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Fallback Postgres password when `DATABASE_PASSWORD` is not set. |
-| `DATABASE_USER` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Preferred Postgres user for local/fallback connections when `DATABASE_URL` is not set. |
-| `DATABASE_PASSWORD` | unset | same as above | Preferred Postgres password for local/fallback connections and DB auto-creation. |
-| `PASSWORD_HASH_PEPPER` | unset | `server/rate-limiting/distributed-rate-limiter.js` | Optional fallback HMAC pepper for hashing IP-based rate-limit keys when `USER_ID_SALT` is unavailable. |
-| `USER_ID_SALT` | auto-generated if unset | `server/database/database.js`, `server/server.js`, `server/rate-limiting/distributed-rate-limiter.js`, `server/authentication/token-service.js` | Salt used for user identifier hashing. Generated and persisted to `USER_ID_SALT_FILE` if not provided. |
-| `USER_ID_SALT_FILE` | `server/config/generated-user-id-salt.txt` | `server/database/database.js` | File path where the user ID salt is stored when not supplied via env. |
-| `DB_FIELD_KEY` | auto-generated if unset | `server/database/database.js`, `server/server.js`, `server/authentication/token-database.js` | Master key for field-level database encryption. Must be at least 32 bytes when provided via env. Otherwise a random key is generated and persisted to `DB_FIELD_KEY_FILE`. |
-| `DB_FIELD_KEY_FILE` | `server/config/generated-db-field-key.txt` | `server/database/database.js` | File path where the master DB field key is stored when not supplied via env. |
+## Redis and anonymous rate limits
 
----
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `REDIS_CLUSTER_NODES` | Unset | `server/session/redis-client.js` | Comma separated `host:port` seed nodes. When set, the client uses Redis Cluster with the same verified TLS policy. |
+| `REDIS_USERNAME` | Unset | Redis clients | Redis ACL username. |
+| `REDIS_PASSWORD` | Unset | Redis clients and Docker Redis | Redis ACL password. |
+| `REDIS_TLS_SERVERNAME` | `redis` | Redis clients | SNI and certificate-verification name. |
+| `REDIS_CA_CERT_PATH` | System roots when unset | Redis clients | Explicit Redis CA bundle. |
+| `REDIS_CLIENT_CERT_PATH` | Unset | Redis clients | Client certificate for Redis mutual TLS. |
+| `REDIS_CLIENT_KEY_PATH` | Unset | Redis clients | Private key for `REDIS_CLIENT_CERT_PATH`, cached key bytes are wiped on teardown. |
+| `REDIS_POOL_MIN` | `4`, 1-100 and no greater than max | `server/session/redis-client.js` | Minimum pooled clients. |
+| `REDIS_POOL_MAX` | `50`, 10-500 | same | Maximum pooled clients. |
+| `REDIS_POOL_ACQUIRE_TIMEOUT` | `15000`, 1000-60000 | same | Pool acquisition timeout. |
+| `REDIS_POOL_IDLE_TIMEOUT` | `180000`, 10000-600000 | same | Pooled client idle timeout. |
+| `REDIS_POOL_EVICTION_INTERVAL` | `60000`, 10000-600000 | same | Idle client eviction interval. |
+| `REDIS_CONNECT_TIMEOUT` | `15000`, 1000-60000 | same | Redis connection timeout. |
+| `REDIS_COMMAND_TIMEOUT` | `10000`, 1000-30000 | same | Redis command timeout. |
+| `REDIS_KEEPALIVE` | `30000`, 0-300000 | same | TCP keepalive delay. |
+| `REDIS_SOCKET_TIMEOUT` | `120000`, 30000-600000 | same | Redis socket timeout. |
+| `REDIS_QUIET_ERRORS` | `false`, load-balancer launcher sets `true` | same | Throttles repeated identical operational errors. It does not suppress the first error. |
+| `REDIS_ERROR_THROTTLE_MS` | `5000`, 1000-60000 | same | Duplicate error throttle interval. |
+| `RATE_LIMIT_REDIS_URL` | Falls back to `REDIS_URL`, must use `rediss://` | `server/rate-limiting/distributed-rate-limiter.js` | Optional dedicated Redis endpoint for the anonymous global connection limiter. |
+| `RATE_LIMIT_REDIS_CONNECT_TIMEOUT` | `10000`, 1000-60000 | same | Rate-limit Redis connection timeout. |
+| `RATE_LIMIT_REDIS_COMMAND_TIMEOUT` | `10000`, 1000-30000 | same | Rate-limit Redis command timeout. |
 
-## Redis, presence, and rate limiting
+`REDISCLI_AUTH` is created internally by the launcher when invoking `redis-cli`, so
+the password does not appear in command arguments. It is not an operator setting.
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `REDIS_URL` | **required** | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Redis connection URL. Must use `rediss://` with TLS. Plaintext `redis://` is treated as an error. |
-| `REDIS_CLUSTER_NODES` | unset | `server/session/redis-client.js` | Comma-separated `host:port` list enabling ioredis cluster mode for presence and messaging when set. |
-| `REDIS_USERNAME` | unset | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js` | Redis ACL username used for both presence and rate limiter clients. |
-| `REDIS_PASSWORD` | unset | same as above | Redis ACL password. |
-| `REDISCLI_AUTH` | derived from `REDIS_URL` | `scripts/start-server.cjs` | Used to securely pass the Redis password to `redis-cli`, preventing the "insecure password" warning in TUI/logs. |
-| `REDIS_POOL_MIN` | `(4)` (clamped 1–100) | `server/session/redis-client.js` | Minimum number of Redis connections in the generic-pool-based client pool. |
-| `REDIS_POOL_MAX` | `(50)` (clamped 10–500) | same as above | Maximum number of Redis connections in the pool. |
-| `REDIS_POOL_ACQUIRE_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | same as above | Timeout for acquiring a Redis client from the pool. |
-| `REDIS_POOL_IDLE_TIMEOUT` | `(30000)` ms (clamped 10000–120000) | same as above | Idle timeout for pooled Redis clients. |
-| `REDIS_POOL_EVICTION_INTERVAL` | `(60000)` ms (clamped 10000–120000) | same as above | Interval for evicting idle Redis connections from the pool. |
-| `REDIS_CONNECT_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | `server/session/redis-client.js` | Network connection timeout for Redis clients. |
-| `REDIS_COMMAND_TIMEOUT` | `(10000)` ms (clamped 1000–30000) | `server/session/redis-client.js` | Timeout for individual Redis commands. |
-| `REDIS_DUPLICATE_POOL_MAX` | `(5)` (clamped 1–20) | `server/session/redis-client.js` | Upper bound on duplicate Redis connections used for pub/sub and specialized operations. |
-| `PRESENCE_REDIS_QUIET_ERRORS` | `('true')` in load balancer, else `('false')` | `server/session/redis-client.js`, `scripts/start-loadbalancer.cjs` | When `'true'`, repeated identical Redis errors are throttled and logged less frequently. Load balancer startup enforces `'true'` by default. |
-| `REDIS_ERROR_THROTTLE_MS` | `(5000)` ms (clamped 1000–60000) | `server/session/redis-client.js` | Minimum interval before the same Redis error message is logged again when `PRESENCE_REDIS_QUIET_ERRORS` is enabled. |
-| `RATE_LIMIT_REDIS_URL` | unset → falls back to `REDIS_URL` | `server/rate-limiting/distributed-rate-limiter.js` | Redis URL override specifically for the distributed rate limiter. Must also use `rediss://`. |
-| `RATE_LIMIT_REDIS_CONNECT_TIMEOUT` | `(10000)` ms (clamped 1000–60000) | `server/rate-limiting/distributed-rate-limiter.js` | Connection timeout for the rate limiter Redis client. |
-| `REDIS_CA_CERT_PATH` | unset | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js` | Path to Redis CA certificate used to validate the Redis server's TLS certificate. When set, enables full mutual TLS for Redis connections. In Docker environments, typically `/app/redis-certs/redis-ca.crt`. |
-| `REDIS_CLIENT_CERT_PATH` | unset | same as above | Path to client certificate used for mutual TLS authentication with Redis. Required when Redis is configured with `--tls-auth-clients yes`. In Docker, typically `/app/redis-certs/redis-client.crt`. |
-| `REDIS_CLIENT_KEY_PATH` | unset | same as above | Path to client private key corresponding to `REDIS_CLIENT_CERT_PATH`. Used for mutual TLS authentication with Redis. In Docker, typically `/app/redis-certs/redis-client.key`. |
+## Anonymous PQ HTTP transport
 
-**Note:** in security-sensitive code paths, `REDIS_URL` and `RATE_LIMIT_REDIS_URL` must use TLS (`rediss://`).
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `PQ_ANONYMOUS_HTTP_MAX_INFLIGHT` | `4`, 1-16 | `server/routes/pq-anonymous-http.js` | Concurrent admitted replay/KEM/decrypt/dispatch/response operations per process. |
+| `PQ_ANONYMOUS_HTTP_MAX_RPS` | `100`, 1-2000 | same | Process wide token bucket for work-valid requests before KEM processing. |
+| `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 64 KiB opaque failure writes, excess failures close without allocating a response. |
+| `PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS` | `200`, 1-4000 | same | Process wide token bucket for opaque failure writes. |
+| `PQ_ANONYMOUS_HTTP_WRITE_TIMEOUT_MS` | `180000`, 5000-300000 | same | Deadline for a success or opaque failure response write, including clients that disconnect or stop reading. |
 
----
+## Authentication and cryptography
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `AUTH_THROTTLE_WINDOW_MS` | `60000`, 5000-600000 | `server/security/auth-throttle.js` | Current/previous global failure-count window. |
+| `AUTH_THROTTLE_FREE_FAILURES` | `30`, 0-1000000 | same | Work backed failures before delay begins. |
+| `AUTH_THROTTLE_MS_PER_FAILURE` | `150`, 0-60000 | same | Delay added per failure above the free allowance. |
+| `AUTH_THROTTLE_MAX_DELAY_MS` | `8000`, 0-120000 | same | Maximum adaptive delay. |
+| `AUTH_POW_FREE_FAILURES` | `30`, 0-1000000 | same | Failures before adaptive proof-of-work activates. |
+| `AUTH_POW_MIN_BITS` | `10`, 0-28 | same | Adaptive PoW difficulty when active. |
+| `AUTH_POW_MAX_BITS` | `22`, 22-28 | same | Adaptive PoW ceiling. |
+| `AUTH_POW_STEP_FAILURES` | `40`, 1-1000000 | same | Failures per logarithmic difficulty step. |
+| `AUTH_PREFLIGHT_POW_BITS` | `20`, 18 to `AUTH_POW_MAX_BITS` | same | Baseline work before expensive registration/login processing. |
+| `AUTH_FINALIZE_POW_BITS` | `22`, 22 to `AUTH_POW_MAX_BITS` | same | Baseline work before expensive authentication finalization. |
+| `AUTH_PREFLIGHT_STEP_REQUESTS` | `32`, 1-1000000 | same | Paid requests per logarithmic preflight step. |
+| `AUTH_OT_MAX_QUEUE` | `8`, 0-8 | same | Maximum waiters for the isolated constant-work private-auth worker. |
+| `AUTH_OT_QUEUE_TIMEOUT_MS` | `90000`, 1000-120000 | same | Maximum wait for that worker. |
+| `ARGON2_TIME` | `4`, 3-10 | `server/crypto/unified-crypto.js` | Argon2id time cost. |
+| `ARGON2_MEMORY` | 262144 KiB, 131072-1048576 KiB | same | Argon2id memory cost. |
 
-## Authentication, tokens, and key material
+## Blind routing, mix relay, and cover traffic
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `BLIND_ROUTE_WINDOW_MS` | `60000`, 1000-600000 | `server/handlers/delivery-handlers.js` | Per-connection blind-route admission window. |
+| `BLIND_ROUTE_MAX_PER_WINDOW` | `30`, 1-10000 | same | Envelopes admitted in that window. |
+| `BLIND_ROUTE_MAX_BYTES_PER_WINDOW` | 8 MiB, 64 KiB-512 MiB | same | Aggregate admitted bytes in that window. |
+| `BLIND_ROUTE_MAX_ENVELOPE_BYTES` | 384 KiB, 16 KiB-8 MiB | same | Maximum sealed route envelope. |
+| `MIXNET_DELAY_MIN_MS` | `1500`, 250-120000 | `server/routing/blind-router.js` | Minimum randomized relay delay. |
+| `MIXNET_DELAY_MAX_MS` | `9000`, minimum delay to 300000 | same | Maximum randomized relay delay. |
+| `MIXNET_FLUSH_MIN_MS` | `700`, 100-60000 | same | Minimum randomized relay flush interval. |
+| `MIXNET_FLUSH_MAX_MS` | `2500`, minimum flush to 120000 | same | Maximum randomized relay flush interval. |
+| `MIXNET_BATCH_MAX_MESSAGES` | `24`, 1-256 | same | Real messages claimed per flush. |
+| `MIXNET_FLUSH_CONCURRENCY` | `8`, 1-32 | same | Concurrent claimed-message processing. |
+| `MIXNET_PROCESSING_TIMEOUT_MS` | `120000`, 60000-600000 | same | Recovery age for unfinished Redis claims. |
+| `MIXNET_POOL_TTL_SECONDS` | `3600`, 60-3600 | same | Maximum delay/processing recovery lifetime. The one-hour cap cannot be raised. |
+| `MIXNET_PENDING_MAX_MESSAGES` | `2048`, 64-100000 | same | Global delayed/processing queue count cap. |
+| `MIXNET_PENDING_MAX_BYTES` | 128 MiB, 8 MiB-2 GiB | same | Global delayed/processing queue byte cap. |
+| `MIXNET_COVER_WRITES_MIN` | `1`, 0-32 | same | Minimum cover writes in a nonempty flush. |
+| `MIXNET_COVER_WRITES_MAX` | `2`, minimum to 64 | same | Maximum cover writes in a nonempty flush. |
+| `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400`, 60-604800 | same | Global sealed-spool row lifetime (24-hour default, seven-day maximum). |
+| `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768`, 64-10000000 | same | Global sealed-spool row cap held across the whole server for the full TTL. |
+| `GLOBAL_MIX_SPOOL_MAX_BYTES` | 512 MiB, 1 MiB-4 GiB | same | Global sealed-spool byte cap. Only the standard 128 KiB ciphertext class is retained, base64 and envelope framing make the serialized Redis row larger. Both caps refuse writes when reached until rows age out through `GLOBAL_MIX_SPOOL_TTL_SECONDS`. |
+| `GLOBAL_MIX_PUBLICATION_MAX_BYTES` | 2 MiB, 64 KiB-16 MiB | same | Maximum cross-node publication payload. |
+| `GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES` | `64`, 1-4096 | same | Local cross-node delivery queue count. |
+| `GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES` | 32 MiB, 1-512 MiB | same | Local cross-node delivery queue bytes. |
+| `GLOBAL_MIX_PUBLICATION_QUEUE_MAX_MESSAGES` | `64`, 1-4096 | same | Local publication queue count. |
+| `GLOBAL_MIX_PUBLICATION_QUEUE_MAX_BYTES` | 32 MiB, 1-512 MiB | same | Local publication queue bytes. |
+| `LOCAL_BROADCAST_BUFFERED_MAX_BYTES` | 8 MiB, 1-256 MiB | same | Per-socket buffered-output threshold. |
+| `LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS` | `30000`, 1000-600000 | same | Backpressure diagnostic throttle. |
+| `LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS` | `120000`, 10000-1800000 | same | Continuous pressure before local socket eviction. |
+| `LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS` | `120000`, 10000-1800000 | same | Local delivery suspension after pressure. |
+| `LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS` | `0`, 0-300000 | same | Optional spacing between local broadcast writes. |
+| `LOCAL_BROADCAST_CONCURRENCY` | `8`, 1-64 | same | Concurrent local broadcast writes. |
+| `BLIND_ROUTE_MAX_LOCAL_SOCKETS` | `2048`, 64-100000 | same | Local sockets considered for one blind delivery. |
+| `BLIND_DELIVERY_RETRY_MIN_MS` | `5000`, 1000-60000 | same | Minimum cross-node subscription retry. |
+| `BLIND_DELIVERY_RETRY_MAX_MS` | `60000`, minimum retry to 600000 | same | Maximum cross-node subscription retry. |
+| `SERVER_COVER_TRAFFIC_INTERVAL_MS` | `30000`, 5000-600000 | `server/routing/timing-protection.js` | Base idle cover-write interval. |
+| `SERVER_COVER_TRAFFIC_VARIANCE_MS` | `15000`, 0-600000 | same | Random interval variance. |
+| `SERVER_COVER_TRAFFIC_WRITES_MIN` | `1`, 1-32 | same | Minimum writes per cover cycle. |
+| `SERVER_COVER_TRAFFIC_WRITES_MAX` | `3`, minimum to 64 | same | Maximum writes per cover cycle. |
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `KEY_ENCRYPTION_SECRET` | **required** (≥32 characters) | `server/authentication/token-service.js`, `server/crypto/unified-key-encryption.js`, `scripts/start-server.cjs` | High-entropy secret used as input to Argon2id to derive the key-encryption key (KEK) for server-side private key protection and token integrity keys. |
-| `SERVER_PASSWORD` | unset (**required** for blind server entry) | `server/authentication/auth-utils.js` | Plaintext server password. On startup it is hashed, the gatekeeper is initialized with the plaintext (the actual verifier of blind server-entry submissions), the hash is kept in memory, and `SERVER_PASSWORD` is then deleted from `process.env`. A server with no plaintext password (and not joining an existing cluster) refuses to boot. |
-| `SERVER_PASSWORD_HASH` | set internally | `server/authentication/auth-utils.js`, `server/cluster/cluster-manager.js` | **Not a user boot option.** The server derives this from the plaintext `SERVER_PASSWORD` at boot and shares it into the cluster's Redis config so a secondary node can validate already-granted (Redis-shared) server-entry sessions. A node started with only `SERVER_PASSWORD_HASH` and no plaintext `SERVER_PASSWORD` cannot initialize the gatekeeper, so the legacy hash-only boot path was removed. |
-| `SESSION_STORE_KEY` | **required** (≥32 bytes after decoding) | `server/session/pq-session-storage.js`, `scripts/start-server.cjs` | Master secret used to derive encryption keys for PQ WebSocket session keys stored in Redis. `start-server.cjs` generates and persists a random value at `server/config/secrets/SESSION_STORE_KEY` if unset. |
-| `BLIND_SIGNATURE_KEY_PATH` | auto-generated file when unset | `server/security/blind-signatures.js` | Path to the blind-signature keypair used to issue/verify the anonymous server-entry tokens (the gatekeeper). A keypair is generated and persisted here on first boot if absent. |
-| `PQ_SESSION_CACHE_MAX` | `(5000)` (clamped 0–50000) | `server/session/pq-session-storage.js` | Max number of decrypted PQ WebSocket sessions kept in the in-memory LRU (Redis is the source of truth. This bounds RAM). |
-| `PQ_SESSION_CACHE_TTL_MS` | `(300000)` ms (clamped 1000–3600000) | `server/session/pq-session-storage.js` | TTL for cached in-memory PQ sessions before they are dropped and re-loaded from Redis. |
+## Discovery publication privacy
 
-Several of these secrets (`KEY_ENCRYPTION_SECRET`, `SESSION_STORE_KEY`, `USER_ID_SALT`, `DB_FIELD_KEY`) are persisted to files under `server/config` when not provided via env. Losing both the environment values and those files will render encrypted data unrecoverable.
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `DISCOVERY_MAX_SOURCE_PUBLICATIONS` | `4096`, 1-100000 | `server/discovery/bucket-layout.js` | Active encrypted publications admitted to an index build. |
+| `DISCOVERY_MAX_SOURCE_BYTES` | 256 MiB, 1 MiB-2 GiB | same | Cumulative source-byte budget for one index. |
+| `DISCOVERY_PADDED_BUCKET_CACHE_SIZE` | `4`, 0-32 | `server/discovery/bucket-index.js` | Fully padded bucket LRU size, `0` disables the cache. |
+| `DISCOVERY_PUBLISH_MAX_PER_MIN` | `12`, 1-1000 | `server/config/config.js` | Per-unlinked-connection publication admission. |
+| `DISCOVERY_OPRF_HTTP_MAX_INFLIGHT` | `64`, 1-256 | `server/routes/api-routes.js` | Concurrent anonymous VOPRF evaluations per process. |
+| `DISCOVERY_OPRF_HTTP_MAX_RPS` | `500`, 1-10000 | same | Per-process OPRF token bucket. |
+| `DISCOVERY_MANIFEST_HTTP_MAX_RPS` | `50`, 1-2000 | same | Per-process manifest token bucket. |
+| `DISCOVERY_BUCKET_MAX_INFLIGHT` | `2`, 1-8 | same | Concurrent fixed-shape bucket responses. |
+| `DISCOVERY_BUCKET_HTTP_MAX_RPS` | `30`, 1-256 | same | Per-process bucket token bucket. |
+| `DISCOVERY_BUCKET_RESPONSE_MAX_BYTES` | 48 MiB, 1-48 MiB | same | Serialized bucket-response ceiling. |
+| `OPRF_GLOBAL_MAX_PER_MIN` | `1200`, 60-60000 | `server/crypto/oprf-discovery.js` | Anonymous global OPRF CPU ceiling. |
+| `DISCOVERY_PUBLICATION_DELAY_MIN_MS` | `2000`, 1000-1800000 | `server/discovery/publication-privacy.js` | Minimum randomized publication release delay. |
+| `DISCOVERY_PUBLICATION_DELAY_MAX_MS` | `10000`, minimum delay to 3600000 | same | Maximum randomized release delay. |
+| `DISCOVERY_PUBLICATION_FLUSH_MIN_MS` | `1000`, 500-600000 | same | Minimum randomized relay flush interval. |
+| `DISCOVERY_PUBLICATION_FLUSH_MAX_MS` | `4000`, minimum flush to 900000 | same | Maximum randomized relay flush interval. |
+| `DISCOVERY_PUBLICATION_BATCH_MAX` | `32`, 1-512 | same | Real publications claimed per flush. |
+| `DISCOVERY_PUBLICATION_FLUSH_CONCURRENCY` | `8`, 1-32 | same | Concurrent claimed-publication processing. |
+| `DISCOVERY_PUBLICATION_PROCESSING_TIMEOUT_MS` | `120000`, 60000-600000 | same | Recovery age for unfinished claims. |
+| `DISCOVERY_PUBLICATION_MAX_POOL_ENTRIES` | `512`, 100-8192 | same | Combined delayed/processing entry cap. Each entry contains one fixed 64 KiB publication. |
+| `DISCOVERY_PUBLICATION_POOL_TTL_SECONDS` | `604800`, 60-2592000 | same | Redis queue-state lifetime. |
+| `DISCOVERY_PUBLICATION_COVER_WRITES_MIN` | `1`, 0-64 | same | Minimum cover rows in a nonempty flush. |
+| `DISCOVERY_PUBLICATION_COVER_WRITES_MAX` | `3`, minimum to 128 | same | Maximum cover rows in a nonempty flush. |
+| `DISCOVERY_PUBLICATION_IDLE_COVER_WRITES_MIN` | `0`, 0-64 | same | Minimum cover rows in an idle flush. |
+| `DISCOVERY_PUBLICATION_IDLE_COVER_WRITES_MAX` | `0`, minimum to 128 | same | Maximum cover rows in an idle flush. |
+| `DISCOVERY_PUBLICATION_TIMESTAMP_QUANTUM_MS` | `900000`, 60000-21600000 | same | Expiry rounding quantum, exact publication time is not stored. |
+| `DISCOVERY_INDEX_REFRESH_MIN_INTERVAL_MS` | `45000`, 10000-21600000 | same | Coalescing interval for index invalidation/prewarm. |
 
----
+## Avatar and spool operations
 
-## Cryptography configuration and logging
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `AVATAR_GET_HTTP_MAX_RPS` | `30`, 1-2000 | `server/routes/api-routes.js` | Per-process fixed-batch avatar fetch token bucket. |
+| `AVATAR_PUT_HTTP_MAX_RPS` | `20`, 1-2000 | same | Per-process anonymous avatar write token bucket. |
+| `AVATAR_POOL_HTTP_MAX_RPS` | `10`, 1-2000 | same | Per-process cover-pool token bucket. |
+| `AVATAR_BLOB_MAX_COUNT` | `20000`, 100-100000 | `server/config/constants.js` | Mandatory global encrypted-avatar row cap. Oldest-expiring rows are evicted, the cap cannot be disabled. |
+| `AVATAR_ENFORCE_EVERY` | `100`, 1-1000 | `server/routes/api-routes.js` | Successful writes between inline cap enforcement passes. |
+| `SPOOL_HTTP_MAX_RPS` | `50`, 1-2000 | same | Per-process token bucket shared by the tag-index and PIR endpoints. |
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `ARGON2_TIME` | `(4)` (clamped 3–10) | `server/crypto/unified-crypto.js`, `server/authentication/token-service.js` | Argon2id time cost (iterations) for password hashing and data hashing. Values outside the range are clamped. |
-| `ARGON2_MEMORY` | `(262144)` KiB (256 MiB. Clamped 131072–1048576) | same as above | Argon2id memory cost used by the unified crypto layer. |
-| `ARGON2_PARALLELISM` | `(2)` (clamped 1–16) | same as above | Argon2id parallelism parameter. |
-| `UNIFIED_ARGON2_MEMORY` | `(262144)` KiB (clamped 131072–524288) | `server/crypto/unified-key-encryption.js` | Argon2id memory cost used specifically for key-encryption master key derivation. |
-| `UNIFIED_ARGON2_TIME` | `(4)` (clamped 2–8) | same as above | Argon2id time cost for key-encryption master key derivation. |
-| `UNIFIED_ARGON2_PARALLELISM` | `(2)` (clamped 1–8) | same as above | Argon2id parallelism for key-encryption master key derivation. |
-| `CRYPTO_LOG_LEVEL` | `('warn')` | `server/crypto/crypto-logger.js` | Minimum severity for the crypto logger (`warn`, `error`). The app should not emit verbose cryptographic diagnostics. |
+## Clustering and load balancing
 
----
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `SERVER_ID` | Launcher generates `server-<hostname>-<timestamp>` | server and cluster modules | Logical node identifier. It identifies a server process, never a user. |
+| `SERVER_HOST` | Launcher detects a non-loopback address | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
+| `HOST` | OS hostname | `server/cluster/cluster-manager.js` | Fallback when `SERVER_HOST` is unset. |
+| `HOSTNAME` | `server` fallback | `server/cluster/cluster-integration.js` | Input to generated cluster node IDs. |
+| `ENABLE_CLUSTERING` | Launcher default `true`, only exact `true` enables | `server/server.js` | Enables Redis-backed cluster registration. |
+| `CLUSTER_WORKERS` | `1` | `server/bootstrap/server-bootstrap.js` | Node worker count, values greater than one use local process clustering. |
+| `CLUSTER_PRIMARY` | Unset | cluster modules | Exact `true` marks the node primary. |
+| `SERVER_ROLE` | Unset | `server/cluster/cluster-integration.js` | `primary` is an alternate primary marker. |
+| `CLUSTER_AUTO_APPROVE` | Launcher default `true` | cluster modules | Exact `true` automatically approves new cluster nodes. |
+| `NO_GUI` | `false` | launchers | Disables the interactive server/load-balancer terminal UI. |
+| `HAPROXY_HTTPS_PORT` | Root auto-LB `443`, otherwise `8443` | load-balancer modules | External HAProxy HTTPS port. |
+| `HAPROXY_STATS_PORT` | `8404` | load-balancer modules | HAProxy statistics listener port. |
+| `HAPROXY_STATS_USERNAME` | Initialized by launcher | load-balancer modules | HAProxy statistics and command-channel credential. |
+| `HAPROXY_STATS_PASSWORD` | Generated or prompted by launcher | load-balancer modules | Companion secret, launcher stores its protected form under `server/config`. |
+| `HAPROXY_CERT_PATH` | Repository cert directory or `/etc/haproxy/certs` | `server/load-balancer/haproxy-config-generator.js` | HAProxy certificate directory. |
+| `HAPROXY_CERT_FILE` | Auto-selected certificate | same | Specific certificate file override. |
+| `HAPROXY_CONFIG_PATH` | Platform/root-dependent | cluster and load-balancer modules | Generated HAProxy configuration path. |
+| `HAPROXY_PID_FILE` | Platform/root-dependent | load-balancer modules | HAProxy PID file. |
+| `HAPROXY_STATS_SOCKET` | `${TMPDIR}/haproxy-admin-<uid>.sock` | load-balancer modules | Local HAProxy command socket. |
+| `LOADBALANCER_LOCK_FILE` | Platform/root-dependent | `server/load-balancer/auto-loadbalancer.js` | Single-instance process lock. |
+| `LB_SERVER_ACTIVE_TIMEOUT_MS` | `45000`, 10000-300000 | same | Age after which a cluster backend is no longer considered active. |
+| `HAPROXY_AUTO_CONFIG` | `false` | `server/cluster/cluster-integration.js` | Exact `true` lets a primary write HAProxy configuration from cluster state. |
+| `HAPROXY_AUTO_RELOAD` | `false` | same | Exact `true` validates and reloads HAProxy after an update. |
+| `HAPROXY_UPDATE_INTERVAL` | `60000`, 5000-3600000 | same | Single-flight configuration refresh interval. |
+| `HAPROXY_BIN` | `haproxy` | `server/load-balancer/haproxy-manager.js` | HAProxy executable. |
+| `LB_HAPROXY_BIN` | Selected by launcher | load-balancer launcher | Effective system or repository-built HAProxy executable. |
+| `LB_HAPROXY_CFG` | `server/config/haproxy-quantum.cfg` | load-balancer launcher | PQ-enabled HAProxy configuration. |
+| `LB_OPENSSL_CONF` | Derived from `OPENSSL_CONF` | load-balancer launcher | OpenSSL provider configuration passed to HAProxy. |
+| `HAPROXY_BUILD_ROOT` | User cache, `/app/haproxy-build` in Docker | HAProxy build and load-balancer launcher | Persistent location for the SHA-256-verified pinned HAProxy 3.2.21 source and executable. |
+| `SERVER_<server-id>_URL` | Unset | `server/load-balancer/haproxy-config-generator.js` | Optional backend URL override for a discovered server ID. |
 
-## Discovery and PIR privacy
+## PQ TLS and installation tooling
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `PIR_WORKER_URL` | `(http://127.0.0.1:8787)`, Docker `http://pir-worker:8787` | `server/pir/pir-worker-client.js`, `docker/docker-compose.yml` | URL of the isolated reviewed PIR worker. |
-| `PIR_REQUIRE_WORKER` | `('true')` | `server/pir/pir-worker-client.js`, `docker/docker-compose.yml` | When true, server startup and PIR availability fail closed if the worker is unavailable or fails pin validation. |
-| `PIR_WORKER_PARAMETER_ID` | `hintless-simplepir-rlwe64-v1` | same as above | Pinned worker parameter id that must match the server and worker health response. |
-| `PIR_WORKER_SOURCE_COMMIT` | `49434e086ec56d19546ca6e97353671b690ba19b` | `server/pir/pir-worker-client.js`, `workers/hintless/hintless.lock.json` | Expected upstream `hintless_pir` source commit reported by worker health. |
-| `PIR_WORKER_TOKEN` | unset | `server/pir/pir-worker-client.js`, `workers/hintless/src/qor_pir_worker.cc` | Optional bearer token shared between server and PIR worker. |
-| `PIR_WORKER_TIMEOUT_MS` | `(300000)` ms | `server/pir/pir-worker-client.js` | Timeout for worker health, upload, public-params, and opaque query requests. |
-| `PIR_MAX_QUERY_CHARS` | `(8388608)` | `server/handlers/pir-handlers.js` | Maximum encoded opaque PIR query length accepted by the WebSocket handler. |
-| `PIR_WORKER_MAX_UPLOAD_BODY_BYTES` | `(201326592)` bytes | `server/pir/pir-worker-client.js` | Server-side upload body guard for PIR database uploads. If unset, the legacy `PIR_WORKER_MAX_REQUEST_BYTES` value is used as the fallback input. |
-| `PIR_WORKER_MAX_RESPONSE_BODY_BYTES` | `(67108864)` bytes | `server/pir/pir-worker-client.js` | Maximum worker response body accepted by the server. |
-| `PIR_WORKER_MAX_REQUEST_BYTES` | worker Docker `(268435456)` bytes | `docker/docker-compose.yml`, `workers/hintless/src/qor_pir_worker.cc`, `server/pir/pir-worker-client.js` | Worker-side request limit. Also used as the server upload fallback when `PIR_WORKER_MAX_UPLOAD_BODY_BYTES` is unset. |
-| `PIR_WORKER_MAX_DATABASE_BYTES` | worker `(2147483648)` bytes | `workers/hintless/src/qor_pir_worker.cc` | Worker-side decoded database size limit. |
-| `PIR_EPOCH_GRACE_MS` | `(7200000)` ms | `server/pir/pir-databases.js` | Grace period for serving a recently-rotated PIR epoch (so an in-flight lookup against the previous epoch still resolves). |
-| `DISCOVERY_BUCKET_COUNT` | `(256)` | `server/pir/page-layout.js` | Fixed number of k-anonymity buckets for the discovery keys-blob store. The client derives its own `bucketId = sha256(domain‖epoch‖slotKey) % BUCKET_COUNT` from its OPRF token (the server never sees the token), so this must be a stable, client-agreed constant — it is **not** derived from the record count. |
-| `DISCOVERY_BUCKET_TARGET_SIZE` | `(32)` | `server/pir/page-layout.js` | k-anonymity set K — each bucket is padded up to K entries with deterministic, secret-keyed decoys (generated at response time, not stored). A looker fetches its target's whole bucket and decrypt-filters, so the server learns only the bucket (target = 1-of-K). Bigger K = stronger anonymity, more bandwidth (~K × 131 KB/lookup, so K=32 ≈ 4 MB). The padding is generated per request in the `/api/discovery/bucket` handler, so this is a server-side knob (no client rebuild). Note: lookup latency is dominated by Tor round-trips + the `forceFresh` manifest fetch, not bucket size. |
-| `DISCOVERY_BUCKET_MAX_IDS` | `(4)` | `server/routes/api-routes.js` | Max bucket ids per `/api/discovery/bucket` request (target + cover buckets). Bounds response size. |
-| `DISCOVERY_OPRF_HTTP_MAX_INFLIGHT` | `(8)` | `server/routes/api-routes.js` | Concurrent in-flight cap on the anonymous discovery OPRF-eval HTTP route. Excess gets 503. |
-| `DISCOVERY_PIR_HTTP_MAX_INFLIGHT` | `(8)` | `server/routes/api-routes.js` | Concurrent in-flight cap on the anonymous discovery PIR query HTTP route. |
-| `OPRF_GLOBAL_MAX_PER_MIN` | `(1200)` | `server/crypto/oprf-discovery.js` | Global (server-wide) cap on discovery OPRF evaluations per rolling minute, on top of the per-session limit. Bounds online username probing through the live OPRF service when an attacker holds many anonymous tokens (the per-token limit doesn't bind a token-rich attacker, but a global cap does). See `docs/app/USERNAME_ENUMERATION_RESISTANCE.md`. |
-| `DISCOVERY_BUCKET_MAX_INFLIGHT` | `(8)` | `server/routes/api-routes.js` | Concurrent in-flight cap on the anonymous `/api/discovery/bucket` route. |
-| `DISCOVERY_BUCKET_COVER_COUNT` | `(0)` | `src/lib/pir/pir-client.ts` (client const) | Extra random cover buckets fetched alongside the real one. 0 = just the target bucket (K-anonymity). >0 multiplies bandwidth but hides which fetched bucket is real. |
-| `AVATAR_HTTP_MAX_INFLIGHT` | `(16)` | `server/routes/api-routes.js` | Concurrent in-flight cap across the anonymous avatar content-store routes (`/api/avatar/blob/put`, `/blob/get`, `/pool`). Excess gets 503. |
-| `AVATAR_GET_MAX_BATCH` | `(16)` | `server/routes/api-routes.js` | Max ids per cover-traffic batch fetch (`/api/avatar/blob/get`). Bounds the per-request response size. The client mixes its real target with decoys up to this cap (client default is `AVATAR_COVER_TOTAL_IDS` = 10). Each id returns one uniform-size PURB, so this directly sets the per-lookup bandwidth ceiling. |
-| `AVATAR_MISS_SECRET` | per-process random | `server/routes/api-routes.js` | Secret keying the deterministic synthetic "miss" blob so a non-existent id returns an identically-sized, byte-stable, unpredictable response (hits and misses indistinguishable). Set explicitly only to keep misses stable across restarts. |
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `OPENSSL_CONF` | Unset | quantum setup/build and load-balancer modules | OpenSSL configuration that loads the selected providers. |
+| `OPENSSL_MODULES` | Unset | same | OpenSSL provider module directory. |
+| `OQS_PROVIDER_MODULE` | Auto-detected | same | Explicit `oqsprovider` module path. |
+| `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` | Inherited | quantum tooling | Dynamic-library search path for HAProxy/OpenSSL dependencies. |
+| `OQS_SIG` | Tool-selected | `scripts/setup-quantum-haproxy.cjs` | Preferred supported PQ signature algorithm for generated PQ certificate tooling. |
+| `FORCE_REBUILD` | `0` | install/build scripts | `1` forces rebuilding quantum dependencies. |
+| `TLS_REDIS_SERVER` | Installer-generated path | `scripts/start-server.cjs` | Repository-local TLS Redis executable override. |
+| `REDIS_SERVER_BIN` | `redis-server` | same | System Redis executable fallback. |
+| `REDIS_TLS_SOURCE_URL` | Redis 7.2.5 release URL | `scripts/install-deps.cjs` | Source archive used to build the local TLS Redis helper. |
+| `TLS_CERT_CN` | `localhost` | `scripts/generate_tls.cjs` | Common name used by local TLS certificate generation. |
 
-Client-side avatar cover knobs (compile-time constants in `src/lib/avatar/avatar-store-client.ts`, not env): `AVATAR_COVER_TOTAL_IDS` (k, default 10 — anonymity-set size per fetch and the bandwidth multiplier), `COVER_BLOBS_PER_CLIENT` (default 12 — cover PURBs each client keeps in the pool so k-anonymity holds even with few real users), and `DECOY_CACHE_TTL_MS` (how long a target's stable decoy set is reused, to defeat the set-intersection attack). The avatar PURB size is `AVATAR_PURB_CAPACITY` (256 KiB, in `src/lib/crypto/avatar-blob-crypto.ts`, mirrored by `AVATAR_PURB_WIRE_BYTES` in `server/database/avatar-blob-db.js`).
+## Client and build tooling
 
-Hintless SimplePIR has no client hint download. The per-epoch public params
-(~350 bytes) ride inline in the PIR manifest.
-| `PIR_MANIFEST_INCLUDE_RECORD_DIGESTS` | `('false')` | `server/pir/pir-databases.js` | Optional manifest record digests for tests/audits. Normal clients verify encrypted payload digests and worker database digests. |
-| `PIR_MANIFEST_INCLUDE_PAYLOAD_DIGESTS` | `('false')` | `server/pir/pir-databases.js` | Optional payload digest map for tests/audits. |
-| `PIR_DISCOVERY_RECORD_FLOOR` | privacy floor | `server/pir/page-layout.js` | Minimum padded record count for the discovery PIR database (anonymity floor). |
-| `PIR_DISCOVERY_EPOCH_MS` | `(21600000)` ms | `server/pir/page-layout.js` | Discovery PIR epoch duration (changes only on discovery-membership change). |
-| `PIR_DISCOVERY_MAX_SOURCE_RECORDS` | bound | `server/pir/page-layout.js` | Maximum source records admitted before padding/layout for the discovery database. |
-| `PIR_DISCOVERY_SLOT_PROBE_COUNT` | `(96)` | `server/pir/page-layout.js` | Deterministic client-side collision probe count for token-derived slots. |
+| Name | Default / range | Owner | Purpose |
+| ---- | --------------- | ----- | ------- |
+| `VITE_WS_URL` | Unset | `src/components/setup/ConnectSetup.tsx` | Packaged web-client websocket endpoint, for example `wss://localhost:8443`. |
+| `QOR_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and log filename for multi-instance testing. It is local and is never sent to the server. |
+| `PROTOC` | Auto-detected | `scripts/start-client.cjs` | Explicit Protocol Buffers compiler path. |
+| `QOR_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
+| `QOR_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
+| `QOR_STRAWBERRY_PERL_URL` | Pinned Strawberry Perl download URL | same | Windows native-build dependency URL. |
 
-Offline-message retrieval no longer uses computational PIR. The retired opaque
-PIR path has been replaced by the uniform spool snapshot. The spool window is
-served by:
+## Docker interpolation
 
-| `SPOOL_SNAPSHOT_EPOCH_MS` | `(30000)` ms | `server/routing/spool-snapshot-service.js` | Epoch duration for the uniform per-epoch encrypted spool snapshot (cache window). |
-| `SPOOL_SNAPSHOT_PADDING_FLOOR` | `(256)` | `server/routing/spool-snapshot-service.js` | Minimum padded entry count (hides the real spool size). |
-| `SPOOL_SNAPSHOT_MAX_ROWS` | `(512)` | `server/routing/spool-snapshot-service.js` | Maximum spool envelopes considered for one snapshot before byte-budget trimming. |
-| `SPOOL_SNAPSHOT_MAX_PLAINTEXT_BYTES` | `(134217728)` bytes | `server/routing/spool-snapshot-service.js` | Approximate plaintext snapshot budget. Large cover-heavy windows trim rows/padding instead of allocating multi-GB JSON. |
-| `SPOOL_SNAPSHOT_GZIP_LEVEL` | `(6)` | `server/routing/spool-snapshot-service.js` | Gzip level for the spool snapshot. |
-| `DISCOVERY_SNAPSHOT_EPOCH_MS` | `(600000)` ms | `server/discovery/snapshot-service.js` | Epoch duration for compressed padded discovery snapshots. |
-| `DISCOVERY_SNAPSHOT_PADDING_FLOOR` | `(128)` | `server/discovery/snapshot-service.js` | Minimum padded entry count for no-selector discovery snapshots. |
-| `DISCOVERY_SNAPSHOT_MAX_ROWS` | `(200000)` | `server/discovery/snapshot-service.js` | Maximum source rows admitted into one discovery snapshot. |
-| `DISCOVERY_SNAPSHOT_DUMMY_BLOB_CHARS` | `(2048)` | `server/discovery/snapshot-service.js` | Size of opaque decoy blobs used for snapshot padding. |
-| `DISCOVERY_SNAPSHOT_GZIP_LEVEL` | `(9)` | `server/discovery/snapshot-service.js` | Gzip level for snapshot compression. |
-| `DISCOVERY_PUBLICATION_DELAY_MIN_MS` | `(2000)` ms | `server/discovery/publication-privacy.js` | Minimum delay before a real discovery publication leaves the Redis delay pool. |
-| `DISCOVERY_PUBLICATION_DELAY_MAX_MS` | `(10000)` ms | same as above | Maximum publication delay before relay release. |
-| `DISCOVERY_PUBLICATION_FLUSH_MIN_MS` | `(1000)` ms | same as above | Minimum publication relay flush interval. |
-| `DISCOVERY_PUBLICATION_FLUSH_MAX_MS` | `(4000)` ms | same as above | Maximum publication relay flush interval. |
-| `DISCOVERY_PUBLICATION_BATCH_MAX` | `(32)` | same as above | Maximum delayed publication batch size per flush. |
-| `DISCOVERY_PUBLICATION_COVER_WRITES_MIN` | `(1)` | same as above | Minimum cover writes injected with real publication flushes. |
-| `DISCOVERY_PUBLICATION_COVER_WRITES_MAX` | `(3)` | same as above | Maximum cover writes injected with real publication flushes. |
-| `DISCOVERY_PUBLICATION_IDLE_COVER_WRITES_MIN` | `(0)` | same as above | Minimum cover writes during idle relay flushes. |
-| `DISCOVERY_PUBLICATION_IDLE_COVER_WRITES_MAX` | `(0)` | same as above | Maximum cover writes during idle relay flushes. |
-| `DISCOVERY_PUBLICATION_COVER_TOKEN_BATCH_SIZE` | `(122)` | same as above | Number of OPRF-shaped cover tokens per cover publication. |
-| `DISCOVERY_PUBLICATION_COVER_BLOB_CHARS` | `(16384)` | same as above | Minimum opaque cover blob size when no larger recent real blob is available. |
-| `DISCOVERY_PIR_REFRESH_MIN_INTERVAL_MS` | `(1800000)` ms | `server/discovery/publication-privacy.js` | Minimum interval between opaque PIR database rebuilds after delayed publication batches. Rebuilds are coalesced so clients can reuse downloaded setup. |
-| `DISCOVERY_PUBLICATION_COVER_LEASE_MS` | `(2592000000)` ms | same as above | Lease duration used for cover publication material. |
-| `DISCOVERY_PUBLICATION_POOL_TTL_SECONDS` | `(604800)` seconds | same as above | Redis TTL for delayed publication pool state. |
-| `DISCOVERY_PUBLICATION_REDIS_ENQUEUE_TIMEOUT_MS` | `(2500)` ms | same as above | Timeout for enqueueing delayed publication state. |
-| `DISCOVERY_PUBLICATION_REDIS_FLUSH_TIMEOUT_MS` | `(3000)` ms | same as above | Timeout for relay flush Redis operations. |
+These values are consumed by Compose or container entrypoints in addition to any
+server-runtime use above.
 
----
+| Name | Default / required | Purpose |
+| ---- | ------------------ | ------- |
+| `REDIS_BIND_HOST` | `0.0.0.0` | Host interface for the published mutual-TLS Redis port. Prefer a private/VPN address, or `127.0.0.1` for one host. |
+| `REDIS_EXTERNAL_PORT` | `6379` | Published Redis port. |
+| `POSTGRES_BIND_HOST` | `127.0.0.1` | Host interface for the published TLS PostgreSQL port. |
+| `PG_ALLOWED_CIDR` | `172.16.0.0/12` | Network allowed by the generated `hostssl ... scram-sha-256` rules. Tighten it before exposing PostgreSQL to another host. |
+| `POSTGRES_PASSWORD` | Required by the PostgreSQL entrypoint, Compose supplies `DATABASE_PASSWORD` | Initial PostgreSQL role password. |
+| `POSTGRES_DB` | `Qor`, Compose supplies `DB_NAME` | Database initialized by the PostgreSQL entrypoint. |
+| `DB_PORT` | Required by current Compose file | Host-side PostgreSQL published port. |
+| `PORT` | `3000` | Host-side server published port. |
+| `HAPROXY_HTTPS_PORT` | `8443` | Host-side load-balancer HTTPS port. |
+| `HAPROXY_STATS_PORT` | `8404` | Host-side load-balancer statistics port. |
 
-## Clustering, HAProxy, and load balancer
+The PostgreSQL entrypoint regenerates network access policy on every boot and
+accepts remote traffic only through TLS with SCRAM-SHA-256 authentication.
 
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `HAPROXY_HTTPS_PORT` | if root: `(443)`, else `(8443)` | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js`, `scripts/simple-tunnel.cjs` | External HTTPS listen port for the HAProxy load balancer. |
-| `HAPROXY_STATS_PORT` | `(8404)` | same as above | Port for the HAProxy statistics dashboard. |
-| `HAPROXY_STATS_USERNAME` | `'admin'` when first created | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Username for the HAProxy stats HTTP interface and the PQ command-encryption keypair. When unset, tooling loads it from encrypted credentials or initializes it to `admin`. |
-| `HAPROXY_STATS_PASSWORD` | generated or prompted when first created | same as above | Password for the HAProxy stats HTTP interface and PQ command-encryption keypair. When unset, tooling either unlocks the stored value or prompts/generates a strong random password and stores it encrypted under `server/config/.haproxy-*`. |
-| `HAPROXY_CERT_PATH` | `server/config/certs` (generator) or `/etc/haproxy/certs` (auto-LB) | `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Directory containing certificates used by HAProxy for TLS termination. |
-| `HAPROXY_CERT_FILE` | `cert.pem` inside `HAPROXY_CERT_PATH` | `server/cluster/haproxy-config-generator.js` | Specific certificate file that the generated HAProxy config should reference. |
-| `HAPROXY_CONFIG_PATH` | `/etc/haproxy/haproxy-auto.cfg` when root. Temp file otherwise | `server/cluster/cluster-integration.js`, `server/load-balancer/auto-loadbalancer.js` | Path to the HAProxy configuration file written and reloaded by cluster tools. |
-| `HAPROXY_PID_FILE` | `/var/run/haproxy-auto.pid` when root. Temp file otherwise | `server/load-balancer/auto-loadbalancer.js`, `server/cluster/haproxy-config-generator.js` | PID file used to detect and control the HAProxy process. |
-| `HAPROXY_STATS_SOCKET` | `${TMPDIR}/haproxy-admin-<uid>.sock` | `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Unix domain socket path for HAProxy admin commands. Can be overridden explicitly. |
-| `LOADBALANCER_LOCK_FILE` | `/var/run/auto-loadbalancer.pid` when root. Temp file otherwise | `server/load-balancer/auto-loadbalancer.js` | Lock file ensuring only one auto-loadbalancer process is running. |
-| `HAPROXY_AUTO_CONFIG` | `('false')` | `server/cluster/cluster-integration.js` | When `'true'` and this node is primary, cluster integration automatically writes HAProxy configuration from Redis cluster state. |
-| `HAPROXY_AUTO_RELOAD` | `('false')` | `server/cluster/cluster-integration.js` | When `'true'`, HAProxy is automatically validated and reloaded after configuration updates. |
-| `HAPROXY_UPDATE_INTERVAL` | `(60000)` ms | `server/cluster/cluster-integration.js` | Interval for periodic HAProxy configuration regeneration in the primary node. |
-| `HAPROXY_BIN` | `('haproxy')` | `server/load-balancer/auto-loadbalancer.js` | Name or path of the HAProxy binary used by the auto-loadbalancer process. |
-| `LB_HAPROXY_BIN` | derived | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Effective HAProxy binary to run (system or project-built), chosen after config validation. |
-| `HAPROXY_VERSION` | `(3.2.0)` | `scripts/build-quantum-haproxy.cjs` | HAProxy source version to download and compile for the quantum build. |
-| `CLUSTER_API_URL` | `(https://localhost:3000/api/cluster)` | `scripts/cluster-cli.js` | Base URL for the cluster management HTTP API used by the CLI tool. |
-| `CLUSTER_ADMIN_TOKEN` | **required** | `scripts/cluster-cli.js` | Static admin token used by the CLI to authenticate cluster management operations. |
+## Private Spool Retrieval
 
----
-
-## Redis TLS helper, quantum OpenSSL, and build tooling
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `REDIS_SERVER_BIN` | `('redis-server')` | `scripts/start-server.cjs` | Name or path of the system Redis server binary used when no project-local TLS Redis is configured. |
-| `REDIS_TLS_SOURCE_URL` | `https://download.redis.io/releases/redis-7.2.5.tar.gz` | `scripts/install-deps.cjs` | Source tarball URL for building a local TLS-enabled `redis-server` when needed. |
-| `OQS_PROVIDER_MODULE` | auto-detected or user-provided path | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs` | Absolute path to the Open Quantum Safe (`oqsprovider`) module for OpenSSL. Overrides the auto-detected path for quantum TLS. |
-| `OQS_SIG` | unset | `scripts/setup-quantum-haproxy.cjs` | Optional preferred PQ signature algorithm name for generating PQ-only certificates (for future use). |
-| `FORCE_REBUILD` | `('0')` | `scripts/install-deps.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs` | When `'1'`, forces rebuilding quantum dependencies such as `liboqs` or `oqs-provider` even if existing installations are detected. |
-
----
-
-## TLS, Tor, and network tooling
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `TLS_CERT_CN` | `('localhost')` | `scripts/generate_tls.cjs` | Common Name (and certificate filename stem) used when generating the self-signed server TLS certificate. The cert also includes SANs for `localhost`, `127.0.0.1`, `::1`, and the machine hostname. |
-
----
-
-## Web Client Build
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `VITE_WS_URL` | unset | `src/components/setup/ConnectSetup.tsx`, `src/lib/cluster-key-manager.ts` | Base WebSocket URL for the packaged web client (e.g. `wss://localhost:8443`). Qor-Chat has one packaged runtime. No Vite server runtime is supported. |
-
----
-
-## Qor desktop client
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `QOR_INSTANCE_ID` | unset → `'1'` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | When set, each instance uses a separate data directory (`<base>-instance-<id>`) so you can run multiple isolated instances (e.g. for 2-instance testing). Also names the client log file `logs/client-instance-<id>.log`. |
-| `QOR_PIR_CLIENT_BIN` | bundled path | `src-tauri/src/*` | Override path to the bundled PIR client daemon binary (normally resolved next to the app). |
-
----
-
-## Notes
-
-- Secrets and key material are often auto-generated and persisted under `server/config` if not provided via environment variables.
-- `REDIS_URL` is required for normal operation. Presence, rate limiting, PQ session storage, and cluster coordination all depend on Redis.
-- TLS certificate paths (`TLS_CERT_PATH`, `TLS_KEY_PATH`) must be configured explicitly. Run `node scripts/generate_tls.cjs` to generate a self-signed certificate and populate these paths in `.env`.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BROADCAST_LANE_COVER_PERCENT` | `25` | Share of server cover traffic written to the first-contact lane. Without cover on that lane its entry count is a live readout of how fast new relationships form. |
+| `QOR_PIR_WORKER_PATH` | `workers/ypir/target/release/qor-pir-worker` | Optional override. The Docker image builds the worker to the default path, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
+| `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400` (24h) | Spool retention. No longer tied to a paging ceiling for the tagged lane, which PIR serves directly. |
+| `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768` | Also the PIR database row count. Build time is near-flat in rows, memory is the real constraint at ~400 MiB per worker, and there are two workers. |

@@ -1,8 +1,8 @@
-import React from 'react';
 import { Message } from '../../components/chat/messaging/types';
 
 // Receipt event detail for message delivery/read receipts
 export interface ReceiptEventDetail {
+  account: string;
   messageId: string;
   from: string;
 }
@@ -11,30 +11,16 @@ export interface ReceiptEventDetail {
 export interface HybridPublicKeys {
   kyberPublicBase64: string;
   dilithiumPublicBase64: string;
-  x25519PublicBase64?: string;
-  inboxId?: string;
-  routeId?: string;
-  mailboxLookupId?: string;
-  bundleLookupId?: string;
+  x25519PublicBase64: string;
 }
 
 // User with hybrid keys
 export interface UserWithKeys {
   username: string;
   hybridPublicKeys?: HybridPublicKeys;
-  inboxId?: string;
-  routeId?: string;
-  mailboxLookupId?: string;
-  bundleLookupId?: string;
   peerCertificateFingerprint?: string;
   identityRootFingerprint?: string;
   identityBundleFingerprint?: string;
-}
-
-// Signing keys for session establishment
-export interface SigningKeys {
-  secretKey: Uint8Array;
-  publicKeyBase64: string;
 }
 
 // Pending retry message structure
@@ -42,18 +28,22 @@ export interface PendingRetryMessage {
   user: UserWithKeys;
   content: string;
   replyTo?: string | { id: string; sender?: string; content?: string };
-  fileData?: string;
   messageSignalType?: string;
+  retryId?: string;
   originalMessageId?: string;
   editMessageId?: string;
   retryCount: number;
+  queuedAt: number;
 }
 
 // Receipt pending info
 export interface PendingReceiptInfo {
+  messageId: string;
   kind: 'delivered' | 'read';
   addedAt: number;
   attempts: number;
+  /** Peer that sent the receipt — must be the recipient of the target message. */
+  from: string;
 }
 
 // Rate limit bucket
@@ -70,20 +60,16 @@ export interface IdCache {
 
 // Session API interface
 export interface SessionApi {
-  hasSession(args: { selfUsername: string; peerUsername: string; deviceId: number }): Promise<{ hasSession: boolean }>;
+  hasSession(args: { selfUsername: string; peerUsername: string }): Promise<{ hasSession: boolean }>;
 }
 
 // Message receipt updater function type
 export type ReceiptUpdater = (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined;
 
-// Unacknowledged message structure for session reset retry
-export interface UnacknowledgedMessage {
-  user: UserWithKeys;
-  content: string;
-  replyTo?: string | { id: string; sender?: string; content?: string };
-  fileData?: string;
-  messageSignalType?: string;
-  originalMessageId?: string;
-  editMessageId?: string;
-  timestamp: number;
+export interface DbQueuedReceipt {
+  messageId: string;
+  kind: 'delivered' | 'read';
+  from: string;
+  addedAt: number;
+  attempts: number;
 }

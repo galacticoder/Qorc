@@ -1,23 +1,41 @@
-import { useState, useRef, useCallback, useEffect } from "react";
-import { SignalType } from "../../lib/types/signal-types";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
-import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import { SecureDB } from "../../lib/database/secureDB";
-import { SecureKeyManager } from "../../lib/database/secure-key-manager";
-import { encryptedStorage } from "../../lib/database/encrypted-storage";
-import { secureWipeStringRef, PinnedServer, generateBlindCredential } from "../../lib/utils/auth-utils";
-import type { ServerHybridPublicKeys, HybridKeys, ServerTrustRequest, MaxStepReached } from "../../lib/types/auth-types";
+import { clearStringRef, computeBlindUserId } from "../../lib/utils/auth-utils";
+import type { ServerHybridPublicKeys, HybridKeys } from "../../lib/types/auth-types";
 import { createDeriveEffectivePassphrase, createGetKeysOnDemand, createWaitForServerKeys, createInitializeKeys } from "./keyManagement";
 import { createHandleAccountSubmit } from "./handlers";
 import { createHandleAuthSuccess } from "./authSuccess";
 import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearAuthenticationState } from "./recovery";
 import { createLogout, createGetLogout } from "./logout";
-import { signal, storage } from "../../lib/tauri-bindings";
+import { account } from "../../lib/tauri-bindings";
 import { toast } from "sonner";
 import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
+import { loadLastAuthenticatedAccount } from "../../lib/security/local-account-scope";
+import {
+  type AuthLifecycle,
+  type AuthOperationSnapshot,
+  StaleAuthOperationError,
+  isStaleAuthOperation,
+} from "../../lib/auth/auth-lifecycle";
+import { hasResumeToken, invalidateResumePoolOperations } from "../../lib/signals/resume-tokens";
+import { handleTokenValidationResponse } from "../../lib/signals/auth-handlers";
+import { tokenVault } from "../../lib/database/token-vault";
+import { resetAvatarStoreClient } from "../../lib/avatar/avatar-store-client";
+import { getBlindRoutingClient, resetBlindRoutingClient } from "../../lib/transport/blind-routing-client";
+import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
+import { p2pTransport } from "../../lib/transport/p2p-transport";
+import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
+import { receiptBatcher } from "../message-handling/receipt-batcher";
+import { identityChangeStore } from "../../lib/security/identity-change-store";
+import { blockingSystem } from "../../lib/blocking/blocking-system";
+import { blockStatusCache } from "../../lib/blocking/block-status-cache";
+import { profilePictureSystem } from "../../lib/avatar/profile-picture-system";
+import { keyTransparencyClient } from "../../lib/key-transparency/client";
+import { keyTransparencyWarningStore } from "../../lib/key-transparency/warning-store";
+import { deliveryReceiptOutbox } from "../../lib/signals/delivery-receipt-outbox";
 
-export const useAuth = (_secureDB?: SecureDB) => {
+export const useAuth = () => {
   const [username, setUsername] = useState("");
   const [pseudonym, setPseudonym] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -27,57 +45,139 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
-  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(false);
+  const [tokenValidationInProgress, setTokenValidationInProgressState] = useState(false);
+  const [tokenValidationGeneration, setTokenValidationGeneration] = useState(0);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
-  const [maxStepReached, setMaxStepReached] = useState<MaxStepReached>('login');
   const [recoveryActive, setRecoveryActive] = useState(false);
   const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
   const [vaultReady, setVaultReady] = useState(false);
+  const showPasswordPromptRef = useRef<boolean>(false);
+  showPasswordPromptRef.current = showPasswordPrompt;
 
-  const passphraseRef = useRef<string>("");
+  useEffect(() => {
+    websocketClient.setServerEntryPromptPending?.(showPasswordPrompt);
+  }, [showPasswordPrompt]);
+
   const passphrasePlaintextRef = useRef<string>("");
-  const aesKeyRef = useRef<CryptoKey | null>(null);
   const getKeysPromiseRef = useRef<Promise<any> | null>(null);
-  const passphraseLimiterRef = useRef<{ tokens: number; last: number }>({ tokens: 5, last: Date.now() });
   const accountSubmitInFlightRef = useRef<boolean>(false);
-  const blindCredentialRef = useRef<{
-    message: string;
-    inboxId?: string;
-    routeId?: string;
-    blindedMsg: string;
-    blindingFactor: string;
-    n: string;
-    kid: string;
-    modulusLength: number;
-    hash: string;
-    saltLength: number;
-    scheme: string;
-    used?: boolean;
-  } | null>(null);
-
+  const recoveryInFlightRef = useRef<Promise<boolean> | null>(null);
+  const loginUsernameRef = useRef("");
+  const originalUsernameRef = useRef<string>("");
+  const passwordRef = useRef<string>("");
+  const confirmPasswordRef = useRef<string>("");
+  const hybridKeysRef = useRef<HybridKeys | null>(null);
+  const keyManagerOwnerRef = useRef<string>("");
+  const authLifecycleStateRef = useRef({
+    generation: 0,
+    account: '',
+    requestId: '',
+    controller: new AbortController(),
+  });
   const [serverHybridPublic, setServerHybridPublic] = useState<ServerHybridPublicKeys | null>(null);
   const serverHybridPublicRef = useRef<ServerHybridPublicKeys | null>(null);
 
+  const setTokenValidationInProgress = useCallback((value: boolean) => {
+    if (value) setTokenValidationGeneration((generation) => generation + 1);
+    setTokenValidationInProgressState(value);
+  }, []);
+
+  const rotateAuthLifecycle = useCallback((account = '', requestId = ''): AuthOperationSnapshot => {
+    invalidateResumePoolOperations();
+    const previous = authLifecycleStateRef.current;
+    previous.controller.abort();
+
+    const normalizedAccount = account.trim().toLowerCase();
+    if (
+      normalizedAccount &&
+      loginUsernameRef.current &&
+      loginUsernameRef.current !== normalizedAccount
+    ) {
+      keyTransparencyClient.destroy();
+      hybridKeysRef.current = null;
+      keyManagerOwnerRef.current = '';
+    }
+
+    const next = {
+      generation: previous.generation + 1,
+      account: normalizedAccount,
+      requestId,
+      controller: new AbortController(),
+    };
+    authLifecycleStateRef.current = next;
+    accountSubmitInFlightRef.current = false;
+    recoveryInFlightRef.current = null;
+    getKeysPromiseRef.current = null;
+    return {
+      generation: next.generation,
+      account: next.account,
+      requestId: next.requestId,
+      signal: next.controller.signal,
+    };
+  }, []);
+
+  const captureAuthOperation = useCallback((): AuthOperationSnapshot => {
+    const current = authLifecycleStateRef.current;
+    return {
+      generation: current.generation,
+      account: current.account,
+      requestId: current.requestId,
+      signal: current.controller.signal,
+    };
+  }, []);
+
+  const isAuthOperationCurrent = useCallback((operation: AuthOperationSnapshot): boolean => {
+    const current = authLifecycleStateRef.current;
+    return !operation.signal.aborted &&
+      operation.generation === current.generation &&
+      operation.signal === current.controller.signal;
+  }, []);
+
+  const assertAuthOperationCurrent = useCallback((operation: AuthOperationSnapshot): void => {
+    if (!isAuthOperationCurrent(operation)) throw new StaleAuthOperationError();
+  }, [isAuthOperationCurrent]);
+
+  const authLifecycle = useMemo<AuthLifecycle>(() => ({
+    begin: rotateAuthLifecycle,
+    capture: captureAuthOperation,
+    invalidate: () => { void rotateAuthLifecycle(''); },
+    isCurrent: isAuthOperationCurrent,
+    assertCurrent: assertAuthOperationCurrent,
+  }), [assertAuthOperationCurrent, captureAuthOperation, isAuthOperationCurrent, rotateAuthLifecycle]);
+
   useEffect(() => {
+    const mountedOperation = rotateAuthLifecycle(loginUsernameRef.current);
+    return () => {
+      if (isAuthOperationCurrent(mountedOperation)) {
+        authLifecycleStateRef.current.controller.abort();
+      }
+    };
+  }, [isAuthOperationCurrent, rotateAuthLifecycle]);
+
+  useLayoutEffect(() => {
     serverHybridPublicRef.current = serverHybridPublic;
   }, [serverHybridPublic]);
 
   useEffect(() => {
-    let countdownInterval: NodeJS.Timeout | null = null;
+    let countdownTimeout: ReturnType<typeof setTimeout> | null = null;
+    let countdownGeneration = 0;
     const onAuthError = () => { setIsSubmittingAuth(false); setTokenValidationInProgress(false); setAuthStatus(''); };
     const onAuthRateLimited = (event: any) => {
       setIsSubmittingAuth(false); setTokenValidationInProgress(false); setAuthStatus(''); setIsGeneratingKeys(false);
       const rateLimitUntil = event.detail?.rateLimitUntil;
       if (rateLimitUntil) {
-        if (countdownInterval) clearInterval(countdownInterval);
+        countdownGeneration += 1;
+        const generation = countdownGeneration;
+        if (countdownTimeout) clearTimeout(countdownTimeout);
         const updateCountdown = () => {
+          if (generation !== countdownGeneration) return;
           const remaining = Math.max(0, Math.ceil((rateLimitUntil - Date.now()) / 1000));
           if (remaining > 0) {
             setLoginError(`Too many attempts. Try again in ${remaining}s.`);
-            setTimeout(updateCountdown, 1000 - (Date.now() % 1000));
+            countdownTimeout = setTimeout(updateCountdown, 1000 - (Date.now() % 1000));
           } else {
             setLoginError('');
-            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+            countdownTimeout = null;
           }
         };
         updateCountdown();
@@ -86,7 +186,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
     try { window.addEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
     try { window.addEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
     return () => {
-      if (countdownInterval) clearInterval(countdownInterval);
+      countdownGeneration += 1;
+      if (countdownTimeout) clearTimeout(countdownTimeout);
       try { window.removeEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
       try { window.removeEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
     };
@@ -105,29 +206,10 @@ export const useAuth = (_secureDB?: SecureDB) => {
     return () => window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
   }, []);
 
-  const [serverTrustRequest, setServerTrustRequest] = useState<ServerTrustRequest | null>(null);
-  const acceptServerTrust = useCallback(() => {
-    if (!serverTrustRequest) return;
-    try { PinnedServer.set(serverTrustRequest.newKeys); } catch { }
-    setServerHybridPublic(serverTrustRequest.newKeys);
-    setServerTrustRequest(null);
-    setLoginError("");
-  }, [serverTrustRequest]);
-
-  const rejectServerTrust = useCallback(() => { setServerTrustRequest(null); setLoginError("Server key changed. Trust not granted."); }, []);
-
-  const hybridKeysRef = useRef<HybridKeys | null>(null);
-  const keyManagerRef = useRef<SecureKeyManager | null>(null);
-  const keyManagerOwnerRef = useRef<string>("");
-  const loginUsernameRef = useRef("");
-  const originalUsernameRef = useRef<string>("");
-  const passwordRef = useRef<string>("");
-  const confirmPasswordRef = useRef<string>("");
-
   const keyManagementRefs = {
     loginUsernameRef, passwordRef, confirmPasswordRef, passphrasePlaintextRef,
-    passphraseRef, aesKeyRef, hybridKeysRef, keyManagerRef, keyManagerOwnerRef,
-    getKeysPromiseRef, serverHybridPublicRef, blindCredentialRef,
+    hybridKeysRef, keyManagerOwnerRef,
+    getKeysPromiseRef, serverHybridPublicRef,
   };
 
   const keyManagementSetters = {
@@ -138,157 +220,149 @@ export const useAuth = (_secureDB?: SecureDB) => {
   };
 
   const deriveEffectivePassphrase = createDeriveEffectivePassphrase(keyManagementRefs);
-  const getKeysOnDemand = useCallback(createGetKeysOnDemand(keyManagementRefs, deriveEffectivePassphrase), []);
+  const getKeysOnDemand = useCallback(
+    createGetKeysOnDemand(keyManagementRefs, deriveEffectivePassphrase, authLifecycle),
+    [authLifecycle]
+  );
   const waitForServerKeys = useCallback(createWaitForServerKeys(keyManagementRefs, keyManagementSetters), []);
-  const initializeKeys = useCallback(createInitializeKeys(keyManagementRefs, keyManagementSetters, deriveEffectivePassphrase, recoveryActive), [recoveryActive]);
+  const initializeKeys = useCallback(
+    createInitializeKeys(keyManagementRefs, keyManagementSetters, deriveEffectivePassphrase, recoveryActive, authLifecycle),
+    [authLifecycle, recoveryActive]
+  );
 
   const storeAuthenticationState = useCallback(createStoreAuthenticationState(), []);
   const clearAuthenticationState = useCallback(createClearAuthenticationState(), []);
 
-  const attemptAuthRecovery = useCallback(
-    createAttemptAuthRecovery(
-      { loginUsernameRef, originalUsernameRef, blindCredentialRef, serverHybridPublicRef },
-      { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
-      accountAuthenticated, isLoggedIn
-    ),
-    [accountAuthenticated, isLoggedIn]
+  const completeRecoveredAuthorization = useCallback(
+    async (response: import("../../lib/websocket/websocket").ResumeAuthorizationResponse) => {
+      await handleTokenValidationResponse(response, {
+        loginUsernameRef,
+        setAccountAuthenticated,
+        setIsLoggedIn,
+        setLoginError,
+        setTokenValidationInProgress,
+        setUsername,
+        setShowPassphrasePrompt,
+        setShowPasswordPrompt,
+        setIsSubmittingAuth,
+        setAuthStatus,
+        setVaultReady,
+        keyManagerOwnerRef,
+        getKeysOnDemand,
+        hybridKeysRef,
+        authLifecycle,
+      });
+    },
+    [authLifecycle, getKeysOnDemand, setTokenValidationInProgress]
   );
 
-  const clearSecureDBForUser = async (p: string) => {
-    try {
-      const { SQLiteKV } = await import('../../lib/database/sqlite-kv');
-      await (SQLiteKV as any).purgeUserDb(p);
-    } catch { }
-  };
+  const attemptAuthRecovery = useCallback(
+    createAttemptAuthRecovery(
+      { loginUsernameRef, originalUsernameRef, recoveryInFlightRef },
+      { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
+      accountAuthenticated, isLoggedIn, authLifecycle, completeRecoveredAuthorization
+    ),
+    [accountAuthenticated, authLifecycle, completeRecoveredAuthorization, isLoggedIn, setTokenValidationInProgress]
+  );
 
   const authRefs = {
     loginUsernameRef, originalUsernameRef, passwordRef, confirmPasswordRef,
-    passphraseRef, passphrasePlaintextRef, hybridKeysRef, keyManagerRef,
-    keyManagerOwnerRef, passphraseLimiterRef, accountSubmitInFlightRef,
-    aesKeyRef: keyManagementRefs.aesKeyRef,
-    blindCredentialRef: keyManagementRefs.blindCredentialRef,
+    passphrasePlaintextRef, hybridKeysRef,
+    keyManagerOwnerRef, accountSubmitInFlightRef,
   };
 
   const authSetters = {
     setUsername, setPseudonym, setIsLoggedIn, setIsGeneratingKeys,
     setAuthStatus, setLoginError, setIsSubmittingAuth, setAccountAuthenticated,
-    setIsRegistrationMode, setShowPassphrasePrompt, setRecoveryActive, setMaxStepReached,
-    setVaultReady, setShowPasswordPrompt, setTokenValidationInProgress,
+    setIsRegistrationMode,
+    setVaultReady, setShowPasswordPrompt, setShowPassphrasePrompt,
+    setRecoveryActive, setTokenValidationInProgress,
   };
 
-  const authState = { isLoggedIn, accountAuthenticated, recoveryActive, serverHybridPublic, isSubmittingAuth };
+  const authState = { isSubmittingAuth };
 
   const handleAccountSubmit = createHandleAccountSubmit(
     authRefs, authSetters, authState,
-    { waitForServerKeys, initializeKeys, getKeysOnDemand, storeAuthenticationState, clearSecureDBForUser }
+    {
+      waitForServerKeys,
+      initializeKeys,
+      attemptAuthRecovery,
+      isLocalRecovery: () => recoveryActive,
+      storeAuthenticationState,
+      lifecycle: authLifecycle,
+    }
   );
 
   const handleAuthSuccess = createHandleAuthSuccess(
-    { loginUsernameRef, originalUsernameRef, passphrasePlaintextRef, keyManagerRef },
-    { setAuthStatus, setUsername, setPseudonym, setIsLoggedIn, setAccountAuthenticated, setRecoveryActive, setShowPassphrasePrompt, setIsRegistrationMode, setLoginError },
-    { storeAuthenticationState, deriveEffectivePassphrase, getKeysOnDemand }
+    { loginUsernameRef, originalUsernameRef },
+    { setAuthStatus, setUsername, setPseudonym, setIsLoggedIn, setAccountAuthenticated, setIsSubmittingAuth, setLoginError },
+    { storeAuthenticationState, lifecycle: authLifecycle }
   );
 
   const logout = createLogout(
-    { loginUsernameRef, passwordRef, passphraseRef, passphrasePlaintextRef, aesKeyRef, hybridKeysRef, keyManagerRef },
-    { setIsLoggedIn, setLoginError, setAccountAuthenticated, setIsRegistrationMode, setIsSubmittingAuth, setUsername, setTokenValidationInProgress },
-    clearAuthenticationState
+    {
+      loginUsernameRef, passwordRef, passphrasePlaintextRef,
+      hybridKeysRef, keyManagerOwnerRef, getKeysPromiseRef,
+    },
+    {
+      setIsLoggedIn, setLoginError, setAccountAuthenticated, setIsRegistrationMode,
+      setIsSubmittingAuth, setUsername, setTokenValidationInProgress, setVaultReady,
+      setShowPassphrasePrompt, setShowPasswordPrompt,
+    },
+    clearAuthenticationState,
+    authLifecycle
   );
 
   const getLogout = createGetLogout(logout);
 
-  useEffect(() => { if (accountAuthenticated) setMaxStepReached('server'); }, [accountAuthenticated]);
-
   useEffect(() => {
     const handleAuthUiBack = (event: CustomEvent) => {
       try {
-        const to = (event as any).detail?.to as 'login' | 'server' | undefined;
+        const to = (event as any).detail?.to as 'server' | undefined;
+        if (to !== 'server') return;
+        authLifecycle.invalidate();
         setLoginError(""); setAuthStatus("");
-        if (to === 'login') {
-          setShowPassphrasePrompt(false); setRecoveryActive(false); setAccountAuthenticated(false);
-        } else if (to === 'server') {
-          setShowPassphrasePrompt(false); setRecoveryActive(false); setAccountAuthenticated(false);
-          setIsLoggedIn(false); setMaxStepReached('login');
-          secureWipeStringRef(passwordRef as any); secureWipeStringRef(passphraseRef as any);
-          secureWipeStringRef(passphrasePlaintextRef as any);
-          loginUsernameRef.current = ""; originalUsernameRef.current = ""; setUsername("");
-          setServerTrustRequest?.(null);
+        unifiedSignalTransport.resetForAccountTransition();
+        deliveryReceiptOutbox.setPersistence(null, null);
+        deliveryReceiptOutbox.setActiveAccount(null);
+        receiptBatcher.setActiveAccount(null);
+        identityChangeStore.clear();
+        blockingSystem.setSecureDB(null);
+        blockStatusCache.clear();
+        profilePictureSystem.setSecureDB(null);
+        syncEncryptedStorage.reset();
+        void p2pTransport.shutdown().catch(() => { });
+        setShowPassphrasePrompt(false); setRecoveryActive(false); setAccountAuthenticated(false);
+        setIsLoggedIn(false); setVaultReady(false);
+        tokenVault.lock();
+        resetAvatarStoreClient();
+        resetBlindRoutingClient();
+        keyTransparencyClient.destroy();
+        keyTransparencyWarningStore.clear();
+        clearStringRef(passwordRef);
+        clearStringRef(confirmPasswordRef);
+        clearStringRef(passphrasePlaintextRef);
+        const accountOwner = keyManagerOwnerRef.current;
+        hybridKeysRef.current = null;
+        keyManagerOwnerRef.current = '';
+        getKeysPromiseRef.current = null;
+        loginUsernameRef.current = ""; originalUsernameRef.current = ""; setUsername("");
+        setPseudonym("");
+        if (/^[a-f0-9]{64}$/.test(accountOwner)) {
+          void account.lock(accountOwner).catch(() => false);
         }
+        void websocketClient.close({ killSession: true }).catch(() => { });
       } catch { }
     };
     window.addEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
     return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
-  }, []);
-
-  useEffect(() => {
-    const handleAuthUiInput = (event: CustomEvent) => {
-      try {
-        const { field, value } = (event as any).detail || {};
-        if (typeof value !== 'string') return;
-        switch (field) {
-          case 'username': originalUsernameRef.current = value; break;
-          case 'password': passwordRef.current = value; break;
-          case 'confirmPassword': confirmPasswordRef.current = value; break;
-          case 'passphrase': passphrasePlaintextRef.current = value; break;
-          case 'confirmPassphrase': confirmPasswordRef.current = value; break;
-        }
-      } catch { }
-    };
-    window.addEventListener(EventType.AUTH_UI_INPUT, handleAuthUiInput as EventListener);
-    return () => window.removeEventListener(EventType.AUTH_UI_INPUT, handleAuthUiInput as EventListener);
-  }, []);
-
-  useEffect(() => {
-    const handleAuthUiForward = async (event: CustomEvent) => {
-      try {
-        const to = (event as any).detail?.to as 'login' | 'passphrase' | undefined;
-        setLoginError(""); setAuthStatus("");
-        if (to === 'login' || (!showPassphrasePrompt && !accountAuthenticated)) {
-          const orig = originalUsernameRef.current; const pwd = passwordRef.current;
-          const pps = passphrasePlaintextRef.current;
-          if (orig && pwd) { await handleAccountSubmit(isRegistrationMode ? 'register' : 'login', orig, pwd, pps); }
-        }
-      } catch { }
-    };
-    window.addEventListener(EventType.AUTH_UI_FORWARD, handleAuthUiForward as EventListener);
-    return () => window.removeEventListener(EventType.AUTH_UI_FORWARD, handleAuthUiForward as EventListener);
-  }, [accountAuthenticated, isRegistrationMode, showPassphrasePrompt, handleAccountSubmit]);
-
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (isLoggedIn && loginUsernameRef.current) {
-        try {
-          (async () => {
-            const qRaw = await encryptedStorage.getItem('cleanup_queue_pending');
-            const q = Array.isArray(qRaw) ? qRaw : [];
-            q.push({ username: loginUsernameRef.current, timestamp: Date.now() });
-            await encryptedStorage.setItem('cleanup_queue_pending', q.slice(-10));
-          })();
-        } catch { }
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isLoggedIn]);
+  }, [authLifecycle]);
 
   useEffect(() => {
     const handleReconnection = async () => { if (isLoggedIn && loginUsernameRef.current) { try { await attemptAuthRecovery(); } catch { } } };
     window.addEventListener(EventType.WS_RECONNECTED, handleReconnection);
     return () => window.removeEventListener(EventType.WS_RECONNECTED, handleReconnection);
   }, [isLoggedIn, attemptAuthRecovery]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        if (isLoggedIn && loginUsernameRef.current) {
-          const keys = await getKeysOnDemand?.();
-          const pub = keys?.kyber?.publicKeyBase64;
-          const sec = keys?.kyber?.secretKey ? CryptoUtils.Base64.arrayBufferToBase64(keys.kyber.secretKey) : undefined;
-          if (pub && sec) await signal.setStaticMlkemKeys(loginUsernameRef.current, pub, sec);
-        }
-      } catch { }
-    })();
-  }, [isLoggedIn, getKeysOnDemand]);
 
   useEffect(() => {
     if (!isLoggedIn || !accountAuthenticated || !hybridKeysRef.current) return;
@@ -302,7 +376,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
       !vaultReady &&
       !showPassphrasePrompt &&
       !showPasswordPrompt &&
-      aesKeyRef.current &&
       hybridKeysRef.current
     ) {
       setVaultReady(true);
@@ -310,20 +383,24 @@ export const useAuth = (_secureDB?: SecureDB) => {
   }, [isLoggedIn, accountAuthenticated, vaultReady, showPassphrasePrompt, showPasswordPrompt]);
 
   useEffect(() => {
+    const operation = authLifecycle.capture();
     (async () => {
       try {
         if (await isExplicitlyLoggedOut()) {
+          if (!authLifecycle.isCurrent(operation)) return;
           setTokenValidationInProgress(false);
           setAuthStatus('');
           return;
         }
-        const { hasResumeToken } = await import('../../lib/signals/resume-tokens');
-        const canResume = await hasResumeToken();
-        const sU = await storage.get('last_authenticated_username');
+        authLifecycle.assertCurrent(operation);
+        const sU = (await loadLastAuthenticatedAccount()).username;
+        authLifecycle.assertCurrent(operation);
+        authLifecycle.assertCurrent(operation);
+        const canResume = sU ? await hasResumeToken(sU) : false;
+        authLifecycle.assertCurrent(operation);
         if (canResume || sU) {
           setTokenValidationInProgress(true); setAuthStatus('Verifying session...');
           if (sU) {
-            const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
             const pseudonymHash = computeBlindUserId(sU);
             loginUsernameRef.current = sU;
             setPseudonym(pseudonymHash);
@@ -333,9 +410,13 @@ export const useAuth = (_secureDB?: SecureDB) => {
         } else {
           setTokenValidationInProgress(false); setAuthStatus('');
         }
-      } catch { setTokenValidationInProgress(false); setAuthStatus(''); }
+      } catch (error) {
+        if (!isStaleAuthOperation(error) && authLifecycle.isCurrent(operation)) {
+          setTokenValidationInProgress(false); setAuthStatus('');
+        }
+      }
     })();
-  }, []);
+  }, [authLifecycle, setTokenValidationInProgress]);
 
   useEffect(() => {
     const onStart = () => { setTokenValidationInProgress(true); setAuthStatus('Verifying session...'); };
@@ -344,10 +425,17 @@ export const useAuth = (_secureDB?: SecureDB) => {
   }, []);
 
   useEffect(() => {
-    let timeout: NodeJS.Timeout;
-    if (tokenValidationInProgress) timeout = setTimeout(() => { setTokenValidationInProgress(false); setAuthStatus(''); }, 45000);
+    const operation = authLifecycle.capture();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    if (tokenValidationInProgress) {
+      timeout = setTimeout(() => {
+        if (!authLifecycle.isCurrent(operation)) return;
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
+      }, 45000);
+    }
     return () => clearTimeout(timeout);
-  }, [tokenValidationInProgress]);
+  }, [authLifecycle, tokenValidationGeneration, tokenValidationInProgress, setTokenValidationInProgress]);
 
   useEffect(() => {
     const onTimeout = () => { setTokenValidationInProgress(false); setAuthStatus(''); setLoginError('Session validation timed out.'); };
@@ -355,69 +443,74 @@ export const useAuth = (_secureDB?: SecureDB) => {
     return () => window.removeEventListener(EventType.TOKEN_VALIDATION_TIMEOUT, onTimeout);
   }, []);
 
-  useEffect(() => {
-    try {
-      const pinned = PinnedServer.get();
-      if (pinned) setServerHybridPublic(pinned); else setServerHybridPublic(null);
-    } catch { setServerHybridPublic(null); }
-  }, []);
+  const resumeSavedAccountAfterServerEntry = useCallback(async (
+    operation: AuthOperationSnapshot
+  ): Promise<void> => {
+    if (await isExplicitlyLoggedOut()) {
+      authLifecycle.assertCurrent(operation);
+      setTokenValidationInProgress(false);
+      setAuthStatus('');
+      return;
+    }
+    authLifecycle.assertCurrent(operation);
+    if (websocketClient.isUnlinkedMode()) {
+      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] server-entry resume: SKIP — already unlinked`);
+      return;
+    }
+
+    const savedAccount = await loadLastAuthenticatedAccount();
+    authLifecycle.assertCurrent(operation);
+    const savedUsername = savedAccount.username;
+    if (operation.account && savedUsername && operation.account !== savedUsername) return;
+    const canResume = savedUsername ? await hasResumeToken(savedUsername) : false;
+    authLifecycle.assertCurrent(operation);
+
+    if (canResume) {
+      setTokenValidationInProgress(true);
+      setAuthStatus('Resuming session...');
+
+      if (savedUsername) {
+        const pseudonymHash = computeBlindUserId(savedUsername);
+        loginUsernameRef.current = savedUsername;
+        originalUsernameRef.current = savedAccount.displayName || savedUsername;
+        setPseudonym(pseudonymHash);
+        setUsername(savedAccount.displayName || savedUsername);
+        getBlindRoutingClient(savedUsername);
+        websocketClient.setUsername(savedUsername);
+      }
+
+      const authorization = await websocketClient.switchToUnlinkedMode(operation.signal);
+      authLifecycle.assertCurrent(operation);
+      await completeRecoveredAuthorization(authorization);
+      authLifecycle.assertCurrent(operation);
+    } else if (savedUsername) {
+      loginUsernameRef.current = savedUsername;
+      originalUsernameRef.current = savedAccount.displayName || savedUsername;
+      setUsername(savedAccount.displayName || savedUsername);
+      setTokenValidationInProgress(false);
+    }
+  }, [authLifecycle, completeRecoveredAuthorization, setTokenValidationInProgress]);
 
   useEffect(() => {
     const onServerEntryGranted = async () => {
+      const inFlight = accountSubmitInFlightRef.current;
+      const unlinked = websocketClient.isUnlinkedMode();
+      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted fired`, { accountSubmitInFlight: inFlight, isUnlinkedMode: unlinked });
+      if (inFlight) {
+        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: SKIP — manual login in flight`);
+        return;
+      }
+      
+      if (showPasswordPromptRef.current) {
+        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: SKIP — server password prompt active (awaiting user)`);
+        return;
+      }
+      const operation = authLifecycle.capture();
       try {
-        if (await isExplicitlyLoggedOut()) {
-          setTokenValidationInProgress(false);
-          setAuthStatus('');
-          return;
-        }
-        if (websocketClient.isUnlinkedMode()) {
-          return;
-        }
-
-        const savedUsername = await storage.get('last_authenticated_username');
-        const { hasResumeToken } = await import('../../lib/signals/resume-tokens');
-        const canResume = await hasResumeToken();
-
-        if (canResume) {
-          setTokenValidationInProgress(true);
-          setAuthStatus('Resuming session...');
-
-          if (savedUsername) {
-            const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
-            const pseudonymHash = computeBlindUserId(savedUsername);
-            loginUsernameRef.current = savedUsername;
-            setPseudonym(pseudonymHash);
-            setUsername(savedUsername);
-          }
-
-          // Generate blinded token for blind routing credential issuance
-          let blindedToken: string | undefined;
-          if (savedUsername && serverHybridPublicRef.current?.blindPublicKey) {
-            const result = await generateBlindCredential(savedUsername, serverHybridPublicRef.current.blindPublicKey);
-            if (result) {
-              const existing = blindCredentialRef.current;
-              if (!existing || existing.used) {
-                blindCredentialRef.current = { ...result, used: false };
-                blindedToken = result.blindedMsg;
-              } else {
-                blindedToken = existing.blindedMsg;
-              }
-            }
-          }
-
-          // Resume the session by redeeming a one time anonymous token
-          await websocketClient.attemptTokenValidationOnce(
-            'server-entry-granted',
-            true,
-            blindedToken ? { blindedToken } : {}
-          );
-        } else if (savedUsername) {
-          // Have username but no token then show login with username pre-filled
-          loginUsernameRef.current = savedUsername;
-          setUsername(savedUsername);
-          setTokenValidationInProgress(false);
-        }
+        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: proceeding to auto-resume (switch to unlinked)`);
+        await resumeSavedAccountAfterServerEntry(operation);
       } catch (err) {
+        if (isStaleAuthOperation(err) || !authLifecycle.isCurrent(operation)) return;
         console.warn('[Auth] Auto-login after server entry failed:', err);
         setTokenValidationInProgress(false);
         setAuthStatus('');
@@ -426,70 +519,68 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
     window.addEventListener(EventType.SERVER_ENTRY_GRANTED, onServerEntryGranted);
     return () => window.removeEventListener(EventType.SERVER_ENTRY_GRANTED, onServerEntryGranted);
-  }, []);
+  }, [authLifecycle, resumeSavedAccountAfterServerEntry, setTokenValidationInProgress]);
 
   return {
     username, setUsername, pseudonym, setPseudonym, tokenValidationInProgress, setTokenValidationInProgress,
-    serverHybridPublic, setServerHybridPublic, serverTrustRequest, setServerTrustRequest,
-    acceptServerTrust, rejectServerTrust, isLoggedIn, setIsLoggedIn, isGeneratingKeys, isSubmittingAuth,
+    setServerHybridPublic, isLoggedIn, setIsLoggedIn, isGeneratingKeys, isSubmittingAuth,
     authStatus, setAuthStatus, loginError, accountAuthenticated, isRegistrationMode, setIsRegistrationMode,
     loginUsernameRef, originalUsernameRef, initializeKeys,
     handleAccountSubmit, handleAuthSuccess, setAccountAuthenticated, passwordRef, setLoginError,
-    setShowPassphrasePrompt, showPassphrasePrompt, setMaxStepReached, logout, getLogout,
-    hybridKeysRef, keyManagerRef, getKeysOnDemand, attemptAuthRecovery, storeAuthenticationState,
+    setShowPassphrasePrompt, showPassphrasePrompt, logout, getLogout,
+    hybridKeysRef, getKeysOnDemand, attemptAuthRecovery, storeAuthenticationState,
     clearAuthenticationState, recoveryActive, setRecoveryActive,
-    aesKeyRef, passphrasePlaintextRef, passphraseRef,
+    passphrasePlaintextRef,
+    authLifecycle, keyManagerOwnerRef,
     vaultReady, setVaultReady,
     showPasswordPrompt,
     setShowPasswordPrompt,
-    handlePasswordHashSubmit: async () => { },
     handleServerPasswordSubmit: async (password: string) => {
       if (!password) return;
+      const requestId = crypto.randomUUID();
+      const operation = authLifecycle.begin(loginUsernameRef.current, requestId);
       setLoginError("");
       setIsSubmittingAuth(true);
-      setAuthStatus("Verifying entry...");
+      setAuthStatus("Preparing private server-authentication connection...");
       try {
-        const success = await websocketClient.startServerGatekeeperFlow(password, (status) => setAuthStatus(status));
+        await websocketClient.ensureLinkedAuthenticationMode(operation.signal);
+        authLifecycle.assertCurrent(operation);
+        setAuthStatus("Verifying entry...");
+        
+        const success = websocketClient.isServerAuthGranted()
+          ? true
+          : await websocketClient.startServerGatekeeperFlow(
+              password,
+              requestId,
+              (status) => {
+                if (authLifecycle.isCurrent(operation)) setAuthStatus(status);
+              },
+              operation.signal
+            );
+        authLifecycle.assertCurrent(operation);
         if (success) {
           websocketClient.markServerAuthGranted?.();
+          
+          showPasswordPromptRef.current = false;
+          websocketClient.setServerEntryPromptPending?.(false);
           setShowPasswordPrompt(false);
-          setMaxStepReached('server');
           setAuthStatus("Entry granted");
           toast.success("Server access granted anonymously");
+          await resumeSavedAccountAfterServerEntry(operation);
+          authLifecycle.assertCurrent(operation);
         } else {
           setLoginError("Invalid server password");
           setAuthStatus("");
         }
       } catch (err) {
+        if (isStaleAuthOperation(err) || !authLifecycle.isCurrent(operation)) return;
         setLoginError(err instanceof Error && err.message ? err.message : "Entry verification failed");
         setAuthStatus("");
       } finally {
-        setIsSubmittingAuth(false);
+        if (authLifecycle.isCurrent(operation)) setIsSubmittingAuth(false);
       }
     },
-    handlePassphraseSubmit: async (passphrase: string) => {
-      if (!passphrase) return;
-      setIsSubmittingAuth(true);
-      setAuthStatus("Initializing encryption...");
-      try {
-        passphrasePlaintextRef.current = passphrase;
-        await initializeKeys(false);
-        setVaultReady(true);
-        setShowPassphrasePrompt(false);
-      } catch (err) {
-        setLoginError("Master key generation failed");
-        console.error('[Auth] Passphrase submit error:', err);
-      } finally {
-        setIsSubmittingAuth(false);
-        setAuthStatus("");
-      }
-    },
-    setTypedUsername: (n: string) => { originalUsernameRef.current = n; },
-    setTypedPassword: (p: string) => { passwordRef.current = p; },
-    setTypedConfirmPassword: (p: string) => { confirmPasswordRef.current = p; },
-    setTypedPassphrase: (p: string) => { passphrasePlaintextRef.current = p; },
-    confirmPasswordRef, maxStepReached,
-    blindCredentialRef: keyManagementRefs.blindCredentialRef,
+    confirmPasswordRef,
     serverHybridPublicRef: keyManagementRefs.serverHybridPublicRef,
   };
 };

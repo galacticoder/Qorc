@@ -3,8 +3,9 @@ import { getTorAutoSetup } from '../../lib/transport/tor-auto-setup';
 import type { TorSetupStatus } from '../../lib/types/tor-types';
 import { torNetworkManager } from '../../lib/transport/tor-network';
 import { toast } from 'sonner';
-import { websocket, storage } from '../../lib/tauri-bindings';
+import { websocket, storage, anonymousHttp } from '../../lib/tauri-bindings';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
+import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 
 interface ConnectSetupProps {
   onComplete?: (serverUrl: string) => Promise<void> | void;
@@ -15,20 +16,9 @@ interface ConnectSetupProps {
 
 type SymbolKind = 'lock' | 'eye' | 'government';
 
-const AUTO_START_KEY = 'qor_tor_auto_start_v1';
-const AUTO_CONNECT_KEY = 'qor_tor_auto_connect_v1';
-const BRIDGES_ENABLED_KEY = 'qor_tor_bridges_enabled_v1';
-const BRIDGE_TRANSPORT_KEY = 'qor_tor_bridge_transport_v1';
-const BRIDGE_LINES_KEY = 'qor_tor_bridge_lines_v1';
-
 const readBooleanPreference = async (key: string): Promise<boolean> => {
   try {
     const value = await storage.get(key);
-    if (value !== null) return value === 'true' || value === '1';
-  } catch { }
-
-  try {
-    const value = localStorage.getItem(key);
     return value === 'true' || value === '1';
   } catch {
     return false;
@@ -38,21 +28,13 @@ const readBooleanPreference = async (key: string): Promise<boolean> => {
 const writeBooleanPreference = async (key: string, value: boolean): Promise<void> => {
   try {
     await storage.set(key, value ? 'true' : 'false');
-  } catch {
-    try {
-      localStorage.setItem(key, value ? 'true' : 'false');
-    } catch { }
-  }
+  } catch { }
 };
 
 const readStringPreference = async (key: string): Promise<string> => {
   try {
     const value = await storage.get(key);
-    if (value !== null) return value;
-  } catch { }
-
-  try {
-    return localStorage.getItem(key) || '';
+    return value ?? '';
   } catch {
     return '';
   }
@@ -61,11 +43,7 @@ const readStringPreference = async (key: string): Promise<string> => {
 const writeStringPreference = async (key: string, value: string): Promise<void> => {
   try {
     await storage.set(key, value);
-  } catch {
-    try {
-      localStorage.setItem(key, value);
-    } catch { }
-  }
+  } catch { }
 };
 
 const setupSymbols: readonly Readonly<{
@@ -167,7 +145,6 @@ const renderSymbolIcon = (icon: SymbolKind) => {
 
 export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', isConnected = false }: ConnectSetupProps) {
   const [status, setStatus] = useState<TorSetupStatus>({
-    isInstalled: false,
     isConfigured: false,
     isRunning: false,
     isBootstrapped: false,
@@ -180,28 +157,38 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   const [autoConnectEnabled, setAutoConnectEnabled] = useState(false);
   const [customServerUrl, setCustomServerUrl] = useState('');
   const [isTesting, setIsTesting] = useState(false);
-  const [testStatus, setTestStatus] = useState<string>('');
   const [testError, setTestError] = useState<string>('');
   const [isContinuing, setIsContinuing] = useState(false);
   const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
   const [bridgesText, setBridgesText] = useState('');
   const [preferencesReady, setPreferencesReady] = useState(false);
-  const continueInFlightRef = useRef(false);
+  const continueInFlightRef = useRef<object | null>(null);
+  const torMutationInFlightRef = useRef<object | null>(null);
+  const lifecycleGenerationRef = useRef(0);
   const autoStartTriggeredRef = useRef(false);
   const autoConnectAttemptRef = useRef<string | null>(null);
 
+  useEffect(() => () => {
+    lifecycleGenerationRef.current += 1;
+    continueInFlightRef.current = null;
+    torMutationInFlightRef.current = null;
+  }, []);
+
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       const [savedAutoStart, savedAutoConnect, savedBridgeEnabled, savedBridgeTransport, savedBridgeLines] = await Promise.all([
-        readBooleanPreference(AUTO_START_KEY),
-        readBooleanPreference(AUTO_CONNECT_KEY),
-        readBooleanPreference(BRIDGES_ENABLED_KEY),
-        readStringPreference(BRIDGE_TRANSPORT_KEY),
-        readStringPreference(BRIDGE_LINES_KEY),
+        readBooleanPreference(STORAGE_KEYS.TOR_AUTO_START),
+        readBooleanPreference(STORAGE_KEYS.TOR_AUTO_CONNECT),
+        readBooleanPreference(STORAGE_KEYS.TOR_BRIDGES_ENABLED),
+        readStringPreference(STORAGE_KEYS.TOR_BRIDGE_TRANSPORT),
+        readStringPreference(STORAGE_KEYS.TOR_BRIDGE_LINES),
       ]);
+      if (cancelled) return;
 
       try {
         const initialStatus = await getTorAutoSetup().refreshStatus();
+        if (cancelled) return;
         setStatus(initialStatus);
         if (initialStatus.isRunning) {
           torNetworkManager.updateConfig({
@@ -213,6 +200,7 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
         }
 
         const storedUrl = await websocket.getServerUrl();
+        if (cancelled) return;
         const envUrl = (import.meta as any)?.env?.VITE_WS_URL || '';
         let preferred = initialServerUrl || '';
         if (!preferred) {
@@ -233,6 +221,7 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
         }
       } catch { }
 
+      if (cancelled) return;
       setAutoStartEnabled(savedAutoStart);
       setAutoConnectEnabled(savedAutoStart && savedAutoConnect);
       setEnableBridges(savedBridgeEnabled);
@@ -240,6 +229,9 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
       setBridgesText(savedBridgeLines);
       setPreferencesReady(true);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [initialServerUrl]);
 
   useEffect(() => {
@@ -247,9 +239,14 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
       return;
     }
 
-    const timer = window.setInterval(async () => {
+    let disposed = false;
+    let refreshInFlight = false;
+    const refresh = async () => {
+      if (disposed || refreshInFlight) return;
+      refreshInFlight = true;
       try {
         const refreshed = await getTorAutoSetup().refreshStatus();
+        if (disposed) return;
         setStatus(refreshed);
         if (refreshed.isBootstrapped) {
           torNetworkManager.updateConfig({
@@ -259,10 +256,18 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
           });
           await torNetworkManager.syncWithDaemon();
         }
-      } catch { }
+      } catch { } finally {
+        refreshInFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => {
+      void refresh();
     }, 2000);
 
-    return () => window.clearInterval(timer);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   }, [status.isRunning, status.isBootstrapped, isSetupRunning]);
 
   const normalizeToWss = (value: string): string => {
@@ -284,6 +289,8 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   };
 
   const chosenServerUrl = useMemo(() => normalizeToWss(customServerUrl), [customServerUrl]);
+  const chosenServerUrlRef = useRef(chosenServerUrl);
+  chosenServerUrlRef.current = chosenServerUrl;
   const torReady = Boolean((status.isRunning && status.isBootstrapped) || isConnected);
   const torStarting = Boolean(isSetupRunning || (status.isRunning && !status.isBootstrapped));
   const meterProgress = torReady
@@ -295,11 +302,20 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   const serverLocked = !torReady || isConnected;
 
   const handleAutoSetup = async () => {
+    if (torMutationInFlightRef.current) return;
+    const operation = {};
+    const generation = lifecycleGenerationRef.current;
+    torMutationInFlightRef.current = operation;
+    const isCurrent = () => (
+      lifecycleGenerationRef.current === generation &&
+      torMutationInFlightRef.current === operation
+    );
     setIsSetupRunning(true);
     setStatus(prev => ({ ...prev, error: undefined }));
     setTestError('');
     try {
       const beforeSetup = await getTorAutoSetup().refreshStatus();
+      if (!isCurrent()) return;
       if (beforeSetup.isRunning && !beforeSetup.isBootstrapped) {
         setStatus(prev => ({
           ...prev,
@@ -308,28 +324,33 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
         }));
         await getTorAutoSetup().stopTor();
         await torNetworkManager.shutdown();
+        if (!isCurrent()) return;
       }
 
       const bridges = bridgesText.split('\n').map(l => l.trim()).filter(Boolean);
-      void writeBooleanPreference(BRIDGES_ENABLED_KEY, enableBridges);
-      void writeStringPreference(BRIDGE_TRANSPORT_KEY, transport);
-      void writeStringPreference(BRIDGE_LINES_KEY, bridgesText);
+      void writeBooleanPreference(STORAGE_KEYS.TOR_BRIDGES_ENABLED, enableBridges);
+      void writeStringPreference(STORAGE_KEYS.TOR_BRIDGE_TRANSPORT, transport);
+      void writeStringPreference(STORAGE_KEYS.TOR_BRIDGE_LINES, bridgesText);
       const success = await getTorAutoSetup().autoSetup({
         autoStart: true,
         enableBridges,
-        allowBridgeFallback: true,
         transport,
         bridges,
         onProgress: (newStatus) => {
+          if (!isCurrent()) return;
           setStatus(prevStatus => ({ ...prevStatus, ...newStatus, error: newStatus.error || undefined }));
         }
       });
+      if (!isCurrent()) return;
       if (success) {
         let refreshed = await getTorAutoSetup().refreshStatus();
+        if (!isCurrent()) return;
         let attempts = 0;
         while (!refreshed.isBootstrapped && attempts < 30 && refreshed.isRunning) {
           await new Promise(r => setTimeout(r, 2000));
+          if (!isCurrent()) return;
           refreshed = await getTorAutoSetup().refreshStatus();
+          if (!isCurrent()) return;
           setStatus(refreshed);
           attempts++;
         }
@@ -342,44 +363,63 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
           controlPort: refreshed.controlPort
         });
         const ready = await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize();
-        await websocket.setTorReady(ready, refreshed.socksPort);
+        if (!isCurrent()) return;
+        await websocket.syncTorState();
+        if (!isCurrent()) return;
         (window as any).__TOR_MODE__ = ready;
         if (!ready) {
           setStatus(prev => ({ ...prev, error: 'Tor started but did not finish bootstrapping. Check your internet connection and retry.' }));
         }
       } else {
         const refreshed = await getTorAutoSetup().refreshStatus();
+        if (!isCurrent()) return;
         setStatus(refreshed);
         await torNetworkManager.syncWithDaemon();
       }
     } catch (_error) {
+      if (!isCurrent()) return;
       console.error('[ConnectSetup] Auto-setup failed:', _error);
       const errorMsg = _error instanceof Error ? _error.message : 'Setup failed';
       setStatus(prev => ({ ...prev, error: errorMsg, setupProgress: 0 }));
       toast.error(`Tor setup failed: ${errorMsg}`);
     } finally {
-      setIsSetupRunning(false);
+      if (torMutationInFlightRef.current === operation) {
+        torMutationInFlightRef.current = null;
+      }
+      if (lifecycleGenerationRef.current === generation) setIsSetupRunning(false);
     }
   };
 
   const handleStopTor = async () => {
-    if (!canStopTor) return;
+    if (!canStopTor || torMutationInFlightRef.current) return;
+    const operation = {};
+    const generation = lifecycleGenerationRef.current;
+    torMutationInFlightRef.current = operation;
+    const isCurrent = () => (
+      lifecycleGenerationRef.current === generation &&
+      torMutationInFlightRef.current === operation
+    );
     setIsSetupRunning(true);
-    setTestStatus('');
     setTestError('');
     try {
       await getTorAutoSetup().stopTor();
       await torNetworkManager.shutdown();
-      await websocket.setTorReady(false).catch(() => { });
+      await websocket.syncTorState().catch(() => false);
       (window as any).__TOR_MODE__ = false;
       const newStatus = await getTorAutoSetup().refreshStatus();
-      setStatus({ ...newStatus, setupProgress: 0, currentStep: 'Ready to setup' });
+      if (isCurrent()) {
+        setStatus({ ...newStatus, setupProgress: 0, currentStep: 'Ready to setup' });
+      }
     } catch (_error) {
+      if (!isCurrent()) return;
       const friendly = _error instanceof Error ? _error.message : 'Failed to stop Tor.';
       setTestError(friendly);
       toast.error(friendly);
     } finally {
-      setIsSetupRunning(false);
+      if (torMutationInFlightRef.current === operation) {
+        torMutationInFlightRef.current = null;
+      }
+      if (lifecycleGenerationRef.current === generation) setIsSetupRunning(false);
     }
   };
 
@@ -393,27 +433,10 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
       || normalized.includes('connection timeout');
   };
 
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-  const testConnection = async (url: string, timeoutMs = 45000): Promise<void> => {
-    const runProbe = () => websocket.probeConnect(url, timeoutMs);
-    let res = await runProbe();
-    if ((!res || res.success === false) && isRecoverableConnectionStall(res?.error)) {
-      setTestStatus('Resetting stale connection...');
-      if (!isConnected) {
-        await websocket.disconnect().catch(() => { });
-      }
-      await sleep(350);
-      res = await runProbe();
-    }
-    if (!res || res.success === false) {
-      throw new Error(res?.error || 'Connection failed');
-    }
-  };
-
-  const ensureTorInitialized = async (): Promise<boolean> => {
+  const ensureTorInitialized = async (isCurrent: () => boolean): Promise<boolean> => {
     try {
       const currentStatus = await getTorAutoSetup().refreshStatus();
+      if (!isCurrent()) return false;
 
       torNetworkManager.updateConfig({
         enabled: true,
@@ -422,15 +445,17 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
       });
 
       const ok = await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize();
+      if (!isCurrent()) return false;
       const refreshed = await getTorAutoSetup().refreshStatus();
+      if (!isCurrent()) return false;
       setStatus(refreshed);
 
       if (ok && refreshed.isBootstrapped) {
-        await websocket.setTorReady(true, refreshed.socksPort);
-        return true;
+        const synced = await websocket.syncTorState();
+        return isCurrent() && synced;
       }
 
-      await websocket.setTorReady(false);
+      await websocket.syncTorState();
       return false;
     } catch {
       return false;
@@ -458,70 +483,86 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   };
 
   const handleContinue = async () => {
-    if (!canContinue || continueInFlightRef.current) return;
-    continueInFlightRef.current = true;
+    if (!canContinue || continueInFlightRef.current || torMutationInFlightRef.current) return;
+    const operation = {};
+    const generation = lifecycleGenerationRef.current;
+    const serverUrl = chosenServerUrl;
+    continueInFlightRef.current = operation;
+    const isCurrent = () => (
+      lifecycleGenerationRef.current === generation &&
+      continueInFlightRef.current === operation &&
+      chosenServerUrlRef.current === serverUrl
+    );
     setIsContinuing(true);
-    setTestStatus('');
     setTestError('');
     try {
-      const ready = await ensureTorInitialized();
+      const ready = await ensureTorInitialized(isCurrent);
+      if (!isCurrent()) return;
       if (!ready) {
         toast.error('Tor verification failed. Please retry.');
-        setIsContinuing(false);
         return;
       }
 
-      const serverUrl = chosenServerUrl;
       if (!serverUrl) {
         toast.error('Invalid server URL.');
-        setIsContinuing(false);
         return;
       }
 
       setIsTesting(true);
-      setTestStatus('Testing connection...');
-      await testConnection(serverUrl);
-      setIsTesting(false);
-      setTestStatus('Connected');
-
-      try {
-        await websocket.setServerUrl(serverUrl);
-      } catch { }
+      await websocket.setServerUrl(serverUrl);
+      if (!isCurrent()) return;
+      void anonymousHttp.prewarm().catch(() => { });
 
       await (onComplete?.(serverUrl));
     } catch (_error) {
+      if (!isCurrent()) return;
       console.error('[ConnectSetup] handleContinue error', _error);
       const friendly = humanizeConnectionError(_error);
       setTestError(friendly);
       if (isRecoverableConnectionStall(_error) && !isConnected) {
         await websocket.disconnect().catch(() => { });
+        if (!isCurrent()) return;
       }
       toast.error(friendly);
     } finally {
-      setIsTesting(false);
-      setIsContinuing(false);
-      continueInFlightRef.current = false;
+      if (continueInFlightRef.current === operation) {
+        continueInFlightRef.current = null;
+      }
+      if (lifecycleGenerationRef.current === generation) {
+        setIsTesting(false);
+        setIsContinuing(false);
+      }
     }
   };
 
   const handleDisconnect = async () => {
-    if (!canDisconnect) return;
+    if (!canDisconnect || continueInFlightRef.current || torMutationInFlightRef.current) return;
+    const operation = {};
+    const generation = lifecycleGenerationRef.current;
+    continueInFlightRef.current = operation;
+    const isCurrent = () => (
+      lifecycleGenerationRef.current === generation &&
+      continueInFlightRef.current === operation
+    );
     setIsContinuing(true);
-    setTestStatus('');
     setTestError('');
     autoConnectAttemptRef.current = chosenServerUrl || null;
     setAutoConnectEnabled(false);
-    await writeBooleanPreference(AUTO_CONNECT_KEY, false);
     try {
+      await writeBooleanPreference(STORAGE_KEYS.TOR_AUTO_CONNECT, false);
+      if (!isCurrent()) return;
       await onDisconnect?.();
-      setTestStatus('Disconnected');
     } catch (_error) {
+      if (!isCurrent()) return;
       console.error('[ConnectSetup] handleDisconnect error', _error);
       const friendly = _error instanceof Error ? _error.message : 'Failed to disconnect.';
       setTestError(friendly);
       toast.error(friendly);
     } finally {
-      setIsContinuing(false);
+      if (continueInFlightRef.current === operation) {
+        continueInFlightRef.current = null;
+      }
+      if (lifecycleGenerationRef.current === generation) setIsContinuing(false);
     }
   };
 
@@ -535,12 +576,12 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   const connectText = isConnected
     ? (isContinuing ? 'Disconnecting...' : 'Disconnect')
     : isContinuing || isTesting
-      ? (isTesting ? 'Testing Connection...' : 'Connecting...')
+      ? 'Connecting...'
       : 'Connect to Server';
 
   useEffect(() => {
     if (!preferencesReady) return;
-    void writeBooleanPreference(AUTO_START_KEY, autoStartEnabled);
+    void writeBooleanPreference(STORAGE_KEYS.TOR_AUTO_START, autoStartEnabled);
     if (!autoStartEnabled && autoConnectEnabled) {
       setAutoConnectEnabled(false);
       autoConnectAttemptRef.current = null;
@@ -549,14 +590,14 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
 
   useEffect(() => {
     if (!preferencesReady) return;
-    void writeBooleanPreference(AUTO_CONNECT_KEY, autoStartEnabled && autoConnectEnabled);
+    void writeBooleanPreference(STORAGE_KEYS.TOR_AUTO_CONNECT, autoStartEnabled && autoConnectEnabled);
   }, [preferencesReady, autoStartEnabled, autoConnectEnabled]);
 
   useEffect(() => {
     if (!preferencesReady) return;
-    void writeBooleanPreference(BRIDGES_ENABLED_KEY, enableBridges);
-    void writeStringPreference(BRIDGE_TRANSPORT_KEY, transport);
-    void writeStringPreference(BRIDGE_LINES_KEY, bridgesText);
+    void writeBooleanPreference(STORAGE_KEYS.TOR_BRIDGES_ENABLED, enableBridges);
+    void writeStringPreference(STORAGE_KEYS.TOR_BRIDGE_TRANSPORT, transport);
+    void writeStringPreference(STORAGE_KEYS.TOR_BRIDGE_LINES, bridgesText);
   }, [preferencesReady, enableBridges, transport, bridgesText]);
 
   useEffect(() => {

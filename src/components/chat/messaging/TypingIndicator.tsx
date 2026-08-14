@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import { memo } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 

@@ -2,16 +2,11 @@
  * WebSocket Message Handler
  */
 
-import { SecurityAuditLogger } from '../cryptography/audit-logger';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
-import type { MessageHandler, MessageHandlerCallbacks } from '../types/websocket-types';
-import { MAX_INCOMING_WS_STRING_CHARS } from '../constants';
-import { SignalType } from '../types/signal-types';
+import type { MessageHandler } from '../types/websocket-types';
 
 export class WebSocketMessageHandler {
   private messageHandlers: Map<string, Set<MessageHandler>> = new Map();
-
-  constructor(private callbacks: MessageHandlerCallbacks) {}
 
   registerHandler(type: string, handler: MessageHandler): void {
     const existing = this.messageHandlers.get(type);
@@ -48,60 +43,13 @@ export class WebSocketMessageHandler {
   // Handle incoming WebSocket messages
   async handleMessage(data: unknown): Promise<void> {
     try {
-      if (data === null || data === undefined) {
+      if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
         return;
       }
-
-      let message: any;
-
-      if (typeof data === 'object' && data !== null) {
-        message = data;
-      } else {
-        const dataString = String(data);
-        if (dataString.length > MAX_INCOMING_WS_STRING_CHARS) {
-          SecurityAuditLogger.log('warn', 'ws-message-data-string-too-long', {
-            length: dataString.length,
-            maxLength: MAX_INCOMING_WS_STRING_CHARS
-          });
-          return;
-        }
-        try {
-          message = JSON.parse(dataString);
-        } catch {
-          message = { type: 'raw', data: dataString };
-        }
-      }
-
-      if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
-        SecurityAuditLogger.log('warn', 'ws-message-invalid-object', {})
-        return;
-      }
-
-      if (typeof message === 'object' && message?.type === SignalType.PQ_HEARTBEAT_PONG) {
-        this.callbacks.handleHeartbeatResponse(message);
-        return;
-      }
-
-      if (typeof message === 'object' && message?.type === SignalType.PQ_ENVELOPE) {
-        const decrypted = await this.callbacks.decryptEnvelope(message);
-        if (!decrypted) {
-          SecurityAuditLogger.log('warn', 'ws-message-envelope-decryption-failed', {})
-          return;
-        }
-        message = decrypted;
-      }
-
-      if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
-        SecurityAuditLogger.log('warn', 'ws-message-invalid-decrypted-object', {})
-        return;
-      }
+      const message = data;
 
       if (typeof message.type === 'string') {
         if (message.type.length > 100) {
-          SecurityAuditLogger.log('warn', 'ws-message-type-too-long', {
-            length: message.type.length,
-            maxLength: 100
-          });
           return;
         }
 
@@ -110,25 +58,15 @@ export class WebSocketMessageHandler {
           for (const handler of Array.from(handlers)) {
             try {
               await handler(message);
-            } catch (err) {
-              console.error('[WS-MessageHandler] typed handler error', { type: message.type, error: (err as Error).message });
+            } catch {
+              console.error('[WS-MessageHandler] typed handler failed');
             }
           }
         }
       }
 
-      const rawHandlers = this.messageHandlers.get('raw');
-      if (rawHandlers && rawHandlers.size > 0) {
-        for (const rawHandler of Array.from(rawHandlers)) {
-          try {
-            await rawHandler(message);
-          } catch (err) {
-            console.error('[WS-MessageHandler] raw handler error', { error: (err as Error).message });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('[WS-MessageHandler] handleMessage error', { error: (err as Error).message });
+    } catch {
+      console.error('[WS-MessageHandler] message handling failed');
     }
   }
 }

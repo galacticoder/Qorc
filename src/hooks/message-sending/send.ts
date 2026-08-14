@@ -1,50 +1,35 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import { secureMessageQueue } from '../../lib/database/secure-message-queue';
 import {
   logError,
-  createCoverPadding
+  createCoverPadding,
+  recordSessionRequest
 } from '../../lib/utils/message-sending-utils';
 import { signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 import { validateSignalBundleForPeerIdentity } from '../../lib/utils/signal-bundle-utils';
+import { OUTBOUND_RETRY_MAX_AGE_MS } from '../../lib/constants';
+import { sanitizeMessageId } from '../../lib/sanitizers';
 
 // Build message payload
 export const buildMessagePayload = (
   wireMessageId: string,
-  currentUser: string,
-  recipientUsername: string,
   sanitizedContent: string | undefined,
-  timestamp: number,
-  messageType: string,
   messageSignalType: string | undefined,
-  localKeys: { kyber: { publicKeyBase64: string }; dilithium: { publicKeyBase64: string; secretKey: Uint8Array } },
-  originalUsernameRef: React.RefObject<string>,
   replyToData?: { id: string; sender?: string; content?: string },
-  fileData?: string,
   originalMessageId?: string,
   editMessageId?: string,
-  senderSignalBundle?: any
 ): Record<string, unknown> => {
+  const isNativePrivateText = messageSignalType === SignalType.MESSAGE ||
+    messageSignalType === SignalType.EDIT_MESSAGE;
   const payload: Record<string, unknown> = {
     messageId: wireMessageId,
-    from: currentUser,
-    to: recipientUsername,
-    content: sanitizedContent,
-    timestamp,
-    type: messageType,
-    messageType,
-    signalType: messageSignalType,
-    senderKyberPublicBase64: localKeys.kyber.publicKeyBase64,
-    ...(senderSignalBundle ? { senderSignalBundle } : {}),
-    ...(editMessageId ? { editMessageId } : {}),
+    content: isNativePrivateText ? '' : sanitizedContent,
+    ...(isNativePrivateText ? { nativeContentRef: wireMessageId } : {}),
   };
 
   if (replyToData) {
     payload.replyTo = replyToData;
-  }
-  if (fileData) {
-    payload.fileData = fileData;
   }
   if (messageSignalType === SignalType.DELETE_MESSAGE && originalMessageId) {
     payload.deleteMessageId = originalMessageId;
@@ -75,21 +60,27 @@ export const dispatchLocalEvents = (
   messageSignalType: string | undefined,
   originalMessageId: string | undefined,
   editMessageId: string | undefined,
-  wireMessageId: string,
   sanitizedContent: string | undefined,
-  currentUser: string
+  contentVaultId: string | undefined,
+  currentUser: string,
+  operationId: string,
 ): boolean => {
   if (messageType === SignalType.DELETE_MESSAGE && originalMessageId) {
     window.dispatchEvent(
-      new CustomEvent(EventType.LOCAL_MESSAGE_DELETE, { detail: { messageId: originalMessageId } }),
+      new CustomEvent(EventType.LOCAL_MESSAGE_DELETE, {
+        detail: { account: currentUser, messageId: originalMessageId, operationId }
+      }),
     );
     return true;
   }
 
   if (messageType === SignalType.EDIT_MESSAGE) {
-    const targetId = editMessageId || wireMessageId;
+    if (!editMessageId || !contentVaultId) return false;
+    const targetId = editMessageId;
     window.dispatchEvent(
-      new CustomEvent(EventType.LOCAL_MESSAGE_EDIT, { detail: { messageId: targetId, newContent: sanitizedContent } }),
+      new CustomEvent(EventType.LOCAL_MESSAGE_EDIT, {
+        detail: { account: currentUser, messageId: targetId, contentVaultId, operationId }
+      }),
     );
     return true;
   }
@@ -100,19 +91,16 @@ export const dispatchLocalEvents = (
   ) {
     window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
       detail: {
+        account: currentUser,
         messageId: originalMessageId,
         emoji: sanitizedContent,
         isAdd: messageSignalType === SignalType.REACTION_ADD,
-        username: currentUser
+        username: currentUser,
+        operationId,
       }
     }));
     return true;
   }
-
-  if (messageType === SignalType.TYPING_INDICATOR) {
-    return true;
-  }
-
   return false;
 };
 
@@ -120,68 +108,44 @@ export const dispatchLocalEvents = (
 export const storeUnacknowledgedMessage = async (
   secureDBRef: React.RefObject<any> | undefined,
   recipientUsername: string,
-  timestamp: number,
-  messageData: any
+  messageData: any,
+  isCurrent: () => boolean
 ) => {
-  if (!secureDBRef?.current) return;
+  const db = secureDBRef?.current;
+  if (!db || !isCurrent()) throw new Error('Secure database account is not current');
+  const operationId = sanitizeMessageId(messageData?.retryId || messageData?.originalMessageId);
+  if (!operationId) throw new Error('Unacknowledged message operation ID is invalid');
 
   try {
-    await secureDBRef.current.storeEphemeral(
+    await db.storeEphemeral(
       'unacknowledged-messages',
-      `${recipientUsername}:${timestamp}`,
+      `${recipientUsername}:${operationId}`,
       messageData,
-      30000,
+      OUTBOUND_RETRY_MAX_AGE_MS,
       true
     );
-
-    const messageListKey = `${recipientUsername}:message-list`;
-    await secureDBRef.current.appendEphemeralList(
-      'unacknowledged-messages',
-      messageListKey,
-      timestamp,
-      500,
-      30000
-    );
+    if (!isCurrent()) throw new Error('Account changed while recording unacknowledged message');
   } catch (_error) {
     logError('unack-msg-store-failed', _error);
+    throw _error;
   }
-};
-
-// Queue message when keys are unavailable
-export const queueMessageForLater = async (
-  recipientUsername: string,
-  sanitizedContent: string,
-  messageId: string,
-  replyToData: { id: string; sender?: string; content?: string } | undefined,
-  fileDataToSend: string | undefined,
-  messageSignalType: string | undefined,
-  editMessageId: string | undefined
-) => {
-  await secureMessageQueue.queueMessage(recipientUsername, sanitizedContent ?? '', {
-    messageId,
-    replyTo: replyToData,
-    fileData: fileDataToSend,
-    messageSignalType,
-    originalMessageId: messageId,
-    editMessageId,
-  });
 };
 
 // Request bundle for retry using discovery
 export const requestBundleForRetry = async (
   recipientUsername: string,
   currentUser: string,
-  _getKeysOnDemand: () => Promise<any>,
   lastSessionBundleReqTsRef: React.RefObject<Map<string, number>>,
-  _inboxId?: string,
-  users?: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }>,
-  findUser?: (handle: string) => Promise<any>
+  users: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }> | undefined,
+  findUser: ((handle: string) => Promise<any>) | undefined,
+  isCurrent: () => boolean
 ) => {
   try {
+    if (!isCurrent()) return;
     const now = Date.now();
     const last = lastSessionBundleReqTsRef.current.get(recipientUsername) || 0;
     if (now - last >= 3000) {
-      lastSessionBundleReqTsRef.current.set(recipientUsername, now);
+      recordSessionRequest(lastSessionBundleReqTsRef.current, recipientUsername, now);
 
       if (!findUser) {
         console.warn('[Send] findUser not available for bundle retry');
@@ -193,21 +157,25 @@ export const requestBundleForRetry = async (
       }
 
       const material = await findUser(recipientUsername);
+      if (!isCurrent()) return;
       if (material && material.fullBundle) {
         const validation = await validateSignalBundleForPeerIdentity(
+          currentUser,
           recipientUsername,
           material.fullBundle,
           users as any,
           findUser as any
         );
+        if (!isCurrent()) return;
         if (!validation.valid) {
           return;
         }
-        await signal.processPreKeyBundle(currentUser, recipientUsername, material.fullBundle);
-        window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: recipientUsername } }));
+        await signal.processVerifiedPreKeyBundle(currentUser, recipientUsername, material.fullBundle);
+        if (!isCurrent()) return;
+        window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, {
+          detail: { peer: recipientUsername, account: currentUser }
+        }));
       }
     }
-  } catch (_err) {
-    console.error('[Send] Bundle retry for Discovery failed:', _err);
-  }
+  } catch { }
 };

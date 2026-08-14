@@ -1,14 +1,11 @@
 import './trusted-types.ts';
-import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { ThemeProvider } from 'next-themes';
+import { ThemeProvider } from './contexts/ThemeContext';
 import App from './App.tsx';
 import './index.css';
 import { isTauri } from './lib/tauri-bindings';
-import { installTerminalLogForwarder } from './lib/debug/terminal-log-forwarder';
 
 function bootstrap() {
-  // Only run in Tauri
   if (!isTauri()) {
     const body = document.body || document.documentElement;
     const el = document.getElementById('root') || body;
@@ -66,8 +63,6 @@ function bootstrap() {
     return;
   }
 
-  installTerminalLogForwarder();
-
   const waitForBody = (callback: () => void) => {
     if (document.body) {
       callback();
@@ -98,7 +93,7 @@ function bootstrap() {
     }
 
     createRoot(root as HTMLElement).render(
-      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+      <ThemeProvider>
         <App />
       </ThemeProvider>
     );

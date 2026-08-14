@@ -1,36 +1,61 @@
 /**
  * Privacy Pass Client
- * 
- * Generates, blinds, unblinds, and redeems anonymous tokens
  */
 
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { Base64 } from './base64';
+import { Base64, decodeCanonicalBase64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
-import { PrivacyPassOps } from './crypto-ops';
+import { normalizePrivacyPassPurpose } from './privacy-pass-purpose';
+import { PRIVACY_PASS_CONFIG as PP_CONFIG } from '../../../shared/privacy-pass-protocol.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
-// Privacy Pass configuration
-const PP_CONFIG = {
-    DEFAULT_BATCH_SIZE: 250,
-    NULLIFIER_SIZE: 32,
-    TOKEN_SIZE: 64,
-    MAC_SIZE: 32,
-    NONCE_SIZE: 24,
-};
+export function getPrivacyPassTokenEpoch(tokenSecret: Uint8Array): number {
+    if (!(tokenSecret instanceof Uint8Array) || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE) {
+        throw new Error('Invalid Privacy Pass token secret');
+    }
+    return new DataView(
+        tokenSecret.buffer,
+        tokenSecret.byteOffset,
+        tokenSecret.byteLength
+    ).getUint32(0, false);
+}
 
-// Domain separation labels
-const PP_LABELS = {
-    NULLIFIER: 'PrivacyPass-Nullifier-v1',
-    REDEMPTION_MAC: 'PrivacyPass-Redemption-MAC-v1',
-    TOKEN_ENCRYPTION: 'PrivacyPass-Token-Encryption-v1',
-    OPRF_INPUT: 'PrivacyPass-OPRF-Input-v1',
-};
+export function getPrivacyPassBatchEpoch(tokens: ReadonlyArray<{ tokenSecret: Uint8Array }>): number {
+    if (!Array.isArray(tokens) || tokens.length < 1 || tokens.length > PP_CONFIG.MAX_BATCH_SIZE) {
+        throw new Error('Invalid Privacy Pass token batch');
+    }
+    const epoch = getPrivacyPassTokenEpoch(tokens[0].tokenSecret);
+    if (!tokens.every((token) => getPrivacyPassTokenEpoch(token.tokenSecret) === epoch)) {
+        throw new Error('Privacy Pass token batch spans multiple epochs');
+    }
+    return epoch;
+}
 
-function normalizePurpose(purpose?: string): string {
-    const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
-    return /^[a-z0-9:_-]{1,64}$/.test(value) ? value : 'account-auth';
+export function isPrivacyPassTokenEpochUsable(tokenSecret: Uint8Array): boolean {
+    let tokenEpoch: number;
+    try {
+        tokenEpoch = getPrivacyPassTokenEpoch(tokenSecret);
+    } catch {
+        return false;
+    }
+    const currentEpoch = Math.floor(Date.now() / 86_400_000);
+    return tokenEpoch <= currentEpoch && currentEpoch - tokenEpoch <= PP_CONFIG.TOKEN_MAX_AGE_EPOCHS;
+}
+
+export function isPrivacyPassTokenUsable(token: AnonymousToken, purpose?: string): boolean {
+    try {
+        return Boolean(
+            token &&
+            !token.used &&
+            token.unblindedToken?.length === PP_CONFIG.TOKEN_SIZE &&
+            isPrivacyPassTokenEpochUsable(token.tokenSecret) &&
+            (!purpose || normalizePrivacyPassPurpose(token.purpose) === normalizePrivacyPassPurpose(purpose))
+        );
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -39,9 +64,8 @@ function normalizePurpose(purpose?: string): string {
 export interface AnonymousToken {
     id: string;
     tokenSecret: Uint8Array;
-    blindingFactor: Uint8Array;
+    blindingFactor?: Uint8Array;
     blindedElement?: Uint8Array;
-    signature?: Uint8Array;
     unblindedToken?: Uint8Array;
     purpose?: string;
     issuedAt: number;
@@ -55,11 +79,10 @@ export interface AnonymousToken {
  * Manages the full lifecycle of anonymous authentication tokens
  */
 export class PrivacyPassClient {
-    private pendingBlinds: Map<string, { blind: Uint8Array; input: Uint8Array }> = new Map();
     private readonly purpose: string;
 
-    constructor(purpose: string = 'account-auth') {
-        this.purpose = normalizePurpose(purpose);
+    constructor(purpose: string = ACCOUNT_AUTH_PURPOSE) {
+        this.purpose = normalizePrivacyPassPurpose(purpose);
     }
 
     /**
@@ -69,42 +92,11 @@ export class PrivacyPassClient {
         blindedTokens: Uint8Array[];
         tokenSecrets: AnonymousToken[];
     }> {
-        try {
-            const result = await PostQuantumWorker.ppGenerateTokenBatch(count, this.purpose);
-            return {
-                blindedTokens: result.blindedTokens,
-                tokenSecrets: result.tokenSecrets as AnonymousToken[]
-            };
-        } catch (err) {
-            console.warn('[PrivacyPassClient] Worker failed, falling back to local generation', err);
-            return this.generateTokenBatchLocal(count);
-        }
-    }
-
-    async generateTokenBatchLocal(count: number = PP_CONFIG.DEFAULT_BATCH_SIZE): Promise<{
-        blindedTokens: Uint8Array[];
-        tokenSecrets: AnonymousToken[];
-    }> {
-        const result = PrivacyPassOps.generateTokenBatch(count, this.purpose);
-        
-        // Track pending blinds for unblinding
-        for (const token of result.tokenSecrets) {
-            const { hkdf } = await import('@noble/hashes/hkdf.js');
-            const { blake3 } = await import('@noble/hashes/blake3.js');
-            const oprfInput = hkdf(
-                blake3,
-                token.tokenSecret,
-                new Uint8Array(0),
-                new TextEncoder().encode(`${PP_LABELS.OPRF_INPUT}:${normalizePurpose(token.purpose || this.purpose)}`),
-                32
-            );
-            this.pendingBlinds.set(token.id, {
-                blind: token.blindingFactor,
-                input: oprfInput
-            });
-        }
-
-        return result;
+        const result = await PostQuantumWorker.ppGenerateTokenBatch(count, this.purpose);
+        return {
+            blindedTokens: result.blindedTokens,
+            tokenSecrets: result.tokenSecrets as AnonymousToken[]
+        };
     }
 
     /**
@@ -114,31 +106,14 @@ export class PrivacyPassClient {
         tokenSecrets: AnonymousToken[],
         signedBlindedTokens: Uint8Array[],
         proof: Uint8Array,
-        serverPublicKey: Uint8Array
+        serverPublicKey: Uint8Array,
+        issuerEpoch: number
     ): Promise<AnonymousToken[]> {
-        try {
-            const result = await PostQuantumWorker.ppUnblindTokens(tokenSecrets, signedBlindedTokens, proof, serverPublicKey);
-            return result.completedTokens as AnonymousToken[];
-        } catch (err) {
-            console.warn('[PrivacyPassClient] Worker unblind failed, falling back to local', err);
-            return this.unblindTokensLocal(tokenSecrets, signedBlindedTokens, proof, serverPublicKey);
+        if (!Number.isSafeInteger(issuerEpoch) || getPrivacyPassBatchEpoch(tokenSecrets) !== issuerEpoch) {
+            throw new Error('Privacy Pass issuer epoch mismatch');
         }
-    }
-
-    async unblindTokensLocal(
-        tokenSecrets: AnonymousToken[],
-        signedBlindedTokens: Uint8Array[],
-        proof: Uint8Array,
-        serverPublicKey: Uint8Array
-    ): Promise<AnonymousToken[]> {
-        const completed = PrivacyPassOps.unblindTokens(tokenSecrets, signedBlindedTokens, proof, serverPublicKey);
-        
-        // Clear pending blinds
-        for (const token of completed) {
-            this.pendingBlinds.delete(token.id);
-        }
-        
-        return completed;
+        const result = await PostQuantumWorker.ppUnblindTokens(tokenSecrets, signedBlindedTokens, proof, serverPublicKey);
+        return result.completedTokens as AnonymousToken[];
     }
 
     /**
@@ -149,8 +124,6 @@ export class PrivacyPassClient {
         token: Uint8Array;
         nullifier: Uint8Array;
         mac: Uint8Array;
-        decryptionKey: Uint8Array;
-        purpose: string;
     }> {
         if (!token.unblindedToken) {
             throw new Error('Token not finalized');
@@ -159,87 +132,117 @@ export class PrivacyPassClient {
         if (token.used) {
             throw new Error('Token already used');
         }
+        if (!isPrivacyPassTokenEpochUsable(token.tokenSecret)) {
+            throw new Error('Token expired');
+        }
+        if (normalizePrivacyPassPurpose(token.purpose) !== this.purpose) {
+            throw new Error('Token purpose mismatch');
+        }
 
-        // Compute nullifier
-        const nullifier = hkdf(
-            blake3,
-            token.unblindedToken,
-            new Uint8Array(0),
-            new TextEncoder().encode(PP_LABELS.NULLIFIER),
-            PP_CONFIG.NULLIFIER_SIZE
-        );
-
-        // Compute MAC proving we possess the token
-        const macKey = hkdf(
-            blake3,
-            token.unblindedToken,
-            nullifier,
-            new TextEncoder().encode(PP_LABELS.REDEMPTION_MAC),
-            32
-        );
-        const mac = blake3(macKey, { dkLen: PP_CONFIG.MAC_SIZE });
-
-        // Derive key for decrypting server response
-        const decryptionKey = hkdf(
-            blake3,
-            token.unblindedToken,
-            new Uint8Array(0),
-            new TextEncoder().encode(PP_LABELS.TOKEN_ENCRYPTION),
-            32
-        );
-
-        return {
-            tokenSecret: token.tokenSecret,
-            token: token.unblindedToken,
-            nullifier,
-            mac,
-            decryptionKey,
-            purpose: normalizePurpose(token.purpose || this.purpose),
-        };
-    }
-
-    /**
-     * Process server redemption response
-     */
-    async processRedemptionResponse(
-        encryptedResponse: Uint8Array,
-        decryptionKey: Uint8Array
-    ): Promise<{
-        success: boolean;
-        sessionNonce?: Uint8Array;
-        capabilityTokenSeed?: Uint8Array;
-    }> {
+        let nullifier: Uint8Array | null = null;
+        let macKey: Uint8Array | null = null;
+        let mac: Uint8Array | null = null;
         try {
-            const nonce = encryptedResponse.slice(0, PP_CONFIG.NONCE_SIZE);
-            const ciphertext = encryptedResponse.slice(PP_CONFIG.NONCE_SIZE);
+            nullifier = hkdf(
+                blake3,
+                token.unblindedToken,
+                new Uint8Array(0),
+                new TextEncoder().encode(PROTOCOL_KEYS.PRIVACY_PASS_NULLIFIER),
+                PP_CONFIG.NULLIFIER_SIZE
+            );
 
-            const cipher = xchacha20poly1305(decryptionKey, nonce);
-            const payload = cipher.decrypt(ciphertext);
-
-            if (payload[0] !== 0x01) {
-                return { success: false };
-            }
+            macKey = hkdf(
+                blake3,
+                token.unblindedToken,
+                nullifier,
+                new TextEncoder().encode(PROTOCOL_KEYS.PRIVACY_PASS_REDEMPTION_MAC),
+                32
+            );
+            mac = blake3(macKey, { dkLen: PP_CONFIG.MAC_SIZE });
 
             return {
-                success: true,
-                sessionNonce: payload.slice(1, 33),
-                capabilityTokenSeed: payload.slice(33, 65),
+                tokenSecret: token.tokenSecret,
+                token: token.unblindedToken,
+                nullifier,
+                mac
             };
-        } catch {
-            return { success: false };
+        } catch (error) {
+            nullifier?.fill(0);
+            mac?.fill(0);
+            throw error;
+        } finally {
+            macKey?.fill(0);
         }
     }
+}
 
-    /**
-     * Clear pending blinds
-     */
-    clearPending(): void {
-        for (const entry of this.pendingBlinds.values()) {
-            entry.blind.fill(0);
-            entry.input.fill(0);
-        }
-        this.pendingBlinds.clear();
+function deserializeTokenObject(parsed: any): AnonymousToken {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid token record');
+    if (Object.keys(parsed).sort().join(',') !== 'blindedElement,blindingFactor,id,issuedAt,pending,purpose,tokenSecret,unblindedToken,used') {
+        throw new Error('Invalid token record shape');
     }
+    if (typeof parsed.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)) {
+        throw new Error('Invalid token ID');
+    }
+    if (!Number.isSafeInteger(parsed.issuedAt) || parsed.issuedAt <= 0) throw new Error('Invalid token timestamp');
+    if (typeof parsed.used !== 'boolean' || typeof parsed.pending !== 'boolean') throw new Error('Invalid token state');
+
+    let tokenSecret: Uint8Array | null = null;
+    let blindingFactor: Uint8Array | undefined;
+    let blindedElement: Uint8Array | undefined;
+    let unblindedToken: Uint8Array | undefined;
+    try {
+        tokenSecret = decodeCanonicalBase64(parsed.tokenSecret, 'token encoding', { exactBytes: PP_CONFIG.TOKEN_SECRET_SIZE });
+        blindingFactor = parsed.blindingFactor == null ? undefined : decodeCanonicalBase64(parsed.blindingFactor, 'token encoding', { exactBytes: 32 });
+        blindedElement = parsed.blindedElement == null ? undefined : decodeCanonicalBase64(parsed.blindedElement, 'token encoding', { exactBytes: 32 });
+        unblindedToken = parsed.unblindedToken == null ? undefined : decodeCanonicalBase64(parsed.unblindedToken, 'token encoding', { exactBytes: PP_CONFIG.TOKEN_SIZE });
+        if (
+            (!unblindedToken && (!blindedElement || !blindingFactor)) ||
+            (unblindedToken && (blindedElement || blindingFactor))
+        ) {
+            throw new Error('Invalid token lifecycle state');
+        }
+
+        return {
+            id: parsed.id,
+            tokenSecret,
+            blindingFactor,
+            blindedElement,
+            unblindedToken,
+            purpose: normalizePrivacyPassPurpose(parsed.purpose),
+            issuedAt: parsed.issuedAt,
+            used: parsed.used,
+            pending: parsed.pending,
+        };
+    } catch (error) {
+        tokenSecret?.fill(0);
+        blindingFactor?.fill(0);
+        blindedElement?.fill(0);
+        unblindedToken?.fill(0);
+        throw error;
+    }
+}
+
+function serializeTokenObject(token: AnonymousToken): Record<string, unknown> {
+    normalizePrivacyPassPurpose(token.purpose);
+    if (!isPrivacyPassTokenEpochUsable(token.tokenSecret)) throw new Error('Cannot persist expired token');
+    if (
+        (!token.unblindedToken && (!token.blindedElement || !token.blindingFactor)) ||
+        (token.unblindedToken && (token.blindedElement || token.blindingFactor))
+    ) {
+        throw new Error('Cannot persist an invalid token lifecycle state');
+    }
+    return {
+        id: token.id,
+        tokenSecret: Base64.arrayBufferToBase64(token.tokenSecret),
+        blindingFactor: token.blindingFactor ? Base64.arrayBufferToBase64(token.blindingFactor) : null,
+        blindedElement: token.blindedElement ? Base64.arrayBufferToBase64(token.blindedElement) : null,
+        unblindedToken: token.unblindedToken ? Base64.arrayBufferToBase64(token.unblindedToken) : null,
+        purpose: token.purpose,
+        issuedAt: token.issuedAt,
+        used: token.used,
+        pending: token.pending,
+    };
 }
 
 /**
@@ -250,63 +253,25 @@ export const TokenSerializer = {
      * Serialize token for storage
      */
     serialize(token: AnonymousToken): string {
-        return JSON.stringify({
-            id: token.id,
-            tokenSecret: Base64.arrayBufferToBase64(token.tokenSecret),
-            blindingFactor: Base64.arrayBufferToBase64(token.blindingFactor),
-            signature: token.signature ? Base64.arrayBufferToBase64(token.signature) : null,
-            unblindedToken: token.unblindedToken
-                ? Base64.arrayBufferToBase64(token.unblindedToken)
-                : null,
-            purpose: token.purpose || 'account-auth',
-            issuedAt: token.issuedAt,
-            used: token.used,
-            pending: token.pending,
-        });
+        return JSON.stringify(serializeTokenObject(token));
     },
 
     /**
      * Deserialize token from storage
      */
     deserialize(data: string): AnonymousToken {
-        const parsed = JSON.parse(data);
-        return {
-            id: parsed.id,
-            tokenSecret: Base64.base64ToUint8Array(parsed.tokenSecret),
-            blindingFactor: Base64.base64ToUint8Array(parsed.blindingFactor),
-            signature: parsed.signature
-                ? Base64.base64ToUint8Array(parsed.signature)
-                : undefined,
-            unblindedToken: parsed.unblindedToken
-                ? Base64.base64ToUint8Array(parsed.unblindedToken)
-                : undefined,
-            purpose: typeof parsed.purpose === 'string' ? parsed.purpose : 'legacy',
-            issuedAt: parsed.issuedAt,
-            used: parsed.used,
-            pending: parsed.pending,
-        };
+        return deserializeTokenObject(JSON.parse(data));
     },
 
     /**
      * Serialize batch for storage
      */
     async serializeBatch(tokens: AnonymousToken[]): Promise<string> {
+        if (!Array.isArray(tokens) || tokens.length > 1000) throw new Error('Invalid token batch');
         const serialized = [];
         for (let i = 0; i < tokens.length; i++) {
             const t = tokens[i];
-            serialized.push({
-                id: t.id,
-                tokenSecret: Base64.arrayBufferToBase64(t.tokenSecret),
-                blindingFactor: Base64.arrayBufferToBase64(t.blindingFactor),
-                signature: t.signature ? Base64.arrayBufferToBase64(t.signature) : null,
-                unblindedToken: t.unblindedToken
-                    ? Base64.arrayBufferToBase64(t.unblindedToken)
-                    : null,
-                purpose: t.purpose || 'account-auth',
-                issuedAt: t.issuedAt,
-                used: t.used,
-                pending: t.pending,
-            });
+            if (isPrivacyPassTokenEpochUsable(t.tokenSecret)) serialized.push(serializeTokenObject(t));
 
             // Yield every 50 tokens
             if (i % 50 === 0 && i > 0) {
@@ -320,32 +285,36 @@ export const TokenSerializer = {
      * Deserialize batch from storage
      */
     async deserializeBatch(data: string): Promise<AnonymousToken[]> {
+        if (typeof data !== 'string' || data.length > 5 * 1024 * 1024) throw new Error('Invalid token batch');
         const parsed = JSON.parse(data);
+        if (!Array.isArray(parsed) || parsed.length > 1000) throw new Error('Invalid token batch');
         const tokens: AnonymousToken[] = [];
-        for (let i = 0; i < parsed.length; i++) {
-            const p = parsed[i];
-            tokens.push({
-                id: p.id as string,
-                tokenSecret: Base64.base64ToUint8Array(p.tokenSecret as string),
-                blindingFactor: Base64.base64ToUint8Array(p.blindingFactor as string),
-                signature: p.signature
-                    ? Base64.base64ToUint8Array(p.signature as string)
-                    : undefined,
-                unblindedToken: p.unblindedToken
-                    ? Base64.base64ToUint8Array(p.unblindedToken as string)
-                    : undefined,
-                purpose: typeof p.purpose === 'string' ? p.purpose : 'legacy',
-                issuedAt: p.issuedAt as number,
-                used: p.used as boolean,
-                pending: p.pending as boolean,
-            });
-            
-            // Yield every 50 tokens
-            if (i % 50 === 0 && i > 0) {
-                await new Promise(resolve => setTimeout(resolve, 0));
+        try {
+            for (let i = 0; i < parsed.length; i++) {
+                const token = deserializeTokenObject(parsed[i]);
+                if (isPrivacyPassTokenEpochUsable(token.tokenSecret)) {
+                    tokens.push(token);
+                } else {
+                    token.tokenSecret.fill(0);
+                    token.blindingFactor?.fill(0);
+                    token.blindedElement?.fill(0);
+                    token.unblindedToken?.fill(0);
+                }
+
+                if (i % 50 === 0 && i > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
             }
+            return tokens;
+        } catch (error) {
+            for (const token of tokens) {
+                token.tokenSecret.fill(0);
+                token.blindingFactor?.fill(0);
+                token.blindedElement?.fill(0);
+                token.unblindedToken?.fill(0);
+            }
+            throw error;
         }
-        return tokens;
     },
 };
 
@@ -375,14 +344,14 @@ export const PrivacyPassHelpers = {
         signedBlindedTokens: Uint8Array[];
         proof: Uint8Array;
         serverPublicKey: Uint8Array;
+        issuerEpoch: number;
     } {
         const rawTokens = (data as any)?.signedBlindedTokens;
         if (!Array.isArray(rawTokens) || rawTokens.length === 0) {
             throw new Error('Missing or empty signedBlindedTokens in issuance response');
         }
-        const tokenList = rawTokens.filter((t): t is string => typeof t === 'string' && t.length > 0);
-        if (tokenList.length === 0) {
-            throw new Error('No valid token strings in signedBlindedTokens');
+        if (rawTokens.length > PP_CONFIG.MAX_BATCH_SIZE || !rawTokens.every((t) => typeof t === 'string')) {
+            throw new Error('Invalid signed token batch');
         }
 
         const proofStr = typeof data.proof === 'string' ? data.proof : undefined;
@@ -390,19 +359,32 @@ export const PrivacyPassHelpers = {
             throw new Error('Missing proof in issuance response');
         }
 
-        const pubKeyStr = typeof data.publicKey === 'string' ? data.publicKey
-            : typeof data.serverPublicKey === 'string' ? data.serverPublicKey
-            : undefined;
+        const pubKeyStr = typeof data.publicKey === 'string' ? data.publicKey : undefined;
         if (!pubKeyStr) {
             throw new Error('Missing publicKey in issuance response');
         }
+        const issuerEpoch = data.issuerEpoch;
+        if (!Number.isSafeInteger(issuerEpoch) || issuerEpoch < 0 || issuerEpoch > 0xffffffff) {
+            throw new Error('Invalid Privacy Pass issuer epoch');
+        }
 
-        return {
-            signedBlindedTokens: tokenList.map(t => Base64.base64ToUint8Array(t)),
-            proof: Base64.base64ToUint8Array(proofStr),
-            serverPublicKey: Base64.base64ToUint8Array(pubKeyStr),
-        };
+        const signedBlindedTokens: Uint8Array[] = [];
+        let proof: Uint8Array | null = null;
+        let serverPublicKey: Uint8Array | null = null;
+        try {
+            for (const token of rawTokens) {
+                signedBlindedTokens.push(decodeCanonicalBase64(token, 'token encoding', { exactBytes: 32 }));
+            }
+            proof = decodeCanonicalBase64(proofStr, 'token encoding', { exactBytes: 64 });
+            serverPublicKey = decodeCanonicalBase64(pubKeyStr, 'token encoding', { exactBytes: 32 });
+            return { signedBlindedTokens, proof, serverPublicKey, issuerEpoch };
+        } catch (error) {
+            for (const token of signedBlindedTokens) token.fill(0);
+            proof?.fill(0);
+            serverPublicKey?.fill(0);
+            throw error;
+        }
     }
 };
 
-export { PP_CONFIG, PP_LABELS };
+export { PP_CONFIG };

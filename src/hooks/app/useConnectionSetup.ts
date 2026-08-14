@@ -1,9 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
-import { SignalType } from '../../lib/types/signal-types';
-import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import websocketClient from '../../lib/websocket/websocket';
-import { storage } from '../../lib/tauri-bindings';
 
 interface ConnectionSetupProps {
   setupComplete: boolean;
@@ -17,8 +13,6 @@ interface ConnectionSetupProps {
     accountAuthenticated: boolean;
     recoveryActive: boolean;
     tokenValidationInProgress: boolean;
-    attemptAuthRecovery: () => Promise<boolean>;
-    setTokenValidationInProgress: (value: boolean) => void;
   };
   Database: {
     secureDBRef: React.RefObject<any>;
@@ -32,53 +26,34 @@ export function useConnectionSetup({
   Authentication,
   Database,
 }: ConnectionSetupProps) {
-  const attemptedRecoveryRef = useRef(false);
+  const connectionGenerationRef = useRef(0);
 
   useEffect(() => {
-    if (!selectedServerUrl || !setupComplete) return;
-
+    const generation = ++connectionGenerationRef.current;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && connectionGenerationRef.current === generation;
+    if (!selectedServerUrl || !setupComplete) {
+      return () => { cancelled = true; };
+    }
+    
+    if (
+      Authentication.isSubmittingAuth ||
+      Authentication.recoveryActive ||
+      Authentication.tokenValidationInProgress ||
+      Authentication.showPasswordPrompt
+    ) {
+      return () => { cancelled = true; };
+    }
     const initializeConnection = async () => {
       try {
         await websocketClient.connect();
-
-        const hasEncryptedAuth = Database.secureDBRef.current !== null;
-        let storedUsername: string | null = null;
-        try {
-          storedUsername = await storage.get('last_authenticated_username');
-        } catch { }
-
-        const canRecover = (
-          (hasEncryptedAuth || !!storedUsername) &&
-          !Authentication.isLoggedIn &&
-          !Authentication.isRegistrationMode &&
-          !Authentication.showPassphrasePrompt &&
-          !Authentication.showPasswordPrompt &&
-          !Authentication.isSubmittingAuth &&
-          !Authentication.accountAuthenticated &&
-          !Authentication.recoveryActive
-        );
-
-        if (canRecover && !attemptedRecoveryRef.current) {
-          attemptedRecoveryRef.current = true;
-          try {
-            const recovered = await Authentication.attemptAuthRecovery();
-            if (!recovered) {
-              Authentication.setTokenValidationInProgress(false);
-            }
-          } catch (_e) {
-            SecurityAuditLogger.log('warn', 'auth-recovery-failed', { error: (_e as any)?.message || 'unknown' });
-            Authentication.setTokenValidationInProgress(false);
-          }
-        } else if (!canRecover && Authentication.tokenValidationInProgress && !Authentication.isLoggedIn) {
-          if (!storedUsername && !hasStoredTokens && !hasEncryptedAuth) {
-            Authentication.setTokenValidationInProgress(false);
-          }
-        }
-      } catch (_error) {
-        SecurityAuditLogger.log(SignalType.ERROR, 'connection-init-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
+        if (!isCurrent()) return;
+      } catch {
+        if (!isCurrent()) return;
       }
     };
 
     void initializeConnection();
-  }, [setupComplete, selectedServerUrl, Authentication.isLoggedIn, Authentication.isRegistrationMode, Authentication.showPassphrasePrompt, Authentication.showPasswordPrompt, Authentication.isSubmittingAuth, Authentication.accountAuthenticated, Authentication.recoveryActive, Authentication.tokenValidationInProgress, Database.dbInitialized]);
+    return () => { cancelled = true; };
+  }, [setupComplete, selectedServerUrl, Authentication.isSubmittingAuth, Authentication.recoveryActive, Authentication.tokenValidationInProgress, Authentication.showPasswordPrompt, Database.dbInitialized]);
 }

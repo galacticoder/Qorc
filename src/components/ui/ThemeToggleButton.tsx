@@ -1,5 +1,5 @@
-import React, { useId } from 'react';
-import { useTheme } from 'next-themes';
+import { useId } from 'react';
+import { useTheme } from '../../contexts/ThemeContext';
 
 interface ThemeToggleButtonProps {
   className?: string;

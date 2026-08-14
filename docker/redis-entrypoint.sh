@@ -3,6 +3,17 @@ set -e
 
 echo "[REDIS-ENTRYPOINT] Starting Redis TLS setup..."
 
+if [ ${#REDIS_PASSWORD} -lt 32 ]; then
+  echo "[REDIS-ENTRYPOINT] REDIS_PASSWORD must be at least 32 characters" >&2
+  exit 1
+fi
+case "$REDIS_PASSWORD" in
+  *[!A-Za-z0-9_-]*)
+    echo "[REDIS-ENTRYPOINT] REDIS_PASSWORD must use only base64url characters" >&2
+    exit 1
+    ;;
+esac
+
 if [ ! -f /certs/redis-ca.crt ] || [ ! -f /certs/redis.crt ] || [ ! -f /certs/redis-client.crt ]; then
   echo "[REDIS-ENTRYPOINT] Generating TLS certificates..."
   
@@ -55,9 +66,17 @@ else
   echo "[REDIS-ENTRYPOINT] Using existing TLS certificates"
 fi
 
+rm -f /certs/redis-ca.key /certs/redis-ca.srl /certs/redis.csr \
+  /certs/redis-client.csr /certs/redis-san.cnf
+
+umask 077
+printf 'user default on >%s ~* &* +@all\n' "$REDIS_PASSWORD" > /data/users.acl
+chown redis:redis /data/users.acl
+chmod 600 /data/users.acl
+
 echo "[REDIS-ENTRYPOINT] Starting Redis with TLS..."
 exec redis-server \
-  --requirepass "${REDIS_PASSWORD}" \
+  --aclfile /data/users.acl \
   --tls-port 6379 \
   --port 0 \
   --tls-cert-file /certs/redis.crt \
@@ -65,5 +84,5 @@ exec redis-server \
   --tls-ca-cert-file /certs/redis-ca.crt \
   --tls-auth-clients yes \
   --bind 0.0.0.0 \
-  --protected-mode no \
+  --protected-mode yes \
   --daemonize no

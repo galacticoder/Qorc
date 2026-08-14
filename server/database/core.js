@@ -1,51 +1,28 @@
 /**
  * Database Connection Pool and Utilities
- * 
- * Shared database infrastructure used by all database modules
  */
 
-import path from 'path';
-import { fileURLToPath } from 'url';
 import fs from 'fs';
-import crypto, { randomBytes } from 'crypto';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import crypto from 'crypto';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { deriveAuthRootKey } from '../crypto/auth-root.js';
+import { envInt } from '../utils/env.js';
+import { SHA_512_ALGORITHM } from '../utils/crypto-consts.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 
-const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const ROUTING_IDENTIFIER_KEY = deriveAuthRootKey(PROTOCOL_KEYS.ROUTING_IDENTIFIER_ROOT);
+let routingIdentifierKeyDestroyed = false;
 
-export function sanitizeParsedJson(value) {
-  if (!value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(sanitizeParsedJson);
-  const out = Object.create(null);
-  for (const [key, v] of Object.entries(value)) {
-    if (RESERVED_JSON_KEYS.has(key)) continue;
-    out[key] = sanitizeParsedJson(v);
-  }
-  return out;
-}
-
-export function safeJsonParseObject(raw) {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return sanitizeParsedJson(parsed);
-  } catch {
-    return null;
-  }
-}
-
-function getPrivateIdentifierSecret() {
-  const secret = process.env.ROUTING_ID_SECRET || process.env.DB_FIELD_KEY || process.env.USER_ID_SALT;
-  if (!secret || Buffer.byteLength(secret, 'utf8') < 32) {
-    throw new Error('ROUTING_ID_SECRET or DB_FIELD_KEY must be at least 32 bytes for private identifier storage');
-  }
-  return secret;
+export function destroyDatabaseSecrets() {
+  if (routingIdentifierKeyDestroyed) return;
+  routingIdentifierKeyDestroyed = true;
+  ROUTING_IDENTIFIER_KEY.fill(0);
 }
 
 export function privateLookupId(namespace, identifier) {
+  if (routingIdentifierKeyDestroyed) {
+    throw new Error('Database routing secrets have been destroyed');
+  }
   if (typeof namespace !== 'string' || namespace.length === 0) {
     throw new Error('privateLookupId requires a namespace');
   }
@@ -54,136 +31,175 @@ export function privateLookupId(namespace, identifier) {
   }
 
   return crypto
-    .createHmac('sha512', Buffer.from(getPrivateIdentifierSecret(), 'utf8'))
+    .createHmac(SHA_512_ALGORITHM, ROUTING_IDENTIFIER_KEY)
     .update(namespace)
     .update('\0')
     .update(identifier)
     .digest('base64url');
 }
 
-export function privateRedisKey(prefix, namespace, identifier) {
-  return `${prefix}${privateLookupId(namespace, identifier)}`;
-}
-
-// Secret file paths
-const USER_ID_SALT_FILE_PATH = process.env.USER_ID_SALT_FILE
-  ? path.resolve(process.env.USER_ID_SALT_FILE)
-  : path.resolve(__dirname, '../config/generated-user-id-salt.txt');
-
-const DB_FIELD_KEY_FILE_PATH = process.env.DB_FIELD_KEY_FILE
-  ? path.resolve(process.env.DB_FIELD_KEY_FILE)
-  : path.resolve(__dirname, '../config/generated-db-field-key.txt');
-
-/**
- * Load or generate a secret from file
- */
-function loadOrGenerateSecret(envVarName, filePath, label, purpose, warningMessage) {
-  // Check environment first
-  if (process.env[envVarName]) {
-    return process.env[envVarName];
-  }
-
-  // Try to load from file
-  try {
-    if (fs.existsSync(filePath)) {
-      const secret = fs.readFileSync(filePath, 'utf8').trim();
-      if (secret.length >= 32) {
-        cryptoLogger.info('[SECURITY] Loaded secret from configured storage', { label });
-        return secret;
-      }
-    }
-  } catch (e) {
-    cryptoLogger.warn('[SECURITY] Could not read configured secret file', { label, error: e?.message });
-  }
-
-  // Generate new secret
-  cryptoLogger.info('[SECURITY] Generating new secret', { label, purpose });
-  cryptoLogger.warn('[SECURITY] Secret rotation warning', { label, warning: warningMessage });
-
-  const newSecret = crypto.randomBytes(64).toString('hex');
-
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(filePath, newSecret, { mode: 0o600 });
-    cryptoLogger.info('[SECURITY] Saved generated secret to configured storage', { label });
-  } catch (e) {
-    cryptoLogger.error('[SECURITY] Could not save generated secret', { label, error: e?.message });
-  }
-
-  return newSecret;
-}
-
-// Load secrets
-const USER_ID_SALT_ENV = loadOrGenerateSecret(
-  'USER_ID_SALT',
-  USER_ID_SALT_FILE_PATH,
-  'USER_ID_SALT',
-  'secure user ID hashing',
-  'Losing this salt will affect token service user ID hashing'
-);
-if (!process.env.USER_ID_SALT) {
-  process.env.USER_ID_SALT = USER_ID_SALT_ENV;
-}
-
-const DB_FIELD_KEY_ENV = loadOrGenerateSecret(
-  'DB_FIELD_KEY',
-  DB_FIELD_KEY_FILE_PATH,
-  'DB_FIELD_KEY',
-  'database field encryption',
-  'Losing this key will make all encrypted database fields unreadable'
-);
-if (!process.env.DB_FIELD_KEY) {
-  process.env.DB_FIELD_KEY = DB_FIELD_KEY_ENV;
-}
-
-// Database connection
-const USE_PG = !!process.env.DATABASE_URL;
 let pgPool = null;
+let pgPoolInitialization = null;
+
+function requiredDatabaseValue(value, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${label} is required for PostgreSQL`);
+  }
+  return value;
+}
+
+function buildPgSslConfig(serverName) {
+  const ssl = {
+    rejectUnauthorized: true,
+    servername: requiredDatabaseValue(serverName, 'DB_TLS_SERVERNAME')
+  };
+
+  const caPath = process.env.PGSSLROOTCERT;
+  if (caPath) {
+    try {
+      ssl.ca = fs.readFileSync(caPath, 'utf8');
+    } catch (e) {
+      throw new Error(`Failed to read Postgres CA certificate at ${caPath}: ${e?.message}`);
+    }
+  } else if (process.env.DATABASE_CA_CERT) {
+    ssl.ca = process.env.DATABASE_CA_CERT;
+  } else {
+    throw new Error('PGSSLROOTCERT or DATABASE_CA_CERT is required');
+  }
+  return ssl;
+}
+
+function databaseConnectionConfig() {
+  let host;
+  let port;
+  let user;
+  let password;
+  let database;
+  let certificateName;
+
+  if (typeof process.env.DATABASE_URL === 'string' && process.env.DATABASE_URL.length > 0) {
+    let url;
+    try {
+      url = new URL(process.env.DATABASE_URL);
+    } catch {
+      throw new Error('DATABASE_URL is invalid');
+    }
+    if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+      throw new Error('DATABASE_URL must use postgres:// or postgresql://');
+    }
+    host = process.env.DB_CONNECT_HOST || url.hostname;
+    port = url.port || '5432';
+    user = decodeURIComponent(url.username);
+    password = decodeURIComponent(url.password);
+    database = decodeURIComponent(url.pathname.replace(/^\//, ''));
+    certificateName = process.env.DB_TLS_SERVERNAME || url.hostname;
+  } else {
+    host = process.env.DB_CONNECT_HOST || process.env.PGHOST || process.env.DB_HOST;
+    port = process.env.PGPORT || process.env.DB_PORT;
+    user = process.env.PGUSER || process.env.DATABASE_USER;
+    password = process.env.PGPASSWORD || process.env.DATABASE_PASSWORD;
+    database = process.env.PGDATABASE || process.env.DB_NAME;
+    certificateName = process.env.DB_TLS_SERVERNAME || process.env.PGHOST || process.env.DB_HOST;
+  }
+
+  requiredDatabaseValue(host, 'PGHOST/DB_HOST');
+  requiredDatabaseValue(user, 'PGUSER/DATABASE_USER');
+  requiredDatabaseValue(password, 'PGPASSWORD/DATABASE_PASSWORD');
+  requiredDatabaseValue(database, 'PGDATABASE/DB_NAME');
+  const parsedPort = Number(port);
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    throw new Error('PGPORT/DB_PORT must be an integer from 1 through 65535');
+  }
+
+  const statementTimeoutMs = envInt('PG_STATEMENT_TIMEOUT_MS', 15_000, 1_000, 30_000);
+  const queryTimeoutMs = envInt(
+    'PG_QUERY_TIMEOUT_MS',
+    20_000,
+    statementTimeoutMs,
+    30_000
+  );
+
+  return {
+    host,
+    port: parsedPort,
+    user,
+    password,
+    database,
+    ssl: buildPgSslConfig(certificateName),
+    max: envInt('PG_POOL_MAX', 20, 2, 100),
+    idleTimeoutMillis: envInt('PG_IDLE_TIMEOUT_MS', 30_000, 10_000, 10 * 60_000),
+    connectionTimeoutMillis: envInt('PG_CONNECTION_TIMEOUT_MS', 10_000, 1_000, 30_000),
+    statement_timeout: statementTimeoutMs,
+    query_timeout: queryTimeoutMs,
+    lock_timeout: envInt('PG_LOCK_TIMEOUT_MS', 5_000, 500, statementTimeoutMs),
+    idle_in_transaction_session_timeout: envInt(
+      'PG_IDLE_TRANSACTION_TIMEOUT_MS',
+      20_000,
+      1_000,
+      30_000
+    )
+  };
+}
 
 export async function getPgPool() {
   if (pgPool) return pgPool;
+  if (pgPoolInitialization) return pgPoolInitialization;
 
-  const { default: pg } = await import('pg');
-  const Pool = pg.Pool || pg.default?.Pool;
-  if (!Pool) throw new Error('pg.Pool not found');
+  const initialization = (async () => {
+    const { default: pg } = await import('pg');
+    const Pool = pg.Pool || pg.default?.Pool;
+    if (!Pool) throw new Error('pg.Pool not found');
 
-  let config;
-  if (typeof process.env.DATABASE_URL === 'string') {
-    const dbUrl = process.env.DATABASE_URL;
-    config = {
-      connectionString: dbUrl,
-      ssl: false,
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    };
+    const config = databaseConnectionConfig();
+    const candidate = new Pool(config);
 
-    if (dbUrl.includes('sslmode=require') || dbUrl.includes('ssl=true')) {
-      config.ssl = { rejectUnauthorized: false };
+    try {
+      await candidate.query('SELECT 1');
+      pgPool = candidate;
+      console.log('[DB] PostgreSQL pool initialized');
+      return candidate;
+    } catch (error) {
+      try {
+        await candidate.end();
+      } catch {
+      }
+      console.error('[DB] PostgreSQL connection failed');
+      throw error;
     }
-  } else {
-    config = {
-      host: process.env.PGHOST || 'localhost',
-      port: parseInt(process.env.PGPORT || '5432', 10),
-      user: process.env.PGUSER || 'postgres',
-      password: process.env.PGPASSWORD || 'postgres',
-      database: process.env.PGDATABASE || 'qor_chat',
-      ssl: false,
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    };
-  }
+  })();
 
+  pgPoolInitialization = initialization;
   try {
-    pgPool = new Pool(config);
-    await pgPool.query('SELECT 1');
-    cryptoLogger.info('[DB] PostgreSQL pool initialized');
-    return pgPool;
-  } catch (e) {
-    cryptoLogger.error('[DB] PostgreSQL connection failed', { error: e?.message });
-    throw e;
+    return await initialization;
+  } finally {
+    if (pgPoolInitialization === initialization) pgPoolInitialization = null;
   }
 }
 
-export { USE_PG, crypto, randomBytes, cryptoLogger };
+export async function closePgPool() {
+  const initialization = pgPoolInitialization;
+  if (initialization) await initialization.catch(() => { });
+
+  const pool = pgPool;
+  pgPool = null;
+  if (pool) await pool.end();
+}
+
+export async function withTransaction(client, operation) {
+  await client.query('BEGIN');
+  let shouldRollback = false;
+  const rollback = (value) => {
+    shouldRollback = true;
+    return value;
+  };
+  try {
+    const result = await operation({ rollback });
+    await client.query(shouldRollback ? 'ROLLBACK' : 'COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  }
+}
+
+export { crypto };

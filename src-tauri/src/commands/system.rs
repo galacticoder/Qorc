@@ -1,147 +1,251 @@
 //! System Commands
 
 use crate::state::AppState;
-use crate::system::power::BlockerType;
-use crate::system::screen_capture::{CaptureOptions, ScreenSource};
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use crate::system::screen_capture::ScreenSource;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use url::Url;
 
-/// Platform information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlatformInfo {
-    pub platform: String,
-    pub arch: String,
-    pub version: String,
-    pub hostname: String,
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
+
+const MAX_EXTERNAL_URL_BYTES: usize = 8 * 1024;
+static EXTERNAL_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MEDIA_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+const MEDIA_PERMISSION_LEASE_TTL: Duration = Duration::from_secs(10);
+
+#[cfg(target_os = "linux")]
+struct MediaPermissionLease {
+    audio: bool,
+    video: bool,
+    expires_at: Instant,
 }
 
-/// Get platform info
-#[tauri::command]
-pub fn get_platform_info() -> PlatformInfo {
-    PlatformInfo {
-        platform: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        version: std::env::consts::OS.to_string(),
-        hostname: hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string()),
+#[cfg(target_os = "linux")]
+static MEDIA_PERMISSION_LEASE: Mutex<Option<MediaPermissionLease>> = Mutex::new(None);
+
+struct ExternalDialogGuard;
+
+impl ExternalDialogGuard {
+    fn acquire() -> Result<Self, String> {
+        EXTERNAL_DIALOG_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self)
+            .map_err(|_| "Another external-link confirmation is active".to_string())
     }
 }
 
-/// Get platform
-#[tauri::command]
-pub fn get_platform() -> String {
-    std::env::consts::OS.to_string()
+struct MediaDialogGuard;
+
+impl MediaDialogGuard {
+    fn acquire() -> Result<Self, String> {
+        MEDIA_DIALOG_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self)
+            .map_err(|_| "Another media confirmation is active".to_string())
+    }
 }
 
-/// Get architecture
-#[tauri::command]
-pub fn get_arch() -> String {
-    std::env::consts::ARCH.to_string()
+impl Drop for MediaDialogGuard {
+    fn drop(&mut self) {
+        MEDIA_DIALOG_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn consume_media_permission_lease(audio: bool, video: bool) -> bool {
+    let Ok(mut slot) = MEDIA_PERMISSION_LEASE.lock() else {
+        return false;
+    };
+    let Some(lease) = slot.take() else {
+        return false;
+    };
+
+    Instant::now() <= lease.expires_at
+        && (!audio || lease.audio)
+        && (!video || lease.video)
+        && (audio || video)
+}
+
+async fn confirm_native_dialog(
+    app: &AppHandle,
+    title: &str,
+    message: String,
+    confirm_label: &str,
+) -> bool {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirm_label.to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(move |confirmed| {
+            let _ = response_tx.send(confirmed);
+        });
+    response_rx.await.unwrap_or(false)
+}
+
+impl Drop for ExternalDialogGuard {
+    fn drop(&mut self) {
+        EXTERNAL_DIALOG_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 /// Get the runtime qor instance id used for per instance storage paths
 #[tauri::command]
-pub fn get_instance_id() -> String {
-    crate::system::get_instance_id()
+pub fn get_instance_id() -> Result<String, String> {
+    crate::system::get_instance_id().map_err(|error| error.safe_message())
 }
 
 /// Open URL in default browser
 #[tauri::command]
-pub async fn open_external(url: String) -> Result<bool, String> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("Only HTTP(S) URLs allowed".to_string());
+pub async fn open_external(url: String, app: AppHandle) -> Result<bool, String> {
+    if url.is_empty() || url.len() > MAX_EXTERNAL_URL_BYTES || url.chars().any(char::is_control) {
+        return Err("Invalid external URL".to_string());
     }
 
-    open::that(&url)
+    let parsed = Url::parse(&url).map_err(|_| "Invalid external URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only HTTP(S) URLs allowed".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "External URL must include a host".to_string())?;
+    if host.len() > 253 {
+        return Err("External URL host is too long".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Credentials in external URLs are not allowed".to_string());
+    }
+
+    let _dialog_guard = ExternalDialogGuard::acquire()?;
+    let destination = parsed
+        .port()
+        .map(|port| format!("{host}:{port}"))
+        .unwrap_or_else(|| host.to_string());
+    let confirmed = confirm_native_dialog(
+        &app,
+        "Open external link",
+        format!(
+            "Opening this link in your system browser may reveal your network address to {destination}. Continue?"
+        ),
+        "Open browser",
+    )
+    .await;
+    if !confirmed {
+        return Ok(false);
+    }
+
+    open::that(parsed.as_str())
         .map(|_| true)
-        .map_err(|e| format!("Failed to open URL: {}", e))
+        .map_err(|_| "Failed to open URL".to_string())
 }
 
-/// Get screen capture sources
 #[tauri::command]
-pub async fn get_screen_sources(
-    options: Option<CaptureOptions>,
-) -> Result<Vec<ScreenSource>, String> {
-    crate::system::screen_capture::get_sources(options)
-        .await
-        .map_err(|e| e.safe_message())
-}
-
-/// Capture a screen source
-#[tauri::command]
-pub async fn capture_source(source_id: String) -> Result<Vec<u8>, String> {
-    crate::system::screen_capture::capture_source(&source_id)
-        .await
-        .map_err(|e| e.safe_message())
-}
-
-/// Start power save blocker
-#[tauri::command]
-pub async fn power_save_blocker_start(
-    blocker_type: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<u32, String> {
-    let blocker = state
-        .power_blocker()
-        .ok_or_else(|| "Power blocker not initialized".to_string())?;
-
-    let bt = match blocker_type.as_deref() {
-        Some("prevent-app-suspension") | Some("system") => BlockerType::PreventSystemSleep,
-        _ => BlockerType::PreventDisplaySleep,
+pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, String> {
+    let (audio, video, description, enumeration_only) = match kind.as_str() {
+        "audio" => (true, false, "microphone", false),
+        "video" => (false, true, "camera or screen/window capture", false),
+        "audio-video" => (true, true, "microphone and camera", false),
+        "enumerate" => (false, false, "media device names and identifiers", true),
+        _ => return Err("Invalid media access type".to_string()),
     };
 
-    blocker.start(bt).map_err(|e| e.safe_message())
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (audio, video);
+        if !enumeration_only {
+            let _ = (description, app);
+            return Ok(true);
+        }
+        let _dialog_guard = MediaDialogGuard::acquire()?;
+        return Ok(confirm_native_dialog(
+            &app,
+            "Show media devices",
+            format!("Allow Qor Chat to list your {description}?"),
+            "Show devices",
+        )
+        .await);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _dialog_guard = MediaDialogGuard::acquire()?;
+        let confirmed = confirm_native_dialog(
+            &app,
+            if enumeration_only {
+                "Show media devices"
+            } else {
+                "Allow media access"
+            },
+            if enumeration_only {
+                format!("Allow Qor Chat to list your {description}?")
+            } else {
+                format!("Allow Qor Chat to access your {description} for this action?")
+            },
+            if enumeration_only {
+                "Show devices"
+            } else {
+                "Allow once"
+            },
+        )
+        .await;
+
+        let mut slot = MEDIA_PERMISSION_LEASE
+            .lock()
+            .map_err(|_| "Media permission state unavailable".to_string())?;
+        *slot = if confirmed && !enumeration_only {
+            Some(MediaPermissionLease {
+                audio,
+                video,
+                expires_at: Instant::now() + MEDIA_PERMISSION_LEASE_TTL,
+            })
+        } else {
+            None
+        };
+        Ok(confirmed)
+    }
 }
 
-/// Stop power save blocker
 #[tauri::command]
-pub async fn power_save_blocker_stop(id: u32, state: State<'_, AppState>) -> Result<bool, String> {
-    let blocker = state
-        .power_blocker()
-        .ok_or_else(|| "Power blocker not initialized".to_string())?;
+pub async fn get_screen_sources(app: AppHandle) -> Result<Vec<ScreenSource>, String> {
+    let _dialog_guard = MediaDialogGuard::acquire()?;
+    let confirmed = confirm_native_dialog(
+        &app,
+        "Show screen sources",
+        "Show Qor Chat the names of your open windows and displays for the screen-share picker? Nothing is shared until you select a source."
+            .to_string(),
+        "Show sources",
+    )
+    .await;
+    if !confirmed {
+        return Err("Screen source access denied".to_string());
+    }
 
-    blocker.stop(id).map_err(|e| e.safe_message())
+    crate::system::screen_capture::get_sources()
+        .await
+        .map_err(|e| e.safe_message())
 }
 
-/// Check if power save blocker is active
+/// Start the single call sleep inhibitor.
 #[tauri::command]
-pub async fn power_save_blocker_is_started(
-    id: u32,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let blocker = state
-        .power_blocker()
-        .ok_or_else(|| "Power blocker not initialized".to_string())?;
-
-    Ok(blocker.is_started(id))
+pub fn power_save_blocker_start(state: State<'_, AppState>) -> Result<bool, String> {
+    state.power_blocker().start().map_err(|e| e.safe_message())
 }
 
-/// Get app version
+/// Stop the call sleep inhibitor.
 #[tauri::command]
-pub fn get_app_version(app: AppHandle) -> String {
-    app.package_info().version.to_string()
-}
-
-/// Get app name
-#[tauri::command]
-pub fn get_app_name(app: AppHandle) -> String {
-    app.package_info().name.clone()
-}
-
-/// Check if running in Tauri
-#[tauri::command]
-pub fn is_tauri() -> bool {
-    true
-}
-
-/// Get user data path
-#[tauri::command]
-pub fn get_user_data_path(app: AppHandle) -> Result<String, String> {
-    app.path()
-        .app_data_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| format!("Failed to get app data path: {}", e))
+pub fn power_save_blocker_stop(state: State<'_, AppState>) -> Result<bool, String> {
+    state.power_blocker().stop().map_err(|e| e.safe_message())
 }
 
 /// Get close to tray setting
@@ -157,12 +261,6 @@ pub fn set_close_to_tray(enabled: bool, state: State<'_, AppState>) -> bool {
     true
 }
 
-/// Set tray unread badge count
-#[tauri::command]
-pub fn tray_set_unread_count(app: AppHandle, count: u32) {
-    crate::system::tray::set_unread_count(&app, count);
-}
-
 /// Increment tray unread badge count
 #[tauri::command]
 pub fn tray_increment_unread(app: AppHandle) {
@@ -173,14 +271,4 @@ pub fn tray_increment_unread(app: AppHandle) {
 #[tauri::command]
 pub fn tray_clear_unread(app: AppHandle) {
     crate::system::tray::clear_unread(&app);
-}
-
-/// Forward  frontend log line into rust terminal
-#[tauri::command]
-pub fn frontend_log(level: String, line: String) {
-    match level.as_str() {
-        "warn" => tracing::warn!(target: "qor_chat::frontend", "{}", line),
-        "error" => tracing::error!(target: "qor_chat::frontend", "{}", line),
-        _ => tracing::info!(target: "qor_chat::frontend", "{}", line),
-    }
 }

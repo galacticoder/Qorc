@@ -1,376 +1,332 @@
-//! Local discovery PIR client commands
+//! Client side PIR driven through `qor-pir-client` sidecar
 
-use serde_json::{Value, json};
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::OnceLock;
-use std::time::Duration;
-use tauri::State;
-use tauri::{AppHandle, Manager};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 
-use crate::state::AppState;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde::Serialize;
+use tauri::Manager;
 
-fn candidate_binary_names() -> Vec<&'static str> {
-    if cfg!(windows) {
-        vec!["qor-pir-client.exe"]
-    } else {
-        vec!["qor-pir-client"]
-    }
+use crate::error::{QorError, QorResult};
+
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_pir_client.rs"));
 }
 
-fn candidate_paths(app: &AppHandle) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+const OP_QUERY: u8 = 1;
+const OP_DECODE: u8 = 2;
+const OP_DISCARD: u8 = 3;
+const STATUS_OK: u8 = 0;
 
-    if let Ok(raw) = std::env::var("QOR_PIR_CLIENT_BIN") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            paths.push(PathBuf::from(trimmed));
-        }
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RECORDS: u32 = 1 << 20;
+const MAX_ENTRY_BYTES: u32 = 1 << 20;
+
+static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PirQuery {
+    pub session_id: u32,
+    pub query: String,
+    pub pub_params: String,
+}
+
+fn embedded_file_matches(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file()
+        || metadata.len() != embedded::EMBEDDED_PIR_CLIENT.len() as u64
+    {
+        return false;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    blake3::hash(&bytes).as_bytes() == &embedded::EMBEDDED_PIR_CLIENT_HASH
+}
+
+fn secure_embedded_directory(path: &Path) -> QorResult<()> {
+    fs::create_dir_all(path)
+        .map_err(|_| QorError::Internal("PIR runtime directory is unavailable".to_string()))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| QorError::Internal("PIR runtime directory is unavailable".to_string()))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(QorError::Internal(
+            "PIR runtime directory is invalid".to_string(),
+        ));
     }
 
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        for name in candidate_binary_names() {
-            paths.push(resource_dir.join(name));
-            paths.push(resource_dir.join("bin").join(name));
-            paths.push(resource_dir.join("binaries").join(name));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(QorError::Internal(
+                "PIR runtime directory has the wrong owner".to_string(),
+            ));
         }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
+            QorError::Internal("PIR runtime directory permissions failed".to_string())
+        })?;
     }
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
-            for name in candidate_binary_names() {
-                paths.push(dir.join(name));
-                paths.push(dir.join("bin").join(name));
-                paths.push(dir.join("binaries").join(name));
+    Ok(())
+}
+
+fn write_embedded_client(path: &Path) -> QorResult<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| QorError::Internal("Invalid PIR runtime path".to_string()))?;
+    let temp = parent.join(format!(
+        ".qor-pir-client-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> QorResult<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options
+            .open(&temp)
+            .map_err(|_| QorError::Internal("PIR client extraction failed".to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|_| QorError::Internal("PIR client permissions failed".to_string()))?;
+        }
+        file.write_all(embedded::EMBEDDED_PIR_CLIENT)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| QorError::Internal("PIR client extraction failed".to_string()))?;
+        drop(file);
+
+        if path.exists() && !embedded_file_matches(path) {
+            fs::remove_file(path).map_err(|_| {
+                QorError::Internal("Invalid PIR client cannot be replaced".to_string())
+            })?;
+        }
+        match fs::rename(&temp, path) {
+            Ok(()) => {}
+            Err(_) if embedded_file_matches(path) => {}
+            Err(_) => {
+                return Err(QorError::Internal(
+                    "PIR client installation failed".to_string(),
+                ));
             }
         }
+        if !embedded_file_matches(path) {
+            return Err(QorError::Internal(
+                "PIR client integrity verification failed".to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    if temp.exists() {
+        let _ = fs::remove_file(&temp);
     }
-
-    paths
+    result
 }
 
-fn find_pir_client_binary(app: &AppHandle) -> Result<PathBuf, String> {
-    for path in candidate_paths(app) {
-        if path.is_file() {
-            return Ok(path);
+fn materialize_embedded_client(directory: &Path) -> QorResult<PathBuf> {
+    secure_embedded_directory(&directory)?;
+    let hash_prefix = hex::encode(&embedded::EMBEDDED_PIR_CLIENT_HASH[..8]);
+    let base_name = embedded::EMBEDDED_PIR_CLIENT_FILE_NAME;
+    let file_name = match base_name.rsplit_once('.') {
+        Some((stem, extension)) => format!("{stem}-{hash_prefix}.{extension}"),
+        None => format!("{base_name}-{hash_prefix}"),
+    };
+    let path = directory.join(file_name);
+    if !embedded_file_matches(&path) {
+        write_embedded_client(&path)?;
+    }
+    Ok(path)
+}
+
+fn sidecar_path(app: &tauri::AppHandle) -> QorResult<PathBuf> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| QorError::Internal("App cache directory is unavailable".to_string()))?;
+    materialize_embedded_client(&cache.join("native").join("pir"))
+}
+
+fn ensure_started(app: &tauri::AppHandle) -> QorResult<()> {
+    let mut guard = SIDECAR
+        .lock()
+        .map_err(|_| QorError::Internal("PIR lock".into()))?;
+    if let Some(child) = guard.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return Ok(());
         }
     }
-    Err("Local PIR client binary is required and was not found".to_string())
-}
-
-// PIR client daemon
-const PIR_DAEMON_MAX_FRAME_BYTES: u32 = 256 << 20;
-const PIR_DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-
-struct PirDaemon {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
-    next_id: u64,
-}
-
-static PIR_DAEMON: OnceLock<tokio::sync::Mutex<Option<PirDaemon>>> = OnceLock::new();
-
-fn pir_daemon_slot() -> &'static tokio::sync::Mutex<Option<PirDaemon>> {
-    PIR_DAEMON.get_or_init(|| tokio::sync::Mutex::new(None))
-}
-
-fn spawn_pir_daemon(app: &AppHandle) -> Result<PirDaemon, String> {
-    let binary = find_pir_client_binary(app)?;
-    let mut child = Command::new(binary)
-        .arg("serve")
+    let child = Command::new(sidecar_path(app)?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("Failed to start local PIR client daemon: {e}"))?;
+        .map_err(|_| QorError::Internal("PIR sidecar failed to start".to_string()))?;
+    *guard = Some(child);
+    Ok(())
+}
+
+fn call(op: u8, payload: &[u8]) -> QorResult<Vec<u8>> {
+    let mut guard = SIDECAR
+        .lock()
+        .map_err(|_| QorError::Internal("PIR lock".into()))?;
+    let child = guard
+        .as_mut()
+        .ok_or_else(|| QorError::Internal("PIR sidecar is not running".to_string()))?;
 
     let stdin = child
         .stdin
-        .take()
-        .ok_or_else(|| "PIR client daemon stdin unavailable".to_string())?;
+        .as_mut()
+        .ok_or_else(|| QorError::Internal("PIR sidecar stdin closed".to_string()))?;
+    let length = (payload.len() + 1) as u32;
+    stdin
+        .write_all(&length.to_le_bytes())
+        .and_then(|_| stdin.write_all(&[op]))
+        .and_then(|_| stdin.write_all(payload))
+        .and_then(|_| stdin.flush())
+        .map_err(|_| QorError::Internal("PIR sidecar write failed".to_string()))?;
+
     let stdout = child
         .stdout
-        .take()
-        .ok_or_else(|| "PIR client daemon stdout unavailable".to_string())?;
+        .as_mut()
+        .ok_or_else(|| QorError::Internal("PIR sidecar stdout closed".to_string()))?;
+    let mut header = [0u8; 4];
+    stdout
+        .read_exact(&mut header)
+        .map_err(|_| QorError::Internal("PIR sidecar read failed".to_string()))?;
+    let length = u32::from_le_bytes(header) as usize;
+    if length == 0 || length > MAX_FRAME_BYTES {
+        return Err(QorError::Internal(
+            "PIR sidecar sent an invalid frame".to_string(),
+        ));
+    }
+    let mut frame = vec![0u8; length];
+    stdout
+        .read_exact(&mut frame)
+        .map_err(|_| QorError::Internal("PIR sidecar read failed".to_string()))?;
 
-    Ok(PirDaemon {
-        child,
-        stdin,
-        stdout: tokio::io::BufReader::new(stdout),
-        next_id: 1,
+    if frame[0] != STATUS_OK {
+        return Err(QorError::Internal(
+            "PIR sidecar rejected the request".to_string(),
+        ));
+    }
+    Ok(frame[1..].to_vec())
+}
+
+
+#[tauri::command]
+pub async fn pir_generate_query(
+    app: tauri::AppHandle,
+    count: u32,
+    entry_bytes: u32,
+    target_row: u32,
+) -> QorResult<PirQuery> {
+    if count == 0 || count > MAX_RECORDS || entry_bytes == 0 || entry_bytes > MAX_ENTRY_BYTES {
+        return Err(QorError::Internal("Invalid PIR database shape".to_string()));
+    }
+    if target_row >= count.next_power_of_two().max(2048) {
+        return Err(QorError::Internal("Invalid PIR row".to_string()));
+    }
+    ensure_started(&app)?;
+
+    let mut payload = Vec::with_capacity(12);
+    payload.extend_from_slice(&count.to_le_bytes());
+    payload.extend_from_slice(&entry_bytes.to_le_bytes());
+    payload.extend_from_slice(&target_row.to_le_bytes());
+
+    let response = call(OP_QUERY, &payload)?;
+    if response.len() < 12 {
+        return Err(QorError::Internal(
+            "PIR sidecar returned a short query".to_string(),
+        ));
+    }
+    let session_id = u32::from_le_bytes(response[0..4].try_into().unwrap());
+    let query_len = u32::from_le_bytes(response[4..8].try_into().unwrap()) as usize;
+    let params_len = u32::from_le_bytes(response[8..12].try_into().unwrap()) as usize;
+    if session_id == 0 || response.len() != 12 + query_len + params_len {
+        return Err(QorError::Internal(
+            "PIR sidecar returned a malformed query".to_string(),
+        ));
+    }
+    Ok(PirQuery {
+        session_id,
+        query: BASE64.encode(&response[12..12 + query_len]),
+        pub_params: BASE64.encode(&response[12 + query_len..]),
     })
 }
 
-async fn pir_daemon_exchange(daemon: &mut PirDaemon, request: &Value) -> Result<Value, String> {
-    let id = daemon.next_id;
-    daemon.next_id = daemon.next_id.wrapping_add(1);
-
-    let mut tagged = match request {
-        Value::Object(map) => map.clone(),
-        _ => return Err("pir_daemon_bad_request".to_string()),
-    };
-    tagged.insert("id".to_string(), Value::from(id));
-    let payload = serde_json::to_vec(&Value::Object(tagged)).map_err(|e| e.to_string())?;
-    if payload.len() as u64 > PIR_DAEMON_MAX_FRAME_BYTES as u64 {
-        return Err("pir_daemon_request_too_large".to_string());
+#[tauri::command]
+pub async fn pir_decode_response(response: String, session_id: u32) -> QorResult<String> {
+    if session_id == 0 {
+        return Err(QorError::Internal("Invalid PIR session".to_string()));
     }
-
-    daemon
-        .stdin
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await
-        .map_err(|e| format!("pir_daemon_write_failed: {e}"))?;
-    daemon
-        .stdin
-        .write_all(&payload)
-        .await
-        .map_err(|e| format!("pir_daemon_write_failed: {e}"))?;
-    daemon
-        .stdin
-        .flush()
-        .await
-        .map_err(|e| format!("pir_daemon_flush_failed: {e}"))?;
-
-    let mut len_buf = [0u8; 4];
-    daemon
-        .stdout
-        .read_exact(&mut len_buf)
-        .await
-        .map_err(|e| format!("pir_daemon_read_failed: {e}"))?;
-    let len = u32::from_be_bytes(len_buf);
-    if len == 0 || len > PIR_DAEMON_MAX_FRAME_BYTES {
-        return Err("pir_daemon_bad_frame".to_string());
+    let bytes = BASE64
+        .decode(&response)
+        .map_err(|_| QorError::Internal("Invalid PIR response encoding".to_string()))?;
+    if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
+        return Err(QorError::Internal("Invalid PIR response".to_string()));
     }
-    let mut buf = vec![0u8; len as usize];
-    daemon
-        .stdout
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| format!("pir_daemon_read_failed: {e}"))?;
-
-    let parsed: Value =
-        serde_json::from_slice(&buf).map_err(|_| "pir_daemon_invalid_json".to_string())?;
-    if parsed.get("id").and_then(Value::as_u64) != Some(id) {
-        return Err("pir_daemon_response_mismatch".to_string());
-    }
-    Ok(parsed)
+    let mut payload = Vec::with_capacity(4 + bytes.len());
+    payload.extend_from_slice(&session_id.to_le_bytes());
+    payload.extend_from_slice(&bytes);
+    Ok(BASE64.encode(call(OP_DECODE, &payload)?))
 }
 
-/// Sends one request to the persistent daemon transparently spawning/respawning if is not running or died
-async fn pir_daemon_call(app: &AppHandle, request: Value) -> Result<Value, String> {
-    let mut guard = pir_daemon_slot().lock().await;
-    let mut last_err = String::from("pir_daemon_unavailable");
+#[tauri::command]
+pub async fn pir_discard_query(session_id: u32) -> QorResult<()> {
+    if session_id == 0 {
+        return Err(QorError::Internal("Invalid PIR session".to_string()));
+    }
+    call(OP_DISCARD, &session_id.to_le_bytes())?;
+    Ok(())
+}
 
-    for _ in 0..2 {
-        if guard.is_none() {
-            match spawn_pir_daemon(app) {
-                Ok(daemon) => *guard = Some(daemon),
-                Err(e) => {
-                    last_err = e;
-                    continue;
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::{embedded, embedded_file_matches, materialize_embedded_client};
 
-        let daemon = guard.as_mut().expect("daemon present");
-        match tokio::time::timeout(
-            PIR_DAEMON_REQUEST_TIMEOUT,
-            pir_daemon_exchange(daemon, &request),
-        )
-        .await
+    #[test]
+    fn embedded_pir_client_extracts_and_repairs_by_hash() {
+        let directory = std::env::temp_dir().join(format!(
+            "qor-embedded-pir-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let path = materialize_embedded_client(&directory).expect("extract embedded PIR client");
+        assert!(embedded_file_matches(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), embedded::EMBEDDED_PIR_CLIENT);
+
+        #[cfg(unix)]
         {
-            Ok(Ok(response)) => return Ok(response),
-            Ok(Err(e)) => last_err = e,
-            Err(_) => last_err = "pir_daemon_timeout".to_string(),
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
 
-        if let Some(mut dead) = guard.take() {
-            let _ = dead.child.start_kill();
-        }
+        let mut child = std::process::Command::new(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start extracted PIR client");
+        drop(child.stdin.take());
+        assert!(
+            child
+                .wait()
+                .expect("wait for extracted PIR client")
+                .success()
+        );
+
+        std::fs::write(&path, b"corrupt").unwrap();
+        let repaired = materialize_embedded_client(&directory).expect("repair embedded PIR client");
+        assert_eq!(repaired, path);
+        assert!(embedded_file_matches(&repaired));
+        std::fs::remove_dir_all(directory).unwrap();
     }
-
-    Err(last_err)
-}
-
-fn pir_daemon_unwrap(parsed: Value) -> Result<Value, String> {
-    if parsed.get("success").and_then(Value::as_bool) != Some(true) {
-        let code = parsed
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("local_pir_client_failed");
-        return Err(code.to_string());
-    }
-    Ok(parsed)
-}
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-/// Build an opaque PIR request for one record index
-#[tauri::command]
-pub async fn pir_query_record(
-    app: AppHandle,
-    parameter_id: String,
-    record_count: u64,
-    record_size: u64,
-    public_params: String,
-    index: u64,
-) -> Result<Value, String> {
-    let request = json!({
-        "operation": "query-record",
-        "parameterId": parameter_id,
-        "recordCount": record_count,
-        "recordSize": record_size,
-        "publicParams": public_params,
-        "index": index,
-    });
-    pir_daemon_unwrap(pir_daemon_call(&app, request).await?)
-}
-
-/// Recover the record from worker's opaque response using secret kept under handle
-#[tauri::command]
-pub async fn pir_recover_record(
-    app: AppHandle,
-    handle: String,
-    response: String,
-) -> Result<Value, String> {
-    let request = json!({
-        "operation": "recover-record",
-        "handle": handle,
-        "response": response,
-    });
-    pir_daemon_unwrap(pir_daemon_call(&app, request).await?)
-}
-
-/// Shared transport for anonymous discovery/avatar ops over dedicated isolated Tor circuit
-async fn isolated_tor_post(
-    app: &AppState,
-    path: &str,
-    body: &Value,
-    circuit: &str,
-) -> Result<Value, String> {
-    let storage = app
-        .storage()
-        .ok_or_else(|| "Storage not initialized".to_string())?;
-    let server_url = storage
-        .get("server_url")
-        .await
-        .map_err(|e| e.safe_message())?
-        .ok_or_else(|| "Server URL not configured".to_string())?;
-
-    let mut base = server_url
-        .replace("wss://", "https://")
-        .replace("ws://", "http://");
-    if !base.ends_with('/') {
-        base.push('/');
-    }
-    let api_url = format!("{base}api/{path}");
-
-    let tor = app
-        .tor_manager()
-        .ok_or_else(|| "Tor manager not initialized".to_string())?;
-    let proxy_url = format!("socks5h://127.0.0.1:{}", tor.get_socks_port());
-
-    let mut last_err = String::from("discovery request failed");
-    for attempt in 0u32..3 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(600 * attempt as u64)).await;
-        }
-
-        let attempt_circuit = if attempt == 0 {
-            circuit.to_string()
-        } else {
-            format!("{circuit}-r{attempt}")
-        };
-        let proxy = match reqwest::Proxy::all(&proxy_url) {
-            Ok(p) => p.basic_auth(&attempt_circuit, "isolate"),
-            Err(e) => {
-                last_err = e.to_string();
-                continue;
-            }
-        };
-
-        // server identity is authenticated end to end
-        let client = match reqwest::Client::builder()
-            .proxy(proxy)
-            .danger_accept_invalid_certs(true)
-            .http1_only()
-            .timeout(std::time::Duration::from_secs(45))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = format!("Failed to create HTTP client: {e}");
-                continue;
-            }
-        };
-
-        match client
-            .post(&api_url)
-            .header("Accept", "application/json")
-            .header(reqwest::header::CONNECTION, "close")
-            .json(body)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                if !status.is_success() {
-                    return Err(format!("discovery request failed ({status})"));
-                }
-                
-                match response.json::<Value>().await {
-                    Ok(value) => return Ok(value),
-                    Err(e) => {
-                        last_err = format!("invalid discovery response: {e}");
-                    }
-                }
-            }
-            Err(e) => {
-                last_err = format!("discovery request failed: {e}");
-            }
-        }
-    }
-    Err(last_err)
-}
-
-/// Tier-1 discovery PIR query
-#[tauri::command]
-pub async fn pir_query_fetch(
-    state: State<'_, AppState>,
-    epoch_id: String,
-    query: String,
-) -> Result<Value, String> {
-    isolated_tor_post(
-        state.inner(),
-        "pir/query",
-        &serde_json::json!({ "epochId": epoch_id, "query": query }),
-        "qor-discovery-pir",
-    )
-    .await
-}
-
-/// discovery control op
-#[tauri::command]
-pub async fn discovery_api_fetch(
-    state: State<'_, AppState>,
-    path: String,
-    body: String,
-) -> Result<Value, String> {
-    // Route each concern onto its own isolated circuit so server cant link client's avatar publishing
-    let circuit = match path.as_str() {
-        "avatar/blob/put" => "qor-avatar-pub",
-        "avatar/blob/get" | "avatar/pool" => "qor-avatar-fetch",
-        "oprf/evaluate" => "qor-discovery-oprf",
-        "pir/manifest" | "discovery/bucket" => "qor-discovery-pir",
-        _ => return Err("unsupported_discovery_path".to_string()),
-    };
-    let body_val: Value =
-        serde_json::from_str(&body).map_err(|e| format!("invalid request body json: {e}"))?;
-    isolated_tor_post(state.inner(), &path, &body_val, circuit).await
 }

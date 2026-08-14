@@ -1,14 +1,10 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
-import { CryptoUtils } from '../lib/utils/crypto-utils';
-import { SecureMemory } from '../lib/cryptography/secure-memory';
-import { SignalType } from '../lib/types/signal-types';
+import { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
 import { EventType } from '../lib/types/event-types';
-import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from '../lib/sanitizers';
+import { hasPrototypePollutionKeys, isCanonicalAuthUsername, isPlainObject } from '../lib/sanitizers';
 import {
 	DEFAULT_MAX_TYPING_USERS,
 	DEFAULT_TYPING_TIMEOUT_MS,
 	DEFAULT_RATE_LIMIT_PER_MINUTE,
-	DEFAULT_UI_EVENT_RATE_MAX,
 	DEFAULT_TYPING_EVENT_RATE_WINDOW_MS
 } from '../lib/constants';
 
@@ -29,13 +25,8 @@ interface TypingIndicatorProviderProps {
 }
 
 interface SecureEventDetail {
-	readonly signature: string;
-	readonly timestamp: number;
-	readonly nonce: string;
-	readonly payload: {
-		readonly username: string;
-		readonly action: TypingAction;
-	};
+    readonly username: string;
+    readonly action: TypingAction;
 }
 
 class BoundedMap<K, V> extends Map<K, V> {
@@ -44,7 +35,7 @@ class BoundedMap<K, V> extends Map<K, V> {
 	}
 
 	override set(key: K, value: V): this {
-		if (this.size >= this.maxSize) {
+		if (!this.has(key) && this.size >= this.maxSize) {
 			const firstKey = this.keys().next().value;
 			if (firstKey !== undefined) {
 				super.delete(firstKey);
@@ -55,7 +46,9 @@ class BoundedMap<K, V> extends Map<K, V> {
 }
 
 class RateLimiter {
-	private readonly permitMap = new Map<string, { count: number; resetAt: number }>();
+	private readonly permitMap = new BoundedMap<string, { count: number; resetAt: number }>(
+		DEFAULT_MAX_TYPING_USERS
+	);
 
 	constructor(private readonly limit: number, private readonly windowMs: number) { }
 
@@ -90,12 +83,11 @@ export function useTypingIndicatorContext() {
 	return context;
 }
 
-async function validateAndVerifyEvent(
-	event: CustomEvent,
-	nonceMap: Map<string, number>,
-	rateLimiter: RateLimiter
-): Promise<SecureEventDetail | null> {
-	try {
+function validateTypingEvent(
+    event: CustomEvent,
+    rateLimiter: RateLimiter
+): SecureEventDetail | null {
+    try {
 		if (!event?.detail || typeof event.detail !== 'object') {
 			return null;
 		}
@@ -104,43 +96,15 @@ async function validateAndVerifyEvent(
 			return null;
 		}
 
-		const detail = event.detail as unknown as SecureEventDetail;
-		if (!detail.signature || typeof detail.signature !== 'string' || detail.signature.length < 32) {
-			return null;
-		}
+        const detail = event.detail as unknown as SecureEventDetail;
+        const keys = Object.keys(detail);
+        if (keys.length !== 2 || !keys.every(key => key === 'username' || key === 'action')) {
+            return null;
+        }
 
-		if (!Number.isSafeInteger(detail.timestamp) || Math.abs(Date.now() - detail.timestamp) > 15000) {
-			return null;
-		}
+        const { username, action } = detail;
 
-		if (!detail.nonce || typeof detail.nonce !== 'string' || detail.nonce.length < 32) {
-			return null;
-		}
-
-		const nonceKey = `${detail.nonce}:${detail.timestamp}`;
-		if (nonceMap.has(nonceKey)) {
-			return null;
-		}
-
-		nonceMap.set(nonceKey, detail.timestamp);
-		if (nonceMap.size > DEFAULT_UI_EVENT_RATE_MAX) {
-			const oldestKey = nonceMap.keys().next().value;
-			if (oldestKey) {
-				nonceMap.delete(oldestKey);
-			}
-		}
-
-		if (!detail.payload || typeof detail.payload !== 'object') {
-			return null;
-		}
-
-		if (!isPlainObject(detail.payload) || hasPrototypePollutionKeys(detail.payload)) {
-			return null;
-		}
-
-		const { username, action } = detail.payload;
-
-		if (!username || typeof username !== 'string' || !isValidUsername(username)) {
+		if (!isCanonicalAuthUsername(username)) {
 			return null;
 		}
 
@@ -152,20 +116,7 @@ async function validateAndVerifyEvent(
 			return null;
 		}
 
-		const encoder = new TextEncoder();
-		const payloadBytes = encoder.encode(JSON.stringify(detail.payload));
-
-		const expectedMac = CryptoUtils.Base64.base64ToUint8Array(detail.signature);
-		const macKey = await CryptoUtils.Hash.generateBlake3Mac(encoder.encode(detail.nonce), encoder.encode(String(detail.timestamp)));
-		const verified = await CryptoUtils.Hash.verifyBlake3Mac(payloadBytes, macKey, expectedMac);
-
-		SecureMemory.zeroBuffer(payloadBytes);
-		SecureMemory.zeroBuffer(expectedMac);
-		SecureMemory.zeroBuffer(macKey);
-
-		if (!verified) return null;
-
-		return detail;
+        return detail;
 	} catch {
 		return null;
 	}
@@ -178,11 +129,10 @@ export function TypingIndicatorProvider({
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
 	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(DEFAULT_MAX_TYPING_USERS));
 
-	const nonceMap = useRef(new BoundedMap<string, number>(DEFAULT_UI_EVENT_RATE_MAX));
-	const rateLimiterRef = useRef(new RateLimiter(DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
+    const rateLimiterRef = useRef(new RateLimiter(DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
 
 	const setTypingUser = useCallback((username: string, isTyping: boolean) => {
-		if (!isValidUsername(username)) {
+		if (!isCanonicalAuthUsername(username)) {
 			return;
 		}
 		setTypingUsers(prev => {
@@ -203,7 +153,7 @@ export function TypingIndicatorProvider({
 	}, [DEFAULT_MAX_TYPING_USERS]);
 
 	const clearTypingUser = useCallback((username: string) => {
-		if (!isValidUsername(username)) {
+		if (!isCanonicalAuthUsername(username)) {
 			return;
 		}
 		const existingTimeout = typingTimeoutsRef.current.get(username);
@@ -222,29 +172,20 @@ export function TypingIndicatorProvider({
 	}, []);
 
 	useEffect(() => {
-		const handleTypingIndicator = async (event: Event) => {
-			if (!(event instanceof CustomEvent)) {
-				return;
-			}
+		setTypingUsers(new Set());
+	}, [currentUsername]);
 
-			let username: string | undefined;
-			let action: TypingAction | undefined;
+	useEffect(() => {
+        const handleTypingIndicator = (event: Event) => {
+            if (!(event instanceof CustomEvent)) {
+                return;
+            }
 
-			// Handle P2P originated unified signals
-			if (event.detail?.transport === 'p2p') {
-				username = event.detail.from;
-				const content = event.detail.content;
-				action = content === SignalType.TYPING_START ? 'start' : content === SignalType.TYPING_STOP ? 'stop' : null;
-				if (!username || !action || !isValidUsername(username)) return;
-				if (!rateLimiterRef.current.tryConsume(`p2p:${username}`)) return;
-			} else {
-				const secureEvent = await validateAndVerifyEvent(event, nonceMap.current, rateLimiterRef.current);
-				if (!secureEvent) {
-					return;
-				}
-				username = secureEvent.payload.username;
-				action = secureEvent.payload.action;
-			}
+            const detail = validateTypingEvent(event, rateLimiterRef.current);
+            if (!detail) {
+                return;
+            }
+            const { username, action } = detail;
 
 			if (currentUsername && username === currentUsername) {
 				return;
@@ -265,44 +206,18 @@ export function TypingIndicatorProvider({
 			}
 		};
 
-		const secureChannel = new MessageChannel();
-		const listener = (event: MessageEvent) => {
-			if (event.data?.type === EventType.TYPING_INDICATOR) {
-				const customEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
-					detail: event.data.detail
-				});
-				handleTypingIndicator(customEvent);
-			}
-		};
-
-		secureChannel.port1.onmessage = listener;
-
-		const windowListener = (event: Event) => {
-			try {
-				if (!(event instanceof CustomEvent)) {
-					return;
-				}
-				secureChannel.port2.postMessage({
-					type: EventType.TYPING_INDICATOR,
-					detail: event.detail
-				});
-			} catch {
-				return;
-			}
-		};
+        const windowListener = (event: Event) => {
+            handleTypingIndicator(event);
+        };
 
 		window.addEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
 
-		return () => {
-			window.removeEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
-			secureChannel.port1.onmessage = null;
-			secureChannel.port1.close();
-			secureChannel.port2.close();
-			typingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
-			typingTimeoutsRef.current.clear();
-			rateLimiterRef.current.reset();
-			nonceMap.current.clear();
-		};
+        return () => {
+            window.removeEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
+            typingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
+            typingTimeoutsRef.current.clear();
+            rateLimiterRef.current.reset();
+        };
 	}, [clearTypingUser, currentUsername, setTypingUser, DEFAULT_TYPING_TIMEOUT_MS]);
 
 	const value = useMemo<TypingIndicatorContextType>(() => ({

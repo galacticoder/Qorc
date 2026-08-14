@@ -1,16 +1,17 @@
 import { SignalType } from '../types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
-import { sanitizeContent, sanitizeUsername } from '../sanitizers';
-import { MAX_FILEDATA_LENGTH, BASE64_SAFE_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
+import { sanitizeMessageId, sanitizeUsername } from '../sanitizers';
+import { AUTH_USERNAME_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
 import type { IdCache, SessionApi } from '../types/message-sending-types';
 import { CryptoUtils } from '../utils/crypto-utils';
-import { signal } from '../tauri-bindings';
-import { messageVault } from '../security/message-vault';
+import { nativeMessageContent, signal } from '../tauri-bindings';
+import { setBoundedMapEntry } from './message-state-limits';
+
+const MAX_SESSION_REQUEST_PEERS = 256;
 
 // Signal type mapping for message types
 export const SIGNAL_TYPE_MAP: Record<string, string> = {
-  [SignalType.TYPING_START]: SignalType.TYPING_INDICATOR,
-  [SignalType.TYPING_STOP]: SignalType.TYPING_INDICATOR,
+  [SignalType.MESSAGE]: SignalType.MESSAGE,
   [SignalType.DELETE_MESSAGE]: SignalType.DELETE_MESSAGE,
   [SignalType.EDIT_MESSAGE]: SignalType.EDIT_MESSAGE,
   [SignalType.REACTION_ADD]: SignalType.REACTION_ADD,
@@ -20,9 +21,9 @@ export const SIGNAL_TYPE_MAP: Record<string, string> = {
 // Get session API wrapper for Tauri signal bindings
 export const getSessionApi = (): SessionApi => {
   return {
-    async hasSession(args: { selfUsername: string; peerUsername: string; deviceId: number }) {
+    async hasSession(args: { selfUsername: string; peerUsername: string }) {
       try {
-        const result = await signal.hasSession(args.selfUsername, args.peerUsername, args.deviceId);
+        const result = await signal.hasSession(args.selfUsername, args.peerUsername);
         return { hasSession: result };
       } catch {
         return { hasSession: false };
@@ -31,43 +32,24 @@ export const getSessionApi = (): SessionApi => {
   };
 };
 
-// Validate file data for sending
-export const validateFileData = (value: string | undefined): string | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-
-  const inlinePrefixIndex = trimmed.indexOf(',');
-  const base64Payload = inlinePrefixIndex > 0 ? trimmed.slice(inlinePrefixIndex + 1) : trimmed;
-
-  if (base64Payload.length > MAX_FILEDATA_LENGTH * 1.4) {
-    return undefined;
-  }
-  if (!BASE64_SAFE_REGEX.test(base64Payload.replace(/=+$/, ''))) {
-    return undefined;
-  }
-
-  const estimatedBytes = Math.floor((base64Payload.length * 3) / 4) - (base64Payload.endsWith('==') ? 2 : base64Payload.endsWith('=') ? 1 : 0);
-  if (estimatedBytes <= 0 || estimatedBytes > MAX_FILEDATA_LENGTH) {
-    return undefined;
-  }
-
-  return trimmed;
-};
-
 // Sanitize reply data
 export const sanitizeReply = (reply: string | { id: string; sender?: string; content?: string } | undefined) => {
   if (!reply) return undefined;
   if (typeof reply === 'string') {
-    const id = reply.trim();
+    const id = sanitizeMessageId(reply);
     return id ? { id } : undefined;
   }
-  const id = typeof reply.id === 'string' ? reply.id.trim() : '';
+  const id = sanitizeMessageId(reply.id);
   if (!id) return undefined;
+  const senderCandidate = sanitizeUsername(reply.sender);
+  const sender = senderCandidate &&
+    senderCandidate === senderCandidate.trim().toLowerCase() &&
+    AUTH_USERNAME_REGEX.test(senderCandidate)
+      ? senderCandidate
+      : null;
   return {
     id,
-    sender: sanitizeUsername(reply.sender),
-    content: sanitizeContent(reply.content),
+    ...(sender ? { sender } : {}),
   };
 };
 
@@ -78,6 +60,14 @@ export const logError = (code: string, error?: unknown) => {
   } else {
     console.error(`[MessageSender][${code}]`);
   }
+};
+
+export const recordSessionRequest = (
+  requests: Map<string, number>,
+  peer: string,
+  timestamp: number,
+): void => {
+  setBoundedMapEntry(requests, peer, timestamp, MAX_SESSION_REQUEST_PEERS);
 };
 
 // Create ID cache for message deduplication
@@ -108,11 +98,11 @@ export const getIdCache = (): IdCache => {
 };
 
 // Map message signal type to wire type
-export const mapSignalType = (baseType: string, messageSignalType?: string, fileData?: string): string => {
-  if (!messageSignalType) {
-    return fileData ? SignalType.FILE_MESSAGE : baseType;
-  }
-  return SIGNAL_TYPE_MAP[messageSignalType] ?? (fileData ? SignalType.FILE_MESSAGE : baseType);
+export const mapSignalType = (baseType: string, messageSignalType?: string): string => {
+  const candidate = messageSignalType || baseType;
+  const mapped = SIGNAL_TYPE_MAP[candidate];
+  if (!mapped) throw new Error('Unsupported message operation');
+  return mapped;
 };
 
 // Create local message for optimistic UI update
@@ -122,14 +112,22 @@ export const createLocalMessage = async (
   recipient: string,
   content: string,
   timestamp: number,
-  replyToData?: { id: string; sender?: string; content?: string },
-  fileData?: string,
+  replyToData: { id: string; sender?: string; content?: string } | undefined,
 ): Promise<Message> => {
-  // For text messages store content in vault and empty state object
-  const isVaultable = !fileData && content && content.trim().length > 0;
+  const isVaultable = content && content.trim().length > 0;
 
   if (isVaultable) {
-    await messageVault.store(messageId, content);
+    const committed = await nativeMessageContent.storeOutgoing(
+      messageId,
+      content,
+      recipient,
+      SignalType.MESSAGE,
+      messageId,
+      false,
+    );
+    if (!committed.stored && !committed.duplicate) {
+      throw new Error('Native message content identifier collision');
+    }
   }
 
   const message: Message = {
@@ -139,31 +137,17 @@ export const createLocalMessage = async (
     sender,
     recipient,
     timestamp: new Date(timestamp),
-    type: fileData ? SignalType.FILE : SignalType.TEXT,
+    type: SignalType.TEXT,
     isCurrentUser: true,
+    isDeliberateUserAction: true,
+    encrypted: true,
     receipt: { delivered: false, read: false },
-    version: '1',
-    ...(fileData ? { originalBase64Data: fileData } : {})
   };
 
   if (replyToData) {
-    const replyId = `reply-${replyToData.id}-${messageId}`;
-    if (replyToData.content) {
-      await messageVault.store(replyId, replyToData.content);
-    }
     message.replyTo = {
       ...replyToData,
       content: '',
-      secureContentId: replyId
-    };
-  }
-
-  if (fileData) {
-    message.fileInfo = {
-      name: 'attachment',
-      type: 'application/octet-stream',
-      size: 0,
-      data: new ArrayBuffer(0),
     };
   }
 

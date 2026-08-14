@@ -8,19 +8,23 @@
  *   node scripts/start-docker.cjs stop all
  */
 
-const { execSync, spawn } = require('child_process');
+const { execFileSync, execSync, spawn } = require('child_process');
 const path = require('path');
 const readline = require('readline');
 const fs = require('fs');
 const net = require('net');
-const os = require('os');
+const { randomBytes } = require('crypto');
+const {
+    createDockerBuildContext,
+    removeDockerBuildContext
+} = require('./docker-build-context.cjs');
 
 const args = process.argv.slice(2);
 const command = args[0];
 const flags = args.slice(1);
 
 const validProfiles = ['server', 'loadbalancer'];
-const validServices = ['redis', 'postgres', 'pir-worker', 'server', 'loadbalancer'];
+const validServices = ['redis', 'postgres', 'server', 'loadbalancer'];
 
 function showHelp() {
     console.log('Docker Deployment Helper');
@@ -65,9 +69,33 @@ function isPortInUse(port) {
 }
 
 // Helper to find the next available port
-async function findAvailablePort(startPort) {
+function isComposeServiceUsingPort(service, containerPort, hostPort) {
+    try {
+        const output = execFileSync('docker', [
+            'compose',
+            '--env-file', envPath,
+            '-f', path.join(repoRoot, 'docker/docker-compose.yml'),
+            'port', service, String(containerPort)
+        ], {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        return output.split(/\r?\n/).some((line) => {
+            const match = line.match(/:(\d+)\s*$/);
+            return match && Number(match[1]) === hostPort;
+        });
+    } catch {
+        return false;
+    }
+}
+
+async function findAvailablePort(startPort, composeService, containerPort) {
     let port = parseInt(startPort, 10);
     while (await isPortInUse(port)) {
+        if (composeService && isComposeServiceUsingPort(composeService, containerPort, port)) {
+            return port;
+        }
         port++;
     }
     return port;
@@ -103,7 +131,30 @@ function updateEnvFile(updates) {
     }
 
     fs.writeFileSync(envPath, content, 'utf8');
-    console.log(`[INFO] Updated .env: ${Object.keys(updates).map(k => `${k}=${updates[k]}`).join(', ')}`);
+    const sensitiveKeys = new Set(['AUTH_ROOT_SEED', 'SERVER_TRANSPORT_IDENTITY_SEED']);
+    console.log(`[INFO] Updated .env: ${Object.keys(updates).map((key) => (
+        sensitiveKeys.has(key) ? `${key}=[generated]` : `${key}=${updates[key]}`
+    )).join(', ')}`);
+}
+
+function ensureDockerIdentitySeeds(env) {
+    const updates = {};
+    for (const key of ['AUTH_ROOT_SEED', 'SERVER_TRANSPORT_IDENTITY_SEED']) {
+        const configured = env[key];
+        if (!configured) {
+            updates[key] = randomBytes(32).toString('hex');
+            continue;
+        }
+        if (!/^[0-9a-fA-F]{64}$/.test(configured)) {
+            throw new Error(`${key} must be exactly 32 bytes encoded as 64 hexadecimal characters`);
+        }
+    }
+
+    if (Object.keys(updates).length > 0) {
+        updateEnvFile(updates);
+        Object.assign(env, updates);
+        console.log('[INFO] Generated missing server identity seeds. Preserve these .env values across restarts and authorized cluster nodes.');
+    }
 }
 
 async function main() {
@@ -117,7 +168,6 @@ async function main() {
                 console.error('Usage:');
                 console.error('  node scripts/start-docker.cjs stop server        - Stop server');
                 console.error('  node scripts/start-docker.cjs stop loadbalancer  - Stop loadbalancer');
-                console.error('  node scripts/start-docker.cjs stop pir-worker    - Stop PIR worker');
                 console.error('  node scripts/start-docker.cjs stop postgres      - Stop postgres');
                 console.error('  node scripts/start-docker.cjs stop all           - Stop all services');
                 console.error('');
@@ -180,7 +230,6 @@ async function main() {
                 console.error('Usage:');
                 console.error('  node scripts/start-docker.cjs delete server        - Delete server containers and images');
                 console.error('  node scripts/start-docker.cjs delete loadbalancer  - Delete loadbalancer containers and images');
-                console.error('  node scripts/start-docker.cjs delete pir-worker    - Delete PIR worker containers and images');
                 console.error('  node scripts/start-docker.cjs delete redis         - Delete redis containers and images');
                 console.error('  node scripts/start-docker.cjs delete postgres      - Delete postgres containers and images');
                 console.error('');
@@ -271,11 +320,12 @@ async function main() {
 
         console.log('[INFO] Checking for port conflicts...');
         const env = readEnv();
+        ensureDockerIdentitySeeds(env);
         const updates = {};
 
         // 1. Postgres
         const dbPort = parseInt(env.DB_PORT || '5432', 10);
-        const availableDbPort = await findAvailablePort(dbPort);
+        const availableDbPort = await findAvailablePort(dbPort, 'postgres', 5432);
         if (availableDbPort !== dbPort) {
             console.log(`[WARN] Port ${dbPort} is in use. Switching Postgres to ${availableDbPort}.`);
             updates.DB_PORT = availableDbPort;
@@ -283,7 +333,7 @@ async function main() {
 
         // 2. Server
         const serverPort = parseInt(env.PORT || '3000', 10);
-        const availableServerPort = await findAvailablePort(serverPort);
+        const availableServerPort = await findAvailablePort(serverPort, 'server', 3000);
         if (availableServerPort !== serverPort) {
             console.log(`[WARN] Port ${serverPort} is in use. Switching Server to ${availableServerPort}.`);
             updates.PORT = availableServerPort;
@@ -291,7 +341,7 @@ async function main() {
 
         // 3. Redis
         const redisPort = parseInt(env.REDIS_EXTERNAL_PORT || '6379', 10);
-        const availableRedisPort = await findAvailablePort(redisPort);
+        const availableRedisPort = await findAvailablePort(redisPort, 'redis', 6379);
         if (availableRedisPort !== redisPort) {
             console.log(`[WARN] Port ${redisPort} is in use. Switching Redis to ${availableRedisPort}.`);
             updates.REDIS_EXTERNAL_PORT = availableRedisPort;
@@ -300,28 +350,19 @@ async function main() {
         // 4. LoadBalancer
         if (command === 'loadbalancer') {
             const httpsPort = parseInt(env.HAPROXY_HTTPS_PORT || '8443', 10);
-            const availableHttpsPort = await findAvailablePort(httpsPort);
+            const availableHttpsPort = await findAvailablePort(httpsPort, 'loadbalancer', 8443);
             if (availableHttpsPort !== httpsPort) {
                 console.log(`[WARN] Port ${httpsPort} is in use. Switching LoadBalancer HTTPS to ${availableHttpsPort}.`);
                 updates.HAPROXY_HTTPS_PORT = availableHttpsPort;
             }
 
             const statsPort = parseInt(env.HAPROXY_STATS_PORT || '8404', 10);
-            const availableStatsPort = await findAvailablePort(statsPort);
+            const availableStatsPort = await findAvailablePort(statsPort, 'loadbalancer', 8404);
             if (availableStatsPort !== statsPort) {
                 console.log(`[WARN] Port ${statsPort} is in use. Switching LoadBalancer Stats to ${availableStatsPort}.`);
                 updates.HAPROXY_STATS_PORT = availableStatsPort;
             }
         }
-
-        // Auto-detect a CPU cap for the HintlessPIR worker from host core count
-        const totalCores = os.cpus().length || 1;
-        const pirWorkerCpus = String(Math.max(1, Math.floor((totalCores * 2) / 3)));
-        process.env.PIR_WORKER_CPUS = pirWorkerCpus;
-        if (env.PIR_WORKER_CPUS !== pirWorkerCpus) {
-            updates.PIR_WORKER_CPUS = pirWorkerCpus;
-        }
-        console.log(`[INFO] Detected ${totalCores} CPU core(s). capping pir-worker at ${pirWorkerCpus} core(s) (PIR_WORKER_CPUS).`);
 
         if (Object.keys(updates).length > 0) {
             updateEnvFile(updates);
@@ -341,50 +382,62 @@ async function main() {
             rl.close();
 
             const runDetached = !answer || answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+            let dockerBuildContext;
 
             console.log(`[INFO] Starting Docker with profile: ${command}`);
 
             try {
+                dockerBuildContext = createDockerBuildContext(repoRoot);
+                process.env.QOR_DOCKER_BUILD_CONTEXT = dockerBuildContext;
+
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis pir-worker';
+                    if (command === 'server') sharedServices = 'postgres redis';
 
                     if (sharedServices) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        const buildTargets = command === 'server' ? 'pir-worker server' : command;
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d --remove-orphans ${command}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis pir-worker';
+                    if (command === 'server') sharedServices = 'postgres redis';
 
                     if (sharedServices) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        const buildTargets = command === 'server' ? 'pir-worker server' : command;
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     const dockerRun = spawn('docker', ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--no-deps', '--service-ports', '-it', '--rm', command], {
                         cwd: repoRoot,
-                        stdio: 'inherit'
+                        stdio: 'inherit',
+                        env: { ...process.env }
                     });
 
                     dockerRun.on('exit', (code) => {
+                        removeDockerBuildContext(dockerBuildContext);
                         process.exit(code);
+                    });
+
+                    dockerRun.on('error', (error) => {
+                        removeDockerBuildContext(dockerBuildContext);
+                        console.error('[ERROR] Docker command failed: ', error);
+                        process.exit(1);
                     });
                 }
 
                 if (runDetached) {
+                    removeDockerBuildContext(dockerBuildContext);
+                    dockerBuildContext = undefined;
                     console.log('');
                     console.log(`[SUCCESS] Docker ${command} stack started in background!`);
                     console.log('');
@@ -395,6 +448,7 @@ async function main() {
                     console.log(`  node scripts/start-docker.cjs stop ${command}`);
                 }
             } catch (error) {
+                removeDockerBuildContext(dockerBuildContext);
                 console.error('[ERROR] Docker command failed: ', error);
                 if (error.message && error.message.includes('Cannot connect to the Docker daemon')) {
                     console.error('[ERROR] Docker Desktop is not running. Please start Docker Desktop and try again.');

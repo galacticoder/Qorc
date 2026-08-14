@@ -12,13 +12,14 @@ import {
   getPendingServers,
   removeServer
 } from '../cluster/cluster-integration.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+
 import { requireAdmin } from '../../scripts/admin-auth.js';
+import { SERVER_KEYS_UNAVAILABLE_MESSAGE } from '../config/error-codes.js';
 
 const router = express.Router();
 
 // Get all server public keys for clients
-router.get('/server-keys', async (res) => {
+router.get('/server-keys', async (req, res) => {
   try {
     const keys = await getAllServerPublicKeys();
 
@@ -33,16 +34,16 @@ router.get('/server-keys', async (res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to get server keys', error);
+    console.error('[CLUSTER-API] Failed to get server keys', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to retrieve server keys'
+      error: SERVER_KEYS_UNAVAILABLE_MESSAGE
     });
   }
 });
 
 // Health check endpoint for load balancer
-router.get('/health', async (res) => {
+router.get('/health', async (req, res) => {
   try {
     const manager = getClusterManager();
     const isHealthy = manager && manager.isApproved && !manager.isShuttingDown;
@@ -63,7 +64,7 @@ router.get('/health', async (res) => {
       });
     }
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Health check failed', error);
+    console.error('[CLUSTER-API] Health check failed', error);
     res.status(503).json({
       status: 'unhealthy',
       error: error.message,
@@ -73,7 +74,7 @@ router.get('/health', async (res) => {
 });
 
 // Get cluster status (admin)
-router.get('/status', requireAdmin, async (res) => {
+router.get('/status', requireAdmin, async (req, res) => {
   try {
     const status = await getClusterStatus();
     res.json({
@@ -82,7 +83,7 @@ router.get('/status', requireAdmin, async (res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to get cluster status', error);
+    console.error('[CLUSTER-API] Failed to get cluster status', error);
     res.status(500).json({
       success: false,
       error: 'Failed to retrieve cluster status'
@@ -91,7 +92,7 @@ router.get('/status', requireAdmin, async (res) => {
 });
 
 // Get pending servers awaiting approval (admin)
-router.get('/pending', requireAdmin, async (res) => {
+router.get('/pending', requireAdmin, async (req, res) => {
   try {
     const pending = await getPendingServers();
     res.json({
@@ -100,7 +101,7 @@ router.get('/pending', requireAdmin, async (res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to get pending servers', error);
+    console.error('[CLUSTER-API] Failed to get pending servers', error);
     res.status(500).json({
       success: false,
       error: 'Failed to retrieve pending servers'
@@ -109,7 +110,7 @@ router.get('/pending', requireAdmin, async (res) => {
 });
 
 // Approve a pending server (admin)
-router.post('/approve/:serverId', requireAdmin, async (res) => {
+router.post('/approve/:serverId', requireAdmin, async (req, res) => {
   try {
     const { serverId } = req.params;
 
@@ -122,7 +123,7 @@ router.post('/approve/:serverId', requireAdmin, async (res) => {
 
     await approveServer(serverId);
 
-    cryptoLogger.info('[CLUSTER-API] Server approved', { serverId });
+    console.log('[CLUSTER-API] Server approved', { serverId });
 
     res.json({
       success: true,
@@ -131,7 +132,7 @@ router.post('/approve/:serverId', requireAdmin, async (res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to approve server', error);
+    console.error('[CLUSTER-API] Failed to approve server', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -154,7 +155,7 @@ router.post('/reject/:serverId', requireAdmin, async (req, res) => {
 
     await rejectServer(serverId, reason || 'Rejected by admin');
 
-    cryptoLogger.info('[CLUSTER-API] Server rejected', { serverId, reason });
+    console.log('[CLUSTER-API] Server rejected', { serverId, reason });
 
     res.json({
       success: true,
@@ -164,7 +165,7 @@ router.post('/reject/:serverId', requireAdmin, async (req, res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to reject server', error);
+    console.error('[CLUSTER-API] Failed to reject server', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -194,7 +195,7 @@ router.delete('/remove/:serverId', requireAdmin, async (req, res) => {
 
     const result = await removeServer(serverId);
 
-    cryptoLogger.info('[CLUSTER-API] Server force removed via API', {
+    console.log('[CLUSTER-API] Server force removed via API', {
       serverId,
       adminId: req.admin?.id,
       reason: reason || 'Force removal via admin API',
@@ -210,7 +211,7 @@ router.delete('/remove/:serverId', requireAdmin, async (req, res) => {
       timestamp: Date.now(),
     });
   } catch (error) {
-    cryptoLogger.error('[CLUSTER-API] Failed to remove server', {
+    console.error('[CLUSTER-API] Failed to remove server', {
       error: error.message,
       serverId: req.params.serverId,
       adminId: req.admin?.id,

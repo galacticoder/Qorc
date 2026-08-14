@@ -1,0 +1,371 @@
+diff --git a/src/feature/dirclient/dirclient.c b/src/feature/dirclient/dirclient.c
+index 367cbae..8380e2e 100644
+--- a/src/feature/dirclient/dirclient.c
++++ b/src/feature/dirclient/dirclient.c
+@@ -34,6 +34,7 @@
+ #include "feature/hs/hs_cache.h"
+ #include "feature/hs/hs_client.h"
+ #include "feature/hs/hs_control.h"
++#include "feature/hs/hs_service.h"
+ #include "feature/nodelist/authcert.h"
+ #include "feature/nodelist/describe.h"
+ #include "feature/nodelist/dirlist.h"
+@@ -764,6 +765,17 @@ connection_dir_client_request_failed(dir_connection_t *conn)
+     log_warn(LD_DIR, "Failed to post %s to %s.",
+              dir_conn_purpose_to_string(conn->base_.purpose),
+              connection_describe_peer(TO_CONN(conn)));
++  } else if (conn->base_.purpose == DIR_PURPOSE_UPLOAD_HSDESC &&
++             conn->hs_ident) {
++    /* Onion-service descriptor uploads are anonymous directory requests.
++     * A collapsed circuit used to disappear here without a retry, leaving the
++     * service unpublished until the normal 60--120 minute refresh. */
++    log_info(LD_REND, "Hidden-service descriptor upload to %s failed "
++                      "before an HTTP response.",
++             connection_describe_peer(TO_CONN(conn)));
++    hs_control_desc_event_failed(conn->hs_ident, conn->identity_digest,
++                                 "UNEXPECTED");
++    hs_service_desc_upload_failed(conn->hs_ident);
+   }
+ }
+ 
+@@ -2809,6 +2821,7 @@ handle_response_upload_hsdesc(dir_connection_t *conn,
+   case 200:
+     log_info(LD_REND, "Uploading hidden service descriptor: "
+                       "finished with status 200 (%s)", escaped(reason));
++    hs_service_desc_upload_succeeded(conn->hs_ident);
+     hs_control_desc_event_uploaded(conn->hs_ident, conn->identity_digest);
+     break;
+   case 400:
+diff --git a/src/feature/hs/hs_service.c b/src/feature/hs/hs_service.c
+index 4492cca..51ddb7b 100644
+--- a/src/feature/hs/hs_service.c
++++ b/src/feature/hs/hs_service.c
+@@ -806,6 +806,10 @@ close_directory_connections(const hs_service_t *service,
+                           &service->keys.identity_pk) &&
+         ed25519_pubkey_eq(&dir_conn->hs_ident->blinded_pk,
+                           &desc->blinded_kp.pubkey)) {
++      /* This is an intentional superseding upload, not a network failure.
++       * Mark it finished so connection_dir_about_to_close() does not schedule
++       * a retry for the request we are deliberately replacing. */
++      dir_conn->base_.state = DIR_CONN_STATE_CLIENT_FINISHED;
+       connection_mark_for_close(conn);
+       count++;
+       continue;
+@@ -2364,6 +2368,116 @@ service_desc_schedule_upload(hs_service_descriptor_t *desc,
+    * re-upload no matter what. */
+   if (descriptor_changed) {
+     service_desc_clear_previous_hsdirs(desc);
++    desc->upload_retry_delay = 0;
++    desc->upload_retry_attempts = 0;
++    desc->upload_retry_pending = 0;
++  }
++}
++
++/** Schedule a single prompt retry for a descriptor whose upload connection
++ * failed before an HSDir returned an HTTP response. Return the jittered delay
++ * in seconds when scheduled, or 0 when a retry is already pending, the
++ * normal upload is due sooner, or the prompt retry budget is exhausted. */
++STATIC int
++service_desc_schedule_retry(hs_service_descriptor_t *desc, time_t now)
++{
++  unsigned int backoff, delay;
++  time_t retry_at;
++
++  tor_assert(desc);
++
++  if (desc->upload_retry_pending ||
++      desc->upload_retry_attempts >=
++        HS_SERVICE_UPLOAD_RETRY_ATTEMPTS_MAX) {
++    return 0;
++  }
++
++  backoff = desc->upload_retry_delay;
++  if (backoff < HS_SERVICE_UPLOAD_RETRY_TIME_MIN) {
++    backoff = HS_SERVICE_UPLOAD_RETRY_TIME_MIN;
++  }
++  /* Full jitter keeps the current and next descriptors, and separate
++   * services sharing a failed network path, from retrying in lockstep. The
++   * largest retry is 150--299 seconds. */
++  delay = crypto_rand_int_range(backoff, backoff * 2);
++  retry_at = now + delay;
++
++  if (desc->next_upload_time > 0 && desc->next_upload_time <= retry_at) {
++    return 0;
++  }
++  desc->next_upload_time = retry_at;
++  desc->upload_retry_pending = 1;
++  desc->upload_retry_attempts++;
++  desc->upload_retry_delay = MIN(backoff * 2,
++                                 HS_SERVICE_UPLOAD_RETRY_TIME_MAX);
++  return (int) delay;
++}
++
++/** Find the descriptor named by ident and arrange a bounded retry. */
++void
++hs_service_desc_upload_failed(const hs_ident_dir_conn_t *ident)
++{
++  hs_service_t *service;
++  hs_service_descriptor_t *desc = NULL;
++  time_t now = time(NULL);
++
++  if (BUG(!ident) || !hs_service_map) {
++    return;
++  }
++
++  service = find_service(hs_service_map, &ident->identity_pk);
++  if (!service) {
++    return;
++  }
++  if (service->desc_current &&
++      ed25519_pubkey_eq(&service->desc_current->blinded_kp.pubkey,
++                        &ident->blinded_pk)) {
++    desc = service->desc_current;
++  } else if (service->desc_next &&
++             ed25519_pubkey_eq(&service->desc_next->blinded_kp.pubkey,
++                               &ident->blinded_pk)) {
++    desc = service->desc_next;
++  }
++
++  if (desc) {
++    int delay = service_desc_schedule_retry(desc, now);
++    if (delay <= 0) {
++      return;
++    }
++    log_notice(LD_REND, "Service %s descriptor upload circuit failed; "
++                        "retrying the descriptor in %u seconds.",
++               safe_str_client(service->onion_address), (unsigned int) delay);
++  }
++}
++
++/** Emit an unambiguous publication marker for the application supervisor.
++ * The ordinary HTTP success log does not identify whether it accepted the
++ * current or next-period descriptor. */
++void
++hs_service_desc_upload_succeeded(const hs_ident_dir_conn_t *ident)
++{
++  hs_service_t *service;
++  const char *descriptor_kind = NULL;
++
++  if (BUG(!ident) || !hs_service_map) {
++    return;
++  }
++  service = find_service(hs_service_map, &ident->identity_pk);
++  if (!service) {
++    return;
++  }
++  if (service->desc_current &&
++      ed25519_pubkey_eq(&service->desc_current->blinded_kp.pubkey,
++                        &ident->blinded_pk)) {
++    descriptor_kind = "current";
++  } else if (service->desc_next &&
++             ed25519_pubkey_eq(&service->desc_next->blinded_kp.pubkey,
++                               &ident->blinded_pk)) {
++    descriptor_kind = "next";
++  }
++
++  if (descriptor_kind) {
++    log_notice(LD_REND, "QOR_HS_DESC_PUBLISHED %s", descriptor_kind);
+   }
+ }
+ 
+@@ -3272,11 +3386,27 @@ STATIC void
+ upload_descriptor_to_all(const hs_service_t *service,
+                          hs_service_descriptor_t *desc)
+ {
++  int is_retry;
+   smartlist_t *responsible_dirs = NULL;
+ 
+   tor_assert(service);
+   tor_assert(desc);
+ 
++  is_retry = desc->upload_retry_pending;
++
++  /* Establish the normal publication deadline before touching old requests.
++   * Any asynchronous network failure below can then pull this deadline
++   * forward through service_desc_schedule_retry(). */
++  desc->next_upload_time =
++    (time(NULL) + crypto_rand_int_range(HS_SERVICE_NEXT_UPLOAD_TIME_MIN,
++                                        HS_SERVICE_NEXT_UPLOAD_TIME_MAX));
++  desc->upload_retry_pending = 0;
++  if (!is_retry) {
++    /* A normal lifecycle upload starts a fresh retry budget. */
++    desc->upload_retry_delay = 0;
++    desc->upload_retry_attempts = 0;
++  }
++
+   /* We'll first cancel any directory request that are ongoing for this
+    * descriptor. It is possible that we can trigger multiple uploads in a
+    * short time frame which can lead to a race where the second upload arrives
+@@ -3306,12 +3436,9 @@ upload_descriptor_to_all(const hs_service_t *service,
+     upload_descriptor_to_hsdir(service, desc, hsdir_node);
+   } SMARTLIST_FOREACH_END(hsdir_rs);
+ 
+-  /* Set the next upload time for this descriptor. Even if we are configured
+-   * to not upload, we still want to follow the right cycle of life for this
+-   * descriptor. */
+-  desc->next_upload_time =
+-    (time(NULL) + crypto_rand_int_range(HS_SERVICE_NEXT_UPLOAD_TIME_MIN,
+-                                        HS_SERVICE_NEXT_UPLOAD_TIME_MAX));
++  /* Even if we are configured not to upload, we still follow the normal
++   * descriptor lifecycle.  The deadline was set before launching requests so
++   * a transport failure can safely replace it with a prompt retry. */
+   {
+     char fmt_next_time[ISO_TIME_LEN+1];
+     format_local_iso_time(fmt_next_time, desc->next_upload_time);
+diff --git a/src/feature/hs/hs_service.h b/src/feature/hs/hs_service.h
+index a94f903..dd97a14 100644
+--- a/src/feature/hs/hs_service.h
++++ b/src/feature/hs/hs_service.h
+@@ -35,6 +35,17 @@
+ /** Maximum interval for uploading next descriptor (in seconds). */
+ #define HS_SERVICE_NEXT_UPLOAD_TIME_MAX (120 * 60)
+ 
++/** Retry a descriptor upload quickly when its anonymous directory circuit
++ * fails before the HSDir returns an HTTP response.  The retry is per
++ * descriptor and exponentially backs off to avoid a circuit storm when the
++ * responsible HSDirs remain unreachable. */
++#define HS_SERVICE_UPLOAD_RETRY_TIME_MIN 5
++/** Maximum pre-jitter backoff. Full jitter makes the longest delay 299s. */
++#define HS_SERVICE_UPLOAD_RETRY_TIME_MAX 150
++/** Maximum number of prompt retry batches before falling back to the normal
++ *  descriptor publication interval. */
++#define HS_SERVICE_UPLOAD_RETRY_ATTEMPTS_MAX 6
++
+ /** PoW seed expiration time is set to RAND_TIME(now+7200, 900)
+  * seconds. */
+ #define HS_SERVICE_POW_SEED_ROTATE_TIME_MIN (7200 - 900)
+@@ -166,6 +177,12 @@ typedef struct hs_service_descriptor_t {
+   /** Mutable: When is the next time when we should upload the descriptor. */
+   time_t next_upload_time;
+ 
++  /** Mutable: Backoff and single-flight state for transport-level upload
++   * retries.  A zero delay means that no retry has failed yet. */
++  unsigned int upload_retry_delay;
++  unsigned int upload_retry_attempts;
++  unsigned int upload_retry_pending : 1;
++
+   /** Mutable: Introduction points assign to this descriptor which contains
+    * hs_service_intropoints_t object indexed by authentication key (the RSA key
+    * if the node is legacy). */
+@@ -402,6 +419,13 @@ void hs_service_upload_desc_to_dir(const char *encoded_desc,
+                                    const ed25519_public_key_t *blinded_pk,
+                                    const routerstatus_t *hsdir_rs);
+ 
++/** Schedule a prompt, bounded retry after a descriptor upload connection
++ * fails before receiving an HTTP response. */
++void hs_service_desc_upload_failed(const hs_ident_dir_conn_t *ident);
++
++/** Record that an HSDir accepted this current or next descriptor. */
++void hs_service_desc_upload_succeeded(const hs_ident_dir_conn_t *ident);
++
+ hs_circuit_id_protocol_t
+ hs_service_exports_circuit_id(const ed25519_public_key_t *pk);
+ 
+@@ -496,6 +520,9 @@ STATIC void service_desc_schedule_upload(hs_service_descriptor_t *desc,
+                                          time_t now,
+                                          int descriptor_changed);
+ 
++STATIC int service_desc_schedule_retry(hs_service_descriptor_t *desc,
++                                       time_t now);
++
+ STATIC int service_desc_hsdirs_changed(const hs_service_t *service,
+                                 const hs_service_descriptor_t *desc);
+ 
+diff --git a/src/test/test_hs_service.c b/src/test/test_hs_service.c
+index 9695d08..ae175ae 100644
+--- a/src/test/test_hs_service.c
++++ b/src/test/test_hs_service.c
+@@ -2768,6 +2768,84 @@ test_cannot_upload_descriptors(void *arg)
+   UNMOCK(get_or_state);
+ }
+ 
++static void
++test_upload_retry_schedule(void *arg)
++{
++  hs_service_descriptor_t *desc = NULL;
++  const time_t now = 1700000000;
++
++  (void) arg;
++  desc = service_descriptor_new();
++  tt_assert(desc);
++
++  desc->next_upload_time = now + 3600;
++  int first_delay = service_desc_schedule_retry(desc, now);
++  tt_int_op(first_delay, OP_GE, HS_SERVICE_UPLOAD_RETRY_TIME_MIN);
++  tt_int_op(first_delay, OP_LT, HS_SERVICE_UPLOAD_RETRY_TIME_MIN * 2);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + first_delay);
++  tt_uint_op(desc->upload_retry_delay, OP_EQ,
++             HS_SERVICE_UPLOAD_RETRY_TIME_MIN * 2);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ, 1);
++  tt_int_op(desc->upload_retry_pending, OP_EQ, 1);
++
++  /* Parallel failures from the same upload batch remain single-flight. */
++  tt_int_op(service_desc_schedule_retry(desc, now + 1), OP_EQ, 0);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + first_delay);
++
++  /* A later failed batch backs off, but still retries in seconds rather than
++   * waiting for the normal hourly publication interval. */
++  desc->upload_retry_pending = 0;
++  desc->next_upload_time = now + 3600;
++  int second_delay = service_desc_schedule_retry(desc, now + 10);
++  tt_int_op(second_delay, OP_GE, HS_SERVICE_UPLOAD_RETRY_TIME_MIN * 2);
++  tt_int_op(second_delay, OP_LT, HS_SERVICE_UPLOAD_RETRY_TIME_MIN * 4);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + 10 + second_delay);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ, 2);
++
++  /* Backoff is capped and jitter never defers a retry by five minutes. */
++  desc->upload_retry_pending = 0;
++  desc->upload_retry_delay = HS_SERVICE_UPLOAD_RETRY_TIME_MAX;
++  desc->next_upload_time = now + 3600;
++  int capped_delay = service_desc_schedule_retry(desc, now + 20);
++  tt_int_op(capped_delay, OP_GE, HS_SERVICE_UPLOAD_RETRY_TIME_MAX);
++  tt_int_op(capped_delay, OP_LT, HS_SERVICE_UPLOAD_RETRY_TIME_MAX * 2);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ, 3);
++
++  /* A mixed batch with at least one permanently unreachable HSDir must not
++   * fan out forever. Once the prompt budget is exhausted, retain the normal
++   * publication deadline. */
++  desc->upload_retry_pending = 0;
++  desc->upload_retry_attempts = HS_SERVICE_UPLOAD_RETRY_ATTEMPTS_MAX;
++  desc->next_upload_time = now + 3600;
++  tt_int_op(service_desc_schedule_retry(desc, now + 30), OP_EQ, 0);
++  tt_int_op(desc->upload_retry_pending, OP_EQ, 0);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ,
++             HS_SERVICE_UPLOAD_RETRY_ATTEMPTS_MAX);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + 3600);
++
++  /* Do not misclassify an upload that is already due sooner as a retry. */
++  desc->upload_retry_pending = 0;
++  desc->upload_retry_attempts = 2;
++  desc->next_upload_time = now + 1;
++  tt_int_op(service_desc_schedule_retry(desc, now), OP_EQ, 0);
++  tt_int_op(desc->upload_retry_pending, OP_EQ, 0);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ, 2);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + 1);
++
++  /* Descriptor changes create a new prompt retry budget. */
++  desc->upload_retry_delay = HS_SERVICE_UPLOAD_RETRY_TIME_MAX;
++  desc->upload_retry_attempts = HS_SERVICE_UPLOAD_RETRY_ATTEMPTS_MAX;
++  desc->upload_retry_pending = 1;
++  service_desc_schedule_upload(desc, now + 40, 1);
++  tt_uint_op(desc->upload_retry_delay, OP_EQ, 0);
++  tt_uint_op(desc->upload_retry_attempts, OP_EQ, 0);
++  tt_int_op(desc->upload_retry_pending, OP_EQ, 0);
++  tt_i64_op(desc->next_upload_time, OP_EQ, now + 40);
++
++ done:
++  service_descriptor_free(desc);
++}
++
+ struct testcase_t hs_service_tests[] = {
+   { "e2e_rend_circuit_setup", test_e2e_rend_circuit_setup, TT_FORK,
+     NULL, NULL },
+@@ -2807,6 +2885,8 @@ struct testcase_t hs_service_tests[] = {
+     NULL, NULL },
+   { "cannot_upload_descriptors", test_cannot_upload_descriptors, TT_FORK,
+     NULL, NULL },
++  { "upload_retry_schedule", test_upload_retry_schedule, TT_FORK,
++    NULL, NULL },
+   { "rendezvous1_parsing", test_rendezvous1_parsing, TT_FORK,
+     NULL, NULL },
+   { "authorized_client_config_equal", test_authorized_client_config_equal,

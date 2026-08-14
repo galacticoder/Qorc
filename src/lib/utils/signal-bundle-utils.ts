@@ -1,11 +1,64 @@
-import { EventType } from '../types/event-types';
 import { shouldAttemptDiscovery } from './discovery-utils';
 import { extractX25519FromSignalBundle } from './peer-certificate-utils';
-import { validateCertifiedPeerBundleV2 } from './certified-identity-utils';
+import { validateCertifiedPeerBundleV3 } from './certified-identity-utils';
+import {
+  captureKeyTransparencyPeerAuthorization,
+  getKeyTransparencyAuthorizedPeerState,
+  isKeyTransparencyAuthorizedPeerKeySet,
+  isKeyTransparencyVerifiedMaterial,
+  markKeyTransparencyVerifiedMaterial,
+} from '../key-transparency/verified-material';
+import {
+  discoveryMaterialStillVouchedFor,
+  loadPersistedDiscoveryMaterial,
+} from '../discovery/persisted-discovery-material';
+import { persistPeerDetectionKey } from '../spool/detection-key';
+
+// peers discovery material for an identity check, without refetching it when nothing has changed
+async function discoveryMaterialForIdentityCheck(
+  accountUsername: string,
+  peerUsername: string,
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+): Promise<any> {
+  try {
+    const record = await loadPersistedDiscoveryMaterial(accountUsername, peerUsername);
+    const material = discoveryMaterialStillVouchedFor(
+      record,
+      getKeyTransparencyAuthorizedPeerState(accountUsername, peerUsername)
+    );
+    const keys = (material as any)?.publicKeys;
+    if (
+      material &&
+      keys &&
+      isKeyTransparencyAuthorizedPeerKeySet({
+        account: accountUsername,
+        peer: peerUsername,
+        kyberPublicBase64: keys.kyberPublicBase64,
+        dilithiumPublicBase64: keys.dilithiumPublicBase64,
+        x25519PublicBase64: keys.x25519PublicBase64,
+        peerCertificateFingerprint: (material as any).peerCertificateFingerprint,
+        identityRootFingerprint: (material as any).identityRootFingerprint,
+        identityBundleFingerprint: (material as any).identityBundleFingerprint,
+      })
+    ) {
+      const live = getKeyTransparencyAuthorizedPeerState(accountUsername, peerUsername);
+      if (live) {
+        markKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername, live);
+        await persistPeerDetectionKey(
+          accountUsername,
+          peerUsername,
+          (material as any).spoolDetectionKey,
+        ).catch(() => { });
+        return material;
+      }
+    }
+  } catch {
+  }
+  return findUser(peerUsername, { forceRefresh: true });
+}
 
 export interface PeerIdentityLike {
   username: string;
-  inboxId?: string;
   peerCertificateFingerprint?: string;
   identityRootFingerprint?: string;
   identityBundleFingerprint?: string;
@@ -13,7 +66,6 @@ export interface PeerIdentityLike {
     kyberPublicBase64?: string;
     dilithiumPublicBase64?: string;
     x25519PublicBase64?: string;
-    inboxId?: string;
   };
 }
 
@@ -36,10 +88,6 @@ export interface TrustedPeerHybridKeysResult {
     kyberPublicBase64: string;
     dilithiumPublicBase64: string;
     x25519PublicBase64: string;
-    inboxId?: string;
-    routeId?: string;
-    mailboxLookupId?: string;
-    bundleLookupId?: string;
   } | null;
   peerCertificateFingerprint?: string;
   identityRootFingerprint?: string;
@@ -47,34 +95,11 @@ export interface TrustedPeerHybridKeysResult {
   reason?: string;
 }
 
-function dispatchPeerMaterial(peerUsername: string, material: any) {
-  if (!material?.publicKeys) return;
-  try {
-    window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
-      detail: {
-        username: peerUsername,
-        hybridKeys: {
-          ...material.publicKeys,
-          inboxId: material.inboxId,
-          routeId: material.routeId,
-          mailboxLookupId: material.mailboxLookupId,
-          bundleLookupId: material.bundleLookupId
-        },
-        inboxId: material.inboxId,
-        routeId: material.routeId,
-        mailboxLookupId: material.mailboxLookupId,
-        bundleLookupId: material.bundleLookupId,
-        peerCertificateFingerprint: material.peerCertificateFingerprint,
-        identityRootFingerprint: material.identityRootFingerprint,
-        identityBundleFingerprint: material.identityBundleFingerprint
-      }
-    }));
-  } catch { }
-}
-
 async function validateCertifiedDiscoveryMaterial(
+  accountUsername: string,
   peerUsername: string,
-  material: any
+  material: any,
+  observedFullBundle?: unknown
 ): Promise<{
   valid: boolean;
   reason?: string;
@@ -84,11 +109,13 @@ async function validateCertifiedDiscoveryMaterial(
   signalIdentityX25519PublicKey?: string;
   transportX25519PublicKey?: string;
 }> {
-  const certified = await validateCertifiedPeerBundleV2(material?.certifiedPeerBundle, {
+  if (!isKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername)) {
+    return { valid: false, reason: 'KEY_TRANSPARENCY_NOT_VERIFIED' };
+  }
+  const certified = await validateCertifiedPeerBundleV3(material?.certifiedPeerBundle, {
     targetHandle: peerUsername,
-    inboxId: material?.inboxId,
     publicKeys: material?.publicKeys,
-    fullBundle: material?.fullBundle,
+    fullBundle: observedFullBundle ?? material?.fullBundle,
     peerCertificate: material?.peerCertificate,
     peerCertificateFingerprint: material?.peerCertificateFingerprint
   });
@@ -118,6 +145,7 @@ async function validateCertifiedDiscoveryMaterial(
 }
 
 export async function validateSignalBundleForPeerIdentity(
+  accountUsername: string,
   peerUsername: string,
   bundle: any,
   users?: PeerIdentityLike[] | null,
@@ -134,18 +162,7 @@ export async function validateSignalBundleForPeerIdentity(
   }
 
   const peer = (Array.isArray(users) ? users : []).find((user) => user?.username === normalizedPeerUsername);
-  const existingPinnedFingerprint = typeof peer?.peerCertificateFingerprint === 'string'
-    ? peer.peerCertificateFingerprint.trim().toLowerCase()
-    : '';
-  const existingIdentityRootFingerprint = typeof peer?.identityRootFingerprint === 'string'
-    ? peer.identityRootFingerprint.trim().toLowerCase()
-    : '';
   const cachedX25519 = peer?.hybridPublicKeys?.x25519PublicBase64 || null;
-
-  // Older cache entries stored the Signal identity in the hybrid x25519 slot.
-  if (cachedX25519 && cachedX25519 === bundleX25519 && existingPinnedFingerprint && existingIdentityRootFingerprint) {
-    return { valid: true, bundleX25519, expectedX25519: cachedX25519 };
-  }
 
   if (!findUser) {
     return {
@@ -156,8 +173,7 @@ export async function validateSignalBundleForPeerIdentity(
     };
   }
 
-  const knownPeers = (Array.isArray(users) ? users : []).map((user) => user?.username).filter(Boolean) as string[];
-  if (!shouldAttemptDiscovery(normalizedPeerUsername, knownPeers)) {
+  if (!shouldAttemptDiscovery(normalizedPeerUsername)) {
     return {
       valid: false,
       bundleX25519,
@@ -167,8 +183,13 @@ export async function validateSignalBundleForPeerIdentity(
   }
 
   try {
-    const material = await findUser(normalizedPeerUsername, { forceRefresh: true });
-    const certified = await validateCertifiedDiscoveryMaterial(normalizedPeerUsername, material);
+    const material = await discoveryMaterialForIdentityCheck(accountUsername, normalizedPeerUsername, findUser);
+    const certified = await validateCertifiedDiscoveryMaterial(
+      accountUsername,
+      normalizedPeerUsername,
+      material,
+      bundle
+    );
     if (!certified.valid) {
       return {
         valid: false,
@@ -196,27 +217,7 @@ export async function validateSignalBundleForPeerIdentity(
       };
     }
 
-    if (existingPinnedFingerprint) {
-      if (!discoveredFingerprint || discoveredFingerprint !== existingPinnedFingerprint) {
-        return {
-          valid: false,
-          bundleX25519,
-          expectedX25519: discoveredSignalX25519,
-          reason: 'PINNED_CERTIFICATE_MISMATCH'
-        };
-      }
-    }
-    if (existingIdentityRootFingerprint && discoveredRoot !== existingIdentityRootFingerprint) {
-      return {
-        valid: false,
-        bundleX25519,
-        expectedX25519: discoveredSignalX25519,
-        reason: 'PINNED_IDENTITY_ROOT_MISMATCH'
-      };
-    }
-
     if (discoveredSignalX25519 && discoveredSignalX25519 === bundleX25519) {
-      dispatchPeerMaterial(normalizedPeerUsername, material);
       return {
         valid: true,
         bundleX25519,
@@ -241,6 +242,7 @@ export async function validateSignalBundleForPeerIdentity(
 }
 
 export async function resolveTrustedPeerDilithiumPublicKey(
+  accountUsername: string,
   peerUsername: string,
   observedDilithiumPublicKey: string,
   users?: PeerIdentityLike[] | null,
@@ -256,24 +258,14 @@ export async function resolveTrustedPeerDilithiumPublicKey(
 
   const observed = observedDilithiumPublicKey.trim();
   const peer = (Array.isArray(users) ? users : []).find((user) => user?.username === normalizedPeerUsername);
-  const existingPinnedFingerprint = typeof peer?.peerCertificateFingerprint === 'string'
-    ? peer.peerCertificateFingerprint.trim().toLowerCase()
-    : '';
-  const existingIdentityRootFingerprint = typeof peer?.identityRootFingerprint === 'string'
-    ? peer.identityRootFingerprint.trim().toLowerCase()
-    : '';
   const cachedDilithium = peer?.hybridPublicKeys?.dilithiumPublicBase64 || null;
 
-  if (cachedDilithium && cachedDilithium === observed && existingPinnedFingerprint && existingIdentityRootFingerprint) {
-    return { valid: true, expectedDilithium: cachedDilithium };
-  }
-
-  if (cachedDilithium && existingPinnedFingerprint) {
-    return {
-      valid: false,
-      expectedDilithium: cachedDilithium,
-      reason: 'PINNED_DILITHIUM_IDENTITY_MISMATCH'
-    };
+  if (captureKeyTransparencyPeerAuthorization(
+    accountUsername,
+    normalizedPeerUsername,
+    observed,
+  )) {
+    return { valid: true, expectedDilithium: observed };
   }
 
   if (!findUser) {
@@ -284,8 +276,7 @@ export async function resolveTrustedPeerDilithiumPublicKey(
     };
   }
 
-  const knownPeers = (Array.isArray(users) ? users : []).map((user) => user?.username).filter(Boolean) as string[];
-  if (!shouldAttemptDiscovery(normalizedPeerUsername, knownPeers)) {
+  if (!shouldAttemptDiscovery(normalizedPeerUsername)) {
     return {
       valid: false,
       expectedDilithium: cachedDilithium,
@@ -294,8 +285,8 @@ export async function resolveTrustedPeerDilithiumPublicKey(
   }
 
   try {
-    const material = await findUser(normalizedPeerUsername, { forceRefresh: true });
-    const certified = await validateCertifiedDiscoveryMaterial(normalizedPeerUsername, material);
+    const material = await discoveryMaterialForIdentityCheck(accountUsername, normalizedPeerUsername, findUser);
+    const certified = await validateCertifiedDiscoveryMaterial(accountUsername, normalizedPeerUsername, material);
     if (!certified.valid) {
       return {
         valid: false,
@@ -319,25 +310,7 @@ export async function resolveTrustedPeerDilithiumPublicKey(
       };
     }
 
-    if (existingPinnedFingerprint) {
-      if (!discoveredFingerprint || discoveredFingerprint !== existingPinnedFingerprint) {
-        return {
-          valid: false,
-          expectedDilithium: discoveredDilithium,
-          reason: 'PINNED_CERTIFICATE_MISMATCH'
-        };
-      }
-    }
-    if (existingIdentityRootFingerprint && discoveredRoot !== existingIdentityRootFingerprint) {
-      return {
-        valid: false,
-        expectedDilithium: discoveredDilithium,
-        reason: 'PINNED_IDENTITY_ROOT_MISMATCH'
-      };
-    }
-
     if (discoveredDilithium && discoveredDilithium === observed) {
-      dispatchPeerMaterial(normalizedPeerUsername, material);
       return {
         valid: true,
         expectedDilithium: discoveredDilithium
@@ -359,9 +332,9 @@ export async function resolveTrustedPeerDilithiumPublicKey(
 }
 
 export async function resolveTrustedPeerHybridPublicKeys(
+  accountUsername: string,
   peerUsername: string,
-  material: any,
-  users?: PeerIdentityLike[] | null
+  material: any
 ): Promise<TrustedPeerHybridKeysResult> {
   const normalizedPeerUsername = typeof peerUsername === 'string' ? peerUsername.trim() : '';
   if (!normalizedPeerUsername) {
@@ -381,11 +354,10 @@ export async function resolveTrustedPeerHybridPublicKeys(
   let x25519PublicBase64 = typeof publicKeys?.x25519PublicBase64 === 'string'
     ? publicKeys.x25519PublicBase64.trim()
     : '';
-  const inboxId = typeof material?.inboxId === 'string' ? material.inboxId.trim() : undefined;
   const peerCertificateFingerprint = typeof material?.peerCertificateFingerprint === 'string'
     ? material.peerCertificateFingerprint.trim().toLowerCase()
     : '';
-  const certified = await validateCertifiedDiscoveryMaterial(normalizedPeerUsername, material);
+  const certified = await validateCertifiedDiscoveryMaterial(accountUsername, normalizedPeerUsername, material);
   if (!certified.valid) {
     return { valid: false, hybridKeys: null, reason: certified.reason || 'CERTIFIED_IDENTITY_INVALID' };
   }
@@ -402,7 +374,11 @@ export async function resolveTrustedPeerHybridPublicKeys(
   if (!kyberPublicBase64 || !dilithiumPublicBase64) {
     return { valid: false, hybridKeys: null, reason: 'MISSING_HYBRID_KEYS' };
   }
-  if (!certifiedPeerCertificateFingerprint || !certifiedIdentityRootFingerprint) {
+  if (
+    !certifiedPeerCertificateFingerprint ||
+    !certifiedIdentityRootFingerprint ||
+    !certifiedIdentityBundleFingerprint
+  ) {
     return { valid: false, hybridKeys: null, reason: 'DISCOVERY_CERTIFIED_IDENTITY_MISSING' };
   }
 
@@ -414,41 +390,12 @@ export async function resolveTrustedPeerHybridPublicKeys(
     return { valid: false, hybridKeys: null, reason: 'MISSING_X25519_IDENTITY' };
   }
 
-  const peer = (Array.isArray(users) ? users : []).find((user) => user?.username === normalizedPeerUsername);
-  const existingPinnedFingerprint = typeof peer?.peerCertificateFingerprint === 'string'
-    ? peer.peerCertificateFingerprint.trim().toLowerCase()
-    : '';
-  const existingIdentityRootFingerprint = typeof peer?.identityRootFingerprint === 'string'
-    ? peer.identityRootFingerprint.trim().toLowerCase()
-    : '';
-  const cachedDilithium = peer?.hybridPublicKeys?.dilithiumPublicBase64 || '';
-  const cachedX25519 = peer?.hybridPublicKeys?.x25519PublicBase64 || '';
-
-  if (existingPinnedFingerprint && certifiedPeerCertificateFingerprint && existingPinnedFingerprint !== certifiedPeerCertificateFingerprint) {
-    return { valid: false, hybridKeys: null, reason: 'PINNED_CERTIFICATE_MISMATCH' };
-  }
-  if (existingIdentityRootFingerprint && certifiedIdentityRootFingerprint && existingIdentityRootFingerprint !== certifiedIdentityRootFingerprint) {
-    return { valid: false, hybridKeys: null, reason: 'PINNED_IDENTITY_ROOT_MISMATCH' };
-  }
-
-  if (cachedDilithium && cachedDilithium !== dilithiumPublicBase64 && existingPinnedFingerprint) {
-    return { valid: false, hybridKeys: null, reason: 'PINNED_DILITHIUM_IDENTITY_MISMATCH' };
-  }
-
-  if (cachedX25519 && cachedX25519 !== x25519PublicBase64 && existingPinnedFingerprint) {
-    return { valid: false, hybridKeys: null, reason: 'PINNED_X25519_IDENTITY_MISMATCH' };
-  }
-
   return {
     valid: true,
     hybridKeys: {
       kyberPublicBase64,
       dilithiumPublicBase64,
-      x25519PublicBase64,
-      inboxId,
-      routeId: material.routeId,
-      mailboxLookupId: material.mailboxLookupId,
-      bundleLookupId: material.bundleLookupId,
+      x25519PublicBase64
     },
     peerCertificateFingerprint: certifiedPeerCertificateFingerprint || undefined,
     identityRootFingerprint: certifiedIdentityRootFingerprint || undefined,

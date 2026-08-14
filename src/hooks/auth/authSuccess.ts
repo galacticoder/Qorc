@@ -1,14 +1,11 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import type { HybridKeys } from "../../lib/types/auth-types";
-import { signal } from "../../lib/tauri-bindings";
 import { clearExplicitLogout } from "../../lib/auth/logout-marker";
+import { computeBlindUserId } from "../../lib/utils/auth-utils";
+import { type AuthLifecycle, isStaleAuthOperation } from "../../lib/auth/auth-lifecycle";
 
 export interface AuthSuccessRefs {
   loginUsernameRef: RefObject<string>;
   originalUsernameRef: RefObject<string>;
-  passphrasePlaintextRef: RefObject<string>;
-  keyManagerRef: RefObject<any>;
 }
 
 export interface AuthSuccessSetters {
@@ -17,9 +14,7 @@ export interface AuthSuccessSetters {
   setPseudonym: (v: string) => void;
   setIsLoggedIn: (v: boolean) => void;
   setAccountAuthenticated: (v: boolean) => void;
-  setRecoveryActive: (v: boolean) => void;
-  setShowPassphrasePrompt: (v: boolean) => void;
-  setIsRegistrationMode: (v: boolean) => void;
+  setIsSubmittingAuth: (v: boolean) => void;
   setLoginError: (v: string) => void;
 }
 
@@ -27,90 +22,41 @@ export const createHandleAuthSuccess = (
   refs: AuthSuccessRefs,
   setters: AuthSuccessSetters,
   helpers: {
-    storeAuthenticationState: (username: string, originalUsername?: string) => void;
-    deriveEffectivePassphrase: () => string;
-    getKeysOnDemand: () => Promise<HybridKeys | null>;
+    storeAuthenticationState: (username: string, originalUsername?: string) => Promise<void>;
+    lifecycle: AuthLifecycle;
   }
 ) => {
-  return async (username: string, isRecovered = false) => {
+  return async (username: string) => {
+    const operation = helpers.lifecycle.capture();
+    if (operation.account && operation.account !== username) return;
     const displayName = refs.originalUsernameRef.current || username;
+    const pseudonym = computeBlindUserId(username);
 
-    try { await clearExplicitLogout(); } catch { }
-
-    if (isRecovered && !refs.passphrasePlaintextRef.current) {
-      setters.setAuthStatus("Passphrase required");
-      setters.setUsername(displayName);
-      setters.setPseudonym(username);
-
-      refs.loginUsernameRef.current = username;
-
-      setters.setIsLoggedIn(true);
-      setters.setAccountAuthenticated(true);
-
-      await helpers.storeAuthenticationState(username, displayName);
-
-      setters.setRecoveryActive(true);
-      setters.setShowPassphrasePrompt(true);
-      setters.setIsRegistrationMode(false);
-      setters.setLoginError("");
-      return;
+    try {
+      await clearExplicitLogout();
+      helpers.lifecycle.assertCurrent(operation);
+    } catch (error) {
+      if (isStaleAuthOperation(error)) return;
+      throw error;
     }
+
+    refs.loginUsernameRef.current = username;
+    await helpers.storeAuthenticationState(username, displayName);
+    if (!helpers.lifecycle.isCurrent(operation)) return;
 
     setters.setAuthStatus("Authenticated");
     setters.setUsername(displayName);
-    setters.setPseudonym(username);
+    setters.setPseudonym(pseudonym);
     setters.setIsLoggedIn(true);
     setters.setAccountAuthenticated(true);
-
-    await helpers.storeAuthenticationState(username, displayName);
+    setters.setIsSubmittingAuth(false);
 
     try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
+    if (!helpers.lifecycle.isCurrent(operation)) return;
 
-    setTimeout(() => setters.setAuthStatus(""), 1000);
+    setTimeout(() => {
+      if (helpers.lifecycle.isCurrent(operation)) setters.setAuthStatus("");
+    }, 1000);
     setters.setLoginError("");
-
-    void Promise.resolve().then(async () => {
-      try {
-        const label = new TextEncoder().encode('signal-storage-key-v1');
-        let derived: Uint8Array | null = null;
-        try {
-          const keys = await helpers.getKeysOnDemand?.();
-          const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey;
-          if (kyberSecret && kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-            derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
-          } else {
-            try {
-              const composite = helpers.deriveEffectivePassphrase();
-              const salt = new TextEncoder().encode('signal-storage-key-v1');
-              derived = await (CryptoUtils as any).KDF.argon2id(composite, {
-                salt,
-                time: 3,
-                memoryCost: 1 << 17,
-                parallelism: 2,
-                hashLen: 32
-              });
-            } catch { }
-          }
-          if (derived) {
-            const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-            await signal.setStorageKey(keyB64);
-            if ((derived as any)?.fill) (derived as any).fill(0);
-          }
-        } catch { }
-      } catch { }
-
-      try {
-        await signal.initStorage(username);
-      } catch { }
-
-      if (refs.keyManagerRef.current && refs.passphrasePlaintextRef.current) {
-        try {
-          const effectivePassphrase = helpers.deriveEffectivePassphrase();
-          refs.keyManagerRef.current.initialize(effectivePassphrase).catch((_error: any) => {
-          });
-        } catch { }
-      }
-
-    });
   };
 };

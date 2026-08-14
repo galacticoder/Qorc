@@ -11,6 +11,9 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
+import { deriveQuantumAeadKey } from '../crypto/aead-key-derivation.js';
+import { UTF8_ENCODER } from '../utils/encoding.js';
+import { PROTOCOL_KEYS } from './protocol-keys.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,7 +71,7 @@ async function generateAndProtectKeypair(username, password) {
 
   const aead = new CryptoUtils.PostQuantumAEAD(kek);
   const nonce = CryptoUtils.Random.generateRandomBytes(36);
-  const aad = new TextEncoder().encode('haproxy-SECURE-CREDS-keys-v2');
+  const aad = UTF8_ENCODER.encode(PROTOCOL_KEYS.HAPROXY_SECURE_CREDENTIALS_AAD);
   const { ciphertext, tag } = aead.encrypt(keysBlob, nonce, aad);
 
   const payload = {
@@ -116,7 +119,7 @@ export async function unlockKeypair(username, password) {
   const ciphertext = Buffer.from(data.enc?.ciphertext || '', 'base64');
 
   const aead = new CryptoUtils.PostQuantumAEAD(kek);
-  const aad = new TextEncoder().encode('haproxy-SECURE-CREDS-keys-v2');
+  const aad = UTF8_ENCODER.encode(PROTOCOL_KEYS.HAPROXY_SECURE_CREDENTIALS_AAD);
   const decrypted = aead.decrypt(ciphertext, nonce, tag, aad);
   const keys = JSON.parse(Buffer.from(decrypted).toString('utf8'));
 
@@ -161,17 +164,11 @@ async function encryptCredentials(username, password) {
     Buffer.from(kyberSharedSecret),
     Buffer.from(x25519SharedSecret),
   ]);
-  const info = new TextEncoder().encode('haproxy-credentials-v2');
-  const aeadKey = await CryptoUtils.KDF.quantumHKDF(
-    new Uint8Array(rawSecret),
-    CryptoUtils.Hash.shake256(rawSecret, 64),
-    info,
-    32
-  );
+  const aeadKey = await deriveQuantumAeadKey(rawSecret, PROTOCOL_KEYS.HAPROXY_CREDENTIALS);
 
   const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
   const nonce = CryptoUtils.Random.generateRandomBytes(36);
-  const aad = new TextEncoder().encode('haproxy-credentials-v2');
+  const aad = UTF8_ENCODER.encode(PROTOCOL_KEYS.HAPROXY_CREDENTIALS);
   const { ciphertext, tag } = aead.encrypt(Buffer.from(plaintext, 'utf8'), nonce, aad);
 
   const encryptedPackage = {
@@ -227,16 +224,10 @@ async function decryptCredentials(encryptedObj, { username, password } = {}) {
     Buffer.from(kyberSharedSecret),
     Buffer.from(x25519SharedSecret),
   ]);
-  const info = new TextEncoder().encode('haproxy-credentials-v2');
-  const aeadKey = await CryptoUtils.KDF.quantumHKDF(
-    new Uint8Array(rawSecret),
-    CryptoUtils.Hash.shake256(rawSecret, 64),
-    info,
-    32
-  );
+  const aeadKey = await deriveQuantumAeadKey(rawSecret, PROTOCOL_KEYS.HAPROXY_CREDENTIALS);
 
   const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
-  const aad = new TextEncoder().encode('haproxy-credentials-v2');
+  const aad = UTF8_ENCODER.encode(PROTOCOL_KEYS.HAPROXY_CREDENTIALS);
   const plaintext = aead.decrypt(ciphertext, nonce, tag, aad);
 
   return JSON.parse(Buffer.from(plaintext).toString('utf8'));

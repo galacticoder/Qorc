@@ -82,31 +82,40 @@ export class DecryptService {
       throw new Error('Invalid encrypted data: insufficient length');
     }
     const combined = new Uint8Array(encryptedBytes);
-    let off = 0;
-    const version = combined[off++];
-    if (version !== 1) throw new Error('Unsupported version');
-    const ivLen = combined[off++];
-    if (ivLen === undefined || ivLen === 0 || off + ivLen > combined.length) {
-      throw new Error('Invalid IV length');
+    try {
+      let off = 0;
+      const version = combined[off++];
+      if (version !== 1) throw new Error('Unsupported version');
+      const ivLen = combined[off++];
+      if (ivLen !== 12 || off + ivLen > combined.length) {
+        throw new Error('Invalid IV length');
+      }
+      const iv = combined.slice(off, off + ivLen);
+      off += ivLen;
+      const tagLen = combined[off++];
+      if (tagLen !== 16 || off + tagLen > combined.length) {
+        iv.fill(0);
+        throw new Error('Invalid auth tag length');
+      }
+      const authTag = combined.slice(off, off + tagLen);
+      off += tagLen;
+      if (off + 4 > combined.length) {
+        iv.fill(0);
+        authTag.fill(0);
+        throw new Error('Invalid encrypted data: missing length header');
+      }
+      const encLen = new DataView(combined.buffer, combined.byteOffset + off, 4).getUint32(0, false);
+      off += 4;
+      if (encLen === 0 || off + encLen !== combined.length) {
+        iv.fill(0);
+        authTag.fill(0);
+        throw new Error('Invalid encrypted data length');
+      }
+      const encrypted = combined.slice(off);
+      return { iv, authTag, encrypted };
+    } finally {
+      combined.fill(0);
     }
-    const iv = combined.slice(off, off + ivLen);
-    off += ivLen;
-    const tagLen = combined[off++];
-    if (tagLen === undefined || tagLen === 0 || off + tagLen > combined.length) {
-      throw new Error('Invalid auth tag length');
-    }
-    const authTag = combined.slice(off, off + tagLen);
-    off += tagLen;
-    if (off + 4 > combined.length) {
-      throw new Error('Invalid encrypted data: missing length header');
-    }
-    const encLen = (combined[off] << 24) | (combined[off + 1] << 16) | (combined[off + 2] << 8) | combined[off + 3];
-    off += 4;
-    if (encLen === undefined || encLen === 0 || off + encLen > combined.length) {
-      throw new Error('Invalid encrypted data length');
-    }
-    const encrypted = combined.slice(off, off + encLen);
-    return { iv, authTag, encrypted };
   }
 
   static async decryptWithAESRaw(
@@ -116,27 +125,5 @@ export class DecryptService {
     aesKey: CryptoKey
   ): Promise<string> {
     return await AES.decryptWithAesGcmRaw(iv, authTag, encrypted, aesKey);
-  }
-}
-
-export class PostQuantumHybridService {
-  static async generateHybridKeyPair() {
-    const { Hybrid } = await import('../cryptography/hybrid');
-    return Hybrid.generateHybridKeyPair();
-  }
-
-  static async exportPublicKeys(hybridKeyPair: any) {
-    return {
-      kyberPublicBase64: hybridKeyPair.kyber.publicKeyBase64,
-      dilithiumPublicBase64: hybridKeyPair.dilithium.publicKeyBase64
-    };
-  }
-
-  static async signMessage(message: Uint8Array, dilithiumSecretKey: Uint8Array) {
-    return await DilithiumService.sign(dilithiumSecretKey, message);
-  }
-
-  static async verifySignature(signature: Uint8Array, message: Uint8Array, dilithiumPublicKey: Uint8Array) {
-    return await DilithiumService.verify(signature, message, dilithiumPublicKey);
   }
 }

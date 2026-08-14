@@ -2,32 +2,149 @@
  * Auth Signal Handlers
  */
 
-import { CryptoUtils } from '../utils/crypto-utils';
 import websocketClient from '../websocket/websocket';
-import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
-import { storage } from '../tauri-bindings';
+import { account, storage } from '../tauri-bindings';
 import type { AuthRefs } from '../types/signal-handler-types';
-import { clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
-import { PostQuantumUtils } from '../utils/pq-utils';
-import { auth as authApi } from '../tauri-bindings';
-import { getBlindRoutingClient, BlindRoutingCredentials } from '../transport/blind-routing-client';
+import { getBlindRoutingClient } from '../transport/blind-routing-client';
 import { tokenVault } from '../database/token-vault';
 import { PrivacyPassClient, PrivacyPassHelpers } from '../cryptography/privacy-pass-client';
-import { ZKDeviceProofGenerator, getOrCreateRingKeyPair } from '../cryptography/zk-device-proof';
-import { unblindSignature } from '../crypto/blind-credentials';
-import { computeBlindUserId } from '../utils/auth-utils';
-import { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } from '../cryptography/vault-key';
-import { SecureKeyManager } from '../database/secure-key-manager';
+import { clearStringRef, computePrivateAuthStorageId } from '../utils/auth-utils';
+import {
+  getCurrentLocalAccountScope,
+  getCurrentServerScope,
+  loadLastAuthenticatedAccount,
+} from '../security/local-account-scope';
 import { OPAQUE_CONFIG } from '../cryptography/opaque-client';
+import {
+  type AuthOperationSnapshot,
+  StaleAuthOperationError,
+  wipeStaleAuthResult,
+} from '../auth/auth-lifecycle';
+import { clearRegistrationAttempt } from '../auth/registration-attempt';
+import { SignalType } from '../types/signal-types';
+import { keyTransparencyClient } from '../key-transparency/client';
+import { hasResumeToken, replenishResumePool } from './resume-tokens';
+import { hasExactKeys } from '../sanitizers';
+import { REQUEST_ID_RE } from '../../../shared/patterns.js';
+import { STORAGE_PREFIXES } from '../database/storage-keys';
 
-let unlinkedModeSwitchInFlight = false;
-let unlinkedModeSwitchRetryCount = 0;
-let unlinkedModeSwitchRetryTimer: ReturnType<typeof setTimeout> | null = null;
-const MAX_UNLINKED_SWITCH_BACKOFF_MS = 10000;
-const MAX_UNLINKED_SWITCH_RETRIES = 5;
+type AuthCompletionKind = 'failure' | 'login' | 'registration';
 
-function promptForServerEntry(auth: AuthRefs, message = 'This server requires an entry token. Please provide the server password.'): void {
+function hasValidIssuanceShape(value: unknown): value is Record<string, unknown> {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    hasExactKeys(value as Record<string, unknown>, [
+      'issuerEpoch',
+      'proof',
+      'publicKey',
+      'signedBlindedTokens'
+    ]) &&
+    Array.isArray((value as any).signedBlindedTokens) &&
+    (value as any).signedBlindedTokens.length === 250 &&
+    (value as any).signedBlindedTokens.every((token: unknown) => typeof token === 'string') &&
+    typeof (value as any).proof === 'string' &&
+    typeof (value as any).publicKey === 'string' &&
+    Number.isSafeInteger((value as any).issuerEpoch)
+  );
+}
+
+function validateAuthCompletion(data: unknown): AuthCompletionKind {
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    Object.getPrototypeOf(data) !== Object.prototype
+  ) {
+    throw new Error('Server returned invalid authentication completion');
+  }
+  const payload = data as Record<string, any>;
+  if (
+    payload.type !== SignalType.AUTH_FULL_SUCCESS ||
+    typeof payload.authRequestId !== 'string' ||
+    !REQUEST_ID_RE.test(payload.authRequestId) ||
+    typeof payload.authenticated !== 'boolean' ||
+    typeof payload.serverEntryRequired !== 'boolean' ||
+    typeof payload.serverEntryGranted !== 'boolean' ||
+    payload.serverEntryRequired === payload.serverEntryGranted
+  ) {
+    throw new Error('Server returned invalid authentication completion');
+  }
+
+  if (!payload.authenticated) {
+    if (!hasExactKeys(payload, [
+      'authRequestId',
+      'authenticated',
+      'serverEntryGranted',
+      'serverEntryRequired',
+      'type'
+    ])) {
+      throw new Error('Server returned invalid authentication failure');
+    }
+    return 'failure';
+  }
+
+  if (payload.registrationConfirmed === true) {
+    if (
+      !hasExactKeys(payload, [
+        'anonymitySetSize',
+        'anonymousTokenBatch',
+        'authRequestId',
+        'authenticated',
+        'credentialIndex',
+        'registrationConfirmed',
+        'serverEntryGranted',
+        'serverEntryRequired',
+        'type'
+      ]) ||
+      !Number.isInteger(payload.credentialIndex) ||
+      payload.credentialIndex < 0 ||
+      payload.credentialIndex >= OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
+      payload.anonymitySetSize !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
+      !hasValidIssuanceShape(payload.anonymousTokenBatch)
+    ) {
+      throw new Error('Server returned invalid registration completion');
+    }
+    return 'registration';
+  }
+
+  if (
+    !hasExactKeys(payload, [
+      'anonymousTokenBatch',
+      'authRequestId',
+      'authenticated',
+      'serverEntryGranted',
+      'serverEntryRequired',
+      'type'
+    ]) ||
+    !hasValidIssuanceShape(payload.anonymousTokenBatch)
+  ) {
+    throw new Error('Server returned invalid login completion');
+  }
+  return 'login';
+}
+
+function captureAuthOperation(auth: AuthRefs): AuthOperationSnapshot | null {
+  return auth.authLifecycle?.capture() ?? null;
+}
+
+function isAuthOperationCurrent(auth: AuthRefs, operation: AuthOperationSnapshot | null): boolean {
+  return !operation || !auth.authLifecycle || auth.authLifecycle.isCurrent(operation);
+}
+
+function assertAuthOperationCurrent(auth: AuthRefs, operation: AuthOperationSnapshot | null): void {
+  if (!isAuthOperationCurrent(auth, operation)) throw new StaleAuthOperationError();
+}
+
+function promptForServerEntry(
+  auth: AuthRefs,
+  message = 'This server requires an entry token. Please provide the server password.',
+  authRequestId?: string
+): void {
+  websocketClient.setServerEntryPromptPending?.(true);
   auth.setShowPasswordPrompt?.(true);
   auth.setIsSubmittingAuth?.(false);
   auth.setTokenValidationInProgress?.(false);
@@ -37,231 +154,282 @@ function promptForServerEntry(auth: AuthRefs, message = 'This server requires an
     detail: {
       type: 'SERVER_ENTRY_REQUIRED',
       code: 'SERVER_ENTRY_REQUIRED',
+      authRequestId,
       message
     }
   }));
 }
 
-const scheduleUnlinkedModeSwitch = () => {
-  if (unlinkedModeSwitchInFlight) return;
+const switchToUnlinkedModeOnce = async (
+  assertCurrent: () => void,
+  signal?: AbortSignal
+): Promise<boolean> => {
   try {
-    if (
+    assertCurrent();
+    console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] login-completion: switching to unlinked mode`);
+    await websocketClient.switchToUnlinkedMode(signal);
+    assertCurrent();
+    return !!(
       websocketClient.isUnlinkedMode?.()
       && websocketClient.isConnectedToServer?.()
       && websocketClient.isUnlinkedSessionReady?.()
-    ) {
-      unlinkedModeSwitchRetryCount = 0;
-      return;
-    }
-  } catch { }
-
-  unlinkedModeSwitchInFlight = true;
-  void Promise.resolve().then(async () => {
-    try {
-      await websocketClient.switchToUnlinkedMode();
-      const ready = !!(
-        websocketClient.isUnlinkedMode?.()
-        && websocketClient.isConnectedToServer?.()
-        && websocketClient.isUnlinkedSessionReady?.()
-      );
-      if (!ready) {
-        throw new Error('Unlinked mode switch completed but session is not ready');
-      }
-      unlinkedModeSwitchRetryCount = 0;
-    } catch (err) {
-      const retryAttempt = ++unlinkedModeSwitchRetryCount;
-      if (retryAttempt >= MAX_UNLINKED_SWITCH_RETRIES) {
-        console.error('[AuthHandlers] Unlinked switch exhausted retries, giving up', { retryAttempt });
-        unlinkedModeSwitchRetryCount = 0;
-        unlinkedModeSwitchInFlight = false;
-        return;
-      }
-      const delayMs = Math.min(MAX_UNLINKED_SWITCH_BACKOFF_MS, 1000 * Math.pow(2, Math.max(0, retryAttempt - 1)));
-      console.warn('[AuthHandlers] Unlinked switch failed - scheduling retry', {
-        retryAttempt,
-        delayMs,
-        error: err instanceof Error ? err.message : String(err)
-      });
-      if (unlinkedModeSwitchRetryTimer) {
-        clearTimeout(unlinkedModeSwitchRetryTimer);
-      }
-      unlinkedModeSwitchRetryTimer = setTimeout(() => {
-        unlinkedModeSwitchRetryTimer = null;
-        unlinkedModeSwitchInFlight = false;
-        scheduleUnlinkedModeSwitch();
-      }, delayMs);
-      return;
-    } finally {
-      if (!unlinkedModeSwitchRetryTimer) {
-        unlinkedModeSwitchInFlight = false;
-      }
-    }
-  });
+    );
+  } catch (err) {
+    assertCurrent();
+    console.error('[AuthHandlers] Unlinked privacy-boundary connection failed', {
+      error: err instanceof Error ? err.message : String(err)
+    });
+    return false;
+  }
 };
 
 /**
  * Handle Full Authentication Success
  */
 export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<void> {
+  const operation = captureAuthOperation(auth);
   const {
     setAuthStatus, loginUsernameRef, setIsLoggedIn,
     setAccountAuthenticated, setIsSubmittingAuth,
-    setUsername, setMaxStepReached, setRecoveryActive,
+    setLoginError,
+    setUsername, setRecoveryActive,
     handleAuthSuccess
   } = auth;
 
   const currentUsername = loginUsernameRef?.current || '';
+  if (auth.authLifecycle && (!operation?.requestId || data?.authRequestId !== operation.requestId)) return;
+  if (operation?.account && operation.account !== currentUsername) return;
+  const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
+    const result = await promise;
+    try {
+      assertAuthOperationCurrent(auth, operation);
+    } catch (error) {
+      wipeStaleAuthResult(result);
+      throw error;
+    }
+    return result;
+  };
+  const completionKind = validateAuthCompletion(data);
 
-  // Process masked session result
-  if (data.maskedResult) {
-    setAuthStatus?.('Establishing secure context...');
+  if (completionKind === 'failure') {
+    const message = 'Incorrect username, password, or passphrase.';
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setIsSubmittingAuth?.(false);
+    setAuthStatus?.('');
+    setLoginError?.(message);
+    window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+      detail: { type: 'AUTH_FAILED', code: 'AUTH_FAILED', authRequestId: data?.authRequestId, message }
+    }));
+    return;
   }
 
-  // Handle Privacy Pass issuance
-  if (data.anonymousTokenBatch) {
-    await handlePrivacyPassIssuance(data.anonymousTokenBatch, auth);
+  if (!currentUsername) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setIsSubmittingAuth?.(false);
+    setAuthStatus?.('');
+    setLoginError?.('Local authentication identity is unavailable. Please sign in again.');
+    try { await websocketClient.close(); } catch { }
+    return;
+  }
+
+  if (completionKind === 'registration') {
+    const storageId = computePrivateAuthStorageId(currentUsername, await awaitCurrent(getCurrentServerScope()));
+    const slotKey = `${STORAGE_PREFIXES.PRIVATE_AUTH_SLOT}${storageId}`;
+    const expectedSlotValue = JSON.stringify({
+      credentialIndex: data.credentialIndex,
+      anonymitySetSize: data.anonymitySetSize
+    });
+    if (await awaitCurrent(storage.get(slotKey)) !== expectedSlotValue) {
+      throw new Error('Registration confirmation does not match the staged private-auth slot');
+    }
+  }
+
+  await handlePrivacyPassIssuance(data.anonymousTokenBatch, auth, operation);
+  assertAuthOperationCurrent(auth, operation);
+
+  let resumeCredentialReady = false;
+  try {
+    await awaitCurrent(replenishResumePool(currentUsername, true));
+    resumeCredentialReady = await awaitCurrent(hasResumeToken(currentUsername));
+  } catch {
+    assertAuthOperationCurrent(auth, operation);
+  }
+
+  if (!resumeCredentialReady) {
+    const message = 'Anonymous session credentials could not be persisted. Please sign in again.';
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setIsSubmittingAuth?.(false);
+    setAuthStatus?.('');
+    setLoginError?.(message);
+    try { await websocketClient.close(); } catch { }
+    window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+      detail: {
+        type: 'ANONYMOUS_SESSION_UNAVAILABLE',
+        code: 'ANONYMOUS_SESSION_UNAVAILABLE',
+        authRequestId: data?.authRequestId,
+        message
+      }
+    }));
+    return;
   }
 
   try {
-    const { replenishResumePool } = await import('./resume-tokens');
-    await replenishResumePool();
-  } catch { /* non-fatal */ }
+    await awaitCurrent(keyTransparencyClient.assertSecurityReady());
+  } catch {
+    const message = 'Key-transparency security incident detected. Messaging remains quarantined.';
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setIsSubmittingAuth?.(false);
+    setAuthStatus?.('');
+    setLoginError?.(message);
+    try { await websocketClient.close(); } catch { }
+    window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+      detail: {
+        type: 'KEY_TRANSPARENCY_SECURITY_INCIDENT',
+        code: 'KEY_TRANSPARENCY_SECURITY_INCIDENT',
+        authRequestId: data?.authRequestId,
+        message
+      }
+    }));
+    return;
+  }
 
-  if (data.shardId !== undefined && data.credentialIndex !== undefined && (currentUsername || data.userId)) {
-    const blindId = data.userId || (currentUsername ? computeBlindUserId(currentUsername) : null);
-    if (blindId) {
-      await storage.set(`shard_info_${blindId}`, JSON.stringify({
-        shardId: data.shardId,
-        credentialIndex: data.credentialIndex,
-        shardSize: data.shardSize || OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE
-      }));
-    }
+  if (completionKind === 'registration') {
+    await awaitCurrent(clearRegistrationAttempt(currentUsername));
   }
 
   if (data?.serverEntryRequired) {
     setAccountAuthenticated?.(false);
     setIsLoggedIn?.(false);
-    setMaxStepReached?.('login');
     setRecoveryActive?.(false);
-    promptForServerEntry(auth);
+    promptForServerEntry(auth, undefined, data.authRequestId);
     return;
   }
 
   websocketClient.markServerAuthGranted?.();
 
-  // Initialize blind routing if provided
-  if (data?.blindRouting) {
-    await initializeAnonymousRouting(data, auth, currentUsername);
-  } else if (currentUsername) {
-    try {
-      const blindClient = getBlindRoutingClient(currentUsername);
-      const persistedCreds = await blindClient.loadPersistentCredentials();
-      if (persistedCreds?.primaryInboxId && persistedCreds?.blindSignature) {
-        blindClient.setSendFunction(async (message: any) => {
-          await websocketClient.sendSecureControlMessage(message);
-        });
-        scheduleUnlinkedModeSwitch();
+  try {
+    const blindClient = getBlindRoutingClient(currentUsername);
+    blindClient.setSendFunction(async (message: any) => {
+      await websocketClient.sendSecureControlMessage(message);
+    });
+  } catch { }
+
+  if (websocketClient.isServerEntryPromptPending?.()) {
+    return;
+  }
+
+  if (!await awaitCurrent(switchToUnlinkedModeOnce(
+    () => assertAuthOperationCurrent(auth, operation),
+    operation?.signal
+  ))) {
+    const message = 'Anonymous delivery connection could not be established. Please sign in again.';
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setIsSubmittingAuth?.(false);
+    setAuthStatus?.('');
+    setLoginError?.(message);
+    try { await websocketClient.close(); } catch { }
+    window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+      detail: {
+        type: 'ANONYMOUS_SESSION_UNAVAILABLE',
+        code: 'ANONYMOUS_SESSION_UNAVAILABLE',
+        authRequestId: data?.authRequestId,
+        message
       }
-    } catch { }
+    }));
+    return;
   }
 
   if (handleAuthSuccess) {
-    await handleAuthSuccess(currentUsername, !!data.recovered);
+    await awaitCurrent(Promise.resolve(handleAuthSuccess(currentUsername)));
   } else {
     setAccountAuthenticated?.(true);
     setIsLoggedIn?.(true);
     setIsSubmittingAuth?.(false);
     setAuthStatus?.('');
-    setMaxStepReached?.('server');
     setRecoveryActive?.(false);
     if (currentUsername) setUsername?.(currentUsername);
   }
 
+  auth.setShowPassphrasePrompt?.(false);
+  auth.setShowPasswordPrompt?.(false);
+  auth.setRecoveryActive?.(false);
+  auth.setVaultReady?.(true);
+  auth.setTokenValidationInProgress?.(false);
+
+  assertAuthOperationCurrent(auth, operation);
   websocketClient.markApplicationAuthReady?.();
-  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
+  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS, {
+    detail: {
+      authenticated: true,
+      authRequestId: data.authRequestId,
+      serverEntryRequired: false,
+      serverEntryGranted: true
+    }
+  }));
 }
 
 /**
  * Handle Privacy Pass Token Issuance
  */
-export async function handlePrivacyPassIssuance(data: any, _auth: AuthRefs): Promise<void> {
+export async function handlePrivacyPassIssuance(
+  data: any,
+  auth: AuthRefs,
+  inheritedOperation?: AuthOperationSnapshot | null
+): Promise<void> {
+  const operation = inheritedOperation === undefined ? captureAuthOperation(auth) : inheritedOperation;
+  let signedBlindedTokens: Uint8Array[] = [];
+  let proof: Uint8Array | null = null;
+  let serverPublicKey: Uint8Array | null = null;
+  let pendingTokens: any[] = [];
+  let completedTokens: any[] = [];
   try {
-    const pendingTokens = tokenVault.getPendingTokens();
-    if (pendingTokens.length === 0) return;
-
+    assertAuthOperationCurrent(auth, operation);
     const ppClient = new PrivacyPassClient();
-    const { signedBlindedTokens, proof, serverPublicKey } = PrivacyPassHelpers.decodeResponse(data);
+    const decoded = PrivacyPassHelpers.decodeResponse(data);
+    signedBlindedTokens = decoded.signedBlindedTokens;
+    proof = decoded.proof;
+    serverPublicKey = decoded.serverPublicKey;
 
-    const count = Math.min(pendingTokens.length, signedBlindedTokens.length);
-    const completedTokens = await ppClient.unblindTokens(
-      pendingTokens.slice(0, count),
-      signedBlindedTokens.slice(0, count),
+    pendingTokens = await tokenVault.getPendingTokens(signedBlindedTokens.length);
+    if (pendingTokens.length !== signedBlindedTokens.length) {
+      throw new Error('Privacy Pass issuance batch size mismatch');
+    }
+    completedTokens = await ppClient.unblindTokens(
+      pendingTokens,
+      signedBlindedTokens,
       proof,
-      serverPublicKey
+      serverPublicKey,
+      decoded.issuerEpoch
     );
+    assertAuthOperationCurrent(auth, operation);
 
     await tokenVault.updateTokens(completedTokens);
+    assertAuthOperationCurrent(auth, operation);
   } catch (err) {
+    assertAuthOperationCurrent(auth, operation);
     console.error('[AuthHandlers] Privacy Pass issuance failed:', err);
-  }
-}
-
-/**
- * Handle ZK Refresh Challenge
- */
-export async function handleZKRefreshChallenge(data: any, _auth: AuthRefs): Promise<void> {
-  try {
-    const { challengeId, challenge, commitments } = data;
-    if (!challengeId || !challenge) return;
-    const ppClient = new PrivacyPassClient();
-    const { blindedTokens } = await ppClient.generateTokenBatch();
-
-    const creds = await authApi.getDeviceCredentials();
-    const deviceId = creds.device_id || 'default';
-    const ringKeys = await getOrCreateRingKeyPair(deviceId);
-    const ringPublicKeyBase64 = PostQuantumUtils.uint8ArrayToBase64(ringKeys.publicKey);
-
-    const commitmentList = Array.isArray(commitments) ? commitments : [];
-    const hasRingKey = commitmentList.some((c) => c?.ringPublicKey === ringPublicKeyBase64 && !c?.revoked);
-    if (!hasRingKey) {
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.ZK_DEVICE_REGISTER,
-        ringPublicKey: ringPublicKeyBase64
-      });
-      await websocketClient.sendSecureControlMessage({ type: SignalType.ZK_REFRESH_CHALLENGE });
-      return;
+    throw err;
+  } finally {
+    for (const token of signedBlindedTokens) token.fill(0);
+    proof?.fill(0);
+    serverPublicKey?.fill(0);
+    for (const token of pendingTokens) {
+      token.tokenSecret?.fill(0);
+      token.blindingFactor?.fill(0);
+      token.blindedElement?.fill(0);
+      token.unblindedToken?.fill(0);
     }
-
-    const mappedCommitments = commitmentList
-      .filter((c) => c && !c.revoked && typeof c.ringPublicKey === 'string')
-      .map((c) => ({
-        ringPublicKey: PostQuantumUtils.base64ToUint8Array(c.ringPublicKey),
-        registeredAt: typeof c.registeredAt === 'number' ? c.registeredAt : 0,
-        revoked: !!c.revoked,
-        commitmentHash: c.commitmentHash
-      }));
-
-    const proof = await ZKDeviceProofGenerator.generateProof(
-      ringKeys.secretKey,
-      ringKeys.publicKey,
-      mappedCommitments,
-      PostQuantumUtils.base64ToUint8Array(challenge)
-    );
-
-    await websocketClient.sendSecureControlMessage({
-      type: SignalType.ZK_REFRESH_RESPONSE,
-      challengeId,
-      proof: {
-        version: proof.version,
-        challenge: PostQuantumUtils.uint8ArrayToBase64(proof.challenge),
-        c0: PostQuantumUtils.uint8ArrayToBase64(proof.c0),
-        s: proof.s.map((resp) => PostQuantumUtils.uint8ArrayToBase64(resp)),
-        keyImage: PostQuantumUtils.uint8ArrayToBase64(proof.keyImage)
-      },
-      blindedTokens: blindedTokens.map(t => PostQuantumUtils.uint8ArrayToBase64(t))
-    });
-  } catch (err) {
-    console.error('[AuthHandlers] ZK Refresh failed:', err);
+    for (const token of completedTokens) {
+      token.tokenSecret?.fill(0);
+      token.blindingFactor?.fill(0);
+      token.blindedElement?.fill(0);
+      token.unblindedToken?.fill(0);
+    }
   }
 }
 
@@ -270,6 +438,27 @@ export async function handleZKRefreshChallenge(data: any, _auth: AuthRefs): Prom
  */
 
 export async function handleTokenValidationResponse(data: any, auth: AuthRefs): Promise<void> {
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    Array.isArray(data) ||
+    Object.getPrototypeOf(data) !== Object.prototype ||
+    typeof data.requestId !== 'string' ||
+    !REQUEST_ID_RE.test(data.requestId) ||
+    typeof data.valid !== 'boolean' ||
+    (data.valid
+      ? !hasExactKeys(data, ['requestId', 'serverEntryGranted', 'serverEntryRequired', 'type', 'valid']) ||
+        typeof data.serverEntryRequired !== 'boolean' ||
+        typeof data.serverEntryGranted !== 'boolean' ||
+        data.serverEntryRequired === data.serverEntryGranted
+      : !hasExactKeys(data, ['error', 'requestId', 'type', 'valid']) ||
+        typeof data.error !== 'string' ||
+        data.error.length < 1 ||
+        data.error.length > 128)
+  ) {
+    throw new Error('Server returned invalid session validation response');
+  }
+  const operation = captureAuthOperation(auth);
   const {
     loginUsernameRef,
     setAccountAuthenticated,
@@ -277,85 +466,107 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     setLoginError,
     setTokenValidationInProgress,
     setUsername,
-    setMaxStepReached,
-    accountAuthenticated,
-    isLoggedIn,
     getKeysOnDemand,
     hybridKeysRef
   } = auth;
+  const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
+    const result = await promise;
+    try {
+      assertAuthOperationCurrent(auth, operation);
+    } catch (error) {
+      wipeStaleAuthResult(result);
+      throw error;
+    }
+    return result;
+  };
 
   if (!data?.valid) {
-    if (accountAuthenticated || isLoggedIn) return;
-
-    await clearAuthTokens();
-    await clearTokenEncryptionKey();
-    try {
-      const { clearResumePool } = await import('./resume-tokens');
-      await clearResumePool();
-    } catch { /* ignore */ }
     setAccountAuthenticated?.(false);
-    setMaxStepReached?.('login');
+    setIsLoggedIn?.(false);
     setTokenValidationInProgress?.(false);
-    if (data?.error) setLoginError?.(`Session expired or invalid: ${data.message}`);
+    if (data?.error || data?.message) {
+      setLoginError?.(`Session expired or invalid: ${data.message || data.error}`);
+    }
+    try {
+      await websocketClient.close();
+      websocketClient.resetConnectionPrivacyMode();
+    } catch { }
     return;
   }
 
   if (data?.serverEntryRequired) {
     setAccountAuthenticated?.(false);
     setIsLoggedIn?.(false);
-    setTokenValidationInProgress?.(false);
-    setMaxStepReached?.('login');
     promptForServerEntry(auth);
+    try {
+      await websocketClient.ensureLinkedAuthenticationMode();
+    } catch {
+      if (isAuthOperationCurrent(auth, operation)) {
+        websocketClient.setServerEntryPromptPending?.(false);
+        auth.setShowPasswordPrompt?.(false);
+        setLoginError?.('Could not establish a private server-authentication connection.');
+      }
+      return;
+    }
+    return;
+  }
+
+  if (
+    !websocketClient.isUnlinkedMode?.()
+    || !websocketClient.isConnectedToServer?.()
+    || !websocketClient.isUnlinkedSessionReady?.()
+  ) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setTokenValidationInProgress?.(false);
+    setLoginError?.('Anonymous delivery was not established. Please sign in again.');
+    try { await websocketClient.close(); } catch { }
     return;
   }
 
   websocketClient.markServerAuthGranted?.();
 
   // Get username from storage or current ref
-  let username = await storage.get('last_authenticated_username');
+  const storedAccount = await awaitCurrent(loadLastAuthenticatedAccount());
+  let username = storedAccount.username;
+  const storedDisplayName = storedAccount.displayName;
   
   if (!username && loginUsernameRef?.current) {
     username = loginUsernameRef.current;
   }
   
-  if (typeof username === 'string' && username) {
-    if (loginUsernameRef) loginUsernameRef.current = username;
-    setUsername?.(username);
+  if (typeof username !== 'string' || !username) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setTokenValidationInProgress?.(false);
+    setLoginError?.('Local authentication identity is unavailable. Please sign in again.');
+    try { await websocketClient.close(); } catch { }
+    return;
+  }
+  if (operation?.account && operation.account !== username) return;
+  if (loginUsernameRef) loginUsernameRef.current = username;
+  setUsername?.(typeof storedDisplayName === 'string' && storedDisplayName ? storedDisplayName : username);
+
+  try {
+    await awaitCurrent(keyTransparencyClient.assertSecurityReady());
+  } catch {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setTokenValidationInProgress?.(false);
+    setLoginError?.('Key-transparency security incident detected. Messaging remains quarantined.');
+    try { await websocketClient.close(); } catch { }
+    return;
   }
 
-  // Try to auto-unlock vault with stored master key
   let vaultUnlocked = false;
   if (username) {
     try {
-      const vaultKey = await (async () => {
-        const rawVaultKey = await loadVaultKeyRaw(username);
-        if (rawVaultKey && rawVaultKey.length === 32) {
-          return await CryptoUtils.AES.importAesKey(rawVaultKey);
-        }
-        return await ensureVaultKeyCryptoKey(username);
-      })();
-
-      if (vaultKey) {
-        const masterKeyBytes = await loadWrappedMasterKey(username, vaultKey);
-        if (masterKeyBytes && masterKeyBytes.length === 32) {
-          const masterKey = await CryptoUtils.AES.importAesKey(masterKeyBytes);
-          
-          if (auth.aesKeyRef) auth.aesKeyRef.current = masterKey;
-          
-          if (!auth.keyManagerRef?.current) {
-            auth.keyManagerRef!.current = new SecureKeyManager(username);
-          }
-          try {
-            await auth.keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes);
-          } catch { }
-          
-          try { masterKeyBytes.fill(0); } catch { }
-          
-          auth.setVaultReady?.(true);
-          vaultUnlocked = true;
-        }
-      }
+      const accountScope = await awaitCurrent(getCurrentLocalAccountScope(username));
+      vaultUnlocked = await awaitCurrent(account.isUnlocked(accountScope));
+      if (auth.keyManagerOwnerRef) auth.keyManagerOwnerRef.current = accountScope;
+      auth.setVaultReady?.(vaultUnlocked);
     } catch (err) {
+      assertAuthOperationCurrent(auth, operation);
       console.warn('[Auth] Failed to auto-unlock vault:', err);
     }
   }
@@ -363,111 +574,69 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
   if (getKeysOnDemand) {
     try {
       const keys = await getKeysOnDemand();
+      assertAuthOperationCurrent(auth, operation);
       if (keys && hybridKeysRef) {
         hybridKeysRef.current = keys;
         try { window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED)); } catch { }
       }
-    } catch { }
+    } catch {
+      assertAuthOperationCurrent(auth, operation);
+    }
   }
 
   // Initialize blind routing
   if (username) {
     try {
       const blindClient = getBlindRoutingClient(username);
-      
-      if (data?.blindRouting) {
-        // Server issued fresh blind routing credentials
-        await initializeAnonymousRouting(data, auth, username);
-      } else {
-        // Fallback to saved credentials
-        const persistedCreds = await blindClient.loadPersistentCredentials();
-        if (persistedCreds) {
-          blindClient.setSendFunction(async (message: any) => {
-            await websocketClient.sendSecureControlMessage(message);
-          });
-          if (persistedCreds.primaryInboxId && persistedCreds.blindSignature) {
-            scheduleUnlinkedModeSwitch();
-          }
-        }
-      }
+      blindClient.setSendFunction(async (message: any) => {
+        await websocketClient.sendSecureControlMessage(message);
+      });
     } catch (err) {
       console.warn('[Auth] Failed to initialize blind routing:', err);
     }
   }
 
+  assertAuthOperationCurrent(auth, operation);
   setLoginError?.('');
   setAccountAuthenticated?.(true);
   setIsLoggedIn?.(true);
   setTokenValidationInProgress?.(false);
   
   if (vaultUnlocked) {
-    setMaxStepReached?.('server');
+    if (auth.passwordRef) clearStringRef(auth.passwordRef);
+    if (auth.passphrasePlaintextRef) clearStringRef(auth.passphrasePlaintextRef);
     auth.setShowPassphrasePrompt?.(false);
+    auth.setRecoveryActive?.(false);
   } else {
-    setMaxStepReached?.('passphrase');
     auth.setShowPassphrasePrompt?.(true);
+    auth.setRecoveryActive?.(true);
   }
 
   websocketClient.markApplicationAuthReady?.();
-  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
-}
-
-/**
- * Shared routing finalization
- */
-async function initializeAnonymousRouting(data: any, auth: AuthRefs, recoveredUser: string): Promise<void> {
-  if (!data?.blindRouting) return;
-
-  try {
-    const blindClient = getBlindRoutingClient(recoveredUser);
-    const { blindCredentialRef } = auth;
-    let finalCredentials = { ...data.blindRouting } as BlindRoutingCredentials;
-
-    if (data.blindRouting.signedBlindedToken && blindCredentialRef?.current) {
-      try {
-        const { blindingFactor, n, modulusLength, kid } = blindCredentialRef.current;
-        const signature = unblindSignature(
-          data.blindRouting.signedBlindedToken,
-          blindingFactor,
-          n,
-          modulusLength
-        );
-        finalCredentials.blindSignature = signature;
-        finalCredentials.blindSignatureKid = data.blindRouting.blindSignatureKid || kid;
-        finalCredentials.primaryInboxId = blindCredentialRef.current.inboxId || blindCredentialRef.current.message;
-        finalCredentials.primaryRouteId = blindCredentialRef.current.routeId || blindCredentialRef.current.message;
-        finalCredentials.blindSignatureSubject = 'route-v1';
-        blindCredentialRef.current.used = true;
-      } catch { }
-    }
-
-    if (!finalCredentials.primaryInboxId) {
-      const existing = await blindClient.loadPersistentCredentials();
-      if (existing?.primaryInboxId) {
-        finalCredentials.primaryInboxId = existing.primaryInboxId;
-      }
-      if (!finalCredentials.blindSignature && existing?.blindSignature) {
-        finalCredentials.blindSignature = existing.blindSignature;
-        finalCredentials.blindSignatureKid = existing.blindSignatureKid;
-      }
-    }
-
-    await blindClient.setCredentials(finalCredentials);
-    blindClient.setSendFunction(async (message: any) => {
-      await websocketClient.sendSecureControlMessage(message);
+  if (vaultUnlocked) {
+    void websocketClient.replaceConsumedAccountAuthorizationToken().catch((error) => {
+      console.warn('[Auth] Failed to replace consumed account credential:', error);
     });
-
-    scheduleUnlinkedModeSwitch();
-  } catch (err) {
-    console.warn('[AuthHandlers] Failed to initialize blind routing:', err);
   }
+  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
 }
 
 /**
  * Handle authentication error
  */
 export function handleAuthError(data: any, message: string | undefined, auth: AuthRefs): void {
-  const { setLoginError, setAuthStatus, setIsSubmittingAuth, setAccountAuthenticated, setIsLoggedIn, setMaxStepReached } = auth;
+  const operation = captureAuthOperation(auth);
+  if (
+    typeof data?.authRequestId === 'string' &&
+    auth.authLifecycle &&
+    data.authRequestId !== operation?.requestId
+  ) return;
+  if (
+    typeof data?.requestId === 'string' &&
+    auth.authLifecycle &&
+    data.requestId !== operation?.requestId
+  ) return;
+  const { setLoginError, setAuthStatus, setIsSubmittingAuth, setAccountAuthenticated, setIsLoggedIn } = auth;
   const locked = Boolean(data?.locked);
   const cooldownSeconds = typeof data?.cooldownSeconds === 'number' ? data.cooldownSeconds : undefined;
 
@@ -486,6 +655,8 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
       type: data?.code === 'SERVER_ENTRY_REQUIRED' ? 'SERVER_ENTRY_REQUIRED' : data?.type,
       category: data?.category,
       code: data?.code,
+      authRequestId: data?.authRequestId,
+      requestId: data?.requestId,
       message: errorMessage
     }
   }));
@@ -493,6 +664,5 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   if (locked) {
     setAccountAuthenticated?.(false);
     setIsLoggedIn?.(false);
-    setMaxStepReached?.('login');
   }
 }

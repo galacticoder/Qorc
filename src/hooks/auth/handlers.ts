@@ -3,34 +3,108 @@ import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
 import { PostQuantumUtils } from "../../lib/utils/pq-utils";
-import type { ServerHybridPublicKeys, HybridKeys, HashParams, MaxStepReached } from "../../lib/types/auth-types";
+import type { HybridKeys, ServerHybridPublicKeys } from "../../lib/types/auth-types";
 import { OPAQUEClient, OPAQUEClientHelpers, OPAQUE_CONFIG } from "../../lib/cryptography/opaque-client";
-import { computeBlindUserId } from "../../lib/utils/auth-utils";
-import { PrivacyPassClient, PrivacyPassHelpers } from "../../lib/cryptography/privacy-pass-client";
+import { computeBlindUserId, computePrivateAuthStorageId } from "../../lib/utils/auth-utils";
+import { PrivacyPassClient, getPrivacyPassBatchEpoch } from "../../lib/cryptography/privacy-pass-client";
+import { solvePowChallenge } from "../../lib/cryptography/proof-of-work";
 import { tokenVault } from "../../lib/database/token-vault";
 import { blake3 } from '@noble/hashes/blake3.js';
-import { storage } from "../../lib/tauri-bindings";
-import { deriveRendezvousRouteId } from "../../lib/transport/rendezvous-routing";
+import { sha256 } from '@noble/hashes/sha2.js';
+import { account, storage } from "../../lib/tauri-bindings";
+import { PostQuantumWorker } from "../../lib/cryptography/worker-bridge";
+import { getCurrentServerScope } from "../../lib/security/local-account-scope";
+import {
+  clearRegistrationAttempt,
+  getOrCreateRegistrationAttempt,
+} from "../../lib/auth/registration-attempt";
+import {
+  type AuthLifecycle,
+  StaleAuthOperationError,
+  isStaleAuthOperation,
+  wipeStaleAuthResult,
+} from "../../lib/auth/auth-lifecycle";
+import { keyTransparencyClient } from "../../lib/key-transparency/client";
+import {
+  PASSPHRASE_MAX_LENGTH,
+  PASSPHRASE_MIN_LENGTH,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+} from "../../lib/constants";
+import { REQUEST_ID_RE } from '../../../shared/patterns.js';
+import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
+import { STORAGE_PREFIXES } from '../../lib/database/storage-keys';
+
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+function privateAuthRequestCommitment(
+  blindedElement: Uint8Array,
+  publicKeys: Uint8Array[]
+): string {
+  const hash = sha256.create();
+  hash.update(new TextEncoder().encode(PROTOCOL_KEYS.PRIVATE_AUTH_REQUEST));
+  hash.update(blindedElement);
+  for (const publicKey of publicKeys) hash.update(publicKey);
+  const digest = hash.digest();
+  try {
+    return PostQuantumUtils.uint8ArrayToBase64(digest);
+  } finally {
+    digest.fill(0);
+  }
+}
 
 /**
  * Derive a composite secret from username, password, and passphrase
  */
-function deriveCompositeSecret(username: string, password: string, passphrase?: string): Uint8Array {
+async function deriveCompositeSecret(username: string, password: string, passphrase?: string): Promise<Uint8Array> {
   const u = (username || "").trim().toLowerCase();
   const p = password || "";
   const pp = passphrase || "";
 
-  const encoder = new TextEncoder();
-  const data = new Uint8Array([
-    ...encoder.encode(`u:${u}`),
-    0x00,
-    ...encoder.encode(`p:${p}`),
-    0x00,
-    ...encoder.encode(`s:${pp}`)
-  ]);
+  if (!u || u.length > 128 || !p || p.length > 1024 || pp.length > 1024) {
+    throw new Error('Invalid authentication secret');
+  }
 
-  const hash = blake3(data, { dkLen: 32 });
-  return hash;
+  const encoder = new TextEncoder();
+  const usernameBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_USERNAME_PREFIX}${u}`);
+  const passwordBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_PASSWORD_PREFIX}${p}`);
+  const passphraseBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_PASSPHRASE_PREFIX}${pp}`);
+  const data = new Uint8Array(usernameBytes.length + passwordBytes.length + passphraseBytes.length + 2);
+  let offset = 0;
+  data.set(usernameBytes, offset);
+  offset += usernameBytes.length + 1;
+  data.set(passwordBytes, offset);
+  offset += passwordBytes.length + 1;
+  data.set(passphraseBytes, offset);
+  const saltInput = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_KDF}${u}`);
+  let salt: Uint8Array | null = null;
+  let workerHash: Uint8Array | null = null;
+  try {
+    salt = blake3(saltInput, { dkLen: 32 });
+    const result = await PostQuantumWorker.argon2Hash({
+      pass: data,
+      salt,
+      time: 3,
+      mem: 64 * 1024,
+      parallelism: 1,
+      type: 2,
+      version: 0x13,
+      hashLen: 32
+    });
+    workerHash = result.hash instanceof Uint8Array ? result.hash : null;
+    if (!workerHash || workerHash.length !== 32) {
+      throw new Error('Authentication KDF returned an invalid result');
+    }
+    return new Uint8Array(workerHash);
+  } finally {
+    usernameBytes.fill(0);
+    passwordBytes.fill(0);
+    passphraseBytes.fill(0);
+    data.fill(0);
+    saltInput.fill(0);
+    salt?.fill(0);
+    workerHash?.fill(0);
+  }
 }
 
 export interface AuthRefs {
@@ -38,101 +112,78 @@ export interface AuthRefs {
   originalUsernameRef: RefObject<string>;
   passwordRef: RefObject<string>;
   confirmPasswordRef: RefObject<string>;
-  passphraseRef: RefObject<string>;
   passphrasePlaintextRef: RefObject<string>;
   hybridKeysRef: RefObject<HybridKeys | null>;
-  keyManagerRef: RefObject<any>;
   keyManagerOwnerRef: RefObject<string>;
-  passphraseLimiterRef: RefObject<{ tokens: number; last: number }>;
   accountSubmitInFlightRef: RefObject<boolean>;
-  aesKeyRef: RefObject<CryptoKey | null>;
-  blindCredentialRef?: RefObject<{
-    message: string;
-    inboxId?: string;
-    routeId?: string;
-    blindedMsg: string;
-    blindingFactor: string;
-    n: string;
-    kid: string;
-    modulusLength: number;
-    hash: string;
-    saltLength: number;
-    scheme: string;
-    used?: boolean;
-  } | null>;
 }
 
-const createAuthFinalizeWaiter = (timeoutMs: number): { promise: Promise<any>; cancel: () => void } => {
+const createAuthFinalizeWaiter = (
+  timeoutMs: number,
+  abortSignal: AbortSignal,
+  authRequestId: string
+): { promise: Promise<any>; cancel: () => void } => {
   let cancelWait = () => {};
-  let capturedSuccess: any = null;
   const promise = new Promise<any>((resolve, reject) => {
     let settled = false;
-    const startedAt = Date.now();
-    let timeout: ReturnType<typeof setTimeout>;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       window.removeEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, handleSuccess as any);
-      window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handleServerMessage as any);
-      window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleServerMessage as any);
+      window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleEdgeMessage as any);
       window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
+      abortSignal.removeEventListener('abort', handleAbort);
     };
     cancelWait = cleanup;
 
-    const handleSuccess = () => {
-      console.log('[AUTH-FLOW] Finalization success event received', {
-        elapsedMs: Date.now() - startedAt
-      });
-      cleanup();
-      resolve(capturedSuccess);
-    };
-
-    const handleServerMessage = (evt: Event) => {
+    const handleSuccess = (evt: Event) => {
       const detail = (evt as CustomEvent).detail as any;
-      if (!detail || typeof detail !== 'object') return;
-      const type = detail.type;
-      if (type === SignalType.AUTH_FULL_SUCCESS) {
-        console.log('[AUTH-FLOW] AUTH_FULL_SUCCESS received while waiting for finalization', {
-          elapsedMs: Date.now() - startedAt,
-          serverEntryRequired: !!detail?.serverEntryRequired
-        });
-        capturedSuccess = detail;
-        if (detail?.serverEntryRequired) {
-          cleanup();
-          resolve(detail);
-        }
-        return;
-      }
-      if (type === SignalType.AUTH_ERROR) {
-        console.warn('[AUTH-FLOW] Auth error while waiting for finalization', {
-          elapsedMs: Date.now() - startedAt,
-          code: detail?.code
-        });
-        cleanup();
-        reject(new Error(detail?.message || 'Registration failed'));
-      }
+      if (detail?.authRequestId !== authRequestId || detail?.authenticated !== true) return;
+      cleanup();
+      resolve(detail);
     };
 
     const handleAuthError = (evt: Event) => {
       const detail = (evt as CustomEvent).detail as any;
+      if (detail?.authRequestId !== authRequestId) return;
+      if (detail?.code === 'SERVER_ENTRY_REQUIRED') {
+        cleanup();
+        resolve({
+          authenticated: true,
+          authRequestId,
+          serverEntryRequired: true,
+          serverEntryGranted: false
+        });
+        return;
+      }
       cleanup();
       reject(new Error(detail?.message || 'Registration failed'));
     };
 
+    const handleEdgeMessage = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail as any;
+      if (detail?.type !== '__ws_connection_closed' && detail?.type !== '__ws_connection_error') return;
+      cleanup();
+      reject(new Error('Connection closed while finalizing authentication'));
+    };
+
+    const handleAbort = () => {
+      cleanup();
+      reject(new StaleAuthOperationError());
+    };
+
     window.addEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, handleSuccess as any);
-    window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handleServerMessage as any);
-    window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleServerMessage as any);
+    window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleEdgeMessage as any);
     window.addEventListener(EventType.AUTH_ERROR, handleAuthError as any);
+    abortSignal.addEventListener('abort', handleAbort, { once: true });
 
     timeout = setTimeout(() => {
-      console.error('[AUTH-FLOW] Registration finalization wait timed out', {
-        timeoutMs,
-        elapsedMs: Date.now() - startedAt
-      });
       cleanup();
-      reject(new Error('Registration finalization timeout'));
+      reject(new Error('Authentication completion timeout'));
     }, timeoutMs);
+    if (abortSignal.aborted) handleAbort();
   });
   return { promise, cancel: cancelWait };
 };
@@ -140,35 +191,53 @@ const createAuthFinalizeWaiter = (timeoutMs: number): { promise: Promise<any>; c
 const createSignalResponseWaiter = <T = any>(
   signalType: SignalType,
   timeoutMs: number,
-  timeoutMessage: string
+  timeoutMessage: string,
+  abortSignal: AbortSignal,
+  authRequestId: string
 ): { promise: Promise<T>; cancel: () => void } => {
   let cancelWait = () => {};
   const promise = new Promise<T>((resolve, reject) => {
     let settled = false;
     let onSignalMessage: (msg: any) => void = () => {};
-    const startedAt = Date.now();
-
     const cleanup = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       try { websocketClient.unregisterMessageHandler(signalType, onSignalMessage); } catch { }
-      try { window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, onEdgeMessage as any); } catch { }
+      try { window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, onServerEvent as any); } catch { }
+      try { window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, onServerEvent as any); } catch { }
       try { window.removeEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
+      abortSignal.removeEventListener('abort', onAbort);
     };
 
-    const fail = (reason: string) => {
+    const fail = (reason: string, code?: unknown) => {
       cleanup();
-      reject(new Error(reason));
+      const error = new Error(reason) as Error & { code?: string };
+      if (typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code)) {
+        error.code = code;
+      }
+      reject(error);
     };
 
-    const onEdgeMessage = (event: Event) => {
+    const onServerEvent = (event: Event) => {
       const detail = (event as CustomEvent).detail as any;
       if (!detail || typeof detail !== 'object') return;
       if (detail.type === '__ws_connection_closed') {
         fail('Connection closed while waiting for server response');
       } else if (detail.type === '__ws_connection_error') {
         fail(detail.error ? `Connection error: ${detail.error}` : 'Connection error while waiting for server response');
+      } else if (detail.type === SignalType.ERROR || detail.type === SignalType.AUTH_ERROR) {
+        const responseAuthRequestId = typeof detail.authRequestId === 'string'
+          ? detail.authRequestId
+          : '';
+        if (responseAuthRequestId && responseAuthRequestId !== authRequestId) return;
+        const belongsToAnotherRequest = !responseAuthRequestId && (
+          typeof detail.requestId === 'string' ||
+          typeof detail.op === 'string' ||
+          typeof detail.stage === 'string'
+        );
+        if (belongsToAnotherRequest) return;
+        fail(detail.message || 'Authentication request failed', detail.code);
       }
     };
 
@@ -176,39 +245,31 @@ const createSignalResponseWaiter = <T = any>(
 
     const onAuthError = (event: Event) => {
       const detail = (event as CustomEvent).detail as any;
-      fail(detail?.message || 'Authentication failed');
+      if (detail?.authRequestId !== authRequestId) return;
+      fail(detail?.message || 'Authentication failed', detail?.code);
+    };
+
+    const onAbort = () => {
+      cleanup();
+      reject(new StaleAuthOperationError());
     };
 
     onSignalMessage = (msg: any) => {
-      console.log('[AUTH-FLOW] Response received', {
-        type: signalType,
-        elapsedMs: Date.now() - startedAt
-      });
+      if (msg?.authRequestId !== authRequestId) return;
       cleanup();
       resolve(msg as T);
     };
 
     const timeout = setTimeout(() => {
-      console.error('[AUTH-FLOW] Response wait timed out', {
-        type: signalType,
-        timeoutMs,
-        elapsedMs: Date.now() - startedAt,
-        connected: websocketClient.isConnectedToServer?.(),
-        pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
-      });
       fail(timeoutMessage);
     }, timeoutMs);
 
     websocketClient.registerMessageHandler(signalType, onSignalMessage);
-    console.log('[AUTH-FLOW] Waiting for response', {
-      type: signalType,
-      timeoutMs,
-      connected: websocketClient.isConnectedToServer?.(),
-      pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
-    });
-
-    window.addEventListener(EventType.EDGE_SERVER_MESSAGE, onEdgeMessage as any);
+    window.addEventListener(EventType.EDGE_SERVER_MESSAGE, onServerEvent as any);
+    window.addEventListener(EventType.SECURE_SERVER_MESSAGE, onServerEvent as any);
     window.addEventListener(EventType.AUTH_ERROR, onAuthError as any);
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+    if (abortSignal.aborted) onAbort();
   });
   return { promise, cancel: cancelWait };
 };
@@ -223,22 +284,15 @@ export interface AuthSetters {
   setIsSubmittingAuth: (v: boolean) => void;
   setAccountAuthenticated: (v: boolean) => void;
   setIsRegistrationMode: (v: boolean) => void;
-  setShowPassphrasePrompt: (v: boolean) => void;
-  setRecoveryActive: (v: boolean) => void;
-  setMaxStepReached: (v: MaxStepReached | ((prev: MaxStepReached) => MaxStepReached)) => void;
   setVaultReady: (v: boolean) => void;
   setTokenValidationInProgress: (v: boolean) => void;
+  setShowPasswordPrompt: (v: boolean) => void;
+  setShowPassphrasePrompt: (v: boolean) => void;
+  setRecoveryActive: (v: boolean) => void;
 }
 
 export interface AuthState {
-  isLoggedIn: boolean;
-  accountAuthenticated: boolean;
-  recoveryActive: boolean;
-  passphraseHashParams?: HashParams;
-  serverHybridPublic: ServerHybridPublicKeys | null;
   isSubmittingAuth: boolean;
-  inboxId?: string;
-  blindSignature?: string;
 }
 
 export const createHandleAccountSubmit = (
@@ -246,458 +300,664 @@ export const createHandleAccountSubmit = (
   setters: AuthSetters,
   state: AuthState,
   helpers: {
-    waitForServerKeys: () => Promise<ServerHybridPublicKeys>;
-    initializeKeys: (isRecoveryMode?: boolean, providedSalt?: string, providedArgon2Params?: any) => Promise<void>;
-    getKeysOnDemand: () => Promise<HybridKeys | null>;
-    storeAuthenticationState: (username: string, originalUsername?: string) => void;
-    clearSecureDBForUser: (pseudonym: string) => Promise<void>;
+    waitForServerKeys: (signal?: AbortSignal) => Promise<ServerHybridPublicKeys>;
+    initializeKeys: () => Promise<void>;
+    attemptAuthRecovery: () => Promise<boolean>;
+    isLocalRecovery: () => boolean;
+    storeAuthenticationState: (username: string, originalUsername?: string) => Promise<void>;
+    lifecycle: AuthLifecycle;
   }
 ) => {
   return async (
     mode: "login" | "register",
     userInput: string,
     password: string,
-    passphrase?: string
+    passphrase: string
   ) => {
+    console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] handleAccountSubmit invoked`, { mode, isSubmittingAuth: state.isSubmittingAuth, accountSubmitInFlight: refs.accountSubmitInFlightRef.current });
     if (state.isSubmittingAuth || refs.accountSubmitInFlightRef.current) {
+      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] handleAccountSubmit: IGNORED (already submitting/in-flight)`);
       return;
     }
+    const displayUsername = userInput.trim();
+    const trimmedUsername = displayUsername.toLowerCase();
+    if (!/^[a-zA-Z0-9._-]{3,100}$/.test(displayUsername)) {
+      setters.setLoginError('Invalid username format');
+      return;
+    }
+    if (mode === 'register') {
+      if (
+        password.length < PASSWORD_MIN_LENGTH ||
+        password.length > PASSWORD_MAX_LENGTH ||
+        passphrase.length < PASSPHRASE_MIN_LENGTH ||
+        passphrase.length > PASSPHRASE_MAX_LENGTH ||
+        password === passphrase
+      ) {
+        setters.setLoginError('Password or passphrase does not meet the account security policy');
+        return;
+      }
+    } else {
+      if (
+        password.length === 0 ||
+        password.length > PASSWORD_MAX_LENGTH ||
+        passphrase.length === 0 ||
+        passphrase.length > PASSPHRASE_MAX_LENGTH
+      ) {
+        setters.setLoginError('Enter your password and encryption passphrase');
+        return;
+      }
+    }
+
+    const authRequestId = crypto.randomUUID();
+    if (!REQUEST_ID_RE.test(authRequestId)) {
+      setters.setLoginError('Authentication request could not be initialized');
+      return;
+    }
+    const operation = helpers.lifecycle.begin(trimmedUsername, authRequestId);
+    tokenVault.lock();
+    const assertCurrent = () => {
+      helpers.lifecycle.assertCurrent(operation);
+      if (refs.loginUsernameRef.current && refs.loginUsernameRef.current !== trimmedUsername) {
+        throw new StaleAuthOperationError();
+      }
+    };
+    const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
+      const result = await promise;
+      try {
+        assertCurrent();
+      } catch (error) {
+        wipeStaleAuthResult(result);
+        throw error;
+      }
+      return result;
+    };
+
     refs.accountSubmitInFlightRef.current = true;
     setters.setIsSubmittingAuth(true);
     setters.setLoginError("");
     setters.setIsRegistrationMode(mode === "register");
     setters.setAuthStatus(mode === "register" ? "Creating account..." : "Authenticating...");
 
-    const trimmedUsername = userInput.trim();
-    if (!trimmedUsername || trimmedUsername.length > 120 || /[^a-zA-Z0-9._-]/.test(trimmedUsername)) {
-      setters.setLoginError('Invalid username format');
-      setters.setIsSubmittingAuth(false);
-      refs.accountSubmitInFlightRef.current = false;
-      return;
-    }
-    if (password.length > 1024) {
-      setters.setLoginError('Password too long');
-      setters.setIsSubmittingAuth(false);
-      refs.accountSubmitInFlightRef.current = false;
-      return;
-    }
-
-    refs.originalUsernameRef.current = trimmedUsername;
+    refs.originalUsernameRef.current = displayUsername;
     const blindUserId = computeBlindUserId(trimmedUsername);
 
-    const prevUser = refs.loginUsernameRef.current;
-    if (prevUser && prevUser !== blindUserId) {
-      await helpers.clearSecureDBForUser(prevUser);
-      try {
-        if (refs.keyManagerRef.current) {
-          refs.keyManagerRef.current.clearKeys();
-          await refs.keyManagerRef.current.deleteDatabase();
-          refs.keyManagerRef.current = null;
-          refs.keyManagerOwnerRef.current = '' as any;
-          refs.hybridKeysRef.current = null;
-        }
-      } catch { }
-    }
-
     refs.loginUsernameRef.current = trimmedUsername;
-    setters.setUsername(trimmedUsername);
+    setters.setUsername(displayUsername);
     setters.setPseudonym(blindUserId);
-    websocketClient.setUsername(blindUserId);
+    websocketClient.setUsername(trimmedUsername);
 
     refs.passwordRef.current = password;
-    refs.confirmPasswordRef.current = passphrase || "";
+    refs.confirmPasswordRef.current = "";
+    refs.passphrasePlaintextRef.current = "";
 
-    await helpers.storeAuthenticationState(trimmedUsername, trimmedUsername);
+    let nativeUnlockedForAttempt = false;
+    let retainNativeSession = false;
+
+    const unlockNativeAccountForTokens = async (): Promise<void> => {
+      if (!nativeUnlockedForAttempt) {
+        refs.passwordRef.current = password;
+        refs.passphrasePlaintextRef.current = passphrase;
+        await awaitCurrent(helpers.initializeKeys());
+        nativeUnlockedForAttempt = true;
+      }
+      if (!tokenVault.isVaultUnlocked()) {
+        await awaitCurrent(tokenVault.initialize());
+      }
+    };
+
+    const releaseFailedNativeAccount = async (): Promise<void> => {
+      if (!nativeUnlockedForAttempt || retainNativeSession) return;
+      tokenVault.lock();
+      setters.setVaultReady(false);
+      const accountOwner = refs.keyManagerOwnerRef.current;
+      refs.hybridKeysRef.current = null;
+      refs.keyManagerOwnerRef.current = '';
+      nativeUnlockedForAttempt = false;
+      if (/^[a-f0-9]{64}$/.test(accountOwner)) {
+        await account.lock(accountOwner).catch(() => false);
+      }
+    };
 
     try {
-      if (!websocketClient.isConnectedToServer()) {
-        setters.setAuthStatus("Connecting...");
-        await websocketClient.connect();
-      }
-
-      await helpers.waitForServerKeys();
-
-      if (passphrase) {
+      if (mode === 'login' && helpers.isLocalRecovery()) {
         refs.passphrasePlaintextRef.current = passphrase;
-        await helpers.initializeKeys(false);
+        setters.setAuthStatus('Unlocking local account...');
+        await awaitCurrent(helpers.initializeKeys());
+        nativeUnlockedForAttempt = true;
+        await awaitCurrent(tokenVault.initialize());
+        setters.setVaultReady(true);
+        try { window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED)); } catch { }
+
+        const resumed = await awaitCurrent(helpers.attemptAuthRecovery());
+        if (resumed) {
+          retainNativeSession = true;
+          setters.setShowPassphrasePrompt(false);
+          setters.setRecoveryActive(false);
+          setters.setIsSubmittingAuth(false);
+          return;
+        }
+
+        // native vault is unlocked but no resume credential remains
+        refs.passwordRef.current = password;
+        refs.passphrasePlaintextRef.current = passphrase;
+        setters.setAuthStatus('No restart credential remains; signing in...');
       }
 
-      // Ensure on-demand identity keys are initialized for later use (messaging prekey bundle,
-      // etc.). The OPAQUE flow below derives everything it needs from the password directly and
-      // does not consume this result, so we don't build a placeholder key object here (the old
-      // ephemeral fallback was dead code and constructed an invalid, accountRoot-less HybridKeys).
-      await helpers.getKeysOnDemand();
+      setters.setAuthStatus("Preparing private authentication connection...");
+      await awaitCurrent(websocketClient.switchToLinkedAuthenticationMode(operation.signal));
+
+      await awaitCurrent(helpers.waitForServerKeys(operation.signal));
+      if (
+        websocketClient.isServerPasswordRequired()
+        && !websocketClient.isServerAuthGranted()
+      ) {
+        setters.setIsSubmittingAuth(false);
+        setters.setAuthStatus('');
+        setters.setShowPasswordPrompt(true);
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+          detail: {
+            type: 'SERVER_ENTRY_REQUIRED',
+            code: 'SERVER_ENTRY_REQUIRED',
+            authRequestId,
+            message: 'Enter the server password before signing in to the account.'
+          }
+        }));
+        return;
+      }
 
       // OPAQUE Flow
+      let compositeSecret: Uint8Array | null = null;
+      const opaqueClient = new OPAQUEClient();
+      const ppClient = new PrivacyPassClient();
       try {
         setters.setAuthStatus("Initializing OPAQUE...");
-        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-        const compositeSecret = deriveCompositeSecret(trimmedUsername, password, passphrase);
-
-        const opaqueClient = new OPAQUEClient();
-        const ppClient = new PrivacyPassClient();
+        await awaitCurrent(yieldToEventLoop());
+        compositeSecret = await awaitCurrent(deriveCompositeSecret(trimmedUsername, password, passphrase));
 
         if (mode === "register") {
-          setters.setAuthStatus("Blinding credentials...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-
-          const { blindedElement, clientPublicKey, blindingFactor, clientSecretKey } =
-            await opaqueClient.startOTRegistration(compositeSecret);
-
-          setters.setAuthStatus("Generating anonymous tokens...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-          const { blindedTokens, tokenSecrets } = await ppClient.generateTokenBatch(250);
-
-          // Request a slot
-          const responseWaiter = createSignalResponseWaiter<any>(
-            SignalType.AUTH_OT_REGISTER_RESPONSE,
-            60000,
-            'Registration response timeout'
-          );
-
-          setters.setAuthStatus("Requesting registration slot...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-
-          console.log('[AUTH-FLOW] Sending registration slot request', {
-            connected: websocketClient.isConnectedToServer?.(),
-            pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
-          });
+          let registrationBlindedElement: Uint8Array | null = null;
+          let registrationBlindingFactor: Uint8Array | null = null;
+          let registrationBlindedTokens: Uint8Array[] = [];
+          let registrationTokenSecrets: any[] = [];
+          let pendingRegistrationTokens: any[] = [];
+          let decodedRegistrationResponse: any = null;
+          let registrationFinalize: any = null;
           try {
-            await websocketClient.sendSecureControlMessage({
-              type: SignalType.AUTH_OT_REGISTER_REQUEST,
-              blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
-              clientPublicKey: PostQuantumUtils.uint8ArrayToBase64(clientPublicKey)
-            }, { failIfQueued: true });
-            console.log('[AUTH-FLOW] Registration slot request sent');
+          setters.setAuthStatus("Blinding credentials...");
+          await awaitCurrent(yieldToEventLoop());
+
+          const registrationStart = await awaitCurrent(opaqueClient.startOTRegistration(compositeSecret));
+          registrationBlindedElement = registrationStart.blindedElement;
+          registrationBlindingFactor = registrationStart.blindingFactor;
+
+          setters.setAuthStatus("Requesting registration proof...");
+          await awaitCurrent(yieldToEventLoop());
+
+          let registrationPreflightSolution: string | undefined;
+          let serverResponse: any = null;
+          for (let round = 0; round < 3; round += 1) {
+            const responseWaiter = createSignalResponseWaiter<any>(
+              SignalType.AUTH_OT_REGISTER_RESPONSE,
+              60000,
+              'Registration response timeout',
+              operation.signal,
+              authRequestId
+            );
+            try {
+              await awaitCurrent(websocketClient.sendSecureControlMessage({
+                type: SignalType.AUTH_OT_REGISTER_REQUEST,
+                authRequestId,
+                blindedElement: PostQuantumUtils.uint8ArrayToBase64(registrationBlindedElement),
+                preflightPowSolution: registrationPreflightSolution
+              }, { failIfQueued: true, signal: operation.signal }));
+            } catch (sendError) {
+              responseWaiter.cancel();
+              throw sendError;
+            }
+
+            const response = await awaitCurrent(responseWaiter.promise);
+            if (!response?.preflightRequired) {
+              serverResponse = response;
+              break;
+            }
+            setters.setAuthStatus("Securing registration request...");
+            registrationPreflightSolution = await awaitCurrent(solvePowChallenge(
+              response.powChallenge,
+              operation.signal
+            ));
+          }
+          if (!serverResponse) {
+            throw new Error('Registration preflight could not be completed');
+          }
+          setters.setAuthStatus("Creating envelope...");
+          await awaitCurrent(yieldToEventLoop());
+
+          // Finish OT registration
+          decodedRegistrationResponse = OPAQUEClientHelpers.decodeResponse(serverResponse, {
+            evaluatedElement: 32,
+            serverNonce: 32
+          });
+          registrationFinalize = await awaitCurrent(opaqueClient.finishOTRegistration(
+            compositeSecret,
+            registrationBlindingFactor,
+            decodedRegistrationResponse
+          ));
+
+          const registrationAttemptId = await awaitCurrent(
+            getOrCreateRegistrationAttempt(trimmedUsername)
+          );
+          const readyWaiter = createSignalResponseWaiter<any>(
+            SignalType.AUTH_OT_REGISTER_READY,
+            120000,
+            'Registration staging timeout',
+            operation.signal,
+            authRequestId
+          );
+          try {
+            await awaitCurrent(websocketClient.sendSecureControlMessage({
+              type: SignalType.AUTH_OT_REGISTER_FINALIZE,
+              authRequestId,
+              registrationAttemptId,
+              ...OPAQUEClientHelpers.encodeRequest({
+                envelope: registrationFinalize.envelope,
+                authPublicKey: registrationFinalize.authPublicKey
+              })
+            }, { failIfQueued: true, signal: operation.signal }));
           } catch (sendError) {
-            responseWaiter.cancel();
+            readyWaiter.cancel();
             throw sendError;
           }
 
-          const serverResponse = await responseWaiter.promise;
-          setters.setAuthStatus("Creating envelope...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+          const ready = await awaitCurrent(readyWaiter.promise);
+          if (
+            !ready ||
+            typeof ready !== 'object' ||
+            Array.isArray(ready) ||
+            Object.keys(ready).sort().join(',') !== 'anonymitySetSize,authRequestId,credentialIndex,registrationAlreadyCommitted,staged,type' ||
+            typeof ready.staged !== 'boolean' ||
+            typeof ready.registrationAlreadyCommitted !== 'boolean' ||
+            ready.staged === ready.registrationAlreadyCommitted ||
+            !Number.isInteger(ready.credentialIndex) ||
+            ready.credentialIndex < 0 ||
+            ready.credentialIndex >= OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
+            ready.anonymitySetSize !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE
+          ) {
+            throw new Error('Server returned invalid registration staging state');
+          }
 
-          // Finish OT registration
-          const registrationFinalize = await opaqueClient.finishOTRegistration(
-            compositeSecret,
-            blindingFactor,
-            clientSecretKey,
-            OPAQUEClientHelpers.decodeResponse(serverResponse, ['evaluatedElement', 'serverPublicKey', 'serverNonce'])
+          if (ready.registrationAlreadyCommitted === true) {
+            await awaitCurrent(clearRegistrationAttempt(trimmedUsername));
+            setters.setIsRegistrationMode(false);
+            throw new Error('Account creation was already committed. Sign in to continue.');
+          }
+
+          await unlockNativeAccountForTokens();
+
+          pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
+          if (pendingRegistrationTokens.length > 0 && pendingRegistrationTokens.length !== 250) {
+            for (const token of pendingRegistrationTokens) {
+              token.tokenSecret?.fill(0);
+              token.blindingFactor?.fill(0);
+              token.blindedElement?.fill(0);
+              token.unblindedToken?.fill(0);
+            }
+            pendingRegistrationTokens = [];
+            await awaitCurrent(tokenVault.discardPendingTokens());
+          }
+          if (pendingRegistrationTokens.length === 0) {
+            setters.setAuthStatus("Generating anonymous tokens...");
+            await awaitCurrent(yieldToEventLoop());
+            const generatedTokens = await awaitCurrent(ppClient.generateTokenBatch(250));
+            registrationBlindedTokens = generatedTokens.blindedTokens;
+            registrationTokenSecrets = generatedTokens.tokenSecrets;
+            await awaitCurrent(tokenVault.replaceTokens(registrationTokenSecrets));
+            pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
+          }
+          if (
+            pendingRegistrationTokens.length !== 250 ||
+            pendingRegistrationTokens.some((candidate) => candidate.blindedElement?.length !== 32)
+          ) {
+            throw new Error('Anonymous token issuance state unavailable');
+          }
+
+          const privateAuthStorageId = computePrivateAuthStorageId(
+            trimmedUsername,
+            await awaitCurrent(getCurrentServerScope())
           );
-
-          // wipe composite secret
-          compositeSecret.fill(0);
-
-          // Store export key for vault
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-          await tokenVault.initialize(registrationFinalize.exportKey);
-
-          // Persist vault key
-          try {
-            const { saveVaultKeyRaw } = await import('../../lib/cryptography/vault-key');
-            await saveVaultKeyRaw(trimmedUsername, registrationFinalize.exportKey);
-          } catch (err) {
-            console.warn('[Auth] Failed to persist vault key during registration:', err);
+          const privateAuthSlotKey = `${STORAGE_PREFIXES.PRIVATE_AUTH_SLOT}${privateAuthStorageId}`;
+          const privateAuthSlotValue = JSON.stringify({
+            credentialIndex: ready.credentialIndex,
+            anonymitySetSize: ready.anonymitySetSize
+          });
+          if (!await awaitCurrent(storage.set(
+            privateAuthSlotKey,
+            privateAuthSlotValue
+          ))) {
+            throw new Error('Private authentication slot could not be persisted');
+          }
+          if (await awaitCurrent(storage.get(privateAuthSlotKey)) !== privateAuthSlotValue) {
+            throw new Error('Private authentication slot could not be verified');
           }
 
-          // Re wrap master key with export key that persisted as vault key
+          const finalizationWaiter = createAuthFinalizeWaiter(120000, operation.signal, authRequestId);
           try {
-            const { saveWrappedMasterKey } = await import('../../lib/cryptography/vault-key');
-            const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
-            const masterKey = refs.keyManagerRef.current?.getMasterKey?.();
-            if (masterKey) {
-              const exportVaultKey = await CryptoUtils.AES.importAesKey(registrationFinalize.exportKey);
-              const rawMaster = new Uint8Array(await CryptoUtils.Keys.exportAESKey(masterKey));
-              await saveWrappedMasterKey(trimmedUsername, rawMaster, exportVaultKey);
-              rawMaster.fill(0);
-            }
-          } catch (err) {
-            console.warn('[Auth] Failed to re-wrap master key with export vault key:', err);
-          }
-
-          // Store generated tokens in the vault
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-          await tokenVault.storeTokens(tokenSecrets);
-
-          // Generate blind credential for blind routing
-          let blindedToken: string | undefined;
-          let blindParams: { message: string; inboxId?: string; routeId?: string; blindedMsg: string; blindingFactor: string; n: string; kid: string; modulusLength: number; hash: string; saltLength: number; scheme: string; used?: boolean } | undefined;
-          if (state.serverHybridPublic?.blindPublicKey) {
-            try {
-              const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
-              const { deriveInboxId, currentInboxEpoch } = await import('../../lib/cryptography/vault-key');
-              const { blindMessage } = await import('../../lib/crypto/blind-credentials');
-
-              const vaultKey = await CryptoUtils.AES.importAesKey(registrationFinalize.exportKey);
-              const inboxId = await deriveInboxId(vaultKey, currentInboxEpoch());
-
-              const routeId = deriveRendezvousRouteId(inboxId);
-              const blindResult = await blindMessage(routeId, state.serverHybridPublic.blindPublicKey);
-              blindedToken = blindResult.blindedMsg;
-              blindParams = {
-                message: routeId,
-                inboxId,
-                routeId,
-                blindedMsg: blindResult.blindedMsg,
-                blindingFactor: blindResult.blindingFactor,
-                n: blindResult.n,
-                kid: blindResult.kid,
-                modulusLength: blindResult.modulusLength,
-                hash: blindResult.hash,
-                saltLength: blindResult.saltLength,
-                scheme: blindResult.scheme,
-                used: false
-              };
-
-              if (refs.blindCredentialRef) {
-                const existing = refs.blindCredentialRef.current;
-                if (!existing || existing.used) {
-                  refs.blindCredentialRef.current = blindParams;
-                }
-              }
-            } catch (err) {
-              console.warn('[Auth] Failed to generate blind credential for registration:', err);
-            }
-          }
-
-          const finalizationWaiter = createAuthFinalizeWaiter(120000);
-          try {
-            await websocketClient.sendSecureControlMessage({
-              type: SignalType.AUTH_OT_REGISTER_FINALIZE,
-              credentialId: PostQuantumUtils.uint8ArrayToBase64(registrationFinalize.credentialId),
-              blindedToken,
-              blindedTokens: blindedTokens.map(t => PostQuantumUtils.uint8ArrayToBase64(t)),
-              ...OPAQUEClientHelpers.encodeRequest({
-                envelope: registrationFinalize.envelope,
-                maskedResponse: registrationFinalize.maskedResponse
-              })
-            }, { failIfQueued: true });
+            await awaitCurrent(websocketClient.sendSecureControlMessage({
+              type: SignalType.AUTH_OT_REGISTER_CONFIRM,
+              authRequestId,
+              registrationAttemptId,
+              blindedTokens: pendingRegistrationTokens.map((candidate) =>
+                PostQuantumUtils.uint8ArrayToBase64(candidate.blindedElement!)
+              ),
+              tokenEpoch: getPrivacyPassBatchEpoch(pendingRegistrationTokens)
+            }, { failIfQueued: true, signal: operation.signal }));
           } catch (sendError) {
             finalizationWaiter.cancel();
             throw sendError;
           }
 
-          const finalizeSuccess = await finalizationWaiter.promise;
+          const authResult = await awaitCurrent(finalizationWaiter.promise);
 
-          // Persist assigned shard slot
-          try {
-            const sId = Number.isInteger(finalizeSuccess?.shardId) ? finalizeSuccess.shardId : null;
-            const cIndex = Number.isInteger(finalizeSuccess?.credentialIndex) ? finalizeSuccess.credentialIndex : null;
-            if (sId !== null && cIndex !== null) {
-              await storage.set(`shard_info_${blindUserId}`, JSON.stringify({
-                shardId: sId,
-                credentialIndex: cIndex,
-                shardSize: Number.isInteger(finalizeSuccess?.shardSize)
-                  ? finalizeSuccess.shardSize
-                  : OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE
-              }));
-            } else {
-              console.warn('[Auth] Registration finished without shard slot metadata. re login may require recovery');
-            }
-          } catch (err) {
-            console.warn('[Auth] Failed to persist shard info during registration:', err);
+          if (authResult?.serverEntryRequired) {
+            await awaitCurrent(helpers.storeAuthenticationState(trimmedUsername, displayUsername));
+            return;
           }
 
-          if (passphrase) {
-            refs.passphrasePlaintextRef.current = passphrase;
-            if (!refs.hybridKeysRef.current || !refs.aesKeyRef.current) {
-              await helpers.initializeKeys(false);
-            }
-            setters.setVaultReady(true);
-          } else {
-            setters.setShowPassphrasePrompt(true);
-          }
-
-          registrationFinalize.exportKey.fill(0);
+          retainNativeSession = true;
+          setters.setVaultReady(true);
 
           setters.setAccountAuthenticated(true);
           setters.setIsLoggedIn(true);
           setters.setIsRegistrationMode(false);
           setters.setIsSubmittingAuth(false);
-        } else {
-          setters.setAuthStatus("Preparing anonymous lookup...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-
-          // Retrieve shard info
-          const shardInfoRaw = await storage.get(`shard_info_${blindUserId}`);
-          let shardId: number | null = null;
-          let myIndex: number | null = null;
-
-          if (shardInfoRaw && typeof shardInfoRaw === 'string') {
-            try {
-              const parsed = JSON.parse(shardInfoRaw);
-              shardId = Number.isInteger(parsed.shardId) ? parsed.shardId : null;
-              myIndex = Number.isInteger(parsed.credentialIndex) ? parsed.credentialIndex : null;
-              if (parsed.shardSize !== OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE) {
-                throw new Error('Shard anonymity set size mismatch');
-              }
-            } catch {
-              console.warn('[Auth] Failed to load private auth shard metadata');
-            }
-          }
-          if (shardId === null || myIndex === null) {
-            throw new Error('Private auth shard metadata unavailable. recovery flow is required');
-          }
-
-
-          const opaqueClient = new OPAQUEClient();
-          const ppClient = new PrivacyPassClient();
-
-          // Prepare anonymous token
-          let token = await tokenVault.getToken();
-          let redemptionToken: any = null;
-
-          if (token) {
-            redemptionToken = await ppClient.prepareRedemption(token);
-          }
-
-          setters.setAuthStatus("Generating OT keys...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-
-          const compositeSecret = deriveCompositeSecret(trimmedUsername, password, passphrase);
-          const shardSize = OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE;
-          const { pubKeys, blindedElement } = await opaqueClient.startOTLogin(compositeSecret, shardSize, myIndex);
-
-          // Send OT Request
-          const otResponseWaiter = createSignalResponseWaiter<any>(
-            SignalType.AUTH_OT_RESPONSE,
-            240000,
-            'OT response timeout'
-          );
-
-          setters.setAuthStatus("Retrieving blind record...");
-
-          const onOtChunkProgress = (ev: Event) => {
-            const detail = (ev as CustomEvent).detail;
-            if (
-              detail?.payloadType === SignalType.AUTH_OT_RESPONSE &&
-              Number.isFinite(detail?.total) && detail.total > 0
-            ) {
-              const pct = Math.max(0, Math.min(100, Math.round((detail.received / detail.total) * 100)));
-              setters.setAuthStatus(`Retrieving blind record... (${pct}%)`);
-            }
-          };
-          window.addEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
-
-          let otResponse: any;
-          try {
-            let sent = false;
-            let lastSendError: unknown = null;
-            for (let attempt = 0; attempt < 3 && !sent; attempt++) {
-              const ready = await websocketClient.waitUntilReady(45000);
-              if (!ready) {
-                lastSendError = new Error('Connection not ready. Please try again.');
-                break;
-              }
-              try {
-                await websocketClient.sendSecureControlMessage({
-                  type: SignalType.AUTH_OT_REQUEST,
-                  shardId,
-                  clientPubKeys: pubKeys.map(pk => PostQuantumUtils.uint8ArrayToBase64(pk)),
-                  blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
-                  anonymousTokenData: redemptionToken ? PrivacyPassHelpers.formatResponse(redemptionToken) : null
-                }, { failIfQueued: true });
-                sent = true;
-              } catch (sendError) {
-                lastSendError = sendError;
-                await new Promise(resolve => setTimeout(resolve, 500));
-              }
-            }
-            if (!sent) {
-              otResponseWaiter.cancel();
-              throw lastSendError instanceof Error ? lastSendError : new Error('WebSocket not connected');
-            }
-
-            otResponse = await otResponseWaiter.promise;
           } finally {
-            window.removeEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+            registrationBlindedElement?.fill(0);
+            registrationBlindingFactor?.fill(0);
+            for (const token of registrationBlindedTokens) token.fill(0);
+            for (const token of registrationTokenSecrets) {
+              token.tokenSecret?.fill(0);
+              token.blindingFactor?.fill(0);
+              token.blindedElement?.fill(0);
+              token.unblindedToken?.fill(0);
+            }
+            for (const token of pendingRegistrationTokens) {
+              token.tokenSecret?.fill(0);
+              token.blindingFactor?.fill(0);
+              token.blindedElement?.fill(0);
+              token.unblindedToken?.fill(0);
+            }
+            decodedRegistrationResponse?.evaluatedElement?.fill(0);
+            decodedRegistrationResponse?.serverNonce?.fill(0);
+            registrationFinalize?.envelope?.fill(0);
+            registrationFinalize?.exportKey?.fill(0);
+            registrationFinalize?.authPublicKey?.fill(0);
           }
+        } else {
+          let loginBlindedElement: Uint8Array | null = null;
+          let loginPublicKeys: Uint8Array[] = [];
+          let evaluatedElement: Uint8Array | null = null;
+          let loginServerNonce: Uint8Array | null = null;
+          let loginAuthChannelBinding: Uint8Array | null = null;
+          let loginFinalize: any = null;
+          let otResponse: any = null;
+          let pendingAccountTokens: any[] = [];
+          try {
+            setters.setAuthStatus("Preparing anonymous lookup...");
+            await awaitCurrent(yieldToEventLoop());
 
-          setters.setAuthStatus("Decrypting record...");
-          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+            const privateAuthStorageId = computePrivateAuthStorageId(
+              trimmedUsername,
+              await awaitCurrent(getCurrentServerScope())
+            );
+            const privateAuthSlotRaw = await awaitCurrent(storage.get(`${STORAGE_PREFIXES.PRIVATE_AUTH_SLOT}${privateAuthStorageId}`));
+            let myIndex: number | null = null;
+            if (privateAuthSlotRaw && typeof privateAuthSlotRaw === 'string') {
+              try {
+                const parsed = JSON.parse(privateAuthSlotRaw);
+                if (
+                  !parsed ||
+                  Array.isArray(parsed) ||
+                  Object.getPrototypeOf(parsed) !== Object.prototype ||
+                  Object.keys(parsed).sort().join(',') !== 'anonymitySetSize,credentialIndex' ||
+                  !Number.isInteger(parsed.credentialIndex) ||
+                  parsed.credentialIndex < 0 ||
+                  parsed.credentialIndex >= OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
+                  parsed.anonymitySetSize !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE
+                ) {
+                  throw new Error('Private authentication slot metadata is invalid');
+                }
+                myIndex = parsed.credentialIndex;
+              } catch {
+                console.warn('[Auth] Failed to load private auth slot metadata');
+              }
+            }
+            if (myIndex === null) {
+              throw new Error('Private auth slot unavailable. Account recovery is required.');
+            }
 
-          const loginFinalize = await opaqueClient.finishOTLogin(
-            compositeSecret,
-            otResponse.otRecords,
-            PostQuantumUtils.base64ToUint8Array(otResponse.evaluatedElement),
-            PostQuantumUtils.base64ToUint8Array(otResponse.serverNonce)
-          );
+            setters.setAuthStatus("Generating OT keys...");
+            await awaitCurrent(yieldToEventLoop());
 
-          // Wipe composite secret
-          compositeSecret.fill(0);
+            const anonymitySetSize = OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE;
+            const loginStart = await awaitCurrent(opaqueClient.startOTLogin(compositeSecret, anonymitySetSize, myIndex));
+            loginPublicKeys = loginStart.pubKeys;
+            loginBlindedElement = loginStart.blindedElement;
+            let encodedPubKeys = loginPublicKeys.map((publicKey) =>
+              PostQuantumUtils.uint8ArrayToBase64(publicKey)
+            );
+            const requestCommitment = privateAuthRequestCommitment(loginBlindedElement, loginPublicKeys);
+            for (const publicKey of loginPublicKeys) publicKey.fill(0);
+            loginPublicKeys = [];
 
-          if (!loginFinalize.success || !loginFinalize.authMessage || !loginFinalize.exportKey) {
-            throw new Error('Incorrect username, password, or passphrase.');
-          }
+            setters.setAuthStatus("Retrieving blind record...");
+            const onOtChunkProgress = (ev: Event) => {
+              if (!helpers.lifecycle.isCurrent(operation)) return;
+              const detail = (ev as CustomEvent).detail;
+              if (
+                detail?.payloadType === SignalType.AUTH_OT_RESPONSE &&
+                Number.isFinite(detail?.total) && detail.total > 0
+              ) {
+                const pct = Math.max(0, Math.min(100, Math.round((detail.received / detail.total) * 100)));
+                setters.setAuthStatus(`Retrieving blind record... (${pct}%)`);
+              }
+            };
+            window.addEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
 
-          // Initialize vault and send final auth message
-          await tokenVault.initialize(loginFinalize.exportKey);
-
-          // Store username for auto-login on reconnect
-          await storage.set('last_authenticated_username', trimmedUsername);
-          refs.loginUsernameRef.current = trimmedUsername;
-          setters.setUsername(trimmedUsername);
-
-          // Generate blind credential from export key
-          let blindedToken: string | undefined;
-          if (state.serverHybridPublic?.blindPublicKey) {
             try {
-              const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
-              const { deriveInboxId, currentInboxEpoch, saveVaultKeyRaw } = await import('../../lib/cryptography/vault-key');
-              const { blindMessage } = await import('../../lib/crypto/blind-credentials');
+              let preflightPowSolution: string | undefined;
+              for (let round = 0; round < 3; round += 1) {
+                const otResponseWaiter = createSignalResponseWaiter<any>(
+                  SignalType.AUTH_OT_RESPONSE,
+                  240000,
+                  'OT response timeout',
+                  operation.signal,
+                  authRequestId
+                );
+                let sent = false;
+                let lastSendError: unknown = null;
+                let roundAuthChannelBinding: string | null = null;
+                for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+                  const ready = await awaitCurrent(websocketClient.waitUntilReady(45000, operation.signal));
+                  if (!ready) {
+                    lastSendError = new Error('Connection not ready. Please try again.');
+                    break;
+                  }
+                  try {
+                    roundAuthChannelBinding = await awaitCurrent(websocketClient.sendSecureControlMessage({
+                      type: SignalType.AUTH_OT_REQUEST,
+                      authRequestId,
+                      clientPubKeys: preflightPowSolution ? encodedPubKeys : undefined,
+                      blindedElement: PostQuantumUtils.uint8ArrayToBase64(loginBlindedElement),
+                      requestCommitment,
+                      preflightPowSolution
+                    }, {
+                      authBindingRequestId: authRequestId,
+                      failIfQueued: true,
+                      signal: operation.signal
+                    }));
+                    sent = true;
+                  } catch (sendError) {
+                    if (isStaleAuthOperation(sendError)) throw sendError;
+                    lastSendError = sendError;
+                    await awaitCurrent(new Promise(resolve => setTimeout(resolve, 500)));
+                  }
+                }
+                if (!sent) {
+                  otResponseWaiter.cancel();
+                  throw lastSendError instanceof Error ? lastSendError : new Error('WebSocket not connected');
+                }
 
-              // Persist vault key
-              await saveVaultKeyRaw(trimmedUsername, loginFinalize.exportKey);
+                const response = await awaitCurrent(otResponseWaiter.promise);
+                if (!response?.preflightRequired) {
+                  if (!roundAuthChannelBinding) {
+                    throw new Error('Private authentication channel binding was not transmitted');
+                  }
+                  const decodedBinding = OPAQUEClientHelpers.decodeResponse<{
+                    authChannelBinding: Uint8Array;
+                  }>({ authChannelBinding: roundAuthChannelBinding }, {
+                    authChannelBinding: 64
+                  });
+                  loginAuthChannelBinding?.fill(0);
+                  loginAuthChannelBinding = decodedBinding.authChannelBinding;
+                  otResponse = response;
+                  break;
+                }
 
-              const vaultKey = await CryptoUtils.AES.importAesKey(loginFinalize.exportKey);
-              const inboxId = await deriveInboxId(vaultKey, currentInboxEpoch());
+                setters.setAuthStatus("Securing anonymous lookup...");
+                preflightPowSolution = await awaitCurrent(solvePowChallenge(
+                  response.powChallenge,
+                  operation.signal
+                ));
+              }
+              if (!otResponse) {
+                throw new Error('Authentication preflight could not be completed');
+              }
+            } finally {
+              encodedPubKeys = [];
+              window.removeEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+            }
 
-              const routeId = deriveRendezvousRouteId(inboxId);
-              const blindResult = await blindMessage(routeId, state.serverHybridPublic.blindPublicKey);
-              blindedToken = blindResult.blindedMsg;
-              const blindParams = {
-                message: routeId,
-                inboxId,
-                routeId,
-                blindedMsg: blindResult.blindedMsg,
-                blindingFactor: blindResult.blindingFactor,
-                n: blindResult.n,
-                kid: blindResult.kid,
-                modulusLength: blindResult.modulusLength,
-                hash: blindResult.hash,
-                saltLength: blindResult.saltLength,
-                scheme: blindResult.scheme,
-                used: false
-              };
+            if (!Array.isArray(otResponse.otRecords) || otResponse.otRecords.length !== anonymitySetSize) {
+              throw new Error('Invalid private-auth response');
+            }
+            const decodedResponse = OPAQUEClientHelpers.decodeResponse<any>(otResponse, {
+              evaluatedElement: 32,
+              serverNonce: 32
+            });
+            evaluatedElement = decodedResponse.evaluatedElement;
+            loginServerNonce = decodedResponse.serverNonce;
 
-              if (refs.blindCredentialRef) {
-                const existing = refs.blindCredentialRef.current;
-                if (!existing || existing.used) {
-                  refs.blindCredentialRef.current = blindParams;
+            setters.setAuthStatus("Decrypting record...");
+            await awaitCurrent(yieldToEventLoop());
+
+            if (!loginAuthChannelBinding) {
+              throw new Error('Private authentication channel binding is unavailable');
+            }
+            loginFinalize = await awaitCurrent(opaqueClient.finishOTLogin(
+              compositeSecret,
+              otResponse.otRecords,
+              evaluatedElement,
+              loginServerNonce,
+              loginAuthChannelBinding
+            ));
+            otResponse.otRecords = [];
+
+            if (!loginFinalize.success || !loginFinalize.authMessage || !loginFinalize.exportKey) {
+              throw new Error('Incorrect username, password, or passphrase.');
+            }
+
+            // Unlock local native account before loading or replacing token pool
+            await unlockNativeAccountForTokens();
+
+            pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
+            if (pendingAccountTokens.length > 0 && pendingAccountTokens.length !== 250) {
+              for (const token of pendingAccountTokens) {
+                token.tokenSecret?.fill(0);
+                token.blindingFactor?.fill(0);
+                token.blindedElement?.fill(0);
+                token.unblindedToken?.fill(0);
+              }
+              pendingAccountTokens = [];
+              await awaitCurrent(tokenVault.discardPendingTokens());
+            }
+            if (pendingAccountTokens.length === 0) {
+              const generated = await awaitCurrent(ppClient.generateTokenBatch(250));
+              try {
+                await awaitCurrent(tokenVault.replaceTokens(generated.tokenSecrets));
+              } finally {
+                for (const token of generated.blindedTokens) token.fill(0);
+                for (const token of generated.tokenSecrets) {
+                  token.tokenSecret.fill(0);
+                  token.blindingFactor?.fill(0);
+                  token.blindedElement?.fill(0);
+                  token.unblindedToken?.fill(0);
                 }
               }
-            } catch (err) {
-              console.warn('[Auth] Failed to generate blind credential for login:', err);
+              pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
             }
-          }
+            if (
+              pendingAccountTokens.length !== 250 ||
+              pendingAccountTokens.some((candidate) => candidate.blindedElement?.length !== 32)
+            ) {
+              throw new Error('Anonymous token issuance state unavailable');
+            }
 
-          if (passphrase) {
-            refs.passphrasePlaintextRef.current = passphrase;
-            await helpers.initializeKeys(false);
+            const powSolution = await awaitCurrent(solvePowChallenge(
+              otResponse.powChallenge,
+              operation.signal
+            ));
+            const finalizationWaiter = createAuthFinalizeWaiter(120000, operation.signal, authRequestId);
+            try {
+              await awaitCurrent(websocketClient.sendSecureControlMessage({
+                type: SignalType.AUTH_OT_FINALIZE,
+                authRequestId,
+                authProof: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.authMessage),
+                blindedTokens: pendingAccountTokens.map((candidate) =>
+                  PostQuantumUtils.uint8ArrayToBase64(candidate.blindedElement!)
+                ),
+                tokenEpoch: getPrivacyPassBatchEpoch(pendingAccountTokens),
+                powSolution
+              }, { failIfQueued: true, signal: operation.signal }));
+            } catch (sendError) {
+              finalizationWaiter.cancel();
+              throw sendError;
+            }
+
+            const authResult = await awaitCurrent(finalizationWaiter.promise);
+            refs.loginUsernameRef.current = trimmedUsername;
+            setters.setUsername(displayUsername);
+
+            if (authResult?.serverEntryRequired) {
+              await awaitCurrent(helpers.storeAuthenticationState(trimmedUsername, displayUsername));
+              return;
+            }
+
+            retainNativeSession = true;
             setters.setVaultReady(true);
+            setters.setIsSubmittingAuth(false);
+          } finally {
+            loginBlindedElement?.fill(0);
+            for (const publicKey of loginPublicKeys) publicKey.fill(0);
+            evaluatedElement?.fill(0);
+            loginServerNonce?.fill(0);
+            loginAuthChannelBinding?.fill(0);
+            loginFinalize?.exportKey?.fill(0);
+            loginFinalize?.authMessage?.fill(0);
+            for (const token of pendingAccountTokens) {
+              token.tokenSecret?.fill(0);
+              token.blindingFactor?.fill(0);
+              token.blindedElement?.fill(0);
+              token.unblindedToken?.fill(0);
+            }
+            if (Array.isArray(otResponse?.otRecords)) otResponse.otRecords = [];
           }
-
-          loginFinalize.exportKey.fill(0);
-          await websocketClient.sendSecureControlMessage({
-            type: SignalType.AUTH_OT_FINALIZE,
-            authProof: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.authMessage),
-            serverNonce: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.serverNonce),
-            shardId,
-            blindedToken
-          }, { failIfQueued: true });
         }
       } catch (_error) {
+        if (isStaleAuthOperation(_error) || !helpers.lifecycle.isCurrent(operation)) return;
+        keyTransparencyClient.destroy();
+        tokenVault.lock();
+        if ((_error as { code?: unknown })?.code === 'REGISTRATION_ATTEMPT_MISMATCH') {
+          await awaitCurrent(clearRegistrationAttempt(trimmedUsername));
+        }
         const errorMessage = _error instanceof Error ? _error.message : String(_error);
         console.error('[Auth] Error during account submit:', errorMessage);
         const friendlyMessage = /invalid tag|invalid mac|decrypt|tag mismatch/i.test(errorMessage)
@@ -708,15 +968,25 @@ export const createHandleAccountSubmit = (
         
         try { setters.setTokenValidationInProgress(false); } catch { }
       } finally {
-        setters.setIsGeneratingKeys(false);
+        compositeSecret?.fill(0);
+        opaqueClient.clear();
+        if (helpers.lifecycle.isCurrent(operation)) setters.setIsGeneratingKeys(false);
       }
     } catch (err) {
+      if (isStaleAuthOperation(err) || !helpers.lifecycle.isCurrent(operation)) return;
+      tokenVault.lock();
       console.error('[Auth] Connection or key error:', err);
       setters.setLoginError(err instanceof Error && err.message ? err.message : 'Connection failed. Please try again.');
       setters.setIsSubmittingAuth(false);
     } finally {
-      refs.accountSubmitInFlightRef.current = false;
-      setters.setAuthStatus('');
+      if (helpers.lifecycle.isCurrent(operation)) {
+        await releaseFailedNativeAccount();
+        refs.passwordRef.current = '';
+        refs.confirmPasswordRef.current = '';
+        refs.passphrasePlaintextRef.current = '';
+        refs.accountSubmitInFlightRef.current = false;
+        setters.setAuthStatus('');
+      }
     }
   };
 };

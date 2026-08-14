@@ -4,6 +4,7 @@
 
 import { blake3 } from '@noble/hashes/blake3.js';
 import { PQ_RANDOM_MAX_BYTES_LIMIT, PQ_RANDOM_DEFAULT_MAX_BYTES } from '../constants';
+import { bytesToHex } from '../utils/byte-utils';
 
 export class PostQuantumRandom {
   private static maxRandomBytes = PQ_RANDOM_DEFAULT_MAX_BYTES;
@@ -31,15 +32,44 @@ export class PostQuantumRandom {
     if (length > PostQuantumRandom.maxRandomBytes) {
       throw new Error(`Requested random byte length exceeds ${PostQuantumRandom.maxRandomBytes} byte limit`);
     }
+    const bytes = new Uint8Array(length);
+    PostQuantumRandom.fillRandomBytes(bytes);
+    return bytes;
+  }
+
+  static randomInt(maxExclusive: number): number {
+    if (!Number.isSafeInteger(maxExclusive) || maxExclusive < 1 || maxExclusive > 0x100000000) {
+      throw new Error('Invalid random range');
+    }
+    const range = 0x100000000;
+    const limit = range - (range % maxExclusive);
+    const sample = new Uint32Array(1);
+    do globalThis.crypto.getRandomValues(sample); while (sample[0] >= limit);
+    return sample[0] % maxExclusive;
+  }
+
+  static shuffleInPlace<T>(values: T[]): T[] {
+    for (let index = values.length - 1; index > 0; index -= 1) {
+      const swapIndex = PostQuantumRandom.randomInt(index + 1);
+      [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
+    }
+    return values;
+  }
+
+  static fillRandomBytes(bytes: Uint8Array): void {
+    if (!(bytes instanceof Uint8Array) || bytes.length <= 0) {
+      throw new Error('Random target must be a non-empty Uint8Array');
+    }
+    if (bytes.length > PQ_RANDOM_MAX_BYTES_LIMIT) {
+      throw new Error(`Random target exceeds ${PQ_RANDOM_MAX_BYTES_LIMIT} byte limit`);
+    }
     PostQuantumRandom.ensureSecureRandom();
 
-    const bytes = new Uint8Array(length);
     const maxChunk = 65536;
-    for (let offset = 0; offset < length; offset += maxChunk) {
-      const slice = bytes.subarray(offset, Math.min(offset + maxChunk, length));
+    for (let offset = 0; offset < bytes.length; offset += maxChunk) {
+      const slice = bytes.subarray(offset, Math.min(offset + maxChunk, bytes.length));
       globalThis.crypto.getRandomValues(slice);
     }
-    return bytes;
   }
 
   static randomUUID(): string {
@@ -52,7 +82,7 @@ export class PostQuantumRandom {
     const uuidBytes = blake3(base, { dkLen: 16 });
     uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x40;
     uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80;
-    const hex = Array.from(uuidBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    const hex = bytesToHex(uuidBytes);
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
   }
 }

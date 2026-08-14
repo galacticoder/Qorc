@@ -1,266 +1,207 @@
 # Offline Messaging
 
-Offline messaging in Qor-Chat is not a per-user mailbox. The server does not store messages under usernames, inbox IDs, route IDs, buckets, or contact-specific queues.
-
-The current design has two parts:
-
-1. Server-routed encrypted delivery through the global mix spool.
-2. A local encrypted retry queue when the sender cannot build an encrypted message yet.
-
-## Server-Routed Delivery
-
-When a message cannot go directly over P2P, the sender builds the normal encrypted message stack and wraps it in a sealed envelope:
-
-1. Signal message payload.
-2. Hybrid/PQ message envelope.
-3. Blind-routing sealed envelope.
-4. `blind-route` transport message.
-
-The server receives only:
-
-```json
-{
-  "type": "blind-route",
-  "sealedEnvelope": {
-    "version": "ss-v1",
-    "ciphertext": "...",
-    "ephemeralKey": "...",
-    "nonce": "..."
-  }
-}
-```
-
-The active send request must not contain a destination selector. The server rejects fields such as usernames, handles, raw inbox IDs, route IDs, mailbox lookup IDs, bucket IDs, shard IDs, recipient IDs, and top-level message IDs.
-
-Code references:
-
-- `src/lib/transport/unified-signal-transport.ts`
-- `src/lib/transport/blind-routing-client.ts`
-- `server/handlers/inbox-handlers.js`
-- `server/routing/destination-selector-policy.js`
-- `server/routing/sealed-sender.js`
+Offline delivery is a shared encrypted stream. The
+server stores no message under a username, handle, inbox, route, bucket, or
+recipient specific queue.
 
 ## Server Acceptance
 
-`handleBlindRoute` validates the request, applies rate and size limits, accepts the sealed envelope into the global mix path, and returns `blind-route-ack`.
+The sender submits an exact `blind-route` request containing a random request ID
+and one sealed envelope. Every envelope carries a one-time detection
+`tag` and a 32-byte `probe`, both validated and metered and both required on
+every envelope. See the Detection Tags section below. Call signaling and typing
+state may additionally select the exact `live-only` delivery policy described
+below. Destination selectors and all other fields are rejected. The server
+validates canonical encoding, one of the two fixed ciphertext sizes, and
+per-connection/global resource budgets before returning a correlated
+`BLIND_ROUTE_ACK`.
 
-The ACK only means the opaque envelope was accepted by ingress. It does not say whether the recipient is online, offline, known, unknown, blocked, or able to decrypt.
+That ACK means only that the opaque envelope entered the mix. It does not reveal
+whether a recipient exists, is online, is blocked, or can decrypt the entry.
 
-Relevant server-side limits:
+Code:
 
-- `BLIND_ROUTE_WINDOW_MS`
-- `BLIND_ROUTE_MAX_PER_WINDOW`
-- `BLIND_ROUTE_MAX_BYTES_PER_WINDOW`
-- `BLIND_ROUTE_MAX_ENVELOPE_BYTES`
+- `server/routing/blind-route-schema.js`
+- `server/handlers/delivery-handlers.js`
+- `server/routing/sealed-sender.js`
 
-## Global Mix Path
+## Delayed Global Mix
 
-Server-routed envelopes enter `mixnet:delay:pool:v1` first. Each entry gets a randomized release time. A relay worker later claims due entries, shuffles the batch, adds live cover writes, and writes real envelopes to the global spool.
+Accepted envelopes first enter the Redis delay and processing sets under the
+current `mixnet:{global-v3}` namespace. Each entry receives a randomized release
+time. A single-flight relay:
 
-The global spool is one Redis sorted set:
+1. Recovers stale processing claims.
+2. Atomically claims due entries.
+3. Adds shape-matched cover entries.
+4. Shuffles the batch.
+5. Broadcasts candidates to authorized live sockets.
+6. Writes only real candidates to one global spool.
 
-```txt
-mixnet:global:spool:v1
-```
+Synthetic cover is broadcast with the live batch but is not retained in the
+catch-up spool, so expendable cover cannot consume capacity needed by real
+offline ciphertexts. Cover is generated at the spoolable size with a real
+ephemeral probe, so it is indistinguishable from a genuine entry.
 
-It is a rolling shared stream of sealed envelopes. It is not keyed by recipient, route, mailbox, bucket, shard, username, or account.
+The spool is bounded by both count and actual serialized bytes. A Lua operation
+repairs missing byte-counter or per-entry-size state from the authoritative
+stored envelopes before applying the cap.
 
-The server may also broadcast candidate envelopes live to connected PQ sockets. Recipients try to decrypt locally. Non-recipients receive undecryptable candidates and drop them.
+Default global spool limits are 32,768 entries, 512 MiB, and 24 hours. The
+delay/processing recovery pool has a hard one-hour maximum, the catch-up spool
+can be configured up to seven days. See
+`docs/ENVIRONMENT_VARIABLES.md` for all deployment controls.
 
-Code references:
+Code: `server/routing/blind-router.js`.
 
-- `server/routing/blind-router.js`
-- `server/websocket/gateway.js`
+## Tagged-Lane Retrieval
 
-## Offline Catch-Up
+Each pass, a client fetches the whole tag index (`spool/tag-index`), tests every
+unseen entry's probe against its own detection key, and issues one PIR query per
+match (`spool/pir`). Neither request carries a selector, an account, or a
+recipient. The server publishes the tag index and PIR database as one completed
+snapshot, its opaque snapshot ID prevents positions from being answered against
+a different ordering.
 
-Offline clients catch up by downloading the same global spool snapshot as every other client:
+Code:
 
-```txt
-GET /api/spool/snapshot
-```
-
-The response is a uniform per-epoch encrypted snapshot. It is padded, shuffled, gzipped, digest-verified, and byte-identical for all clients in the same epoch.
-
-Example shape:
-
-```json
-{
-  "ok": true,
-  "distribution": "uniform-anonymous-cdn-tor-suitable",
-  "snapshot": {
-    "version": "qor-spool-snapshot-gzip-v1",
-    "encoding": "base64url+gzip",
-    "compression": "gzip",
-    "digestAlgorithm": "sha256-uncompressed-snapshot",
-    "digest": "...",
-    "epochId": "...",
-    "epochStart": 0,
-    "epochEndsAt": 0,
-    "generatedAt": 0,
-    "realCountHidden": true,
-    "sourceCountHidden": true,
-    "paddedEntryCount": 256,
-    "compressed": "..."
-  }
-}
-```
-
-The decoded body has this shape:
-
-```json
-{
-  "version": "qor-spool-snapshot-v1",
-  "epochId": "...",
-  "entries": [
-    { "version": "ss-v1", "ciphertext": "...", "ephemeralKey": "...", "nonce": "..." }
-  ],
-  "realCountHidden": true,
-  "sourceCountHidden": true,
-  "paddingStrategy": "power-of-two-floor-with-shape-matched-decoys-v1",
-  "paddedEntryCount": 256
-}
-```
-
-The client verifies the digest, decompresses the snapshot, tries every entry against its local keys, and forwards successful candidates into the normal sealed-envelope receive path. Failed decrypts stay local and are not reported to the server.
-
-Code references:
-
-- `server/routes/api-routes.js`
-- `server/routing/spool-snapshot-service.js`
-- `src-tauri/src/commands/spool.rs`
-- `src/lib/websocket/global-spool-pir-handler.ts`
+- `server/routing/blind-router.js` , spool, tag index, PIR record source
+- `server/pir/pir-service.js` , atomic double-buffered PIR snapshots
+- `server/routes/api-routes.js`, `server/routes/pq-anonymous-http.js`
+- `src/lib/spool/tagged-lane-retriever.ts`, `src/lib/spool/pir-fetch.ts`
 - `src/hooks/app/useOfflineMessages.ts`
-- `src/hooks/message-handling/useEncryptedMessageHandler.ts`
 
-## Client Delivery Loop
+Retrieval is not a hard delivery guarantee: capacity eviction, expiry, or
+prolonged offline time past the 24-hour retention can still remove a ciphertext
+before its recipient observes it.
 
-The app-level offline hook wires the snapshot handler to the encrypted message handler.
+See `docs/app/PRIVATE_SPOOL_RETRIEVAL.md` for the tag derivation, the trapdoor
+detection scheme, and the PIR cost model.
 
-The delivery loop starts when the app is ready and restarts after:
+## Detection Tags
 
-- WebSocket reconnect.
-- PQ session establishment.
+Every sealed envelope carries an 8-byte one-time `tag`. It exists so a recipient
+can find its own entries by downloading a compact index rather than trial
+decapsulating the whole spool. The index is tiny relative to the roughly 18 KiB
+of raw cryptographic fields in each retrievable record.
 
-The snapshot fetch goes through Tauri via `fetch_spool_snapshot`, which requests `/api/spool/snapshot` through the configured Tor SOCKS proxy.
+The recipient publishes an X25519 **detection public key** in its discovery
+blob. For every message, the sender generates a fresh ephemeral key, computes
+the shared secret, derives the tag, and attaches the ephemeral public key as the
+envelope's `probe`. The recipient reaches the same tag using its detection
+private key and that probe. Each tag is independent: there is no per-peer chain
+state to desynchronize and no stable recipient tag that could become a
+pseudonym.
 
-Client-side timing constants:
+Every envelope carries a real X25519 probe, including live cover traffic.
+**There is deliberately no lane or type field**, and no field that is present
+only on first contact: either would tell the server which entries represent new
+relationships.
 
-- `GLOBAL_SPOOL_PIR_CATCHUP_DELAY_MS`: first catch-up delay, currently 25 seconds.
-- `GLOBAL_SPOOL_PIR_LOOP_INTERVAL_MS`: regular polling interval, currently 15 minutes.
-- `GLOBAL_SPOOL_PIR_NOT_READY_RETRY_MS`: retry delay while WebSocket/PQ is not ready, currently 5 seconds.
-- `GLOBAL_SPOOL_PIR_RESPONSE_TIMEOUT_MS`: snapshot response timeout, currently 10 minutes.
+`GET /api/spool/tag-index` returns every live tag as one concatenated hex string.
+The request carries no selector, so two clients asking are indistinguishable and
+the response is byte-identical for everyone. The whole index is downloaded rather
+than a delta: a delta would be cheaper but would expose a per-client cursor.
 
-These constants configure the snapshot loop. The offline-message path fetches a uniform snapshot; it does not send a PIR query or recipient selector.
+Detection is load-bearing: PIR is the only catch-up path, so an entry the index
+fails to predict never reaches a recipient who was not connected for its live
+broadcast. See `docs/app/PRIVATE_SPOOL_RETRIEVAL.md`.
+
+**The spool holds exactly one ciphertext size** , 131,088 bytes, 131,054 of usable
+content , so PIR records are uniform by construction rather than by filtering.
+Anything else is rejected on append (`global_mix_spool_unsupported_size`).
+
+There used to be two size classes and a filter, and it broke ordinary messaging
+silently: the earlier 16 KiB rung could not hold the nested Signal-PQ, Hybrid,
+and transparency-head envelope, so ordinary messages became large, were skipped
+by the spool writer, and were acknowledged anyway. STANDARD is now 128 KiB,
+durable sends are forced into it, and the server rejects an off-size durable
+request before acknowledging it.
+
+**File chunks are not retrievable while offline.** They use the 256 KiB frame,
+travel live or over P2P, and are never spooled , a uniform 262 KiB PIR record
+would put the database in the gigabytes and push its build past the epoch.
+
+Code:
+
+- `shared/spool-tag-protocol.js`
+- `src/lib/spool/`
+- `server/routing/blind-router.js`
 
 ## Local Retry Queue
 
-The local retry queue is only for messages the sender cannot encrypt yet, usually because recipient keys or discovery material are not available locally.
+If recipient discovery keys or Signal setup are unavailable, the client cannot
+construct a sealed server envelope. In that case it stores the operation in the
+encrypted local database under the durable pending-retry queue.
 
-Queued messages are stored in the local encrypted database. Message content is kept in the local message vault and referenced by ID. When `USER_KEYS_AVAILABLE` fires for that recipient, the app removes valid messages from the queue and sends them through the normal send path.
+Private message and edit entries carry no content in memory or in the renderer's
+durable retry snapshot. Their operation IDs select native-only content records
+bound to the exact account, recipient, application type, and wire operation.
+Rust inserts that content only after verifying every binding. Reaction controls
+may retain their bounded emoji value inline, delete controls have no content.
+Reply metadata contains the target ID and optional sender but never a quoted
+body. Queues are bounded by peer count, entries per peer, 500 total entries, and
+a 16 MiB serialized snapshot budget. Every entry retains its original enqueue
+time and becomes ineligible after one hour, loading, enqueueing, reconnect
+draining, persistence, and a ten-second in-process maintenance pass all remove
+expired operations and their native send bindings. A successful send removes
+and persists the corresponding retry operation, then revokes or deletes its
+send binding. The bounded in-memory WebSocket reconnect queue enforces the same
+one-hour creation-time cutoff and prunes while disconnected as well as before
+enqueue and flush.
 
-Local queue limits:
+Code:
 
-- `SECURE_QUEUE_MAX_MESSAGES_PER_USER`: 50 messages per recipient.
-- `SECURE_QUEUE_MESSAGE_EXPIRY_MS`: 4 hours.
-- `SECURE_QUEUE_CLEANUP_INTERVAL_MS`: 5 minutes.
-- `SECURE_QUEUE_MAX_PROCESSED_IDS`: 5000 processed IDs.
-- `SECURE_QUEUE_SAVE_DEBOUNCE_MS`: 1 second.
+- `src/hooks/message-sending/retry-queue.ts`
+- `src/hooks/message-sending/useMessageSender.ts`
+- `src-tauri/src/message_content.rs`
+- `src-tauri/src/commands/signal.rs`
 
-Code references:
+## Delivery Semantics
 
-- `src/lib/database/secure-message-queue.ts`
-- `src/hooks/message-sending/send.ts`
-- `src/hooks/useEventHandlers.ts`
-- `src/lib/database/storage-keys.ts`
+- Outgoing persistent messages are locally durable before network transmission.
+- Server ingress ACK and recipient delivery receipt are separate.
+- P2P writes wait for an end-to-end receipt and spool the same encrypted payload
+  on timeout.
+- Duplicate Signal ciphertexts and message IDs are rejected locally.
+- Native Signal receive-ratchet state and plaintext staging commit atomically.
+  Once that durable stage succeeds, retrieval may advance past the entry even if
+  later application/database work fails, the native pending row remains
+  unacknowledged and owns the local retry. This prevents one locally durable
+  candidate from indefinitely blocking every other candidate in the epoch.
+- File transport ACKs stop chunk retransmission, but a file is delivered only
+  after complete assembly and atomic local persistence.
 
-## Retention And Limits
+## Live-Only Signals
 
-Global spool defaults:
+Three signal types use the messaging encryption pipeline but are live-only rather
+than durable: call signaling (`CALL_SIGNAL`) and both typing states
+(`TYPING_START`, `TYPING_STOP`). The sender marks them with
+`deliveryPolicy: "live-only"` on the blind-route request, the server then skips
+both the mixnet delay pool and the durable spool, broadcasting to live sockets
+only. They are also excluded from reconnect recovery, delivery journals, delayed
+server recovery, and the local outbound queue on write failure.
 
-- `GLOBAL_MIX_SPOOL_TTL_SECONDS`: 24 hours.
-- `GLOBAL_MIX_SPOOL_MAX_MESSAGES`: 1024 entries.
-- `GLOBAL_MIX_SPOOL_MAX_BYTES`: 16 MiB.
+Both cases are the same requirement: the signal describes a moment rather than a
+fact. An old call must not ring after reconnection, and a typing indicator
+replayed during catch-up would show "typing…" for a message that already
+arrived. The complete call signaling and retry lifecycle is documented in
+`docs/app/CALLING.md`.
 
-Mix delay defaults:
+Code: `src/lib/transport/unified-signal-transport.ts` (`LIVE_ONLY_SIGNAL_TYPES`),
+`server/routing/blind-route-schema.js`, `server/routing/blind-router.js`.
 
-- `MIXNET_RELAY_ENABLED`: enabled by default.
-- `MIXNET_DELAY_MIN_MS`: 1.5 seconds.
-- `MIXNET_DELAY_MAX_MS`: 9 seconds.
-- `MIXNET_FLUSH_MIN_MS`: 700 ms.
-- `MIXNET_FLUSH_MAX_MS`: 2.5 seconds.
-- `MIXNET_BATCH_MAX_MESSAGES`: 24.
-- `MIXNET_POOL_TTL_SECONDS`: 7 days.
-- `MIXNET_AVOID_SAME_WRITER`: enabled by default.
-- `MIXNET_SAME_WRITER_FALLBACK_MS`: 60 seconds.
+## Metadata Limits
 
-Snapshot defaults:
+The server can observe blind-route timing, global mix activity, tag-index and PIR
+request timing, and response sizes. It cannot tell a first message from an
+ongoing one: both carry a tag and a probe it can neither derive nor recognise,
+and no other field describes the message. It cannot select or confirm the
+recipient from the active send or a retrieval request, and it cannot tell which
+entry a PIR query selects , that is the whole point of the query.
 
-- `SPOOL_SNAPSHOT_EPOCH_MS`: 30 seconds.
-- `SPOOL_SNAPSHOT_PADDING_FLOOR`: 256 entries.
-- `SPOOL_SNAPSHOT_MAX_ROWS`: 256 rows.
-- `SPOOL_SNAPSHOT_MAX_PLAINTEXT_BYTES`: 16 MiB.
-- `SPOOL_SNAPSHOT_GZIP_LEVEL`: 6.
-- `SPOOL_SNAPSHOT_RESPONSE_MAX_BYTES`: 8 MiB.
-
-Code references:
-
-- `server/routing/blind-router.js`
-- `server/routing/spool-snapshot-service.js`
-- `server/routes/api-routes.js`
-
-## Privacy Properties
-
-The server can see:
-
-- connection timing;
-- blind-route ingress timing;
-- sealed-envelope size class;
-- mix delay enqueue and release timing;
-- snapshot request timing and response size;
-- local/live broadcast attempts to connected sockets;
-- coarse rate-limit and server-health information.
-
-The server does not receive:
-
-- plaintext message content;
-- sender identity inside the sealed envelope;
-- recipient username or handle;
-- raw destination inbox ID;
-- destination route ID;
-- mailbox lookup ID;
-- bucket ID;
-- shard or record index;
-- server-visible recipient cursor;
-- decrypt success or failure.
-
-Every client in the same snapshot epoch receives the same snapshot bytes. The server cannot tell which entries, if any, decrypted for a client.
-
-## Calls And Files
-
-Offline catch-up carries normal sealed-envelope messages only.
-
-Real-time call setup state, SDP, ICE candidates, ringing state, and live media negotiation are not persisted as offline server state.
-
-File/control messages can use this path only when they fit the normal sealed-envelope framing limits. Large file transfer state should use live transfer or local retry behavior, not the global spool as object storage.
-
-## Implementation Index
-
-Server:
-
-- `server/handlers/inbox-handlers.js`
-- `server/routing/destination-selector-policy.js`
-- `server/routing/blind-router.js`
-- `server/routing/spool-snapshot-service.js`
-- `server/routes/api-routes.js`
-- `server/database/schema.js`
-
-Client:
-
-- `src/lib/transport/unified-signal-transport.ts`
-- `src/lib/transport/blind-routing-client.ts`
-- `src/lib/websocket/global-spool-pir-handler.ts`
-- `src/hooks/app/useOfflineMessages.ts`
-- `src/hooks/message-handling/useEncryptedMessageHandler.ts`
-- `src/lib/database/secure-message-queue.ts`
-- `src-tauri/src/commands/spool.rs`
+The server decrypts the anonymous tunnel operation and therefore knows that a
+given request is a tag-index or PIR fetch, while an intermediary sees only the
+common route and one fixed size. Tor, per-call isolation, delay, cover, an index
+identical for every caller, and a single sealed-envelope size reduce correlation,
+they do not defeat a global timing-and-volume observer.

@@ -1,96 +1,239 @@
 /**
  * User Database
  * 
- * Stores user records indexed by credentialId.
+ * Stores private authentication records under server random opaque ids
  */
 
-import { getPgPool, crypto, privateLookupId, cryptoLogger } from './core.js';
+import { getPgPool, crypto, privateLookupId, withTransaction } from './core.js';
+import { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../shared/private-auth-protocol.js';
+import {
+  REGISTRATION_ATTEMPT_MISMATCH,
+  REGISTRATION_RECEIPT_EXPIRED
+} from '../config/error-codes.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 
-const PRIVATE_AUTH_SHARD_SIZE = 2048;
-const PRIVATE_AUTH_SHARD_COUNT = 1;
+const REGISTRATION_RECEIPT_TTL_MS = 15 * 60_000;
+
+function registrationError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
 
 export class UserDatabase {
-  static credentialLookupId(credentialId) {
-    if (!credentialId || typeof credentialId !== 'string') {
-      throw new Error('Invalid credential ID');
+  static createRecordId(registrationAttemptId) {
+    if (typeof registrationAttemptId !== 'string' || registrationAttemptId.length !== 44) {
+      throw new Error('Invalid registration attempt identifier');
     }
-    return privateLookupId('opaque-credential-id-v2', credentialId);
+    return privateLookupId(PROTOCOL_KEYS.OPAQUE_REGISTRATION_ATTEMPT, registrationAttemptId);
   }
 
-  static async allocatePrivateAuthSlot(maxAttempts = 64) {
+  static async stageUserRecord(userRecord) {
+    const { recordId, opaqueRecord } = userRecord;
+
+    if (!recordId || typeof recordId !== 'string') {
+      throw new Error('Invalid private authentication record ID');
+    }
+
+    if (typeof opaqueRecord !== 'string' || opaqueRecord.length === 0) {
+      throw new Error('Invalid private auth record');
+    }
+
     const pool = await getPgPool();
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const shard_id = crypto.randomInt(0, PRIVATE_AUTH_SHARD_COUNT);
-      const credential_index = crypto.randomInt(0, PRIVATE_AUTH_SHARD_SIZE);
-      const { rows } = await pool.query(
-        'SELECT 1 FROM users WHERE "shard_id" = $1 AND "credential_index" = $2 LIMIT 1',
-        [shard_id, credential_index]
-      );
-      if (!rows[0]) {
-        return { shard_id, credential_index, shard_size: PRIVATE_AUTH_SHARD_SIZE };
-      }
-    }
-    throw new Error('Failed to allocate private auth slot');
-  }
-
-  static async saveUserRecord(userRecord) {
-    const { credentialId, opaqueRecord } = userRecord;
-
-    if (!credentialId || typeof credentialId !== 'string') {
-      throw new Error('Invalid credential ID');
-    }
-
+    const client = await pool.connect();
+    const now = Date.now();
+    const expiresAt = now + REGISTRATION_RECEIPT_TTL_MS;
+    let stagedNewRecord = false;
     try {
-      const pool = await getPgPool();
+      const output = await withTransaction(client, async () => {
+        await client.query('LOCK TABLE users, pending_registrations IN SHARE ROW EXCLUSIVE MODE');
+        await client.query(
+          'DELETE FROM pending_registrations WHERE "expiresAt" <= $1',
+          [now]
+        );
 
-      let { shard_id, credential_index } = userRecord;
+        const existingReceipt = await client.query(
+          `
+          SELECT "opaqueRecord", "credential_index", "expiresAt"
+          FROM pending_registrations
+          WHERE "recordId" = $1
+        `,
+          [recordId]
+        );
+        if (existingReceipt.rows.length === 1) {
+          const receipt = existingReceipt.rows[0];
+          const storedRecord = Buffer.from(String(receipt.opaqueRecord || ''), 'utf8');
+          const suppliedRecord = Buffer.from(opaqueRecord, 'utf8');
+          try {
+            if (
+              storedRecord.length === 0 ||
+              storedRecord.length !== suppliedRecord.length ||
+              !crypto.timingSafeEqual(storedRecord, suppliedRecord)
+            ) {
+              throw registrationError(
+                'Registration retry does not match the staged credential',
+                REGISTRATION_ATTEMPT_MISMATCH
+              );
+            }
+          } finally {
+            storedRecord.fill(0);
+            suppliedRecord.fill(0);
+          }
+          return {
+            credential_index: Number(receipt.credential_index),
+            expires_at: Number(receipt.expiresAt)
+          };
+        }
 
-      if (shard_id === undefined || credential_index === undefined) {
-        const slot = await this.allocatePrivateAuthSlot();
-        shard_id = slot.shard_id;
-        credential_index = slot.credential_index;
-      }
+        const existingUser = await client.query(
+          'SELECT "credential_index" FROM users WHERE "recordId" = $1',
+          [recordId]
+        );
+        if (existingUser.rows.length > 0) {
+          return {
+            credential_index: Number(existingUser.rows[0].credential_index),
+            recovery_only: true,
+            expires_at: null
+          };
+        }
 
-      const result = await pool.query(
-        `
-        INSERT INTO users ("credentialId", "opaqueRecord", "shard_id", "credential_index")
+        const { rows } = await client.query(
+          `
+          SELECT "credential_index" FROM users
+          UNION
+          SELECT "credential_index" FROM pending_registrations
+          WHERE "expiresAt" > $1
+          ORDER BY "credential_index"
+        `,
+          [now]
+        );
+        const occupied = new Set(rows.map((row) => Number(row.credential_index)));
+        if (occupied.size >= PRIVATE_AUTH_ANONYMITY_SET_SIZE) {
+          throw new Error('Private authentication capacity exhausted');
+        }
+
+        const slotStart = crypto.randomInt(0, PRIVATE_AUTH_ANONYMITY_SET_SIZE);
+        let credential_index = null;
+        for (let offset = 0; offset < PRIVATE_AUTH_ANONYMITY_SET_SIZE; offset += 1) {
+          const candidate = (slotStart + offset) % PRIVATE_AUTH_ANONYMITY_SET_SIZE;
+          if (!occupied.has(candidate)) {
+            credential_index = candidate;
+            break;
+          }
+        }
+        if (credential_index === null) {
+          throw new Error('Private authentication capacity exhausted');
+        }
+
+        const result = await client.query(
+          `
+        INSERT INTO pending_registrations (
+          "recordId", "opaqueRecord", "credential_index", "expiresAt"
+        )
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT ("credentialId") DO UPDATE SET
-          "opaqueRecord" = EXCLUDED."opaqueRecord",
-          "shard_id" = COALESCE(users."shard_id", EXCLUDED."shard_id"),
-          "credential_index" = COALESCE(users."credential_index", EXCLUDED."credential_index")
-        RETURNING "shard_id", "credential_index"
+        RETURNING "credential_index", "expiresAt"
       `,
-        [
-          credentialId,
-          opaqueRecord,
-          shard_id,
-          credential_index
-        ],
-      );
+          [
+            recordId,
+            opaqueRecord,
+            credential_index,
+            expiresAt
+          ],
+        );
 
-      const actualShardId = result.rows[0].shard_id;
-      const actualIndex = result.rows[0].credential_index;
-
-      cryptoLogger.info('[DB] Saved/Updated private auth record');
-      return { shard_id: actualShardId, credential_index: actualIndex };
+        stagedNewRecord = true;
+        return {
+          credential_index: Number(result.rows[0].credential_index),
+          expires_at: Number(result.rows[0].expiresAt)
+        };
+      });
+      if (stagedNewRecord) console.log('[DB] Staged private auth record');
+      return output;
     } catch (error) {
-      cryptoLogger.error('[DB] Error saving user record', { error: error?.message });
+      console.error('[DB] Error staging user record', { error: error?.message });
       throw error;
+    } finally {
+      client.release();
     }
   }
 
-  static async getShardRecords(shardId) {
-    try {
-      const pool = await getPgPool();
-      const { rows } = await pool.query(
-        'SELECT "credentialId", "opaqueRecord", "credential_index" FROM users WHERE "shard_id" = $1 ORDER BY "credential_index"',
-        [shardId]
-      );
-      return rows;
-    } catch (error) {
-      cryptoLogger.error('[DB] Error loading private auth shard', { error: error?.message });
-      return [];
+  static async confirmStagedUserRecord(recordId) {
+    if (!recordId || typeof recordId !== 'string') {
+      throw new Error('Invalid private authentication record ID');
     }
+
+    const pool = await getPgPool();
+    const client = await pool.connect();
+    const now = Date.now();
+    let committedNewRecord = false;
+    try {
+      const output = await withTransaction(client, async () => {
+        await client.query('LOCK TABLE users, pending_registrations IN SHARE ROW EXCLUSIVE MODE');
+        await client.query(
+          'DELETE FROM pending_registrations WHERE "expiresAt" <= $1',
+          [now]
+        );
+
+        const receiptResult = await client.query(
+          `
+          SELECT "opaqueRecord", "credential_index"
+          FROM pending_registrations
+          WHERE "recordId" = $1
+        `,
+          [recordId]
+        );
+        if (receiptResult.rows.length !== 1) {
+          const committedUser = await client.query(
+            'SELECT "credential_index" FROM users WHERE "recordId" = $1',
+            [recordId]
+          );
+          if (committedUser.rows.length === 1) {
+            return {
+              credential_index: Number(committedUser.rows[0].credential_index),
+              already_committed: true
+            };
+          }
+          throw registrationError('Registration retry receipt expired', REGISTRATION_RECEIPT_EXPIRED);
+        }
+
+        const receipt = receiptResult.rows[0];
+        const credentialIndex = Number(receipt.credential_index);
+        if (typeof receipt.opaqueRecord !== 'string' || receipt.opaqueRecord.length === 0) {
+          throw new Error('Pending registration record is invalid');
+        }
+        await client.query(
+          `
+          INSERT INTO users ("recordId", "opaqueRecord", "credential_index")
+          VALUES ($1, $2, $3)
+        `,
+          [recordId, receipt.opaqueRecord, credentialIndex]
+        );
+        await client.query(
+          'DELETE FROM pending_registrations WHERE "recordId" = $1',
+          [recordId]
+        );
+        committedNewRecord = true;
+        return { credential_index: credentialIndex, already_committed: false };
+      });
+      if (committedNewRecord) console.log('[DB] Committed private auth record');
+      return output;
+    } catch (error) {
+      console.error('[DB] Error confirming user record', { error: error?.message });
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  static async getPrivateAuthRecords() {
+    const pool = await getPgPool();
+    const { rows } = await pool.query(
+      `SELECT "opaqueRecord", "credential_index"
+       FROM users
+       ORDER BY "credential_index"
+       LIMIT $1`,
+      [PRIVATE_AUTH_ANONYMITY_SET_SIZE + 1]
+    );
+    return rows;
   }
 }

@@ -3,52 +3,86 @@
  */
 
 import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
-import { hkdf } from '@noble/hashes/hkdf.js';
-import { blake3 } from '@noble/hashes/blake3.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 import crypto from 'node:crypto';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { ml_kem1024 as MlKem, xor } from './helpers.js';
+import { deriveAuthRootKey } from './auth-root.js';
+import {
+    encryptPrivateAuthOtRecords,
+    verifyAuthProofAcrossAnonymitySet,
+} from './auth-crypto-worker-service.js';
+import { throwIfAuthConnectionClosed } from '../authentication/auth-utils.js';
+import { decodeCanonicalBase64, UTF8_ENCODER } from '../utils/encoding.js';
+import {
+    ML_DSA_87_PUBLIC_KEY_BYTES as ML_DSA_PUBLIC_KEY_BYTES,
+    ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_BYTES,
+    ML_KEM_1024_CIPHERTEXT_BYTES as ML_KEM_CIPHERTEXT_BYTES,
+    ML_KEM_1024_PUBLIC_KEY_BYTES as ML_KEM_PUBLIC_KEY_BYTES
+} from '../../shared/crypto-sizes.js';
+import {
+    OPAQUE_AUTH_SIGNATURE_CONTEXT,
+    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+    PRIVATE_AUTH_OT_RECORD_BYTES
+} from '../../shared/private-auth-protocol.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_DIR = path.join(__dirname, '../config');
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import {
+    AUTH_CHANNEL_BINDING_BYTES,
+    HASH_OUTPUT_BYTES,
+    OPAQUE_ELEMENT_BYTES,
+    OPAQUE_ENVELOPE_BYTES,
+    OPAQUE_NONCE_BYTES,
+    OPAQUE_SALT_BYTES,
+    OPAQUE_SECRET_KEY_BYTES
+} from '../utils/crypto-consts.js';
+
+const PRIVATE_AUTH_RECORD_KEYS = Object.freeze(['authPublicKey', 'envelope', 'salt']);
+const GATEKEEPER_RECORD_KEYS = Object.freeze(['authPublicKey', 'envelope', 'oprfSecretKey', 'salt']);
+function throwIfAuthOperationAborted(signal) {
+    throwIfAuthConnectionClosed(signal);
+}
+
+function createDummyAuthPublicKey() {
+    const seed = crypto.randomBytes(HASH_OUTPUT_BYTES);
+    let keyPair = null;
+    try {
+        keyPair = ml_dsa87.keygen(seed);
+        return new Uint8Array(keyPair.publicKey);
+    } finally {
+        seed.fill(0);
+        keyPair?.publicKey.fill(0);
+        keyPair?.secretKey.fill(0);
+    }
+}
+
+function verifyMlDsaSignature(signature, message, publicKey) {
+    if (signature.length !== ML_DSA_SIGNATURE_BYTES || publicKey.length !== ML_DSA_PUBLIC_KEY_BYTES) return false;
+    return ml_dsa87.verify(signature, message, publicKey);
+}
 
 // OPAQUE configuration
 const OPAQUE_CONFIG = {
-    OPRF_SEED_FILE: 'oprf-seed.enc',
-    KEY_ROTATION_DAYS: 90,
-    NONCE_SIZE: 24,
-    AUTH_TAG_SIZE: 16,
-    CREDENTIAL_ID_SIZE: 32,
-    EXPORT_KEY_SIZE: 32,
-    SESSION_KEY_SIZE: 32,
-    ENVELOPE_NONCE_SIZE: 24,
-    PRIVATE_AUTH_SHARD_SIZE: 2048,
-    OT_RECORD_PADDED_BYTES: 1024,
+    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+    OT_RECORD_PADDED_BYTES: PRIVATE_AUTH_OT_RECORD_BYTES,
+    REGISTRATION_RECORD_MAX_BYTES: 4096,
 };
 
 // Domain separation labels
 const LABELS = {
-    OPRF_KEY: 'OPAQUE-OPRF-Key-v1',
-    ENVELOPE_KEY: 'OPAQUE-Envelope-Key-v1',
-    EXPORT_KEY: 'OPAQUE-Export-Key-v1',
-    SESSION_KEY: 'OPAQUE-Session-Key-v1',
-    AUTH_KEY: 'OPAQUE-Auth-Key-v2',
-    AUTH_MAC_CONTEXT: 'OPAQUE-Auth-MAC-v2',
-    CREDENTIAL_ID: 'OPAQUE-Credential-ID-v1',
+    OPRF_INPUT: PROTOCOL_KEYS.OPAQUE_OPRF_INPUT,
+    OPRF_KEY: PROTOCOL_KEYS.OPAQUE_OPRF_KEY,
+    ENVELOPE_KEY: PROTOCOL_KEYS.OPAQUE_ENVELOPE_KEY,
+    EXPORT_KEY: PROTOCOL_KEYS.OPAQUE_EXPORT_KEY,
+    AUTH_SIG_CONTEXT: OPAQUE_AUTH_SIGNATURE_CONTEXT,
 };
 
 export class OPAQUEServer {
     static #oprfKeys = null;
     static #initialized = false;
+    static #dummyAuthPublicKey = createDummyAuthPublicKey();
 
     static #ensureUint8Array(val) {
-        if (!val) return new Uint8Array(0);
-        if (typeof val === 'string') return Buffer.from(val, 'base64');
-        if (val instanceof Uint8Array || Buffer.isBuffer(val)) return new Uint8Array(val);
+        if (val instanceof Uint8Array) return new Uint8Array(val);
         return new Uint8Array(0);
     }
 
@@ -59,121 +93,99 @@ export class OPAQUEServer {
         if (this.#initialized) return;
 
         try {
-            await fs.mkdir(CONFIG_DIR, { recursive: true });
-            const keyPath = path.join(CONFIG_DIR, OPAQUE_CONFIG.OPRF_SEED_FILE);
-
+            const oprfKeyLabel = UTF8_ENCODER.encode(LABELS.OPRF_KEY);
+            const seed = deriveAuthRootKey(PROTOCOL_KEYS.OPAQUE_OPRF_ROOT);
             try {
-                const encryptedSeed = await fs.readFile(keyPath);
-                const seed = await this.#decryptSeed(encryptedSeed);
-                this.#oprfKeys = oprf.oprf.deriveKeyPair(seed, new TextEncoder().encode(LABELS.OPRF_KEY));
-            } catch {
-                // Generate new keys
-                this.#oprfKeys = oprf.oprf.generateKeyPair();
-                
-                const seed = randomBytes(32);
-                const encrypted = await this.#encryptSeed(seed);
-                await fs.writeFile(keyPath, encrypted, { mode: 0o600 });
-                console.log('[OPAQUE] Generated new OPRF keys');
+                this.#oprfKeys = oprf.oprf.deriveKeyPair(seed, oprfKeyLabel);
+            } finally {
+                seed.fill(0);
             }
 
             this.#initialized = true;
             console.log('[OPAQUE] Server initialized');
         } catch (error) {
-            console.error('[OPAQUE] Initialization failed:', error.message);
+            console.error('[OPAQUE] Initialization failed', error);
             throw error;
         }
     }
 
-    /**
-     * Encrypt OPRF seed for storage
-     */
-    static async #encryptSeed(seed) {
-        const machineKey = await this.#getMachineKey();
-        const nonce = randomBytes(OPAQUE_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(machineKey, nonce);
-        const encrypted = cipher.encrypt(seed);
-        return Buffer.concat([nonce, encrypted]);
-    }
-
-    /**
-     * Decrypt stored OPRF seed
-     */
-    static async #decryptSeed(encryptedData) {
-        const machineKey = await this.#getMachineKey();
-        const nonce = encryptedData.slice(0, OPAQUE_CONFIG.NONCE_SIZE);
-        const ciphertext = encryptedData.slice(OPAQUE_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(machineKey, nonce);
-        return cipher.decrypt(ciphertext);
-    }
-
-    /**
-     * Derive machine specific key for OPRF seed encryption
-     */
-    static async #getMachineKey() {
-        const hostname = (await import('os')).hostname() || 'unknown-host';
-        const machineIdPath = path.join(CONFIG_DIR, '.machine-id');
-
-        let machineId;
-        try {
-            machineId = await fs.readFile(machineIdPath);
-            if (!machineId || machineId.length < 16) {
-                throw new Error('Machine ID too short, regenerating');
-            }
-        } catch {
-            machineId = randomBytes(32);
-            await fs.writeFile(machineIdPath, machineId, { mode: 0o600 });
-        }
-
-        return hkdf(blake3, machineId, new TextEncoder().encode(hostname), new TextEncoder().encode('OPAQUE-Machine-Key'), 32);
-    }
-
-    /**
-     * Get public key for client to verify VOPRF proofs
-     */
-    static getPublicKey() {
-        if (!this.#initialized) {
-            throw new Error('OPAQUE server not initialized');
-        }
-        return this.#oprfKeys.publicKey;
+    static destroy() {
+        this.#oprfKeys?.secretKey?.fill(0);
+        this.#oprfKeys?.publicKey?.fill(0);
+        this.#oprfKeys = null;
+        this.#initialized = false;
     }
 
     /**
      * OPAQUE Registration
      */
-    static async createRegistrationResponse(blindedElement, clientPublicKey) {
+    static async createRegistrationResponse(blindedElement) {
         if (!this.#initialized) {
             await this.initialize();
         }
 
-        // Blind OPRF evaluation
         const evaluated = oprf.oprf.blindEvaluate(this.#oprfKeys.secretKey, blindedElement);
 
-        // Generate server nonce for key derivation
-        const serverNonce = randomBytes(32);
-
-        // Generate server keypair for this registration
-        const serverKeyPair = this.#generateServerKeyPair();
+        const serverNonce = randomBytes(OPAQUE_NONCE_BYTES);
 
         return {
             evaluatedElement: evaluated,
-            serverPublicKey: serverKeyPair.publicKey,
             serverNonce,
-            serverPrivateKey: serverKeyPair.privateKey,
         };
     }
 
     /**
      * Create OPAQUE record for storage
      */
-    static createRegistrationRecord(credentialId, envelope, serverPrivateKey, maskedResponse, salt) {
-        return {
-            credentialId: typeof credentialId === 'string' ? credentialId : Buffer.from(credentialId).toString('base64'),
-            envelope: Buffer.from(envelope).toString('base64'),
-            serverPrivateKey: Buffer.from(serverPrivateKey).toString('base64'),
-            maskedResponse: Buffer.from(maskedResponse).toString('base64'),
-            salt: salt ? Buffer.from(salt).toString('base64') : undefined,
-            createdAt: new Date().toISOString(),
-        };
+    static createRegistrationRecord(envelope, authPublicKey, salt) {
+        const envelopeBytes = this.#ensureUint8Array(envelope);
+        const authPublicKeyBytes = this.#ensureUint8Array(authPublicKey);
+        const saltBytes = this.#ensureUint8Array(salt);
+        try {
+            if (
+                envelopeBytes.length !== OPAQUE_ENVELOPE_BYTES ||
+                authPublicKeyBytes.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                saltBytes.length !== OPAQUE_SALT_BYTES
+            ) {
+                throw new Error('Invalid private-auth registration record');
+            }
+            return {
+                envelope: Buffer.from(envelopeBytes).toString('base64'),
+                authPublicKey: Buffer.from(authPublicKeyBytes).toString('base64'),
+                salt: Buffer.from(saltBytes).toString('base64')
+            };
+        } finally {
+            envelopeBytes.fill(0);
+            authPublicKeyBytes.fill(0);
+            saltBytes.fill(0);
+        }
+    }
+
+    static #parseStoredRecord(record) {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            throw new Error('Invalid private-auth record');
+        }
+        const keys = Object.keys(record).sort();
+        if (
+            keys.length !== PRIVATE_AUTH_RECORD_KEYS.length ||
+            keys.some((key, index) => key !== PRIVATE_AUTH_RECORD_KEYS[index])
+        ) {
+            throw new Error('Invalid private-auth record shape');
+        }
+        let envelope = null;
+        let authPublicKey = null;
+        let salt = null;
+        try {
+            envelope = decodeCanonicalBase64(record.envelope, OPAQUE_ENVELOPE_BYTES);
+            authPublicKey = decodeCanonicalBase64(record.authPublicKey, ML_DSA_PUBLIC_KEY_BYTES);
+            salt = decodeCanonicalBase64(record.salt, OPAQUE_SALT_BYTES);
+            return { envelope, authPublicKey, salt };
+        } catch (error) {
+            envelope?.fill(0);
+            authPublicKey?.fill(0);
+            salt?.fill(0);
+            throw error;
+        }
     }
 
     /**
@@ -185,230 +197,329 @@ export class OPAQUEServer {
     }
 
     /**
-     * OPAQUE Login. Create login response with VOPRF evaluation
+     * OPAQUE Login
      */
-    static async createLoginResponse(blindedElement, record) {
+    static async createGatekeeperLoginResponse(blindedElement, record) {
         if (!this.#initialized) {
             await this.initialize();
         }
 
-        console.log(`[OPAQUE] createLoginResponse`);
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            throw new Error('Invalid server-entry authentication record');
+        }
+        const keys = Object.keys(record).sort();
+        if (
+            keys.length !== GATEKEEPER_RECORD_KEYS.length ||
+            keys.some((key, index) => key !== GATEKEEPER_RECORD_KEYS[index])
+        ) {
+            throw new Error('Invalid server-entry authentication record');
+        }
 
-        // Blind OPRF evaluation
-        const secretKey = record.oprfSecretKey || this.#oprfKeys.secretKey;
-        const evaluated = oprf.oprf.blindEvaluate(secretKey, blindedElement);
+        const blinded = this.#ensureUint8Array(blindedElement);
+        const secretKey = this.#ensureUint8Array(record.oprfSecretKey);
+        const authPublicKey = this.#ensureUint8Array(record.authPublicKey);
+        let envelope = this.#ensureUint8Array(record.envelope);
+        let salt = this.#ensureUint8Array(record.salt);
+        let evaluated = null;
+        let serverNonce = null;
+        let delivered = false;
+        try {
+            if (
+                blinded.length !== OPAQUE_ELEMENT_BYTES ||
+                secretKey.length !== OPAQUE_SECRET_KEY_BYTES ||
+                authPublicKey.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                envelope.length !== OPAQUE_ENVELOPE_BYTES ||
+                salt.length !== OPAQUE_SALT_BYTES
+            ) {
+                throw new Error('Invalid server-entry authentication record');
+            }
 
-        // Generate server nonce
-        const serverNonce = randomBytes(32);
-
-        // Return the stored envelope and masked response
-        return {
-            evaluatedElement: evaluated,
-            envelope: this.#ensureUint8Array(record.envelope),
-            maskedResponse: this.#ensureUint8Array(record.maskedResponse),
-            salt: this.#ensureUint8Array(record.salt),
-            serverNonce,
-        };
+            evaluated = oprf.oprf.blindEvaluate(secretKey, blinded);
+            serverNonce = randomBytes(OPAQUE_NONCE_BYTES);
+            delivered = true;
+            return { evaluatedElement: evaluated, envelope, salt, serverNonce };
+        } finally {
+            blinded.fill(0);
+            secretKey.fill(0);
+            authPublicKey.fill(0);
+            if (!delivered) {
+                envelope.fill(0);
+                salt.fill(0);
+                evaluated?.fill(0);
+                serverNonce?.fill(0);
+            }
+            envelope = null;
+            salt = null;
+        }
     }
 
     /**
-     * Compute auth MAC for login verification
+     * Transcript client signs and server verifies for login proof
      */
-    static #computeAuthMac(maskedResponse, serverNonce) {
-        const authKey = hkdf(blake3, maskedResponse, serverNonce, new TextEncoder().encode(LABELS.AUTH_KEY), 32);
-        const transcript = Buffer.concat([
-            Buffer.from(LABELS.AUTH_MAC_CONTEXT, 'utf8'),
-            Buffer.from(serverNonce)
+    static #authSigTranscript(serverNonce, authChannelBinding) {
+        return Buffer.concat([
+            Buffer.from(LABELS.AUTH_SIG_CONTEXT, 'utf8'),
+            Buffer.from(serverNonce),
+            Buffer.from(authChannelBinding)
         ]);
-        return blake3(transcript, { key: authKey, dkLen: 32 });
     }
 
     /**
      * Login finalization
      */
-    static async finishLogin(clientAuthMessage, record, serverNonce) {
-        if (!record || !record.maskedResponse) {
+    static async finishLogin(clientAuthMessage, record, serverNonce, authChannelBinding) {
+        let parsed;
+        try {
+            parsed = this.#parseStoredRecord(record);
+        } catch {
             return { success: false };
         }
 
-        // Use the stored maskedResponse as the shared secret
-        const maskedResponse = this.#ensureUint8Array(record.maskedResponse);
-        const expectedMac = this.#computeAuthMac(maskedResponse, serverNonce);
+        try {
+            return this.finishLoginWithPublicKey(
+                clientAuthMessage,
+                parsed.authPublicKey,
+                serverNonce,
+                authChannelBinding
+            );
+        } finally {
+            parsed.envelope.fill(0);
+            parsed.authPublicKey.fill(0);
+            parsed.salt.fill(0);
+        }
 
-        if (!crypto.timingSafeEqual(
-            Buffer.from(clientAuthMessage),
-            Buffer.from(expectedMac)
-        )) {
-            console.warn('[OPAQUE] finishLogin: MAC mismatch');
+    }
+
+    static finishLoginWithPublicKey(clientAuthMessage, authPublicKey, serverNonce, authChannelBinding) {
+        const signature = this.#ensureUint8Array(clientAuthMessage);
+        const publicKey = this.#ensureUint8Array(authPublicKey);
+        const nonce = this.#ensureUint8Array(serverNonce);
+        const channelBinding = this.#ensureUint8Array(authChannelBinding);
+        let transcript = null;
+        try {
+            if (
+                signature.length !== ML_DSA_SIGNATURE_BYTES ||
+                publicKey.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                nonce.length !== OPAQUE_NONCE_BYTES ||
+                channelBinding.length !== AUTH_CHANNEL_BINDING_BYTES
+            ) {
+                return { success: false };
+            }
+            transcript = this.#authSigTranscript(nonce, channelBinding);
             return {
-                success: false,
-                encryptedSessionKey: randomBytes(OPAQUE_CONFIG.SESSION_KEY_SIZE + 16),
+                success: verifyMlDsaSignature(
+                    signature,
+                    transcript,
+                    publicKey
+                )
             };
+        } catch {
+            return { success: false };
+        } finally {
+            signature.fill(0);
+            publicKey.fill(0);
+            nonce.fill(0);
+            channelBinding.fill(0);
+            transcript?.fill(0);
         }
-
-        // Use serverPrivateKey for session key encryption
-        const authKey = this.#ensureUint8Array(record.serverPrivateKey);
-
-        // Generate session key
-        const sessionKey = randomBytes(OPAQUE_CONFIG.SESSION_KEY_SIZE);
-
-        // Encrypt session key with derived key
-        const encryptionKey = hkdf(
-            blake3,
-            authKey,
-            serverNonce,
-            new TextEncoder().encode(LABELS.SESSION_KEY),
-            32
-        );
-
-        const nonce = randomBytes(OPAQUE_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(encryptionKey, nonce);
-        const encryptedSessionKey = Buffer.concat([
-            nonce,
-            cipher.encrypt(sessionKey)
-        ]);
-
-        return {
-            success: true,
-            sessionKey,
-            encryptedSessionKey,
-        };
     }
 
-    /**
-     * Verify a login auth proof against an ENTIRE shard without learning which account matched
-     */
-    static async finishLoginAcrossShard(shardRecords, clientAuthMessage, serverNonce) {
-        let matched = null;
-        const records = Array.isArray(shardRecords) ? shardRecords : [];
-        for (const row of records) {
-            let parsed = null;
+    // Verify login proof against entire anonymity set
+    static async finishLoginAcrossAnonymitySet(
+        anonymitySetRecords,
+        clientAuthMessage,
+        serverNonce,
+        authChannelBinding,
+        signal
+    ) {
+        const records = Array.isArray(anonymitySetRecords) ? anonymitySetRecords : [];
+        const anonymitySetSize = this.getAnonymitySetSize();
+        let authPublicKeys = new Uint8Array(anonymitySetSize * ML_DSA_PUBLIC_KEY_BYTES);
+        let signature = null;
+        let transcript = null;
+        let nonce = null;
+        let channelBinding = null;
+        let invalidInput = false;
+        try {
+            if (records.length > anonymitySetSize) {
+                throw new Error('Private authentication record set is too large');
+            }
+            for (let slot = 0; slot < anonymitySetSize; slot += 1) {
+                throwIfAuthOperationAborted(signal);
+                authPublicKeys.set(this.#dummyAuthPublicKey, slot * ML_DSA_PUBLIC_KEY_BYTES);
+            }
+
+            const seenSlots = new Uint8Array(anonymitySetSize);
+            for (const row of records) {
+                throwIfAuthOperationAborted(signal);
+                const slot = Number(row?.credential_index);
+                if (!Number.isInteger(slot) || slot < 0 || slot >= anonymitySetSize || seenSlots[slot] !== 0) {
+                    throw new Error('Invalid private-auth slot in database');
+                }
+                seenSlots[slot] = 1;
+                let rawRecord;
+                try {
+                    rawRecord = typeof row?.opaqueRecord === 'string'
+                        ? JSON.parse(row.opaqueRecord)
+                        : null;
+                } catch {
+                    throw new Error('Invalid private-auth record in database');
+                }
+                const parsed = this.#parseStoredRecord(rawRecord);
+                try {
+                    authPublicKeys.set(parsed.authPublicKey, slot * ML_DSA_PUBLIC_KEY_BYTES);
+                } finally {
+                    parsed.envelope.fill(0);
+                    parsed.authPublicKey.fill(0);
+                    parsed.salt.fill(0);
+                }
+            }
+
+            signature = this.#ensureUint8Array(clientAuthMessage);
+            if (signature.length !== ML_DSA_SIGNATURE_BYTES) {
+                signature.fill(0);
+                signature = new Uint8Array(ML_DSA_SIGNATURE_BYTES);
+                invalidInput = true;
+            }
+            nonce = this.#ensureUint8Array(serverNonce);
+            if (nonce.length !== OPAQUE_NONCE_BYTES) {
+                nonce.fill(0);
+                nonce = new Uint8Array(OPAQUE_NONCE_BYTES);
+                invalidInput = true;
+            }
+            channelBinding = this.#ensureUint8Array(authChannelBinding);
+            if (channelBinding.length !== AUTH_CHANNEL_BINDING_BYTES) {
+                channelBinding.fill(0);
+                channelBinding = new Uint8Array(AUTH_CHANNEL_BINDING_BYTES);
+                invalidInput = true;
+            }
+            const transcriptBuffer = this.#authSigTranscript(nonce, channelBinding);
             try {
-                parsed = typeof row?.opaqueRecord === 'string'
-                    ? JSON.parse(row.opaqueRecord)
-                    : row?.opaqueRecord;
-            } catch {
-                parsed = null;
-            }
-            let attempt;
-            try {
-                attempt = await this.finishLogin(clientAuthMessage, parsed, serverNonce);
-            } catch {
-                attempt = { success: false };
+                transcript = new Uint8Array(transcriptBuffer);
+            } finally {
+                transcriptBuffer.fill(0);
             }
 
-            // Record the first match but keep scanning so timing is position independent.
-            if (attempt?.success && !matched) {
-                matched = attempt;
-            }
+            const verification = verifyAuthProofAcrossAnonymitySet(authPublicKeys, signature, transcript, signal);
+            authPublicKeys = null;
+            signature = null;
+            transcript = null;
+            const result = await verification;
+            return { success: !invalidInput && result.matched };
+        } finally {
+            authPublicKeys?.fill(0);
+            signature?.fill(0);
+            transcript?.fill(0);
+            nonce?.fill(0);
+            channelBinding?.fill(0);
         }
-        return matched || { success: false };
     }
 
-    /**
-     * Compute credential ID from blinded user ID
-     */
-    static computeCredentialId(userId) {
-        const salt = this.#oprfKeys ? this.#oprfKeys.publicKey.slice(0, 16) : randomBytes(16);
-        return hkdf(
-            blake3,
-            new TextEncoder().encode(userId),
-            salt,
-            new TextEncoder().encode(LABELS.CREDENTIAL_ID),
-            OPAQUE_CONFIG.CREDENTIAL_ID_SIZE
-        );
+    static getAnonymitySetSize() {
+        return OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE;
     }
 
-    /**
-     * Generate uniform response regardless of login outcome
-     */
-    static generateUniformResponse(actualResult, encryptionKey) {
-        const PAYLOAD_SIZE = 512;
-        const payload = new Uint8Array(PAYLOAD_SIZE);
-
-        if (actualResult.success) {
-            payload.set(actualResult.sessionKey, 0);
-            payload.set(actualResult.capabilityToken || new Uint8Array(32), 32);
-            payload.set(randomBytes(PAYLOAD_SIZE - 128), 128);
-        } else {
-            payload.set(randomBytes(PAYLOAD_SIZE), 0);
-        }
-
-        // Encrypt with provided key
-        const nonce = randomBytes(OPAQUE_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(encryptionKey, nonce);
-        const encrypted = cipher.encrypt(payload);
-
-        return Buffer.concat([nonce, encrypted]);
-    }
-
-    /**
-     * Generate server keypair for OPAQUE
-     */
-    static #generateServerKeyPair() {
-        const seed = randomBytes(32);
-        return {
-            privateKey: seed,
-            publicKey: blake3(seed, { dkLen: 32 }),
-        };
-    }
-
-    /**
-     * Get maximum entries per shard
-     */
-    static getShardSize() {
-        return OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE;
-    }
-
-    static #padOtRecord(rawRecord) {
-        const paddedSize = OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
-        if (!rawRecord || rawRecord.length + 4 > paddedSize) {
-            throw new Error('OPAQUE record exceeds padded transfer size');
-        }
-        const padded = crypto.randomBytes(paddedSize);
-        padded.writeUInt32BE(rawRecord.length, 0);
-        rawRecord.copy(padded, 4);
-        return padded;
+    static getRegistrationRecordMaxBytes() {
+        return OPAQUE_CONFIG.REGISTRATION_RECORD_MAX_BYTES;
     }
 
     /**
      * Oblivious Transfer
      */
-    static async encryptShardForOT(records, clientPubKeys) {
-        const shardSize = this.getShardSize();
-
-        const promises = [];
-
-        for (let i = 0; i < shardSize; i++) {
-            const record = records.find(r => r.credential_index === i);
-            const pubKey = clientPubKeys[i];
-
-            promises.push((async () => {
-                if (!record || !pubKey || !record.opaqueRecord) {
-                    const dummy = crypto.randomBytes(OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES);
-                    const { cipherText: ct, sharedSecret: ss } = await MlKem.encapsulate(this.#ensureUint8Array(pubKey || crypto.randomBytes(1568)));
-                    const mask = blake3(ss, { dkLen: dummy.length });
-                    return {
-                        ct: Buffer.from(ct).toString('base64'),
-                        masked: Buffer.from(xor(dummy, mask)).toString('base64')
-                    };
-                }
-
-                // Real record
-                const rawRecord = Buffer.from(record.opaqueRecord, 'utf8');
-                const paddedRecord = this.#padOtRecord(rawRecord);
-                const { cipherText: ct, sharedSecret: ss } = await MlKem.encapsulate(this.#ensureUint8Array(pubKey));
-                const mask = blake3(ss, { dkLen: paddedRecord.length });
-
-                return {
-                    ct: Buffer.from(ct).toString('base64'),
-                    masked: Buffer.from(xor(paddedRecord, mask)).toString('base64')
-                };
-            })());
+    static async encryptAnonymitySetForOT(records, clientPubKeys, signal) {
+        const anonymitySetSize = this.getAnonymitySetSize();
+        if (
+            !Array.isArray(clientPubKeys) ||
+            clientPubKeys.length !== anonymitySetSize ||
+            clientPubKeys.some((key) => !(key instanceof Uint8Array) || key.length !== ML_KEM_PUBLIC_KEY_BYTES)
+        ) {
+            throw new Error('Invalid private-auth KEM public-key set');
         }
 
-        const encrypted = await Promise.all(promises);
-        return encrypted;
+        const sourceRecords = Array.isArray(records) ? records : [];
+        if (sourceRecords.length > anonymitySetSize) {
+            throw new Error('Private authentication record set is too large');
+        }
+
+        let publicKeySlab = new Uint8Array(anonymitySetSize * ML_KEM_PUBLIC_KEY_BYTES);
+        let paddedRecordSlab = new Uint8Array(anonymitySetSize * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES);
+        let ciphertexts = null;
+        let maskedRecords = null;
+        try {
+            for (let slot = 0; slot < anonymitySetSize; slot += 1) {
+                throwIfAuthOperationAborted(signal);
+                publicKeySlab.set(clientPubKeys[slot], slot * ML_KEM_PUBLIC_KEY_BYTES);
+            }
+            crypto.randomFillSync(paddedRecordSlab);
+
+            const seenSlots = new Uint8Array(anonymitySetSize);
+            const paddedView = new DataView(paddedRecordSlab.buffer);
+            for (const row of sourceRecords) {
+                throwIfAuthOperationAborted(signal);
+                const slot = Number(row?.credential_index);
+                if (!Number.isInteger(slot) || slot < 0 || slot >= anonymitySetSize || seenSlots[slot] !== 0) {
+                    throw new Error('Invalid private-auth slot in database');
+                }
+                seenSlots[slot] = 1;
+                if (
+                    typeof row.opaqueRecord !== 'string' ||
+                    Buffer.byteLength(row.opaqueRecord, 'utf8') > this.getRegistrationRecordMaxBytes()
+                ) {
+                    throw new Error('Invalid private-auth record in database');
+                }
+
+                let rawRecord;
+                try {
+                    rawRecord = JSON.parse(row.opaqueRecord);
+                } catch {
+                    throw new Error('Invalid private-auth record in database');
+                }
+                const parsed = this.#parseStoredRecord(rawRecord);
+                let clientRecord = null;
+                try {
+                    clientRecord = Buffer.from(JSON.stringify({
+                        envelope: Buffer.from(parsed.envelope).toString('base64'),
+                        salt: Buffer.from(parsed.salt).toString('base64')
+                    }), 'utf8');
+                    if (clientRecord.length + 4 > OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES) {
+                        throw new Error('OPAQUE record exceeds padded transfer size');
+                    }
+                    const offset = slot * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
+                    paddedView.setUint32(offset, clientRecord.length, false);
+                    paddedRecordSlab.set(clientRecord, offset + 4);
+                } finally {
+                    clientRecord?.fill(0);
+                    parsed.envelope.fill(0);
+                    parsed.authPublicKey.fill(0);
+                    parsed.salt.fill(0);
+                }
+            }
+
+            const encryption = encryptPrivateAuthOtRecords(publicKeySlab, paddedRecordSlab, signal);
+            publicKeySlab = null;
+            paddedRecordSlab = null;
+            ({ ciphertexts, maskedRecords } = await encryption);
+
+            const encrypted = new Array(anonymitySetSize);
+            for (let slot = 0; slot < anonymitySetSize; slot += 1) {
+                const ciphertextOffset = slot * ML_KEM_CIPHERTEXT_BYTES;
+                const recordOffset = slot * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
+                encrypted[slot] = {
+                    ct: Buffer.from(ciphertexts.buffer, ciphertextOffset, ML_KEM_CIPHERTEXT_BYTES).toString('base64'),
+                    masked: Buffer.from(
+                        maskedRecords.buffer,
+                        recordOffset,
+                        OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES
+                    ).toString('base64')
+                };
+            }
+            return encrypted;
+        } finally {
+            publicKeySlab?.fill(0);
+            paddedRecordSlab?.fill(0);
+            ciphertexts?.fill(0);
+            maskedRecords?.fill(0);
+        }
     }
 }
 
@@ -420,25 +531,8 @@ export const OPAQUEHelpers = {
      * Parse registration request from client
      */
     parseRegistrationRequest(data) {
-        if (!data.blindedElement || !data.clientPublicKey) {
-            throw new Error('Invalid registration request');
-        }
         return {
-            blindedElement: Buffer.from(data.blindedElement, 'base64'),
-            clientPublicKey: Buffer.from(data.clientPublicKey, 'base64'),
-        };
-    },
-
-    /**
-     * Parse login request from client
-     */
-    parseLoginRequest(data) {
-        if (!data.blindedElement || !data.credentialId) {
-            throw new Error('Invalid login request');
-        }
-        return {
-            blindedElement: Buffer.from(data.blindedElement, 'base64'),
-            credentialId: Buffer.from(data.credentialId, 'base64'),
+            blindedElement: decodeCanonicalBase64(data?.blindedElement, OPAQUE_ELEMENT_BYTES),
         };
     },
 
@@ -449,7 +543,12 @@ export const OPAQUEHelpers = {
         const formatted = {};
         for (const [key, value] of Object.entries(response)) {
             if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
-                formatted[key] = Buffer.from(value).toString('base64');
+                const copy = Buffer.from(value);
+                try {
+                    formatted[key] = copy.toString('base64');
+                } finally {
+                    copy.fill(0);
+                }
             } else {
                 formatted[key] = value;
             }

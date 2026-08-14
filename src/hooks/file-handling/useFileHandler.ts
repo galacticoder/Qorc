@@ -1,40 +1,124 @@
 import React, { useRef, useCallback, useEffect } from "react";
-import { IncomingFileChunks } from "../../pages/types";
 import { Message } from '../../components/chat/messaging/types';
-import { INACTIVITY_TIMEOUT_MS, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS, MAX_FILE_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES } from "../../lib/constants";
-import { createBlobCache, releaseFileEntry, dispatchProgressEvent, dispatchCanceledEvent } from "../../lib/utils/file-utils";
+import { INACTIVITY_TIMEOUT_MS, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS, MAX_FILE_SIZE_BYTES, GLOBAL_INBOUND_FILE_MEMORY_BUDGET, FILE_NACK_STALL_MS, MAX_NACK_ATTEMPTS, MAX_RETRANSMIT_CHUNKS_PER_REQUEST } from "../../lib/constants";
+import { dispatchProgressEvent, dispatchCanceledEvent, totalInboundFileBytes, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { extractChunkData, validateNewTransfer, createFileEntry, isValidChunkIndex } from "./chunk-validation";
-import { parseEncryptedChunk, decryptEnvelope, verifyChunkMac, decryptChunk, decompressChunk, cleanupFailedTransfer } from "./chunk-decryption";
-import { completeFileTransfer, handleAssemblyFailure } from "./file-assembly";
+import { parseEncryptedChunk, decryptEnvelope, verifyChunkMac, decryptChunk, cleanupFailedTransfer } from "./chunk-decryption";
+import { completeFileTransfer, deriveIncomingFileMessageId, handleAssemblyFailure } from "./file-assembly";
 import type { User } from "../../components/chat/messaging/UserList";
+import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
+import { SignalType } from "../../lib/types/signal-types";
+import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
+import type { HybridKeys } from '../../lib/types/auth-types';
+
+const FILE_PERSIST_RETRY_BASE_MS = 1_500;
+const FILE_PERSIST_RETRY_MAX_MS = 15_000;
 
 export function useFileHandler(
-  getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
+  getKeysOnDemand: () => Promise<HybridKeys | null>,
   onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void,
   secureDBRef?: React.RefObject<any | null>,
   usersRef?: React.RefObject<User[]>,
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
+  activeAccount?: string | null
 ) {
-  const incomingFileChunksRef = useRef<IncomingFileChunks>({});
-  const macStateRef = useRef<Map<string, { macKey: Uint8Array; fileSize: number }>>(new Map());
+  const incomingFileChunksRef = useRef<Record<string, ExtendedFileState>>({});
+  const macStateRef = useRef<Map<string, { macKey: Uint8Array }>>(new Map());
   const cleanupTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const blobCacheRef = useRef(createBlobCache());
+  
+  const nackTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const nackAttemptsRef = useRef<Map<string, number>>(new Map());
+  const ackRetryTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const accountGenerationRef = useRef(0);
+  const activeAccountRef = useRef<string | null>(activeAccount || null);
+
+  const clearMacState = useCallback((fileKey: string) => {
+    const entry = macStateRef.current.get(fileKey);
+    entry?.macKey.fill(0);
+    macStateRef.current.delete(fileKey);
+  }, []);
+
+  const clearNackTimer = useCallback((fileKey: string) => {
+    const t = nackTimersRef.current.get(fileKey);
+    if (t) { try { clearTimeout(t); } catch { } nackTimersRef.current.delete(fileKey); }
+  }, []);
+
+  const scheduleNackCheck = useCallback((fileKey: string, from: string, fileId: string, filename: string) => {
+    clearNackTimer(fileKey);
+    const generation = accountGenerationRef.current;
+    const timer = setTimeout(() => {
+      nackTimersRef.current.delete(fileKey);
+      if (generation !== accountGenerationRef.current) return;
+      const entry = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;
+      if (!entry) return;
+      if (entry.receivedCount >= entry.totalChunks) return;
+
+      const attempts = (nackAttemptsRef.current.get(fileKey) || 0) + 1;
+      if (attempts > MAX_NACK_ATTEMPTS) return;
+
+      const missingIndices: number[] = [];
+      const received = entry.receivedSet;
+      for (let i = 0; i < entry.totalChunks && missingIndices.length < MAX_RETRANSMIT_CHUNKS_PER_REQUEST; i++) {
+        if (!received?.has(i)) missingIndices.push(i);
+      }
+      if (missingIndices.length === 0) return;
+
+      nackAttemptsRef.current.set(fileKey, attempts);
+      
+      const refund = () => {
+        if (nackAttemptsRef.current.get(fileKey) === attempts) {
+          nackAttemptsRef.current.set(fileKey, attempts - 1);
+        }
+      };
+      void unifiedSignalTransport
+        .send(from, { fileId, filename, missingIndices }, SignalType.FILE_CHUNK_NACK)
+        .then((r) => { if (!r?.success) refund(); })
+        .catch(refund)
+        .finally(() => {
+          const current = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;
+          if (
+            generation === accountGenerationRef.current &&
+            current === entry &&
+            current.receivedCount < current.totalChunks
+          ) {
+            scheduleNackCheck(fileKey, from, fileId, filename);
+          }
+        });
+    }, FILE_NACK_STALL_MS);
+    nackTimersRef.current.set(fileKey, timer);
+  }, [clearNackTimer]);
 
   const cleanup = useCallback(() => {
     for (const [, t] of cleanupTimersRef.current) {
       try { clearTimeout(t); } catch { }
     }
     cleanupTimersRef.current.clear();
+    for (const [, t] of nackTimersRef.current) {
+      try { clearTimeout(t); } catch { }
+    }
+    nackTimersRef.current.clear();
+    nackAttemptsRef.current.clear();
+    for (const entry of macStateRef.current.values()) entry.macKey.fill(0);
     macStateRef.current.clear();
-    blobCacheRef.current.clear();
+    for (const timer of ackRetryTimersRef.current) clearTimeout(timer);
+    ackRetryTimersRef.current.clear();
     for (const key of Object.keys(incomingFileChunksRef.current as any)) {
+      releaseFileEntry((incomingFileChunksRef.current as any)[key]);
       delete (incomingFileChunksRef.current as any)[key];
     }
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
+
+  useEffect(() => {
+    const account = activeAccount || null;
+    if (activeAccountRef.current === account) return;
+    activeAccountRef.current = account;
+    accountGenerationRef.current += 1;
+    cleanup();
+  }, [activeAccount, cleanup]);
 
   const clearTimer = useCallback((fileKey: string) => {
     const t = cleanupTimersRef.current.get(fileKey);
@@ -46,87 +130,244 @@ export function useFileHandler(
 
   const scheduleInactivityTimer = useCallback((fileKey: string, from: string, filename: string) => {
     clearTimer(fileKey);
+    const generation = accountGenerationRef.current;
     const timeout = setTimeout(() => {
+      if (cleanupTimersRef.current.get(fileKey) === timeout) {
+        cleanupTimersRef.current.delete(fileKey);
+      }
+      if (generation !== accountGenerationRef.current) return;
+      releaseFileEntry((incomingFileChunksRef.current as any)[fileKey]);
       delete (incomingFileChunksRef.current as any)[fileKey];
-      macStateRef.current.delete(fileKey);
+      clearMacState(fileKey);
+      clearNackTimer(fileKey);
+      nackAttemptsRef.current.delete(fileKey);
       dispatchCanceledEvent({ from, filename, reason: 'inactivity-timeout' });
     }, INACTIVITY_TIMEOUT_MS);
     cleanupTimersRef.current.set(fileKey, timeout);
-  }, [clearTimer]);
+  }, [clearTimer, clearNackTimer, clearMacState]);
 
   const handleFileMessageChunk = useCallback(
     async (payload: any, message: any) => {
+      const generation = accountGenerationRef.current;
+      const account = activeAccountRef.current;
+      const secureDB = secureDBRef?.current || null;
+      const isCurrent = () => (
+        generation === accountGenerationRef.current &&
+        account !== null &&
+        activeAccountRef.current === account &&
+        secureDBRef?.current === secureDB
+      );
       try {
+        if (!account || !secureDB || !isCurrent()) return false;
         const data = extractChunkData(payload, message);
-        if (!data) return;
+        if (!data) {
+          console.error('[FILE-RECV-STAGE] chunk-payload-validation', {
+            payloadKeys: payload && typeof payload === 'object'
+              ? Object.keys(payload).sort()
+              : typeof payload,
+            transportMessageId: message?.transportMessageId,
+          });
+          return;
+        }
 
-        const { from, toUser, safeFilename, fileKey, chunkIndex, totalChunks, chunkData, envelope } = data;
+        const {
+          from,
+          toUser,
+          safeFilename,
+          fileKey,
+          chunkIndex,
+          totalChunks,
+          chunkData,
+          envelope,
+          transportMessageId,
+          chunkMac,
+          recoveryProbe,
+        } = data;
+        if (toUser !== account) return;
+        
+        if (!isValidChunkIndex(chunkIndex, totalChunks)) return;
         const store = incomingFileChunksRef.current as any;
         let fileEntry = store[fileKey] as ExtendedFileState | undefined;
 
+        const failTransfer = (entry: ExtendedFileState, reason: string, errorMessage: string): void => {
+          console.error(`[FILE-RECV-STAGE] ${reason}`);
+          clearNackTimer(fileKey);
+          nackAttemptsRef.current.delete(fileKey);
+          cleanupFailedTransfer(
+            entry,
+            fileKey,
+            store,
+            macStateRef.current,
+            cleanupTimersRef.current,
+            from,
+            safeFilename,
+            reason,
+            setLoginError,
+            errorMessage
+          );
+        };
+
+        const acknowledgeTransport = (force = false) => {
+          if (!transportMessageId || !isCurrent()) return;
+          const entry = fileEntry!;
+          const canAcknowledge = () => (
+            isCurrent() &&
+            !entry.transportAckCanceled &&
+            (store[fileKey] === entry || entry.transportAckDurablyCommitted === true)
+          );
+          if (!canAcknowledge()) return;
+          entry.transportAckedIndices ??= new Set<number>();
+          entry.transportAckPending ??= new Map<number, string>();
+          if (entry.transportAckedIndices.has(chunkIndex) && !force) return;
+          entry.transportAckPending.set(chunkIndex, transportMessageId);
+
+          const startNextAck = () => {
+            if (!canAcknowledge()) return;
+            if (entry.transportAckInFlight) return;
+            const next = entry.transportAckPending?.entries().next().value as [number, string] | undefined;
+            if (!next) {
+              if (entry.transportAckDurablyCommitted) entry.transportAckedIndices?.clear();
+              return;
+            }
+            const [nextChunkIndex, ackFor] = next;
+            entry.transportAckInFlight = { chunkIndex: nextChunkIndex, ackFor };
+            const finish = (confirmed: boolean) => {
+              const active = entry.transportAckInFlight;
+              if (!active || active.chunkIndex !== nextChunkIndex || active.ackFor !== ackFor) return;
+              entry.transportAckInFlight = undefined;
+              if (confirmed && canAcknowledge()) {
+                entry.transportAckedIndices?.add(nextChunkIndex);
+              }
+              if (entry.transportAckPending?.get(nextChunkIndex) === ackFor) {
+                entry.transportAckPending.delete(nextChunkIndex);
+              }
+              if (canAcknowledge()) startNextAck();
+            };
+            const scheduleRetry = (attempt: number) => {
+              const timer = setTimeout(() => {
+                ackRetryTimersRef.current.delete(timer);
+                if (canAcknowledge()) sendAck(attempt);
+                else finish(false);
+              }, 1500);
+              ackRetryTimersRef.current.add(timer);
+            };
+            const sendAck = (attempt: number) => {
+              if (!canAcknowledge()) {
+                finish(false);
+                return;
+              }
+              unifiedSignalTransport
+                .send(from, { ackFor }, SignalType.FILE_TRANSPORT_ACK)
+                .then((result) => {
+                  if (!canAcknowledge()) {
+                    finish(false);
+                  } else if (result?.success) {
+                    finish(true);
+                  } else if (attempt < 2) {
+                    scheduleRetry(attempt + 1);
+                  } else {
+                    finish(false);
+                  }
+                })
+                .catch(() => {
+                  if (canAcknowledge() && attempt < 2) scheduleRetry(attempt + 1);
+                  else finish(false);
+                });
+            };
+            sendAck(0);
+          };
+          startNextAck();
+        };
+
         if (!fileEntry) {
-          if (!validateNewTransfer(data, incomingFileChunksRef.current, setLoginError)) return;
+          const validation = validateNewTransfer(data, incomingFileChunksRef.current, setLoginError);
+          if (validation !== 'valid') return validation === 'busy' ? false : undefined;
+          if (recoveryProbe) {
+            const persistedMessageId = await deriveIncomingFileMessageId(from, data.messageId);
+            if (!isCurrent()) return false;
+            if (await secureDB.hasCompleteFileMessage(from, persistedMessageId)) {
+              if (!isCurrent()) return false;
+              const queued = await deliveryReceiptOutbox.queueDelivery(toUser, from, data.messageId);
+              if (!queued || !isCurrent()) return false;
+              if (transportMessageId) {
+                try {
+                  await unifiedSignalTransport.send(
+                    from,
+                    { ackFor: transportMessageId },
+                    SignalType.FILE_TRANSPORT_ACK
+                  );
+                } catch { }
+                if (!isCurrent()) return false;
+              }
+              return true;
+            }
+            if (!isCurrent()) return false;
+          }
           fileEntry = createFileEntry(data);
           store[fileKey] = fileEntry;
+          
           scheduleInactivityTimer(fileKey, from, safeFilename);
-        } else if (fileEntry.totalChunks !== totalChunks) {
-          cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'metadata-mismatch', setLoginError, 'File transfer corrupted (metadata mismatch)');
+        } else if (
+          fileEntry.totalChunks !== totalChunks ||
+          fileEntry.fileSize !== data.fileSize ||
+          fileEntry.chunkSize !== data.chunkSize ||
+          fileEntry.messageId !== data.messageId ||
+          fileEntry.safeFilename !== safeFilename
+        ) {
+          failTransfer(fileEntry, 'metadata-mismatch', 'File transfer corrupted (metadata mismatch)');
           return;
         }
 
-        if (fileEntry.paused) {
-          scheduleInactivityTimer(fileKey, from, safeFilename);
-          return;
-        }
+        if (fileEntry.transport !== data.transport) fileEntry.transport = 'relay';
 
-        fileEntry.lastUpdated = Date.now();
-        scheduleInactivityTimer(fileKey, from, safeFilename);
-
-        if (!isValidChunkIndex(chunkIndex, fileEntry.totalChunks) || fileEntry.receivedSet?.has(chunkIndex)) {
-          return;
-        }
-
-        const parsed = parseEncryptedChunk(chunkData);
-        if (!parsed) {
-          cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'deserialize-failed', setLoginError, 'Invalid file chunk format');
-          return;
-        }
-
-        const { iv, authTag, encrypted } = parsed;
-
-        if (!fileEntry.aesKey) {
-          const hybridKeys = await getKeysOnDemand();
-          if (!hybridKeys) {
-            throw new Error(`Hybrid keys not available for file decryption (${safeFilename})`);
+        const finalizeCompletedTransfer = async (): Promise<boolean> => {
+          if ((fileEntry!.persistenceRetryAt || 0) > Date.now()) return false;
+          const result = await completeFileTransfer(
+            fileEntry!,
+            from,
+            toUser,
+            secureDB,
+            onNewMessage,
+            isCurrent
+          );
+          if (!isCurrent()) return false;
+          if (!result.assembled) {
+            clearTimer(fileKey);
+            clearNackTimer(fileKey);
+            nackAttemptsRef.current.delete(fileKey);
+            clearMacState(fileKey);
+            handleAssemblyFailure(fileEntry!, fileKey, store, from, 'assembly-failed', setLoginError, 'File transfer incomplete');
+            return true;
+          }
+          if (!result.durablySaved) {
+            const failures = Math.min((fileEntry!.persistenceFailureCount || 0) + 1, 16);
+            fileEntry!.persistenceFailureCount = failures;
+            fileEntry!.persistenceRetryAt = Date.now() + Math.min(
+              FILE_PERSIST_RETRY_BASE_MS * (2 ** (failures - 1)),
+              FILE_PERSIST_RETRY_MAX_MS
+            );
+            
+            return false;
           }
 
-          const keys = await decryptEnvelope(envelope, hybridKeys, from, usersRef?.current, findUser);
-          if (!keys) {
-            cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'envelope-decrypt-failed', setLoginError, 'File transfer rejected (key envelope invalid)');
-            return;
+          clearTimer(fileKey);
+          clearNackTimer(fileKey);
+          nackAttemptsRef.current.delete(fileKey);
+          clearMacState(fileKey);
+          fileEntry!.transportAckDurablyCommitted = true;
+          delete store[fileKey];
+          releaseFileEntry(fileEntry!);
+          acknowledgeTransport(true);
+          return true;
+        };
+
+        if (fileEntry.receivedSet?.has(chunkIndex)) {
+          if (fileEntry.receivedCount === fileEntry.totalChunks) {
+            return finalizeCompletedTransfer();
           }
-
-          fileEntry.aesKey = keys.aesKey;
-          macStateRef.current.set(fileKey, { macKey: keys.macKey, fileSize: fileEntry.fileSize || 0 });
+          acknowledgeTransport(true);
+          return true;
         }
-
-        const macEntry = macStateRef.current.get(fileKey);
-        if (payload.chunkMac && macEntry) {
-          const ctx = { fileEntry, fileKey, from, safeFilename, chunkIndex, iv, authTag, encrypted };
-          const valid = await verifyChunkMac(ctx, payload.chunkMac, macEntry.macKey, totalChunks);
-          if (!valid) {
-            cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'chunk-mac-failed', setLoginError, 'File integrity check failed');
-            return;
-          }
-        }
-
-        const decryptedBytes = await decryptChunk(iv, authTag, encrypted, fileEntry.aesKey!);
-        if (!decryptedBytes) {
-          cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'decrypt-failed', setLoginError, 'Failed to decrypt file chunk');
-          return;
-        }
-
-        const decompressedChunk = decompressChunk(decryptedBytes);
 
         const nowTs = Date.now();
         const bucket = fileEntry.rateBucket ?? { windowStart: nowTs, count: 0 };
@@ -137,70 +378,120 @@ export function useFileHandler(
         bucket.count += 1;
         fileEntry.rateBucket = bucket;
         if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
-          scheduleInactivityTimer(fileKey, from, safeFilename);
+          return false;
+        }
+
+        const parsed = parseEncryptedChunk(chunkData);
+        if (!parsed) {
+            failTransfer(fileEntry, 'deserialize-failed', 'Invalid file chunk format');
+          return;
+        }
+
+        const { iv, authTag, encrypted } = parsed;
+        try {
+
+          if (!fileEntry.aesKey) {
+          const hybridKeys = await getKeysOnDemand();
+          if (!isCurrent()) return false;
+          if (!hybridKeys) {
+            return false;
+          }
+
+          const keys = await decryptEnvelope(envelope, account, from, usersRef?.current, findUser);
+          if (!isCurrent()) {
+            keys?.macKey.fill(0);
+            return false;
+          }
+          if (!keys) {
+            failTransfer(fileEntry, 'envelope-decrypt-failed', 'File transfer rejected (key envelope invalid)');
+            return;
+          }
+
+          fileEntry.aesKey = keys.aesKey;
+          macStateRef.current.set(fileKey, { macKey: keys.macKey });
+        }
+
+          const macEntry = macStateRef.current.get(fileKey);
+        if (!macEntry) {
+          failTransfer(fileEntry, 'chunk-mac-key-missing', 'File integrity key unavailable');
+          return;
+        }
+          const ctx = { fileEntry, fileKey, from, safeFilename, chunkIndex, iv, authTag, encrypted };
+          const valid = await verifyChunkMac(ctx, chunkMac, macEntry.macKey, totalChunks);
+        if (!isCurrent()) return false;
+        if (!valid) {
+          failTransfer(fileEntry, 'chunk-mac-failed', 'File integrity check failed');
+          return;
+        }
+
+          const decryptedBytes = await decryptChunk(iv, authTag, encrypted, fileEntry.aesKey!);
+        if (!isCurrent()) {
+          decryptedBytes?.fill(0);
+          return false;
+        }
+        if (!decryptedBytes) {
+          failTransfer(fileEntry, 'decrypt-failed', 'Failed to decrypt file chunk');
+          return;
+        }
+
+        const expectedChunkLength = chunkIndex === fileEntry.totalChunks - 1
+          ? fileEntry.fileSize! - (fileEntry.chunkSize! * (fileEntry.totalChunks - 1))
+          : fileEntry.chunkSize!;
+        if (decryptedBytes.length !== expectedChunkLength) {
+          decryptedBytes.fill(0);
+          failTransfer(fileEntry, 'chunk-size-mismatch', 'File transfer rejected (chunk size mismatch)');
           return;
         }
 
         if (!fileEntry.receivedSet!.has(chunkIndex)) {
-          fileEntry.decryptedChunks[chunkIndex] = new Blob([new Uint8Array(decompressedChunk)]);
-          fileEntry.receivedSet!.add(chunkIndex);
-          fileEntry.receivedCount++;
-          fileEntry.bytesReceivedApprox = (fileEntry.bytesReceivedApprox || 0) + decompressedChunk.length;
-
-          if ((fileEntry.fileSize && fileEntry.bytesReceivedApprox > fileEntry.fileSize + MAX_CHUNK_SIZE_BYTES) ||
-            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE_BYTES) {
-            cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'size-exceeded', setLoginError, 'File transfer rejected (size exceeded)');
+          const chunkLength = decryptedBytes.length;
+          if (totalInboundFileBytes(store) + chunkLength > GLOBAL_INBOUND_FILE_MEMORY_BUDGET) {
+            decryptedBytes.fill(0);
+            failTransfer(fileEntry, 'global-memory-exceeded', 'File transfer rejected (memory limit)');
             return;
           }
+          const ownedChunk = new Uint8Array(decryptedBytes.length);
+          ownedChunk.set(decryptedBytes);
+          fileEntry.decryptedChunks[chunkIndex] = ownedChunk;
+          decryptedBytes.fill(0);
+          fileEntry.receivedSet!.add(chunkIndex);
+          fileEntry.receivedCount++;
+          fileEntry.bytesReceivedApprox = (fileEntry.bytesReceivedApprox || 0) + chunkLength;
+          scheduleInactivityTimer(fileKey, from, safeFilename);
+          nackAttemptsRef.current.delete(fileKey);
+
+          if (fileEntry.bytesReceivedApprox > fileEntry.fileSize! ||
+            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE_BYTES) {
+            failTransfer(fileEntry, 'size-exceeded', 'File transfer rejected (size exceeded)');
+            return;
+          }
+        } else {
+          decryptedBytes.fill(0);
         }
 
         dispatchProgressEvent({ from, filename: safeFilename, percent: Math.min(1, fileEntry.receivedCount / fileEntry.totalChunks), received: fileEntry.receivedCount, total: fileEntry.totalChunks });
 
         if (fileEntry.receivedCount === fileEntry.totalChunks) {
-          clearTimer(fileKey);
-          macStateRef.current.delete(fileKey);
-
-          const success = await completeFileTransfer(fileEntry, fileKey, from, toUser, store, blobCacheRef.current, secureDBRef, onNewMessage);
-          if (!success) {
-            handleAssemblyFailure(fileEntry, fileKey, store, blobCacheRef.current, from, 'assembly-failed', setLoginError, 'File transfer incomplete');
-          }
+          return finalizeCompletedTransfer();
+        } else if (fileEntry.messageId) {
+          acknowledgeTransport();
+          scheduleNackCheck(fileKey, from, fileEntry.messageId, safeFilename);
+        }
+          return true;
+        } finally {
+          iv.fill(0);
+          authTag.fill(0);
+          encrypted.fill(0);
         }
       } catch (err) {
+        if (!isCurrent()) return false;
         console.error('[useFileHandler] Error handling FILE_MESSAGE_CHUNK', err);
         setLoginError('Failed to process file chunk');
+        throw err;
       }
     },
-    [getKeysOnDemand, onNewMessage, setLoginError, scheduleInactivityTimer, clearTimer, secureDBRef]
+    [getKeysOnDemand, onNewMessage, setLoginError, scheduleInactivityTimer, clearTimer, clearNackTimer, clearMacState, secureDBRef, usersRef, findUser]
   );
 
-  const cancelIncomingFile = useCallback((from: string, filename: string) => {
-    const fileKey = `${from}-${filename}`;
-    const store = incomingFileChunksRef.current as any;
-    if (store[fileKey]) {
-      delete store[fileKey];
-      macStateRef.current.delete(fileKey);
-      clearTimer(fileKey);
-      dispatchCanceledEvent({ from, filename, reason: 'user-canceled' });
-    }
-  }, [clearTimer]);
-
-  const pauseIncomingFile = useCallback((from: string, filename: string) => {
-    const fileKey = `${from}-${filename}`;
-    const entry = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;
-    if (entry) {
-      entry.paused = true;
-      scheduleInactivityTimer(fileKey, from, filename);
-    }
-  }, [scheduleInactivityTimer]);
-
-  const resumeIncomingFile = useCallback((from: string, filename: string) => {
-    const fileKey = `${from}-${filename}`;
-    const entry = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;
-    if (entry) {
-      entry.paused = false;
-      scheduleInactivityTimer(fileKey, from, filename);
-    }
-  }, [scheduleInactivityTimer]);
-
-  return { handleFileMessageChunk, cancelIncomingFile, pauseIncomingFile, resumeIncomingFile, cleanup };
+  return { handleFileMessageChunk, cleanup };
 }

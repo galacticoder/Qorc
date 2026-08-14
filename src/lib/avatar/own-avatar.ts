@@ -1,6 +1,7 @@
 import websocketClient from '../websocket/websocket';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { EventType } from '../types/event-types';
+import { MAX_AVATAR_DIMENSION } from '../constants';
 import type { AvatarData } from '../types/avatar-types';
 import type { AvatarSystemState } from '../types/avatar-types';
 import {
@@ -10,38 +11,56 @@ import {
     hashAvatarData
 } from '../utils/avatar-utils';
 
+const MAX_AVATAR_SOURCE_DIMENSION = 8192;
+
 // Set own avatar
 export async function setOwnAvatar(
     state: AvatarSystemState,
     imageDataUrl: string,
-    isDefault: boolean = false,
-    uploadFn: () => Promise<any>
+    isDefault: boolean,
+    isCurrent: () => boolean
 ): Promise<{ success: boolean; error?: string }> {
-    if (!state.secureDB) {
+    const secureDB = state.secureDB;
+    if (!secureDB || !isCurrent()) {
         return { success: false, error: 'Not initialized' };
     }
 
-    const validation = validateImageData(imageDataUrl);
+    const validation = validateImageData(imageDataUrl, {
+        allowGeneratedDefaultSvg: isDefault,
+        maxDimension: MAX_AVATAR_SOURCE_DIMENSION
+    });
     if (!validation.valid) {
         return { success: false, error: validation.error };
     }
 
     try {
         const compressed = await compressImage(imageDataUrl);
+        if (!isCurrent() || state.secureDB !== secureDB) {
+            return { success: false, error: 'Account changed' };
+        }
+        const compressedValidation = validateImageData(compressed, {
+            maxDimension: MAX_AVATAR_DIMENSION
+        });
+        if (!compressedValidation.valid) {
+            return { success: false, error: 'Processed avatar failed validation' };
+        }
         const hash = await hashAvatarData(compressed);
+        if (!isCurrent() || state.secureDB !== secureDB) {
+            return { success: false, error: 'Account changed' };
+        }
 
         const avatarData: AvatarData = {
             data: compressed,
             mimeType: 'image/webp',
             hash,
-            updatedAt: Date.now(),
             isDefault
         };
 
-        await state.secureDB.store(STORAGE_KEYS.PROFILE_AVATARS, 'own', avatarData);
+        await secureDB.store(STORAGE_KEYS.PROFILE_AVATARS, STORAGE_KEYS.AVATAR_OWN, avatarData);
+        if (!isCurrent() || state.secureDB !== secureDB) {
+            return { success: false, error: 'Account changed' };
+        }
         state.ownAvatar = avatarData;
-
-        await uploadFn();
 
         window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
             detail: { type: 'own' }
@@ -57,15 +76,16 @@ export async function setOwnAvatar(
 export async function removeOwnAvatar(
     state: AvatarSystemState,
     usernameOverride?: string,
-    setAvatarFn?: (url: string, isDefault: boolean) => Promise<any>
+    setAvatarFn?: (url: string, isDefault: boolean) => Promise<any>,
+    isCurrent: () => boolean = () => false
 ): Promise<void> {
-    if (!state.secureDB) return;
+    if (!state.secureDB || !isCurrent()) return;
 
     try {
         const username = usernameOverride || websocketClient?.getUsername() || 'unknown';
         const defaultAvatarUrl = generateDefaultAvatar(username);
 
-        if (setAvatarFn) {
+        if (setAvatarFn && isCurrent()) {
             await setAvatarFn(defaultAvatarUrl, true);
         }
     } catch { }
@@ -81,13 +101,6 @@ export function getOwnAvatarHash(state: AvatarSystemState): string | null {
     return state.ownAvatar?.hash || null;
 }
 
-// Get own profile version
-export function getOwnProfileVersion(state: AvatarSystemState): number {
-    const avatarUpdatedAt = state.ownAvatar?.updatedAt || 0;
-    const settingsUpdatedAt = state.settings?.lastUpdated || 0;
-    return Math.max(avatarUpdatedAt, settingsUpdatedAt);
-}
-
 // Check if own avatar is default
 export function isOwnAvatarDefault(state: AvatarSystemState): boolean {
     return !!state.ownAvatar?.isDefault;
@@ -97,24 +110,22 @@ export function isOwnAvatarDefault(state: AvatarSystemState): boolean {
 export async function setShareWithOthers(
     state: AvatarSystemState,
     share: boolean,
-    uploadFn: () => Promise<any>
+    isCurrent: () => boolean
 ): Promise<void> {
-    if (!state.secureDB) return;
+    const secureDB = state.secureDB;
+    if (!secureDB || !isCurrent()) throw new Error('Not initialized');
+    if (state.settings.shareWithOthers === share) return;
 
-    const previousState = state.settings.shareWithOthers;
-    state.settings = { shareWithOthers: share, lastUpdated: Date.now() };
+    const nextSettings = { shareWithOthers: share, lastUpdated: Date.now() };
+    await secureDB.store(STORAGE_KEYS.PROFILE_SETTINGS, STORAGE_KEYS.PROFILE_SETTINGS_RECORD, nextSettings);
+    if (!isCurrent() || state.secureDB !== secureDB) {
+        throw new Error('Profile settings account changed during save');
+    }
+    state.settings = nextSettings;
 
-    try {
-        await state.secureDB.store(STORAGE_KEYS.PROFILE_SETTINGS, 'profile', state.settings);
-
-        window.dispatchEvent(new CustomEvent(EventType.PROFILE_SETTINGS_UPDATED, {
-            detail: { shareWithOthers: share }
-        }));
-
-        if (state.ownAvatar && previousState !== share) {
-            await uploadFn();
-        }
-    } catch { }
+    window.dispatchEvent(new CustomEvent(EventType.PROFILE_SETTINGS_UPDATED, {
+        detail: { shareWithOthers: share }
+    }));
 }
 
 // Get share with others

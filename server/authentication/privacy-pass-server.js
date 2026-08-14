@@ -7,226 +7,442 @@
 import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { randomBytes } from '@noble/hashes/utils.js';
 import crypto from 'node:crypto';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_DIR = path.join(__dirname, '../config');
-
-// Privacy Pass configuration
-const PP_CONFIG = {
-    TOKEN_KEY_FILE: 'privacy-pass-key.enc',
-    DEFAULT_BATCH_SIZE: 250,
-    NULLIFIER_SIZE: 32,
-    TOKEN_SIZE: 64,
-    MAC_SIZE: 32,
-    NONCE_SIZE: 24,
-    KEY_ROTATION_DAYS: 30,
-};
+import { deriveAuthRootKey } from '../crypto/auth-root.js';
+import { evaluatePrivacyPassBatch } from '../crypto/auth-crypto-worker-service.js';
+import {
+    ACCOUNT_AUTH_PURPOSE,
+    SERVER_ENTRY_PURPOSE
+} from '../config/audiences.js';
+import { decodeCanonicalBase64, encodeBase64AndWipeCopy, UTF8_ENCODER } from '../utils/encoding.js';
+import { withTransaction } from '../database/core.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
+import { PRIVACY_PASS_CONFIG as PP_CONFIG } from '../../shared/privacy-pass-protocol.js';
 
 // Domain separation labels
 const PP_LABELS = {
-    TOKEN_KEY: 'PrivacyPass-Token-Key-v1',
-    NULLIFIER: 'PrivacyPass-Nullifier-v1',
-    REDEMPTION_MAC: 'PrivacyPass-Redemption-MAC-v1',
-    TOKEN_ENCRYPTION: 'PrivacyPass-Token-Encryption-v1',
-    OPRF_INPUT: 'PrivacyPass-OPRF-Input-v1',
+    NULLIFIER: PROTOCOL_KEYS.PRIVACY_PASS_NULLIFIER,
+    REDEMPTION_MAC: PROTOCOL_KEYS.PRIVACY_PASS_REDEMPTION_MAC,
+    OPRF_INPUT: PROTOCOL_KEYS.PRIVACY_PASS_OPRF_INPUT,
 };
+
+const ALLOWED_PURPOSES = new Set([ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE]);
 
 function normalizePurpose(purpose) {
     const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
-    return /^[a-z0-9:_-]{1,64}$/.test(value) ? value : 'account-auth';
+    if (!ALLOWED_PURPOSES.has(value)) throw new Error('Invalid Privacy Pass purpose');
+    return value;
+}
+
+function currentTokenEpoch() {
+    return Math.floor(Date.now() / 86_400_000);
+}
+
+function normalizeIssuanceEpoch(epoch) {
+    const current = currentTokenEpoch();
+    if (
+        !Number.isSafeInteger(epoch) ||
+        epoch < 0 ||
+        epoch > 0xffffffff ||
+        epoch > current ||
+        current - epoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS
+    ) {
+        throw new Error('Invalid Privacy Pass issuance epoch');
+    }
+    return epoch;
+}
+
+function readTokenEpoch(tokenSecret) {
+    if (!(tokenSecret instanceof Uint8Array) || tokenSecret.length < 4) {
+        throw new Error('Invalid Privacy Pass token secret');
+    }
+    return new DataView(
+        tokenSecret.buffer,
+        tokenSecret.byteOffset,
+        tokenSecret.byteLength
+    ).getUint32(0, false);
 }
 
 export class PrivacyPassServer {
-    static #tokenKeys = null;
+    static #keysByPurpose = new Map();
     static #initialized = false;
+    static #initializationPromise = null;
     static #nullifierStore = null;
     static #cleanupInterval = null;
+    static #cleanupInFlight = null;
+    static #lifecycleGeneration = 0;
+
+    static validateIssuanceEpoch(epoch) {
+        return normalizeIssuanceEpoch(epoch);
+    }
+
+    // Derive cluster wide issuer key
+    static async #getKeysForPurpose(purpose, epoch = currentTokenEpoch()) {
+        const norm = normalizePurpose(purpose);
+        if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 0xffffffff) {
+            throw new Error('Invalid Privacy Pass epoch');
+        }
+        const cacheKey = `${norm}:${epoch}`;
+        const existing = this.#keysByPurpose.get(cacheKey);
+        if (existing) return existing;
+
+        const seed = deriveAuthRootKey(`${PROTOCOL_KEYS.PRIVACY_PASS_VOPRF_ROOT}:${norm}`);
+        let keys;
+        try {
+            keys = oprf.voprf.deriveKeyPair(
+                seed,
+                UTF8_ENCODER.encode(`${PROTOCOL_KEYS.PRIVACY_PASS_ISSUER}:${norm}:${epoch}`)
+            );
+        } finally {
+            seed.fill(0);
+        }
+        this.#validateKeyPair(keys);
+        this.#keysByPurpose.set(cacheKey, keys);
+        this.#pruneIssuerKeys();
+        return keys;
+    }
+
+    static #pruneIssuerKeys() {
+        const current = currentTokenEpoch();
+        for (const [cacheKey, keys] of this.#keysByPurpose) {
+            const epoch = Number(cacheKey.slice(cacheKey.lastIndexOf(':') + 1));
+            if (
+                Number.isSafeInteger(epoch) &&
+                epoch >= current - PP_CONFIG.TOKEN_MAX_AGE_EPOCHS &&
+                epoch <= current
+            ) {
+                continue;
+            }
+            keys?.secretKey?.fill(0);
+            this.#keysByPurpose.delete(cacheKey);
+        }
+    }
+
+    static #validateKeyPair(keys) {
+        let input;
+        let blind;
+        let evaluated;
+        let finalized;
+        let expected;
+        try {
+            input = blake3(
+                UTF8_ENCODER.encode(PROTOCOL_KEYS.PRIVACY_PASS_SELF_TEST),
+                { dkLen: HASH_OUTPUT_BYTES }
+            );
+            blind = oprf.voprf.blind(input);
+            evaluated = oprf.voprf.blindEvaluate(keys.secretKey, keys.publicKey, blind.blinded);
+            finalized = oprf.voprf.finalize(input, blind.blind, evaluated.evaluated, blind.blinded, keys.publicKey, evaluated.proof);
+            expected = oprf.voprf.evaluate(keys.secretKey, input);
+            if (!crypto.timingSafeEqual(finalized, expected)) {
+                throw new Error('Privacy Pass issuer key pair mismatch');
+            }
+        } finally {
+            input?.fill(0);
+            blind?.blind?.fill(0);
+            blind?.blinded?.fill(0);
+            evaluated?.evaluated?.fill(0);
+            evaluated?.proof?.fill(0);
+            finalized?.fill(0);
+            expected?.fill(0);
+        }
+    }
+
+    static #assertLifecycleGeneration(generation) {
+        if (generation === this.#lifecycleGeneration) return;
+        const error = new Error('Privacy Pass initialization cancelled');
+        error.code = 'PRIVACY_PASS_INITIALIZATION_CANCELLED';
+        throw error;
+    }
+
+    static #assertIssuanceGeneration(generation) {
+        if (this.#initialized && generation === this.#lifecycleGeneration) return;
+        const error = new Error('Privacy Pass issuance cancelled');
+        error.code = 'PRIVACY_PASS_ISSUANCE_CANCELLED';
+        throw error;
+    }
 
     /**
      * Initialize Privacy Pass server
      */
     static async initialize(nullifierStore) {
         if (this.#initialized) return;
+        if (this.#initializationPromise) return this.#initializationPromise;
 
-        this.#nullifierStore = nullifierStore;
-
-        try {
-            await fs.mkdir(CONFIG_DIR, { recursive: true });
-            const keyPath = path.join(CONFIG_DIR, PP_CONFIG.TOKEN_KEY_FILE);
-
-            try {
-                const encryptedKey = await fs.readFile(keyPath);
-                const keyData = await this.#decryptKey(encryptedKey);
-                this.#tokenKeys = {
-                    secretKey: keyData.slice(0, 32),
-                    publicKey: keyData.slice(32),
-                };
-            } catch {
-                // Generate new VOPRF keys
-                this.#tokenKeys = oprf.voprf.generateKeyPair();
-                const keyData = Buffer.concat([
-                    Buffer.from(this.#tokenKeys.secretKey),
-                    Buffer.from(this.#tokenKeys.publicKey),
-                ]);
-                const encrypted = await this.#encryptKey(keyData);
-                await fs.writeFile(keyPath, encrypted, { mode: 0o600 });
-                console.log('[PrivacyPass] Generated new token keys');
+        const generation = this.#lifecycleGeneration;
+        const initialization = (async () => {
+            this.#nullifierStore = nullifierStore;
+            if (!nullifierStore) {
+                console.warn('[PrivacyPass] Missing nullifier store; token redemption disabled');
             }
 
-            // Schedule periodic nullifier cleanup (every 24 hours)
+            await this.#getKeysForPurpose(SERVER_ENTRY_PURPOSE);
+            this.#assertLifecycleGeneration(generation);
+            await this.#getKeysForPurpose(ACCOUNT_AUTH_PURPOSE);
+            this.#assertLifecycleGeneration(generation);
+
             if (this.#nullifierStore && !this.#cleanupInterval) {
+                await this.#runNullifierCleanup();
+                this.#assertLifecycleGeneration(generation);
                 this.#cleanupInterval = setInterval(() => {
-                    this.#nullifierStore.cleanup().catch(err =>
-                        console.warn('[PrivacyPass] Nullifier cleanup failed:', err.message)
+                    this.#runNullifierCleanup().catch(() =>
+                        console.warn('[PrivacyPass] Nullifier cleanup failed')
                     );
                 }, 24 * 60 * 60 * 1000);
                 this.#cleanupInterval.unref();
             }
 
+            this.#assertLifecycleGeneration(generation);
             this.#initialized = true;
             console.log('[PrivacyPass] Server initialized');
+        })();
+        this.#initializationPromise = initialization;
+
+        try {
+            await initialization;
         } catch (error) {
-            console.error('[PrivacyPass] Initialization failed:', error.message);
+            if (generation === this.#lifecycleGeneration) {
+                this.#nullifierStore = null;
+            }
+            if (error?.code !== 'PRIVACY_PASS_INITIALIZATION_CANCELLED') {
+                console.error('[PrivacyPass] Initialization failed', error);
+            }
             throw error;
+        } finally {
+            if (this.#initializationPromise === initialization) {
+                this.#initializationPromise = null;
+            }
         }
     }
 
-    /**
-     * Get public key for client verification
-     */
-    static getPublicKey() {
-        if (!this.#initialized) {
-            throw new Error('PrivacyPass server not initialized');
+    static async #runNullifierCleanup() {
+        if (this.#cleanupInFlight) return this.#cleanupInFlight;
+        const store = this.#nullifierStore;
+        if (!store) return;
+
+        const pending = store.cleanup();
+        this.#cleanupInFlight = pending;
+        try {
+            await pending;
+        } finally {
+            if (this.#cleanupInFlight === pending) this.#cleanupInFlight = null;
         }
-        return this.#tokenKeys.publicKey;
+    }
+
+    static async destroy() {
+        this.#lifecycleGeneration += 1;
+        this.#initialized = false;
+        if (this.#cleanupInterval) {
+            clearInterval(this.#cleanupInterval);
+            this.#cleanupInterval = null;
+        }
+        const initialization = this.#initializationPromise;
+        const cleanupInFlight = this.#cleanupInFlight;
+        this.#nullifierStore = null;
+        await Promise.allSettled(
+            [initialization, cleanupInFlight].filter(Boolean)
+        );
+        for (const keys of this.#keysByPurpose.values()) {
+            keys?.secretKey?.fill(0);
+            keys?.publicKey?.fill(0);
+        }
+        this.#keysByPurpose.clear();
+        if (this.#initializationPromise === initialization) {
+            this.#initializationPromise = null;
+        }
+        this.#cleanupInFlight = null;
     }
 
     /**
      * Issue batch of blind signed tokens
      */
-    static async issueTokenBatch(blindedTokens, proofOfEntitlement) {
+    static async issueTokenBatch(blindedTokens, purpose, tokenEpoch, signal) {
         if (!this.#initialized) {
             throw new Error('PrivacyPass server not initialized');
         }
+        const generation = this.#lifecycleGeneration;
 
         if (!Array.isArray(blindedTokens) || blindedTokens.length === 0) {
             throw new Error('Invalid blinded tokens');
         }
 
-        if (blindedTokens.length > PP_CONFIG.DEFAULT_BATCH_SIZE) {
-            throw new Error(`Batch size exceeds limit of ${PP_CONFIG.DEFAULT_BATCH_SIZE}`);
+        if (blindedTokens.length > PP_CONFIG.MAX_BATCH_SIZE) {
+            throw new Error(`Batch size exceeds limit of ${PP_CONFIG.MAX_BATCH_SIZE}`);
         }
 
-        // Verify proof of entitlement
-        if (!proofOfEntitlement || proofOfEntitlement.length < 24) {
-            throw new Error('Invalid proof of entitlement');
+        // sign with issuer key for this purpose
+        if (!blindedTokens.every((token) => token instanceof Uint8Array && token.length === 32)) {
+            throw new Error('Invalid blinded token');
         }
 
-        // Batch VOPRF evaluation with proof
-        const result = oprf.voprf.blindEvaluateBatch(
-            this.#tokenKeys.secretKey,
-            this.#tokenKeys.publicKey,
-            blindedTokens
-        );
+        const issuerEpoch = normalizeIssuanceEpoch(tokenEpoch);
+        const keys = await this.#getKeysForPurpose(purpose, issuerEpoch);
+        this.#assertIssuanceGeneration(generation);
+        let blindedTokenSlab = new Uint8Array(blindedTokens.length * 32);
+        let secretKey = new Uint8Array(keys.secretKey);
+        let publicKey = new Uint8Array(keys.publicKey);
+        let evaluatedTokens = null;
+        let proof = null;
+        try {
+            for (let index = 0; index < blindedTokens.length; index += 1) {
+                blindedTokenSlab.set(blindedTokens[index], index * 32);
+            }
+            const evaluation = evaluatePrivacyPassBatch(
+                blindedTokenSlab,
+                blindedTokens.length,
+                secretKey,
+                publicKey,
+                signal
+            );
+            blindedTokenSlab = null;
+            secretKey = null;
+            publicKey = null;
+            ({ evaluatedTokens, proof } = await evaluation);
+            this.#assertIssuanceGeneration(generation);
 
-        console.log(`[PrivacyPass] Issued batch of ${blindedTokens.length} tokens`);
-
-        return {
-            signedBlindedTokens: result.evaluated,
-            proof: result.proof,
-            publicKey: this.#tokenKeys.publicKey,
-        };
+            const signedBlindedTokens = new Array(blindedTokens.length);
+            for (let index = 0; index < signedBlindedTokens.length; index += 1) {
+                signedBlindedTokens[index] = evaluatedTokens.subarray(index * 32, (index + 1) * 32);
+            }
+            return {
+                signedBlindedTokens,
+                proof,
+                publicKey: keys.publicKey,
+                issuerEpoch,
+            };
+        } catch (error) {
+            evaluatedTokens?.fill(0);
+            proof?.fill(0);
+            throw error;
+        } finally {
+            blindedTokenSlab?.fill(0);
+            secretKey?.fill(0);
+            publicKey?.fill(0);
+        }
     }
 
-    /**
-     * Redeem a token
-     */
-    static async redeemToken(token, nullifier, mac, tokenSecret, expectedPurpose = 'account-auth') {
+    static async issueAccountAuthTokenBatch(blindedTokens, tokenEpoch, signal) {
+        return this.issueTokenBatch(blindedTokens, ACCOUNT_AUTH_PURPOSE, tokenEpoch, signal);
+    }
+
+    static async redeemToken(token, nullifier, mac, tokenSecret, expectedPurpose = ACCOUNT_AUTH_PURPOSE) {
         if (!this.#initialized) {
             throw new Error('PrivacyPass server not initialized');
         }
 
-        if (!token || token.length !== PP_CONFIG.TOKEN_SIZE) {
-            console.log('[PrivacyPass] Token format invalid', { tokenLen: token?.length });
+        if (!await this.#isRedemptionValid(token, nullifier, mac, tokenSecret, expectedPurpose)) {
             return this.#uniformFailureResponse();
         }
 
-        if (!tokenSecret || tokenSecret.length !== 32) {
-            console.log('[PrivacyPass] Token secret proof missing or invalid');
+        const tokenEpoch = readTokenEpoch(tokenSecret);
+        const consumed = await this.#nullifierStore?.markUsed(nullifier, tokenEpoch);
+        if (!consumed) {
             return this.#uniformFailureResponse();
         }
 
-        if (!nullifier || nullifier.length !== PP_CONFIG.NULLIFIER_SIZE) {
-            console.log('[PrivacyPass] Nullifier format invalid', { nullifierLen: nullifier?.length, expected: PP_CONFIG.NULLIFIER_SIZE });
+        return { valid: true };
+    }
+
+    /**
+     * Verify and consume purpose proofs
+     */
+    static async redeemTokenBatch(redemptions) {
+        if (!this.#initialized) {
+            throw new Error('PrivacyPass server not initialized');
+        }
+        if (!Array.isArray(redemptions) || redemptions.length < 1 || redemptions.length > 4) {
             return this.#uniformFailureResponse();
         }
 
-        if (!this.#verifyIssuedToken(token, tokenSecret, expectedPurpose)) {
-            console.log('[PrivacyPass] Token issuance proof invalid');
+        const nullifiers = await Promise.all(redemptions.map(async (redemption) => {
+            if (!redemption || typeof redemption !== 'object') return null;
+            try {
+                const valid = await this.#isRedemptionValid(
+                    redemption.token,
+                    redemption.nullifier,
+                    redemption.mac,
+                    redemption.tokenSecret,
+                    redemption.expectedPurpose
+                );
+                if (!valid) return null;
+                return {
+                    nullifier: redemption.nullifier,
+                    tokenEpoch: readTokenEpoch(redemption.tokenSecret),
+                };
+            } catch {
+                return null;
+            }
+        }));
+        if (nullifiers.some((entry) => entry === null)) {
             return this.#uniformFailureResponse();
         }
 
-        // Compute expected nullifier from token
+        const consumed = await this.#nullifierStore?.markUsedBatch(nullifiers);
+        return consumed ? { valid: true } : this.#uniformFailureResponse();
+    }
+
+    static async #isRedemptionValid(token, nullifier, mac, tokenSecret, expectedPurpose) {
+        if (
+            !token || token.length !== PP_CONFIG.TOKEN_SIZE ||
+            !tokenSecret || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE ||
+            !nullifier || nullifier.length !== PP_CONFIG.NULLIFIER_SIZE ||
+            !mac || mac.length !== PP_CONFIG.MAC_SIZE
+        ) {
+            return false;
+        }
+
+        const tokenEpoch = readTokenEpoch(tokenSecret);
+        const currentEpoch = currentTokenEpoch();
+        if (tokenEpoch > currentEpoch || currentEpoch - tokenEpoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS) {
+            return false;
+        }
+
+        const purposeKeys = await this.#getKeysForPurpose(expectedPurpose, tokenEpoch);
+        const tokenMatches = this.#verifyIssuedToken(token, tokenSecret, expectedPurpose, purposeKeys.secretKey);
+
         const expectedNullifier = this.#computeNullifier(token);
-
-        if (!crypto.timingSafeEqual(
-            Buffer.from(nullifier),
-            Buffer.from(expectedNullifier)
-        )) {
-            console.log('[PrivacyPass] Nullifier mismatch');
-            return this.#uniformFailureResponse();
+        let nullifierMatches;
+        try {
+            nullifierMatches = crypto.timingSafeEqual(nullifier, expectedNullifier);
+        } finally {
+            expectedNullifier.fill(0);
         }
-
-        // Check if nullifier already used
-        const nullifierUsed = await this.#nullifierStore?.isUsed(nullifier);
-        if (nullifierUsed) {
-            console.log('[PrivacyPass] Nullifier already used');
-            return this.#uniformFailureResponse();
-        }
-
-        // Verify MAC
         const expectedMac = this.#computeRedemptionMac(token, nullifier);
-        if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expectedMac))) {
-            console.log('[PrivacyPass] MAC verification failed');
-            return this.#uniformFailureResponse();
+        let macMatches;
+        try {
+            macMatches = crypto.timingSafeEqual(mac, expectedMac);
+        } finally {
+            expectedMac.fill(0);
         }
-
-        // Mark nullifier as used
-        await this.#nullifierStore?.markUsed(nullifier);
-
-        return {
-            valid: true,
-            encryptedResponse: this.#generateSuccessResponse(token),
-        };
+        return tokenMatches && nullifierMatches && macMatches;
     }
 
     /**
      * Verify token was signed with our VOPRF key
      */
-    static #verifyIssuedToken(token, tokenSecret, purpose) {
+    static #verifyIssuedToken(token, tokenSecret, purpose, secretKey) {
+        let oprfInput;
+        let expectedToken;
         try {
-            if (!token || token.length !== PP_CONFIG.TOKEN_SIZE || !tokenSecret || tokenSecret.length !== 32) {
+            if (!token || token.length !== PP_CONFIG.TOKEN_SIZE || !tokenSecret || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE) {
                 return false;
             }
 
             const label = `${PP_LABELS.OPRF_INPUT}:${normalizePurpose(purpose)}`;
-            const oprfInput = hkdf(
+            oprfInput = hkdf(
                 blake3,
                 tokenSecret,
                 new Uint8Array(0),
-                new TextEncoder().encode(label),
+                UTF8_ENCODER.encode(label),
                 32
             );
-            const expectedToken = oprf.voprf.evaluate(this.#tokenKeys.secretKey, oprfInput);
-            return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+            expectedToken = oprf.voprf.evaluate(secretKey, oprfInput);
+            return crypto.timingSafeEqual(token, expectedToken);
         } catch {
             return false;
+        } finally {
+            oprfInput?.fill(0);
+            expectedToken?.fill(0);
         }
     }
 
@@ -234,38 +450,7 @@ export class PrivacyPassServer {
      * Generate uniform failure response
      */
     static #uniformFailureResponse() {
-        return {
-            valid: false,
-            encryptedResponse: randomBytes(256),
-        };
-    }
-
-    /**
-     * Generate encrypted success response
-     */
-    static #generateSuccessResponse(token) {
-        // Derive encryption key from token
-        const encKey = hkdf(
-            blake3,
-            token,
-            new Uint8Array(0),
-            new TextEncoder().encode(PP_LABELS.TOKEN_ENCRYPTION),
-            32
-        );
-
-        // Create success payload with session establishment data
-        const payload = Buffer.concat([
-            Buffer.from([0x01]),
-            randomBytes(32),
-            randomBytes(32),
-        ]);
-
-        // Encrypt payload
-        const nonce = randomBytes(PP_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(encKey, nonce);
-        const encrypted = cipher.encrypt(payload);
-
-        return Buffer.concat([nonce, encrypted]);
+        return { valid: false };
     }
 
     /**
@@ -276,7 +461,7 @@ export class PrivacyPassServer {
             blake3,
             token,
             new Uint8Array(0),
-            new TextEncoder().encode(PP_LABELS.NULLIFIER),
+            UTF8_ENCODER.encode(PP_LABELS.NULLIFIER),
             PP_CONFIG.NULLIFIER_SIZE
         );
     }
@@ -289,53 +474,16 @@ export class PrivacyPassServer {
             blake3,
             token,
             nullifier,
-            new TextEncoder().encode(PP_LABELS.REDEMPTION_MAC),
+            UTF8_ENCODER.encode(PP_LABELS.REDEMPTION_MAC),
             32
         );
-        return blake3(key, { dkLen: PP_CONFIG.MAC_SIZE });
-    }
-
-    /**
-     * Encrypt key for storage
-     */
-    static async #encryptKey(keyData) {
-        const machineKey = await this.#getMachineKey();
-        const nonce = randomBytes(PP_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(machineKey, nonce);
-        return Buffer.concat([nonce, cipher.encrypt(keyData)]);
-    }
-
-    /**
-     * Decrypt stored key
-     */
-    static async #decryptKey(encryptedData) {
-        const machineKey = await this.#getMachineKey();
-        const nonce = encryptedData.slice(0, PP_CONFIG.NONCE_SIZE);
-        const ciphertext = encryptedData.slice(PP_CONFIG.NONCE_SIZE);
-        const cipher = xchacha20poly1305(machineKey, nonce);
-        return cipher.decrypt(ciphertext);
-    }
-
-    /**
-     * Get machine specific key
-     */
-    static async #getMachineKey() {
-        const hostname = (await import('os')).hostname() || 'unknown-host';
-        const machineIdPath = path.join(CONFIG_DIR, '.machine-id');
-
-        let machineId;
         try {
-            machineId = await fs.readFile(machineIdPath);
-            if (!machineId || machineId.length < 16) {
-                throw new Error('Machine ID too short, regenerating');
-            }
-        } catch {
-            machineId = randomBytes(32);
-            await fs.writeFile(machineIdPath, machineId, { mode: 0o600 });
+            return blake3(key, { dkLen: PP_CONFIG.MAC_SIZE });
+        } finally {
+            key.fill(0);
         }
-
-        return hkdf(blake3, machineId, new TextEncoder().encode(hostname), new TextEncoder().encode('PrivacyPass-Machine-Key'), 32);
     }
+
 }
 
 /**
@@ -349,35 +497,80 @@ export class NullifierStore {
     }
 
     /**
-     * Check if nullifier has been used
-     */
-    async isUsed(nullifier) {
-        const nullifierHex = Buffer.from(nullifier).toString('hex');
-        const result = await this.#db.query(
-            'SELECT 1 FROM nullifiers WHERE nullifier_hash = $1',
-            [nullifierHex]
-        );
-        return result.rows.length > 0;
-    }
-
-    /**
      * Mark nullifier as used
      */
-    async markUsed(nullifier) {
-        const nullifierHex = Buffer.from(nullifier).toString('hex');
-        await this.#db.query(
-            'INSERT INTO nullifiers (nullifier_hash) VALUES ($1) ON CONFLICT DO NOTHING',
-            [nullifierHex]
+    async markUsed(nullifier, tokenEpoch) {
+        const nullifierHex = this.#hashNullifier(nullifier);
+        const expiresEpoch = this.#expirationEpoch(tokenEpoch);
+        const result = await this.#db.query(
+            `INSERT INTO nullifiers (nullifier_hash, expires_epoch)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [nullifierHex, expiresEpoch]
         );
+        return (result?.rowCount ?? 0) > 0;
+    }
+
+    async markUsedBatch(entries) {
+        if (!Array.isArray(entries) || entries.length < 1 || entries.length > 4) {
+            return false;
+        }
+        const nullifierHashes = entries.map(({ nullifier }) => this.#hashNullifier(nullifier));
+        const expirationEpochs = entries.map(({ tokenEpoch }) => this.#expirationEpoch(tokenEpoch));
+        const client = await this.#db.connect();
+        try {
+            return await withTransaction(client, async ({ rollback }) => {
+                const result = await client.query(
+                    `INSERT INTO nullifiers (nullifier_hash, expires_epoch)
+                 SELECT hash, expires_epoch
+                 FROM unnest($1::text[], $2::integer[]) AS supplied(hash, expires_epoch)
+                 ON CONFLICT DO NOTHING`,
+                    [nullifierHashes, expirationEpochs]
+                );
+                if ((result?.rowCount ?? 0) !== nullifierHashes.length) return rollback(false);
+                return true;
+            });
+        } finally {
+            client.release();
+        }
+    }
+
+    #hashNullifier(nullifier) {
+        const nullifierKey = deriveAuthRootKey(PROTOCOL_KEYS.PRIVACY_PASS_NULLIFIER_DB_ROOT);
+        let digest = null;
+        try {
+            digest = blake3(nullifier, { key: nullifierKey, dkLen: HASH_OUTPUT_BYTES });
+            return Buffer.from(
+                digest.buffer,
+                digest.byteOffset,
+                digest.byteLength
+            ).toString('hex');
+        } finally {
+            digest?.fill(0);
+            nullifierKey.fill(0);
+        }
+    }
+
+    #expirationEpoch(tokenEpoch) {
+        const current = currentTokenEpoch();
+        if (
+            !Number.isSafeInteger(tokenEpoch) ||
+            tokenEpoch < 0 ||
+            tokenEpoch > current ||
+            current - tokenEpoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS
+        ) {
+            throw new Error('Invalid Privacy Pass nullifier epoch');
+        }
+        return tokenEpoch + PP_CONFIG.TOKEN_MAX_AGE_EPOCHS;
     }
 
     /**
      * Cleanup old nullifiers
      */
-    async cleanup(maxAgeDays = 60) {
-        const days = Math.max(1, Math.min(365, Math.floor(maxAgeDays)));
+    async cleanup() {
         await this.#db.query(
-            `DELETE FROM nullifiers WHERE recorded_at < NOW() - INTERVAL '${days} days'`
+            'DELETE FROM nullifiers WHERE expires_epoch < $1',
+            [currentTokenEpoch()]
         );
     }
 }
@@ -387,34 +580,26 @@ export class NullifierStore {
  */
 export const PrivacyPassHelpers = {
     /**
-     * Parse token issuance request
-     */
-    parseIssuanceRequest(data) {
-        if (!data.blindedTokens || !Array.isArray(data.blindedTokens)) {
-            throw new Error('Invalid issuance request');
-        }
-        return {
-            blindedTokens: data.blindedTokens.map(t => Buffer.from(t, 'base64')),
-            proofOfEntitlement: data.proofOfEntitlement
-                ? Buffer.from(data.proofOfEntitlement, 'base64')
-                : null,
-        };
-    },
-
-    /**
      * Parse token redemption request
      */
     parseRedemptionRequest(data) {
-        if (!data.token || !data.nullifier || !data.mac || !data.tokenSecret) {
-            throw new Error('Invalid redemption request');
+        let token = null;
+        let nullifier = null;
+        let mac = null;
+        let tokenSecret = null;
+        try {
+            token = decodeCanonicalBase64(data?.token, PP_CONFIG.TOKEN_SIZE, 128);
+            nullifier = decodeCanonicalBase64(data?.nullifier, PP_CONFIG.NULLIFIER_SIZE, 64);
+            mac = decodeCanonicalBase64(data?.mac, PP_CONFIG.MAC_SIZE, 64);
+            tokenSecret = decodeCanonicalBase64(data?.tokenSecret, PP_CONFIG.TOKEN_SECRET_SIZE, 64);
+            return { token, nullifier, mac, tokenSecret };
+        } catch (error) {
+            token?.fill(0);
+            nullifier?.fill(0);
+            mac?.fill(0);
+            tokenSecret?.fill(0);
+            throw error;
         }
-        return {
-            token: Buffer.from(data.token, 'base64'),
-            nullifier: Buffer.from(data.nullifier, 'base64'),
-            mac: Buffer.from(data.mac, 'base64'),
-            tokenSecret: Buffer.from(data.tokenSecret, 'base64'),
-            purpose: typeof data.purpose === 'string' ? data.purpose : undefined,
-        };
     },
 
     /**
@@ -425,11 +610,11 @@ export const PrivacyPassHelpers = {
         const formatted = {};
         for (const [key, value] of Object.entries(response)) {
             if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
-                formatted[key] = Buffer.from(value).toString('base64');
+                formatted[key] = encodeBase64AndWipeCopy(value);
             } else if (Array.isArray(value)) {
                 formatted[key] = value.map(v =>
                     v instanceof Uint8Array || Buffer.isBuffer(v)
-                        ? Buffer.from(v).toString('base64')
+                        ? encodeBase64AndWipeCopy(v)
                         : v
                 );
             } else {

@@ -1,4 +1,4 @@
-import { USERNAME_REGEX } from './constants';
+import { AUTH_USERNAME_REGEX, USERNAME_REGEX } from './constants';
 import { SignalType } from './types/signal-types';
 import {
   MAX_CONTENT_LENGTH,
@@ -51,12 +51,7 @@ export const sanitizeMessage = (input: string): string => {
     .replace(/[\u0300-\u036F]{5,}/g, '')
     .replace(/[\uD800-\uDFFF]/g, '')
     .replace(/[\uFDD0-\uFDEF]/g, '')
-    .replace(/[\u0001-\u0008\u000E-\u001F\u007F]/g, '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#x27;');
+    .replace(/[\u0001-\u0008\u000E-\u001F\u007F]/g, '');
 
   return sanitized;
 };
@@ -110,6 +105,47 @@ export const hasPrototypePollutionKeys = (obj: unknown): boolean => {
   return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
 };
 
+export const hasExactKeys = (
+  value: Record<string, unknown>,
+  expected: readonly string[]
+): boolean => {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  return actual.length === required.length &&
+    actual.every((key, index) => key === required[index]);
+};
+
+export const hasExactObjectKeys = (
+  value: unknown,
+  expected: readonly string[]
+): value is Record<string, any> => (
+  isPlainObject(value) &&
+  !hasPrototypePollutionKeys(value) &&
+  hasExactKeys(value, expected)
+);
+
+export const isPlainRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' &&
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.getPrototypeOf(value) === Object.prototype
+);
+
+export const hasExactPlainRecordKeys = (
+  value: unknown,
+  expected: readonly string[],
+): value is Record<string, unknown> => (
+  isPlainRecord(value) && hasExactKeys(value, expected)
+);
+
+export const exactEventDetail = (
+  event: Event,
+  expected: readonly string[]
+): Record<string, unknown> | null => {
+  if (!(event instanceof CustomEvent)) return null;
+  return hasExactObjectKeys(event.detail, expected) ? event.detail : null;
+};
+
 export const isUnsafeObjectKey = (value: string): boolean => {
   return value === '__proto__' || value === 'constructor' || value === 'prototype';
 };
@@ -130,12 +166,27 @@ export const sanitizeUsername = (value: unknown, maxLen?: number): string | null
   return trimmed;
 };
 
+export const isCanonicalAuthUsername = (value: unknown): value is string => (
+  typeof value === 'string' &&
+  value === value.trim().toLowerCase() &&
+  AUTH_USERNAME_REGEX.test(value)
+);
+
+export const canonicalAuthUsername = (value: unknown, label: string): string => {
+  if (!isCanonicalAuthUsername(value)) throw new Error(`Invalid ${label}`);
+  return value;
+};
+
+export const canonicalAuthUsernameOrNull = (value: unknown): string | null => (
+  isCanonicalAuthUsername(value) ? value : null
+);
+
 
 // Sanitize message ID values
-export const sanitizeMessageId = (id: string | undefined) => {
+export const sanitizeMessageId = (id: unknown): string | undefined => {
   if (!id || typeof id !== 'string') return undefined;
-  const trimmed = sanitizeTextInput(id, { maxLength: 256, allowNewlines: false });
-  return trimmed.length ? trimmed : undefined;
+  if (id !== id.trim() || id.length > 256) return undefined;
+  return /^[A-Za-z0-9._~:+/=-]+$/.test(id) ? id : undefined;
 };
 
 // Sanitize event username values
@@ -184,13 +235,6 @@ export const sanitizeEventText = (value: unknown, maxLen: number): string | null
   const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
   if (!cleaned) return null;
   return cleaned.slice(0, maxLen);
-};
-
-export const sanitizeErrorMessage = (error: unknown): string => {
-  if (!error) return 'UNKNOWN';
-  if (typeof error === 'string') return error.slice(0, 80);
-  if (error instanceof Error) return error.message.slice(0, 80);
-  return 'UNRECOGNIZED_ERROR';
 };
 
 export type { TextSanitizeOptions, AllowedKey };

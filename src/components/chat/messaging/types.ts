@@ -20,23 +20,16 @@ export interface MessageReceipt {
   readAt?: Date;
 }
 
-export interface TypingIndicator {
-  id: string;
-  type: 'typing-start' | 'typing-stop';
-  fromUsername: string;
-  toUsername: string;
-  timestamp: number;
-  isTypingIndicator: true;
-}
-
 export interface Message {
   id: string;
+  wireMessageId?: string;
   content: string;
   secureContentId?: string;
   sender: string;
   recipient?: string;
   timestamp: Date;
   isCurrentUser?: boolean;
+  isDeliberateUserAction?: true;
   isSystemMessage?: boolean;
   isDeleted?: boolean;
   isEdited?: boolean;
@@ -47,28 +40,16 @@ export interface Message {
   fileSize?: number;
   type?: string;
   mimeType?: string;
-  originalBase64Data?: string;
   receipt?: MessageReceipt;
   p2p?: boolean;
   encrypted?: boolean;
   transport?: 'websocket' | 'p2p' | 'relay';
-  version: string;
-  envelopeVersion?: string;
-  ciphertext?: string;
-  nonce?: string;
-  tag?: string;
-  mac?: string;
-  aad?: string;
-  kemCiphertext?: string;
-  recipientDeviceId?: string;
-  senderDeviceId?: string;
-  pqContext?: {
-    aadLabel?: string;
-    timestamp?: number;
-    sender?: string;
-    recipient?: string;
-  };
   reactions?: Record<string, string[]>;
+  controlState?: {
+    editOperationId?: string;
+    deleteOperationId?: string;
+    reactionOperations?: Array<{ actor: string; operationId: string }>;
+  };
   rateLimitBypass?: boolean;
 }
 

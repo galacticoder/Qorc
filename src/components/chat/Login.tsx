@@ -9,17 +9,6 @@ import { EventType } from "../../lib/types/event-types.ts";
 import { QorBrandLogo } from "../ui/QorBrandLogo";
 import { ThemeToggleButton } from "../ui/ThemeToggleButton";
 
-interface ServerKeys {
-  readonly x25519PublicBase64: string;
-  readonly kyberPublicBase64: string;
-  readonly dilithiumPublicBase64: string;
-}
-
-interface ServerTrustRequest {
-  readonly newKeys: ServerKeys;
-  readonly pinned: ServerKeys | null;
-}
-
 interface LoginProps {
   readonly isGeneratingKeys: boolean;
   readonly authStatus?: string;
@@ -27,41 +16,24 @@ interface LoginProps {
   readonly accountAuthenticated: boolean;
   readonly isRegistrationMode: boolean;
   readonly initialUsername?: string;
-  readonly initialPassword?: string;
-  readonly maxStepReached?: 'login' | 'server';
-
-  readonly pseudonym?: string;
-  readonly serverTrustRequest?: ServerTrustRequest | null;
-  readonly onAcceptServerTrust?: () => void;
-  readonly onRejectServerTrust?: () => void;
   readonly onAccountSubmit: (
     mode: "login" | "register",
     username: string,
     password: string,
-    passphrase?: string,
+    passphrase: string,
   ) => Promise<void>;
-  readonly onPassphraseSubmit: (passphrase: string) => Promise<void>;
-  readonly showPassphrasePrompt: boolean;
-  readonly setShowPassphrasePrompt: (show: boolean) => void;
   readonly showPasswordPrompt: boolean;
-  readonly setShowPasswordPrompt: (show: boolean) => void;
   readonly handleServerPasswordSubmit: (password: string) => Promise<void>;
   readonly setIsRegistrationMode?: (val: boolean) => void;
 }
 
-const TERMS_URL = "https://qor.chat/terms";
-const PRIVACY_URL = "https://qor.chat/privacy";
+const TERMS_URL = "https://www.qor-chat.com/terms";
+const PRIVACY_URL = "https://www.qor-chat.com/privacy";
 
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
   try {
     window.dispatchEvent(new CustomEvent(eventName, { detail }));
   } catch { }
-};
-
-const truncateKey = (key: string, maxLength: number = 16): string => {
-  if (typeof key !== 'string' || key.length === 0) return '';
-  const safeLength = Math.min(maxLength, key.length);
-  return key.slice(0, safeLength) + '...';
 };
 
 const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
@@ -88,16 +60,10 @@ export const Login = React.memo<LoginProps>(({
   error,
   accountAuthenticated,
   isRegistrationMode,
-  serverTrustRequest,
-  onAcceptServerTrust,
-  onRejectServerTrust,
   showPasswordPrompt,
   handleServerPasswordSubmit,
   setIsRegistrationMode,
   initialUsername = "",
-  initialPassword = "",
-  maxStepReached: _maxStepReached = 'login',
-  pseudonym: _pseudonym = "",
 }) => {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [mode, setMode] = useState<"login" | "register">(isRegistrationMode ? "register" : "login");
@@ -116,10 +82,28 @@ export const Login = React.memo<LoginProps>(({
   }, [error]);
 
   useEffect(() => {
-    const handleRateLimited = () => {
+    let rateLimitTimeout: ReturnType<typeof setTimeout> | null = null;
+    const clearRateLimit = () => {
+      setIsRateLimited(false);
+      setIsSubmitting(false);
+      rateLimitTimeout = null;
+    };
+    const handleRateLimited = (event: Event) => {
       toast.error('Too many attempts. Please wait before trying again.');
       setIsSubmitting(true);
       setIsRateLimited(true);
+      if (rateLimitTimeout) clearTimeout(rateLimitTimeout);
+      const detail = event instanceof CustomEvent ? event.detail : null;
+      const now = Date.now();
+      const declaredUntil = Number(detail?.rateLimitUntil);
+      const remainingSeconds = Number(detail?.remainingSeconds);
+      const fallbackDelay = Number.isFinite(remainingSeconds) && remainingSeconds > 0
+        ? Math.min(Math.ceil(remainingSeconds) * 1000, 24 * 60 * 60 * 1000)
+        : 60_000;
+      const delay = Number.isSafeInteger(declaredUntil) && declaredUntil > now
+        ? Math.min(declaredUntil - now, 24 * 60 * 60 * 1000)
+        : fallbackDelay;
+      rateLimitTimeout = setTimeout(clearRateLimit, delay + 50);
     };
     const handleAuthError = () => {
       setIsSubmitting(false);
@@ -127,12 +111,13 @@ export const Login = React.memo<LoginProps>(({
     window.addEventListener(EventType.AUTH_RATE_LIMITED, handleRateLimited as any);
     window.addEventListener(EventType.AUTH_ERROR, handleAuthError as any);
     return () => {
+      if (rateLimitTimeout) clearTimeout(rateLimitTimeout);
       window.removeEventListener(EventType.AUTH_RATE_LIMITED, handleRateLimited as any);
       window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
     };
   }, []);
 
-  const handleAccountSubmit = useCallback(async (username: string, password: string, passphrase?: string): Promise<void> => {
+  const handleAccountSubmit = useCallback(async (username: string, password: string, passphrase: string): Promise<void> => {
     if (isRateLimited) return;
     setIsSubmitting(true);
     try {
@@ -159,12 +144,7 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [accountAuthenticated, isGeneratingKeys]);
 
-  const handleInputChange = useCallback((field: string, value: string): void => {
-    dispatchAuthEvent(EventType.AUTH_UI_INPUT, { field, value });
-  }, []);
-
-  const handleModeToggle = useCallback((event: React.MouseEvent<HTMLAnchorElement>): void => {
-    event.preventDefault();
+  const handleModeToggle = useCallback((): void => {
     setMode((prev) => {
       const newMode = prev === 'login' ? 'register' : 'login';
       setIsRegistrationMode?.(newMode === 'register');
@@ -172,29 +152,23 @@ export const Login = React.memo<LoginProps>(({
     });
   }, [setIsRegistrationMode]);
 
-  const handleBackToSetup = useCallback((event: React.MouseEvent<HTMLAnchorElement>): void => {
-    event.preventDefault();
+  const handleBackToSetup = useCallback((): void => {
     dispatchAuthEvent(EventType.AUTH_UI_BACK, { to: 'server' });
   }, []);
 
-  const handleExternalLink = useCallback((event: React.MouseEvent<HTMLAnchorElement>, url: string): void => {
-    event.preventDefault();
-    void system.openExternal(url).catch(() => {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    });
+  const handleExternalLink = useCallback((url: string): void => {
+    void system.openExternal(url).catch(() => { });
   }, []);
 
-  const handleAcceptTrust = useCallback(() => {
-    onAcceptServerTrust?.();
-  }, [onAcceptServerTrust]);
-
-  const handleRejectTrust = useCallback(() => {
-    onRejectServerTrust?.();
-  }, [onRejectServerTrust]);
+  const isBusy = isSubmitting || isGeneratingKeys || isRateLimited;
 
   const isSignup = mode === "register" && !showPasswordPrompt;
   const prefix = isSignup ? "signup" : "login";
-  const heading = showPasswordPrompt ? "Server access" : isSignup ? "Create account" : "Sign in";
+  const heading = showPasswordPrompt
+    ? "Server access"
+    : isSignup
+      ? "Create account"
+      : "Sign in";
   const description = showPasswordPrompt
     ? "Identify yourself to the server."
     : isSignup
@@ -211,9 +185,17 @@ export const Login = React.memo<LoginProps>(({
 
         <TorIndicator variant={prefix} />
 
-        <a className={`${prefix}-back-setup`} href="setup.html" onClick={handleBackToSetup}>
+        <button
+          type="button"
+          className={`${prefix}-back-setup`}
+          onClick={() => { if (!isBusy) handleBackToSetup(); }}
+          disabled={isBusy}
+          aria-disabled={isBusy}
+          tabIndex={isBusy ? -1 : undefined}
+          style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
+        >
           Back to setup
-        </a>
+        </button>
 
         <ThemeToggleButton className="auth-theme-toggle" />
 
@@ -223,41 +205,6 @@ export const Login = React.memo<LoginProps>(({
             {!isSignup && !showPasswordPrompt && <p aria-hidden="true"></p>}
             <p>{description}</p>
           </header>
-
-          {serverTrustRequest && (
-            <div className="auth-simple-trust" role="status" aria-live="polite">
-              <div>
-                <p>Server keys changed</p>
-                <span>Review the new server keys before proceeding.</span>
-              </div>
-              <dl>
-                <div>
-                  <dt>Old X25519</dt>
-                  <dd>{truncateKey(serverTrustRequest.pinned?.x25519PublicBase64 || 'None')}</dd>
-                </div>
-                <div>
-                  <dt>New X25519</dt>
-                  <dd>{truncateKey(serverTrustRequest.newKeys.x25519PublicBase64)}</dd>
-                </div>
-              </dl>
-              <div className="auth-simple-trust-actions">
-                <button
-                  type="button"
-                  onClick={handleAcceptTrust}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                >
-                  Trust server
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRejectTrust}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          )}
 
           <AnimatedHeightWrapper>
             <div key={`${accountAuthenticated}-${mode}-${showPasswordPrompt}`}>
@@ -269,9 +216,11 @@ export const Login = React.memo<LoginProps>(({
                   authStatus={authStatus}
                   onSubmit={async (event) => {
                     event.preventDefault();
+                    const submittedPassword = serverPassword;
+                    setServerPassword("");
                     setIsSubmitting(true);
                     try {
-                      await handleServerPasswordSubmit(serverPassword);
+                      await handleServerPasswordSubmit(submittedPassword);
                     } finally {
                       setIsSubmitting(false);
                     }
@@ -280,30 +229,16 @@ export const Login = React.memo<LoginProps>(({
               ) : isSignup ? (
                 <SignUpForm
                   onSubmit={handleAccountSubmit}
-                  disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
                   authStatus={authStatus}
-                  error={error}
-                  hasServerTrustRequest={!!serverTrustRequest}
                   initialUsername={initialUsername}
-                  initialPassword={initialPassword}
-                  onChangeUsername={(v) => handleInputChange('username', v)}
-                  onChangePassword={(v) => handleInputChange('password', v)}
-                  onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
-                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
-                  onChangeConfirmPassphrase={(v) => handleInputChange('confirmPassphrase', v)}
                 />
               ) : (
                 <SignInForm
                   onSubmit={handleAccountSubmit}
-                  disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
                   authStatus={authStatus}
-                  error={error}
-                  hasServerTrustRequest={!!serverTrustRequest}
                   initialUsername={initialUsername}
-                  initialPassword={initialPassword}
-                  onChangeUsername={(v) => handleInputChange('username', v)}
-                  onChangePassword={(v) => handleInputChange('password', v)}
-                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
                 />
               )}
             </div>
@@ -313,23 +248,27 @@ export const Login = React.memo<LoginProps>(({
             <>
               <p className={`${prefix}-simple-legal`}>
                 By signing {isSignup ? "up" : "in"}, you agree to the{' '}
-                <a href={TERMS_URL} target="_blank" rel="noreferrer" onClick={(event) => handleExternalLink(event, TERMS_URL)}>
+                <button type="button" onClick={() => handleExternalLink(TERMS_URL)}>
                   Terms of Service
-                </a>{' '}
+                </button>{' '}
                 and{' '}
-                <a href={PRIVACY_URL} target="_blank" rel="noreferrer" onClick={(event) => handleExternalLink(event, PRIVACY_URL)}>
+                <button type="button" onClick={() => handleExternalLink(PRIVACY_URL)}>
                   Privacy Policy
-                </a>.
+                </button>.
               </p>
               <p className={`${prefix}-simple-switch`}>
                 {isSignup ? "Already have an account? " : "Don't have an account? "}
-                <a
-                  href={isSignup ? "login.html" : "signup.html"}
-                  onClick={handleModeToggle}
+                <button
+                  type="button"
+                  onClick={() => { if (!isBusy) handleModeToggle(); }}
+                  disabled={isBusy}
                   aria-label={isSignup ? "Switch to login" : "Switch to registration"}
+                  aria-disabled={isBusy}
+                  tabIndex={isBusy ? -1 : undefined}
+                  style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
                 >
-                  {isSignup ? "Sign in" : "Create one"}
-                </a>
+                  {isSignup ? "Sign in" : "Create Account"}
+                </button>
               </p>
             </>
           )}

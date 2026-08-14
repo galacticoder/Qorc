@@ -1,145 +1,186 @@
-import { EventType } from '../../lib/types/event-types';
 import type { UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
+import type { SecureDB } from '../../lib/database/secureDB';
 import { logError } from '../../lib/utils/message-sending-utils';
-
-// Setup session reset handler
-export const createSessionResetHandler = (
-  recentSessionResetsRef: React.RefObject<Map<string, number>>,
-  peerCanDecryptRef: React.RefObject<Map<string, boolean>>,
-  preKeyFailureCountRef: React.RefObject<Map<string, number>>
-) => {
-  return (event: Event) => {
-    try {
-      const { peerUsername } = (event as CustomEvent).detail || {};
-      if (typeof peerUsername === 'string') {
-        recentSessionResetsRef.current.set(peerUsername, Date.now());
-        peerCanDecryptRef.current.delete(peerUsername);
-        preKeyFailureCountRef.current.delete(peerUsername);
-      }
-    } catch { }
-  };
-};
-
-// Setup session established handler
-export const createSessionEstablishedHandler = (
-  peerCanDecryptRef: React.RefObject<Map<string, boolean>>
-) => {
-  return async (event: Event) => {
-    try {
-      const { peer, fromPeer } = (event as CustomEvent).detail || {};
-      const peerUsername = peer || fromPeer;
-      if (typeof peerUsername !== 'string') return;
-
-      peerCanDecryptRef.current.set(peerUsername, true);
-
-      window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, {
-        detail: { peer: peerUsername }
-      }));
-    } catch (_err) {
-      console.error('[MessageSender] Error handling SESSION_ESTABLISHED:', _err);
-    }
-  };
-};
+import { AUTH_USERNAME_REGEX } from '../../lib/constants';
+import { hasPrototypePollutionKeys, isPlainObject, sanitizeMessageId } from '../../lib/sanitizers';
+import { EventType } from '../../lib/types/event-types';
+import { blockingSystem } from '../../lib/blocking/blocking-system';
+import {
+  enqueueRetry,
+  isPendingRetryExpired,
+  pinRetryEntry,
+  persistRetryQueue,
+  releaseRetryEntries,
+  recoverUnacknowledgedRetryEntry,
+} from './retry-queue';
 
 // Setup session ready handler for retrying pending messages
 export const createSessionReadyHandler = (
-  pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage>>,
+  pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage[]>>,
+  secureDBRef: React.RefObject<SecureDB | null> | undefined,
   handleSendMessage: (
     user: UserWithKeys,
     content: string,
     replyTo?: string | { id: string; sender?: string; content?: string },
-    fileData?: string,
     messageSignalType?: string,
     originalMessageId?: string,
     editMessageId?: string,
-  ) => Promise<void>
+    retryId?: string,
+  ) => Promise<void>,
+  drainingPeersRef: React.RefObject<Set<string>>,
+  activeAccountRef: React.RefObject<string | null>,
+  accountGenerationRef: React.RefObject<number>
 ) => {
-  return (event: Event) => {
+  return async (event: Event) => {
+    let drainingId: string | null = null;
+    let isCurrent = () => false;
     try {
-      const { peer, peerUsername, fromPeer } = (event as CustomEvent).detail || {};
-      const id = (peerUsername || fromPeer || peer) as string | undefined;
-      if (!id || typeof id !== 'string') return;
+      const detail = (event as CustomEvent).detail;
+      if (
+        !isPlainObject(detail) ||
+        hasPrototypePollutionKeys(detail) ||
+        Object.keys(detail).sort().join(',') !== 'account,peer'
+      ) return;
+      const { peer, account } = detail as { peer?: unknown; account?: unknown };
+      const generation = accountGenerationRef.current;
+      isCurrent = () => (
+        typeof account === 'string' &&
+        accountGenerationRef.current === generation &&
+        activeAccountRef.current === account
+      );
+      if (
+        !isCurrent() ||
+        typeof peer !== 'string' ||
+        peer !== peer.trim().toLowerCase() ||
+        !AUTH_USERNAME_REGEX.test(peer)
+      ) return;
+      const id = peer;
 
-      const pending = pendingRetryMessagesRef.current.get(id);
-      pendingRetryMessagesRef.current.delete(id);
-      if (!pending) return;
+      if (drainingPeersRef?.current.has(id)) return;
 
-      handleSendMessage(
-        pending.user,
-        pending.content,
-        pending.replyTo,
-        pending.fileData,
-        pending.messageSignalType,
-        pending.originalMessageId,
-        pending.editMessageId,
-      ).catch((error) => {
-        console.error('[MessageSender] Retry after session establishment failed:', error);
-      });
+      let pending = pendingRetryMessagesRef.current.get(id);
+      if (!pending || pending.length === 0) return;
+      if (pending.some((entry) => isPendingRetryExpired(entry))) {
+        await persistRetryQueue(
+          secureDBRef,
+          pendingRetryMessagesRef.current,
+          isCurrent,
+        );
+        pending = pendingRetryMessagesRef.current.get(id);
+        if (!pending || pending.length === 0) return;
+      }
+
+      drainingId = id;
+      drainingPeersRef?.current.add(id);
+
+      for (const entry of [...pending]) {
+        if (!isCurrent()) return;
+        try {
+          await handleSendMessage(
+            entry.user,
+            entry.content,
+            entry.replyTo,
+            entry.messageSignalType,
+            entry.originalMessageId,
+            entry.editMessageId,
+            entry.retryId,
+          );
+          if (!isCurrent()) return;
+        } catch (error) {
+          if (isCurrent()) console.error('[MessageSender] Retry after session establishment failed:', error);
+        }
+      }
     } catch (_error) {
-      console.error('[MessageSender] Error handling session-ready event:', _error);
+      if (isCurrent()) console.error('[MessageSender] Error handling session-ready event:', _error);
+    } finally {
+      if (drainingId && isCurrent()) drainingPeersRef.current.delete(drainingId);
     }
   };
 };
 
 // Handle session reset for unacknowledged messages
 export const createSessionResetRetryHandler = (
-  pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage>>,
-  secureDBRef?: React.RefObject<any>
+  pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage[]>>,
+  secureDBRef: React.RefObject<any> | undefined,
+  activeAccountRef: React.RefObject<string | null>,
+  accountGenerationRef: React.RefObject<number>
 ) => {
   return async (event: Event) => {
+    let isCurrent = () => false;
     try {
-      const { peerUsername } = (event as CustomEvent).detail || {};
-      if (!peerUsername || !secureDBRef?.current) return;
+      const detail = (event as CustomEvent).detail;
+      if (
+        !isPlainObject(detail) ||
+        hasPrototypePollutionKeys(detail) ||
+        Object.keys(detail).sort().join(',') !== 'account,failedMessageId,peerUsername'
+      ) return;
+      const { peerUsername, account, failedMessageId } = detail;
+      const generation = accountGenerationRef.current;
+      isCurrent = () => (
+        typeof account === 'string' &&
+        accountGenerationRef.current === generation &&
+        activeAccountRef.current === account
+      );
+      if (
+        !isCurrent() ||
+        typeof account !== 'string' ||
+        account !== account.trim().toLowerCase() ||
+        !AUTH_USERNAME_REGEX.test(account) ||
+        typeof peerUsername !== 'string' ||
+        peerUsername !== peerUsername.trim().toLowerCase() ||
+        !AUTH_USERNAME_REGEX.test(peerUsername) ||
+        peerUsername === account ||
+        typeof failedMessageId !== 'string' ||
+        sanitizeMessageId(failedMessageId) !== failedMessageId ||
+        !secureDBRef?.current
+      ) return;
+      if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
 
       const db = secureDBRef.current;
-      const unacknowledged: Array<{
-        user: UserWithKeys;
-        content: string;
-        replyTo?: string | { id: string; sender?: string; content?: string };
-        fileData?: string;
-        messageSignalType?: string;
-        originalMessageId?: string;
-        editMessageId?: string;
-        timestamp: number;
-      }> = [];
+      const messageData = await db.retrieveEphemeral(
+        'unacknowledged-messages',
+        `${peerUsername}:${failedMessageId}`
+      );
+      if (!isCurrent()) return;
+      if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
+      const entry = recoverUnacknowledgedRetryEntry(messageData, peerUsername, failedMessageId);
+      if (!entry) return;
 
-      const messageListKey = `${peerUsername}:message-list`;
-      const messageList = (await db.retrieveEphemeral('unacknowledged-messages', messageListKey) as number[] | null) || [];
-
-      if (messageList.length === 0) return;
-
-      for (const timestamp of messageList) {
-        const messageKey = `${peerUsername}:${timestamp}`;
-        const messageData = await db.retrieveEphemeral('unacknowledged-messages', messageKey);
-        if (messageData) {
-          unacknowledged.push(messageData as any);
-        }
-      }
-
-      if (unacknowledged.length === 0) return;
-
-      const lastMessage = unacknowledged[unacknowledged.length - 1];
-      pendingRetryMessagesRef.current.set(peerUsername, {
-        user: lastMessage.user,
-        content: lastMessage.content,
-        replyTo: lastMessage.replyTo,
-        fileData: lastMessage.fileData,
-        messageSignalType: lastMessage.messageSignalType,
-        originalMessageId: lastMessage.originalMessageId,
-        editMessageId: lastMessage.editMessageId,
+      const replacementEntry: PendingRetryMessage = {
+        user: entry.user,
+        content: '',
+        replyTo: entry.replyTo,
+        messageSignalType: entry.messageSignalType,
+        retryId: entry.retryId,
+        originalMessageId: entry.originalMessageId,
+        editMessageId: entry.editMessageId,
         retryCount: 0,
-      });
-
-      for (const timestamp of messageList) {
-        try {
-          await db.delete('ephemeral:unacknowledged-messages', `${peerUsername}:${timestamp}`);
-        } catch { }
-      }
+        queuedAt: entry.queuedAt,
+      };
+      
+      const retryMap = pendingRetryMessagesRef.current;
+      const inserted = enqueueRetry(retryMap, peerUsername, replacementEntry);
+      if (inserted) pinRetryEntry(replacementEntry);
       try {
-        await db.delete('ephemeral:unacknowledged-messages', messageListKey);
-      } catch { }
+        await persistRetryQueue(secureDBRef, retryMap, isCurrent);
+      } catch (error) {
+        if (inserted && isCurrent()) {
+          const queue = retryMap.get(peerUsername);
+          const index = queue?.indexOf(replacementEntry) ?? -1;
+          if (queue && index >= 0) {
+            queue.splice(index, 1);
+            if (queue.length === 0) retryMap.delete(peerUsername);
+            releaseRetryEntries([replacementEntry]);
+          }
+        }
+        throw error;
+      }
+      if (!isCurrent()) return;
+      window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, {
+        detail: { peer: peerUsername, account }
+      }));
     } catch (_error) {
-      logError('session-reset-handler-error', _error);
+      if (isCurrent()) logError('session-reset-handler-error', _error);
     }
   };
 };

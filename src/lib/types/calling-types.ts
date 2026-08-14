@@ -9,40 +9,56 @@ export interface CallState {
     startTime?: number;
     endTime?: number;
     duration?: number;
-    endReason?: 'user' | 'remote' | 'timeout' | 'failed' | 'declined' | 'shutdown';
+    endReason?: 'user' | 'remote' | 'timeout' | 'failed' | 'declined' | 'shutdown' | 'blocked';
 }
 
-export interface CallOffer {
-    callId: string;
-    callType: 'audio' | 'video';
-    from: string;
-    timestamp: number;
-}
-
-export interface CallAnswer {
-    callId: string;
-    accepted: boolean;
-    from: string;
-}
-
-export interface CallSignal {
-    type: 'offer' | 'answer' | 'decline-call' | 'end-call' | 'connected' | 'ice-candidate' |
-    'renegotiate' | 'screen-share-start' | 'screen-share-stop';
+interface CallSignalBase {
     callId: string;
     from: string;
     to: string;
-    data?: any;
     timestamp: number;
-    pqSignature?: {
-        signature: string;
-        publicKey: string;
-    };
+}
+
+export type LocalCallEndReason = 'user' | 'timeout' | 'failed' | 'shutdown' | 'blocked';
+
+export type CallSignal =
+    | (CallSignalBase & {
+        type: 'offer';
+        data: { callType: 'audio' | 'video' };
+    })
+    | (CallSignalBase & { type: 'answer' })
+    | (CallSignalBase & { type: 'decline-call' })
+    | (CallSignalBase & { type: 'end-call' })
+    | (CallSignalBase & {
+        type: 'screen-share-start';
+        data: { streamId: string };
+    })
+    | (CallSignalBase & {
+        type: 'screen-share-ready';
+        data: { streamId: string };
+    })
+    | (CallSignalBase & {
+        type: 'screen-share-stop';
+        data: { streamId: string };
+    });
+
+export interface PreviousMediaReceiveKeys {
+    epoch: number;
+    audio: Uint8Array;
+    video: Uint8Array;
+    screen: Uint8Array;
 }
 
 export interface MediaEncryptionContext {
     session: PQNoiseSession;
-    audioKey: Uint8Array;
-    videoKey: Uint8Array;
-    screenKey: Uint8Array;
+    sendAudioKey: Uint8Array;
+    sendVideoKey: Uint8Array;
+    sendScreenKey: Uint8Array;
+    recvAudioKey: Uint8Array;
+    recvVideoKey: Uint8Array;
+    recvScreenKey: Uint8Array;
+    sendEpoch: number;
+    recvEpoch: number;
+    previousRecvKeys: PreviousMediaReceiveKeys | null;
     frameCounter: bigint;
 }

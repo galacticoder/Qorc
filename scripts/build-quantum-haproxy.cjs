@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Build HAProxy with OpenSSL (OQS provider)
+ * Build HAProxy with OpenSSL
  */
 
 const os = require('os');
@@ -8,10 +8,16 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const REQUIRED_TOOLS = ['make', 'gcc', 'openssl', 'tar'];
-const DEFAULT_HAPROXY_VERSION = '3.2.0';
+const HAPROXY_VERSION = '3.2.21';
+const HAPROXY_ARCHIVE_SHA256 = '0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339';
+const MAX_HAPROXY_ARCHIVE_BYTES = 8 * 1024 * 1024;
+const BUILD_ROOT = path.resolve(
+  process.env.HAPROXY_BUILD_ROOT || path.join(os.homedir(), '.cache', 'qor-chat', 'haproxy')
+);
 const MODULE_CANDIDATES = [
   '/usr/local/lib/ossl-modules/oqsprovider.so',
   '/usr/local/lib64/ossl-modules/oqsprovider.so',
@@ -25,7 +31,7 @@ const MODULE_CANDIDATES = [
 const OPENSSL_CONF_PATH = path.join('server', 'config', 'openssl-oqs.cnf');
 const OQS_MODULE_INFO_PATH = path.join('server', 'config', 'oqs-module-path.txt');
 const HAPROXY_CFG_PATH = path.join('server', 'config', 'haproxy-quantum.cfg');
-const BUILD_META_PATH = path.join('server', 'config', 'haproxy-build.json');
+const BUILD_META_PATH = path.join(BUILD_ROOT, 'haproxy-build.json');
 
 function findInPath(bin) {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
@@ -44,18 +50,35 @@ function download(url, dest) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const file = fs.createWriteStream(dest);
     const req = https.get(url, { timeout: 300000 }, (res) => {
-      if ([301, 302].includes(res.statusCode || 0) && res.headers.location) {
-        const redirect = res.headers.location.startsWith('http') ? res.headers.location : new URL(res.headers.location, url).toString();
-        res.resume();
-        return resolve(download(redirect, dest));
-      }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      const declaredLength = Number(res.headers['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_HAPROXY_ARCHIVE_BYTES) {
+        res.resume();
+        return reject(new Error('HAProxy archive exceeds the pinned size limit'));
+      }
+      let received = 0;
+      res.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > MAX_HAPROXY_ARCHIVE_BYTES) {
+          req.destroy(new Error('HAProxy archive exceeds the pinned size limit'));
+        }
+      });
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve(dest)));
     });
     req.on('timeout', () => { try { req.destroy(); } catch { }; reject(new Error('Download timeout')); });
     req.on('error', (e) => { try { file.close(); } catch { }; reject(e); });
   });
+}
+
+async function verifyArchive(archivePath) {
+  const digest = crypto.createHash('sha256');
+  const input = fs.createReadStream(archivePath);
+  for await (const chunk of input) digest.update(chunk);
+  const actual = digest.digest('hex');
+  if (!crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(HAPROXY_ARCHIVE_SHA256, 'hex'))) {
+    throw new Error('HAProxy source archive failed pinned SHA-256 verification');
+  }
 }
 
 function runSpawn(cmd, args, options = {}) {
@@ -69,7 +92,7 @@ async function ensureQuantumDeps() {
   console.log('[BUILD] Ensuring quantum dependencies...');
   await runSpawn(process.execPath, ['scripts/install-deps.cjs', 'quantum'], {
     stdio: 'inherit',
-    env: { ...process.env, FORCE_REBUILD: '1' }
+    env: { ...process.env }
   });
 }
 
@@ -260,6 +283,7 @@ async function writeBuildMetadata(srcDir, haproxyVersion) {
     haproxy_bin: path.join(srcDir, 'haproxy'),
     src_dir: srcDir,
     haproxy_version: haproxyVersion,
+    archive_sha256: HAPROXY_ARCHIVE_SHA256,
     built_at: new Date().toISOString(),
     openssl_conf: OPENSSL_CONF_PATH,
     haproxy_cfg: HAPROXY_CFG_PATH
@@ -268,7 +292,7 @@ async function writeBuildMetadata(srcDir, haproxyVersion) {
   try {
     await fsp.mkdir(path.dirname(BUILD_META_PATH), { recursive: true });
     await fsp.writeFile(BUILD_META_PATH, JSON.stringify(buildMeta, null, 2));
-    console.log('[BUILD] Build metadata written to server/config/haproxy-build.json');
+    console.log('[BUILD] Build metadata written to', BUILD_META_PATH);
   } catch { }
 }
 
@@ -279,27 +303,46 @@ async function buildHaproxy() {
     process.exit(1);
   }
 
-  await ensureQuantumDeps();
   ensureToolsAvailable();
-  const oqsModule = locateOqsModule();
+  let oqsModule = locateOqsModule();
+  if (!oqsModule) {
+    await ensureQuantumDeps();
+    oqsModule = locateOqsModule();
+  }
+  if (!oqsModule) {
+    throw new Error('OQS provider module is unavailable after dependency setup');
+  }
   await ensureOpenSslConf();
   await writeOqsModuleInfo(oqsModule);
 
   const localEnv = buildLocalEnv(oqsModule);
   const target = process.platform === 'darwin' ? 'osx' : 'linux-glibc';
-  const haproxyVersion = process.env.HAPROXY_VERSION || DEFAULT_HAPROXY_VERSION;
+  const haproxyVersion = HAPROXY_VERSION;
   const mm = haproxyVersion.split('.').slice(0, 2).join('.');
   const url = `https://www.haproxy.org/download/${mm}/src/haproxy-${haproxyVersion}.tar.gz`;
 
-  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'haproxy-build-'));
-  const tarPath = path.join(tmp, path.basename(url));
-  console.log('[BUILD] Downloading', url);
-  await download(url, tarPath);
+  await fsp.mkdir(BUILD_ROOT, { recursive: true, mode: 0o700 });
+  const tarPath = path.join(BUILD_ROOT, path.basename(url));
+  if (!fs.existsSync(tarPath)) {
+    console.log('[BUILD] Downloading pinned HAProxy source', url);
+    await download(url, tarPath);
+  }
+  try {
+    await verifyArchive(tarPath);
+  } catch (error) {
+    await fsp.rm(tarPath, { force: true });
+    throw error;
+  }
 
   console.log('[BUILD] Extracting ...');
+  const tmp = await fsp.mkdtemp(path.join(BUILD_ROOT, 'extract-'));
   const { extract } = require('tar');
   await extract({ file: tarPath, cwd: tmp });
-  const srcDir = path.join(tmp, `haproxy-${haproxyVersion}`);
+  const extractedDir = path.join(tmp, `haproxy-${haproxyVersion}`);
+  const srcDir = path.join(BUILD_ROOT, `haproxy-${haproxyVersion}`);
+  await fsp.rm(srcDir, { recursive: true, force: true });
+  await fsp.rename(extractedDir, srcDir);
+  await fsp.rm(tmp, { recursive: true, force: true });
 
   console.log('[BUILD] Running make ...');
   const { execSync } = require('child_process');

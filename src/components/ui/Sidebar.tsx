@@ -1,9 +1,9 @@
-import React, { useState, useRef } from 'react';
+import { useEffect, useState, useRef, type PointerEvent } from 'react';
 import { LogOut } from 'lucide-react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
 import { cn } from '@/lib/utils/shared-utils';
 import { UserAvatar } from './UserAvatar';
-import { useTheme } from 'next-themes';
+import { useTheme } from '../../contexts/ThemeContext';
 import { QorBrandLogo } from './QorBrandLogo';
 
 interface SidebarProps {
@@ -19,7 +19,10 @@ interface SidebarProps {
 export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: SidebarProps) {
     const { theme, resolvedTheme, setTheme } = useTheme();
     const [isCollapsed, setIsCollapsed] = useState(true);
-    const logoutTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const logoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const logoutHoldGenerationRef = useRef(0);
+    const logoutHoldActiveRef = useRef(false);
+    const logoutCommittedRef = useRef(false);
     const [logoutProgress, setLogoutProgress] = useState(0);
     const [isHoldingLogout, setIsHoldingLogout] = useState(false);
     const activeTheme = theme === 'system' ? resolvedTheme : theme;
@@ -30,12 +33,35 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
         { id: 'settings', icon: SettingsIcon, label: 'Settings' },
     ] as const;
 
-    const handleLogoutMouseDown = () => {
+    useEffect(() => {
+        logoutCommittedRef.current = false;
+        logoutHoldActiveRef.current = false;
+        logoutHoldGenerationRef.current += 1;
+        setIsHoldingLogout(false);
+        setLogoutProgress(0);
+        return () => {
+            logoutHoldActiveRef.current = false;
+            logoutHoldGenerationRef.current += 1;
+            if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
+            logoutTimerRef.current = null;
+        };
+    }, [currentUser?.username]);
+
+    const handleLogoutPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
+        if (event.button !== 0 || logoutHoldActiveRef.current || logoutCommittedRef.current) return;
+        event.preventDefault();
+        logoutHoldActiveRef.current = true;
+        const generation = ++logoutHoldGenerationRef.current;
         setIsHoldingLogout(true);
         const startTime = Date.now();
         const duration = 2500;
 
         const updateProgress = () => {
+            if (
+                !logoutHoldActiveRef.current ||
+                logoutHoldGenerationRef.current !== generation ||
+                logoutCommittedRef.current
+            ) return;
             const elapsed = Date.now() - startTime;
             const progress = Math.min((elapsed / duration) * 100, 100);
             setLogoutProgress(progress);
@@ -43,6 +69,10 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
             if (progress < 100) {
                 logoutTimerRef.current = setTimeout(updateProgress, 16);
             } else {
+                logoutTimerRef.current = null;
+                logoutHoldActiveRef.current = false;
+                logoutCommittedRef.current = true;
+                setIsHoldingLogout(false);
                 onLogout?.();
             }
         };
@@ -50,7 +80,9 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
         updateProgress();
     };
 
-    const handleLogoutMouseUp = () => {
+    const cancelLogoutHold = () => {
+        logoutHoldGenerationRef.current += 1;
+        logoutHoldActiveRef.current = false;
         setIsHoldingLogout(false);
         setLogoutProgress(0);
         if (logoutTimerRef.current) {
@@ -151,11 +183,10 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             "qor-rail-row qor-rail-profile",
                             isHoldingLogout && "is-holding"
                         )}
-                        onMouseDown={handleLogoutMouseDown}
-                        onMouseUp={handleLogoutMouseUp}
-                        onMouseLeave={handleLogoutMouseUp}
-                        onTouchStart={handleLogoutMouseDown}
-                        onTouchEnd={handleLogoutMouseUp}
+                        onPointerDown={handleLogoutPointerDown}
+                        onPointerUp={cancelLogoutHold}
+                        onPointerLeave={cancelLogoutHold}
+                        onPointerCancel={cancelLogoutHold}
                         aria-label="Hold to logout"
                     >
                         <span

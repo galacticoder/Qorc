@@ -7,42 +7,26 @@ import { blockStatusCache } from './block-status-cache';
 import { EventType } from '../types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { validateUsername } from '../utils/blocking-utils';
-import { BlockedUser, EncryptedBlockList, KeyMaterial, RateLimitConfig } from '../types/blocking-types';
+import { BlockedUser } from '../types/blocking-types';
 export type { BlockedUser };
-import { NOTIFICATION_TITLE, NOTIFICATION_BODY, MAX_BLOCK_LIST_SIZE } from '../constants';
-import {
-  CircuitBreakerState,
-  createCircuitBreaker,
-  recordCircuitFailure,
-  resetCircuitBreaker
-} from './circuit-breaker';
+import { MAX_BLOCK_LIST_SIZE } from '../constants';
 import { BlockingRateLimiter } from './rate-limiter';
-import { BlockingMessageQueue } from './queue';
-import {
-  encryptBlockList,
-  decryptBlockList,
-  computeBlockListHash
-} from './crypto';
-import { SignalType } from '../types/signal-types';
+import { STORAGE_KEYS, STORAGE_STORES } from '../database/storage-keys';
 
 export class BlockingSystem {
   private static instance: BlockingSystem | null = null;
   private cachedBlockList: BlockedUser[] | null = null;
-  private auditLogger: ((event: string, payload?: Record<string, unknown>) => void) | null;
   private secureDB: SecureDB | null = null;
-  private readonly circuitBreaker: CircuitBreakerState;
   private readonly rateLimiter: BlockingRateLimiter;
-  private readonly messageQueue: BlockingMessageQueue;
-  private notificationsEnabled = false;
+  private bindingGeneration = 0;
+  private mutationChain: Promise<void> = Promise.resolve();
+  private blockCleanupHandlers = new Set<(username: string) => Promise<void>>();
 
   private constructor() {
     if (BlockingSystem.instance) {
       throw new Error('Use BlockingSystem.getInstance()');
     }
-    this.auditLogger = null;
-    this.circuitBreaker = createCircuitBreaker();
     this.rateLimiter = new BlockingRateLimiter();
-    this.messageQueue = new BlockingMessageQueue((action, metadata) => this.log(action, metadata));
   }
 
   static getInstance(): BlockingSystem {
@@ -53,9 +37,12 @@ export class BlockingSystem {
   }
 
   setSecureDB(secureDB: SecureDB | null): void {
+    this.bindingGeneration += 1;
     this.secureDB = secureDB;
-    this.messageQueue.setSecureDB(secureDB);
     this.cachedBlockList = null;
+    this.mutationChain = Promise.resolve();
+    this.rateLimiter.reset();
+    blockStatusCache.clear();
   }
 
   private secureDbHasKey(): boolean {
@@ -63,200 +50,231 @@ export class BlockingSystem {
     return this.secureDB.isInitialized();
   }
 
-  private getActiveSecureDB(): SecureDB {
-    if (!this.secureDB) {
+  private captureBinding(): { secureDB: SecureDB; generation: number } {
+    if (!this.secureDB || !this.secureDB.isInitialized()) {
       throw new Error('SecureDB not initialized - call setSecureDB first');
     }
-    return this.secureDB;
+    return { secureDB: this.secureDB, generation: this.bindingGeneration };
   }
 
-  private async ensureDb(): Promise<void> {
-    if (!this.secureDbHasKey()) {
-      throw new Error('SecureDB not initialized - ensure user is logged in');
-    }
-    await this.messageQueue.loadFromStorage();
+  private isCurrentBinding(binding: { secureDB: SecureDB; generation: number }): boolean {
+    return this.secureDB === binding.secureDB &&
+      this.bindingGeneration === binding.generation &&
+      binding.secureDB.isInitialized();
   }
 
-  private log(action: string, metadata?: Record<string, unknown>): void {
-    if (this.auditLogger) {
-      this.auditLogger(action, { ...metadata, timestamp: Date.now() });
-    }
-  }
-
-  setAuditLogger(logger: (event: string, payload?: Record<string, unknown>) => void): void {
-    this.auditLogger = logger;
-  }
-
-  configureRateLimit(action: string, config: RateLimitConfig): void {
-    this.rateLimiter.configureRateLimit(action, config);
-  }
-
-  getRateLimitConfig(action?: string): RateLimitConfig | Record<string, RateLimitConfig> {
-    return this.rateLimiter.getRateLimitConfig(action);
-  }
-
-  private async getCurrentAuthenticatedUser(): Promise<string | null> {
-    try {
-      try {
-        const { syncEncryptedStorage } = await import('../database/encrypted-storage');
-        const last = syncEncryptedStorage.getItem('last_authenticated_username');
-        if (last && typeof last === 'string') {
-          return last;
-        }
-      } catch { }
-
-      if (this.secureDbHasKey()) {
-        try {
-          const db = this.getActiveSecureDB();
-          const stored = await db.retrieve('auth_metadata', 'current_user');
-          if (stored && typeof stored === 'string') {
-            return stored;
-          }
-        } catch { }
-      }
-      return null;
-    } catch {
-      this.log('getCurrentAuthenticatedUser.error', { error: 'Failed to get current authenticated user' });
-      return null;
+  private assertCurrentBinding(binding: { secureDB: SecureDB; generation: number }): void {
+    if (!this.isCurrentBinding(binding)) {
+      throw new Error('Blocking operation crossed an account transition');
     }
   }
 
-  private async loadBlockList(_key: KeyMaterial | string): Promise<BlockedUser[]> {
+  private enqueueMutation(operation: () => Promise<void>): Promise<void> {
+    const queued = this.mutationChain.catch(() => undefined).then(operation);
+    this.mutationChain = queued.catch(() => undefined);
+    return queued;
+  }
+
+  registerBlockCleanupHandler(handler: (username: string) => Promise<void>): () => void {
+    this.blockCleanupHandlers.add(handler);
+    return () => this.blockCleanupHandlers.delete(handler);
+  }
+
+  private async clearOutgoingRecovery(
+    target: string,
+    binding: { secureDB: SecureDB; generation: number }
+  ): Promise<void> {
+    this.assertCurrentBinding(binding);
+    await binding.secureDB.clearAllUnacknowledgedMessagesForPeer(target);
+    this.assertCurrentBinding(binding);
+
+    if (this.blockCleanupHandlers.size === 0) {
+      throw new Error('Blocked-recipient retry cleanup is unavailable');
+    }
+    const outcomes = await Promise.allSettled(
+      Array.from(this.blockCleanupHandlers, (handler) => handler(target))
+    );
+    this.assertCurrentBinding(binding);
+    if (outcomes.some((outcome) => outcome.status === 'rejected')) {
+      throw new Error('Failed to clear blocked-recipient recovery state');
+    }
+  }
+
+  private normalizeUsername(username: string): string {
+    const normalized = typeof username === 'string' ? username.trim().toLowerCase() : '';
+    validateUsername(normalized);
+    return normalized;
+  }
+
+  private async loadBlockList(
+    binding: { secureDB: SecureDB; generation: number }
+  ): Promise<BlockedUser[]> {
+    this.assertCurrentBinding(binding);
     if (this.cachedBlockList !== null) {
-      return this.cachedBlockList;
+      return this.cachedBlockList.map((entry) => ({ ...entry }));
     }
 
-    await this.ensureDb();
     try {
-      const db = this.getActiveSecureDB();
-      const currentUser = await this.getCurrentAuthenticatedUser();
-      const storageKey = currentUser ? `blocklist:${currentUser}` : 'blocklist:__global__';
-      const storedData = await db.retrieve('blockListData', storageKey);
-      if (!storedData || typeof storedData !== 'object') {
+      const storedData = await binding.secureDB.retrieve(STORAGE_STORES.BLOCK_LIST, STORAGE_KEYS.BLOCK_LIST_GLOBAL);
+      this.assertCurrentBinding(binding);
+      if (storedData === null || storedData === undefined) {
         this.cachedBlockList = [];
         return [];
       }
 
-      const { blockList, version: _version } = storedData as { blockList: BlockedUser[]; version: number; lastUpdated: number };
-
-      if (!Array.isArray(blockList)) {
-        this.log('loadBlockList.invalid', { storageKey });
-        this.cachedBlockList = [];
-        return [];
+      if (
+        !isPlainObject(storedData) ||
+        hasPrototypePollutionKeys(storedData) ||
+        Object.keys(storedData).sort().join(',') !== 'blockList,version' ||
+        storedData.version !== 4 ||
+        !Array.isArray(storedData.blockList) ||
+        storedData.blockList.length > MAX_BLOCK_LIST_SIZE
+      ) {
+        throw new Error('Stored block list is invalid');
       }
+
+      const seen = new Set<string>();
+      const blockList = storedData.blockList.map((entry): BlockedUser => {
+        if (
+          !isPlainObject(entry) ||
+          hasPrototypePollutionKeys(entry) ||
+          Object.keys(entry).sort().join(',') !== 'blockedAt,username' ||
+          typeof entry.username !== 'string' ||
+          typeof entry.blockedAt !== 'number' ||
+          !Number.isSafeInteger(entry.blockedAt) ||
+          entry.blockedAt < 0 ||
+          entry.blockedAt > Date.now() + 5 * 60_000
+        ) {
+          throw new Error('Stored block list entry is invalid');
+        }
+        const username = this.normalizeUsername(entry.username);
+        if (username !== entry.username || seen.has(username)) {
+          throw new Error('Stored block list entry is not canonical');
+        }
+        seen.add(username);
+        return { username, blockedAt: entry.blockedAt };
+      });
 
       this.cachedBlockList = blockList;
-      return blockList;
+      return blockList.map((entry) => ({ ...entry }));
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.log('loadBlockList.error', { error: msg });
+      this.assertCurrentBinding(binding);
       if (this.cachedBlockList !== null) {
         return this.cachedBlockList;
-      }
-      if (msg.includes('decrypt') || msg.includes('passphrase') || msg.includes('corrupted')) {
-        this.cachedBlockList = [];
-        return [];
       }
       throw error;
     }
   }
 
-  private async saveBlockList(blockList: BlockedUser[], _key: KeyMaterial | string): Promise<void> {
-    await this.ensureDb();
+  private async saveBlockList(
+    blockList: BlockedUser[],
+    binding: { secureDB: SecureDB; generation: number }
+  ): Promise<void> {
+    this.assertCurrentBinding(binding);
     try {
-      const db = this.getActiveSecureDB();
-      const currentUser = await this.getCurrentAuthenticatedUser();
-      const storageKey = currentUser ? `blocklist:${currentUser}` : 'blocklist:__global__';
-
-      await db.store('blockListData', storageKey, {
-        version: 3,
+      await binding.secureDB.store(STORAGE_STORES.BLOCK_LIST, STORAGE_KEYS.BLOCK_LIST_GLOBAL, {
+        version: 4,
         blockList,
-        lastUpdated: Date.now()
       });
+      this.assertCurrentBinding(binding);
 
-      this.cachedBlockList = blockList;
+      this.cachedBlockList = blockList.map((entry) => ({ ...entry }));
 
-      await this.messageQueue.persist();
-      resetCircuitBreaker(this.circuitBreaker);
     } catch {
-      this.log('save.error', { error: 'Failed to save block list' });
       throw new Error('Failed to save block list');
     }
   }
 
-  private async sendToServer(message: Record<string, unknown>): Promise<void> {
-    try {
-      const { default: websocketClient } = await import('../websocket/websocket');
-      websocketClient.send(message);
-      resetCircuitBreaker(this.circuitBreaker);
-      void this.messageQueue.persist();
-      return;
-    } catch { }
-
-    await this.messageQueue.queueMessage(message);
-  }
-
-  async processQueuedMessages(): Promise<void> {
-    await this.messageQueue.processQueuedMessages((payload) => this.sendToServer(payload));
-  }
-
-  async blockUser(username: string, key: KeyMaterial | string): Promise<void> {
+  async blockUser(username: string): Promise<void> {
     this.rateLimiter.checkRateLimit('block');
-    validateUsername(username);
-    const blockList = await this.loadBlockList(key);
-    if (blockList.length >= MAX_BLOCK_LIST_SIZE) {
-      throw new Error('Block list size limit reached');
-    }
-
-    if (blockList.some(user => user.username === username)) {
-      return;
-    }
-
-    blockList.push({
-      username,
-      blockedAt: Date.now()
-    });
-
-    await this.saveBlockList(blockList, key);
-    blockStatusCache.set(username, true);
-
-    window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
-      detail: { username, isBlocked: true }
-    }));
-    window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
-      detail: { username }
-    }));
-  }
-
-  async unblockUser(username: string, key: KeyMaterial | string): Promise<void> {
-    this.rateLimiter.checkRateLimit('unblock');
-    validateUsername(username);
-    const blockList = await this.loadBlockList(key);
-    const filteredList = blockList.filter(user => user.username !== username);
-
-    if (filteredList.length !== blockList.length) {
-      await this.saveBlockList(filteredList, key);
-    }
-    blockStatusCache.set(username, false);
-
-    window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
-      detail: { username, isBlocked: false }
-    }));
-    window.dispatchEvent(new CustomEvent(EventType.USER_UNBLOCKED, {
-      detail: { username }
-    }));
-  }
-
-  async isUserBlocked(username: string, key: KeyMaterial | string): Promise<boolean> {
-    validateUsername(username);
-    try {
-      const blockList = await this.loadBlockList(key);
-      return blockList.some(user => user.username === username);
-    } catch (_error) {
-      if (this.cachedBlockList) {
-        return this.cachedBlockList.some(user => user.username === username);
+    username = this.normalizeUsername(username);
+    const target = username;
+    const binding = this.captureBinding();
+    return this.enqueueMutation(async () => {
+      this.assertCurrentBinding(binding);
+      const blockList = await this.loadBlockList(binding);
+      if (blockList.some(user => user.username === target)) {
+        blockStatusCache.set(target, true);
+        window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
+          detail: { username: target }
+        }));
+        await this.clearOutgoingRecovery(target, binding);
+        return;
       }
-      return false;
+      if (blockList.length >= MAX_BLOCK_LIST_SIZE) {
+        throw new Error('Block list size limit reached');
+      }
+
+      const nextBlockList = [...blockList, {
+        username: target,
+        blockedAt: Date.now()
+      }];
+
+      try {
+        await this.saveBlockList(nextBlockList, binding);
+      } catch (error) {
+        if (this.isCurrentBinding(binding)) {
+          this.cachedBlockList = nextBlockList;
+          blockStatusCache.set(target, true);
+          window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
+            detail: { username: target }
+          }));
+        }
+        try {
+          await this.clearOutgoingRecovery(target, binding);
+        } catch {
+          throw new Error('Block is active for this session, but durable enforcement cleanup failed');
+        }
+        throw error;
+      }
+      blockStatusCache.set(target, true);
+
+      window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
+        detail: { username: target }
+      }));
+      await this.clearOutgoingRecovery(target, binding);
+    });
+  }
+
+  async unblockUser(username: string): Promise<void> {
+    this.rateLimiter.checkRateLimit('unblock');
+    username = this.normalizeUsername(username);
+    const target = username;
+    const binding = this.captureBinding();
+    return this.enqueueMutation(async () => {
+      this.assertCurrentBinding(binding);
+      const blockList = await this.loadBlockList(binding);
+      const filteredList = blockList.filter(user => user.username !== target);
+
+      if (filteredList.length !== blockList.length) {
+        await this.clearOutgoingRecovery(target, binding);
+        await this.saveBlockList(filteredList, binding);
+      }
+      this.assertCurrentBinding(binding);
+      blockStatusCache.set(target, false);
+
+      window.dispatchEvent(new CustomEvent(EventType.USER_UNBLOCKED, {
+        detail: { username: target }
+      }));
+    });
+  }
+
+  async isUserBlocked(username: string): Promise<boolean> {
+    username = this.normalizeUsername(username);
+    const target = username;
+    const binding = this.captureBinding();
+    const pendingMutations = this.mutationChain;
+    await pendingMutations.catch(() => undefined);
+    this.assertCurrentBinding(binding);
+    try {
+      const blockList = await this.loadBlockList(binding);
+      return blockList.some(user => user.username === target);
+    } catch {
+      this.assertCurrentBinding(binding);
+      if (this.cachedBlockList) {
+        return this.cachedBlockList.some(user => user.username === target);
+      }
+      throw new Error('Block status unavailable');
     }
   }
 
@@ -265,185 +283,35 @@ export class BlockingSystem {
     return !!this.cachedBlockList?.some(user => user.username === username);
   }
 
-  async getBlockedUsers(key: KeyMaterial | string): Promise<BlockedUser[]> {
-    return await this.loadBlockList(key);
+  isEnforcementReady(): boolean {
+    return this.secureDbHasKey() && this.cachedBlockList !== null;
   }
 
-  async filterIncomingMessage(message: Record<string, unknown>, key: KeyMaterial | string): Promise<boolean> {
+  async getBlockedUsers(): Promise<BlockedUser[]> {
+    const binding = this.captureBinding();
+    const pendingMutations = this.mutationChain;
+    await pendingMutations.catch(() => undefined);
+    this.assertCurrentBinding(binding);
+    return await this.loadBlockList(binding);
+  }
+
+  async filterIncomingMessage(message: Record<string, unknown>): Promise<boolean> {
     if (!isPlainObject(message)) {
-      this.log('incoming.invalid', { reason: 'not a plain object' });
       return false;
     }
     if (hasPrototypePollutionKeys(message)) {
-      this.log('incoming.invalid', { reason: 'prototype pollution' });
       return false;
     }
 
     const sender = typeof message.sender === 'string' ? message.sender : undefined;
     if (!sender) return true;
 
-    const isBlocked = await this.isUserBlocked(sender, key);
+    const isBlocked = await this.isUserBlocked(sender);
     if (isBlocked) {
       return false;
     }
 
     return true;
-  }
-
-  async canSendMessage(recipientUsername: string, key: KeyMaterial | string): Promise<boolean> {
-    try {
-      const isBlocked = await this.isUserBlocked(recipientUsername, key);
-      if (isBlocked) {
-        return false;
-      }
-      return true;
-    } catch (error) {
-      return true;
-    }
-  }
-
-  async filterOutgoingMessage(message: Record<string, unknown>, key: KeyMaterial | string): Promise<Record<string, unknown> | null> {
-    try {
-      if (!isPlainObject(message)) {
-        this.log('outgoing.invalid', { reason: 'not a plain object' });
-        return null;
-      }
-      if (hasPrototypePollutionKeys(message)) {
-        this.log('outgoing.invalid', { reason: 'prototype pollution' });
-        return null;
-      }
-
-      const recipient = typeof message.recipient === 'string'
-        ? message.recipient
-        : typeof message.to === 'string'
-          ? message.to
-          : undefined;
-
-      if (!recipient) {
-        return message;
-      }
-
-      const canSend = await this.canSendMessage(recipient, key);
-
-      if (!canSend) {
-        this.showBlockedMessageNotification();
-        return null;
-      }
-
-      return message;
-    } catch (error) {
-      return message;
-    }
-  }
-
-  private showBlockedMessageNotification(): void {
-    if (this.notificationsEnabled && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification(NOTIFICATION_TITLE, {
-        body: NOTIFICATION_BODY,
-        icon: '/favicon.ico',
-        tag: 'blocked-message',
-        silent: true
-      });
-    }
-
-    window.dispatchEvent(new CustomEvent(EventType.BLOCKED_MESSAGE, {
-      detail: { timestamp: Date.now() }
-    }));
-
-    if (this.notificationsEnabled) {
-      alert('Cannot send message to blocked user.');
-    }
-  }
-
-  setNotificationsEnabled(enabled: boolean): void {
-    this.notificationsEnabled = enabled;
-  }
-
-  async syncWithServer(key: KeyMaterial | string): Promise<void> {
-    this.rateLimiter.checkRateLimit('sync');
-    try {
-      const localBlockList = await this.loadBlockList(key);
-      const km = typeof key === 'string' ? { passphrase: key } : key;
-      const encrypted = await encryptBlockList(localBlockList, km as KeyMaterial);
-      const blockListHash = await computeBlockListHash(encrypted);
-
-      await this.messageQueue.queueMessage({
-        type: SignalType.BLOCK_LIST_SYNC,
-        encryptedBlockList: encrypted.encryptedData,
-        blockListHash,
-        salt: encrypted.salt,
-        version: encrypted.version,
-        lastUpdated: encrypted.lastUpdated
-      });
-
-      resetCircuitBreaker(this.circuitBreaker);
-    } catch (error) {
-      recordCircuitFailure(this.circuitBreaker);
-      this.log('sync.error', { error: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-  }
-
-  async downloadFromServer(_key: KeyMaterial | string): Promise<void> {
-    try {
-      await this.sendToServer({
-        type: SignalType.RETRIEVE_BLOCK_LIST
-      });
-    } catch (error) {
-      this.log('download.error', { error: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-  }
-
-  async handleServerBlockListData(
-    encryptedData: string | null,
-    salt: string | null,
-    lastUpdated: number | null,
-    version: number,
-    key: KeyMaterial | string
-  ): Promise<void> {
-    try {
-      if (!encryptedData || !salt) {
-        return;
-      }
-
-      let storageKey = 'encrypted:__global__';
-      try {
-        const currentUser = await this.getCurrentAuthenticatedUser();
-        storageKey = currentUser ? `encrypted:${currentUser}` : storageKey;
-      } catch { }
-
-      try {
-        const db = this.getActiveSecureDB();
-        const localMeta = await db.retrieve('blockListMeta', storageKey);
-        if (localMeta && (localMeta as EncryptedBlockList).lastUpdated >= (lastUpdated ?? 0)) {
-          return;
-        }
-      } catch { }
-
-      const serverBlockList: EncryptedBlockList = {
-        version,
-        encryptedData,
-        salt,
-        lastUpdated: lastUpdated ?? Date.now()
-      };
-
-      const km = typeof key === 'string' ? { passphrase: key } : key;
-      const blockList = await decryptBlockList(serverBlockList, km as KeyMaterial);
-      const db = this.getActiveSecureDB();
-      await db.store('blockListMeta', storageKey, serverBlockList);
-      this.cachedBlockList = blockList;
-
-      resetCircuitBreaker(this.circuitBreaker);
-    } catch (error) {
-      recordCircuitFailure(this.circuitBreaker);
-      this.log('download.apply.error', { error: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-  }
-
-  clearCache(): void {
-    this.cachedBlockList = null;
   }
 }
 

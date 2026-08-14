@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-/*
- * Load balancer
- */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const crypto = require('crypto');
+const { spawn, execFileSync } = require('child_process');
+const { pathToFileURL } = require('url');
 
 const repoRoot = path.resolve(__dirname, '..');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
@@ -32,7 +31,7 @@ function loadDotEnv(filePath) {
 
 loadDotEnv(path.join(repoRoot, '.env'));
 
-if (!process.env.REDIS_URL) process.env.REDIS_URL = 'redis://127.0.0.1:6379';
+if (!process.env.REDIS_URL) process.env.REDIS_URL = 'rediss://127.0.0.1:6379';
 
 const CONFIG = {
   NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true',
@@ -40,8 +39,8 @@ const CONFIG = {
   HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT || '8404',
 };
 
-if (!process.env.PRESENCE_REDIS_QUIET_ERRORS) {
-  process.env.PRESENCE_REDIS_QUIET_ERRORS = 'true';
+if (!process.env.REDIS_QUIET_ERRORS) {
+  process.env.REDIS_QUIET_ERRORS = 'true';
 }
 
 function log(...args) { console.log('[LB]', ...args); }
@@ -50,8 +49,6 @@ function logErr(...args) { console.error('[LB]', ...args); }
 class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } len() { return this.a.length; } }
 class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
-
-function isHAProxyInstalled() { try { execSync('command -v haproxy >/dev/null 2>&1'); return true; } catch { return false; } }
 
 async function runNodeScript(scriptPath, args = [], env = process.env) {
   return new Promise((resolve, reject) => {
@@ -73,6 +70,22 @@ async function testHaproxyConfig(haproxyBin, cfgPath, env) {
   return new Promise((resolve) => {
     const p = spawn(haproxyBin, ['-c', '-f', cfgPath], { env, stdio: ['ignore', 'ignore', 'ignore'] });
     p.on('exit', (code) => resolve(code === 0));
+  });
+}
+
+async function isPinnedHaproxyVersion(haproxyBin) {
+  return new Promise((resolve) => {
+    const p = spawn(haproxyBin, ['-v'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    const collect = (chunk) => {
+      if (output.length < 4096) output += String(chunk).slice(0, 4096 - output.length);
+    };
+    p.stdout.on('data', collect);
+    p.stderr.on('data', collect);
+    p.on('error', () => resolve(false));
+    p.on('exit', (code) => resolve(
+      code === 0 && /HAProxy version 3\.2\.21(?:-[0-9A-Fa-f]+)?(?:\s|$)/.test(output)
+    ));
   });
 }
 
@@ -151,34 +164,45 @@ async function ensureHaproxyBuiltOrReady() {
   const hapCfgPath = process.env.LB_HAPROXY_CFG || path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
   const env = { ...process.env, OPENSSL_CONF: localConf };
 
-  const buildMetaPath = path.join(repoRoot, 'server', 'config', 'haproxy-build.json');
-  const builtBin = fs.existsSync(buildMetaPath) ? (JSON.parse(fs.readFileSync(buildMetaPath, 'utf8')).haproxy_bin || null) : null;
+  const buildRoot = path.resolve(
+    process.env.HAPROXY_BUILD_ROOT || path.join(os.homedir(), '.cache', 'qor-chat', 'haproxy')
+  );
+  const buildMetaPath = path.join(buildRoot, 'haproxy-build.json');
+  let buildMeta = null;
+  try {
+    if (fs.existsSync(buildMetaPath)) buildMeta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
+  } catch { }
 
-  // 1) Try system haproxy
-  if (isHAProxyInstalled()) {
-    const ok = await testHaproxyConfig('haproxy', hapCfgPath, env);
-    if (ok) { process.env.LB_HAPROXY_BIN = 'haproxy'; return; }
+  const builtBin = buildMeta?.haproxy_bin || null;
+  const metadataIsPinned = buildMeta?.haproxy_version === '3.2.21' &&
+    buildMeta?.archive_sha256 === '0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339';
+  if (metadataIsPinned && builtBin && fs.existsSync(builtBin)) {
+    const [versionOk, configOk] = await Promise.all([
+      isPinnedHaproxyVersion(builtBin),
+      testHaproxyConfig(builtBin, hapCfgPath, env),
+    ]);
+    if (versionOk && configOk) { process.env.LB_HAPROXY_BIN = builtBin; return; }
   }
-  // 2) Try previously built binary
-  if (builtBin && fs.existsSync(builtBin)) {
-    const ok2 = await testHaproxyConfig(builtBin, hapCfgPath, env);
-    if (ok2) { process.env.LB_HAPROXY_BIN = builtBin; return; }
-  }
-  // 3) Build 
+
   log('Building HAProxy with OQS...');
   await runNodeScript(path.join(repoRoot, 'scripts', 'build-quantum-haproxy.cjs'));
 
   if (fs.existsSync(buildMetaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
-      if (meta.haproxy_bin && fs.existsSync(meta.haproxy_bin)) {
-        const ok3 = await testHaproxyConfig(meta.haproxy_bin, hapCfgPath, env);
-        if (ok3) { process.env.LB_HAPROXY_BIN = meta.haproxy_bin; return; }
+      const metadataMatches = meta.haproxy_version === '3.2.21' &&
+        meta.archive_sha256 === '0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339';
+      if (metadataMatches && meta.haproxy_bin && fs.existsSync(meta.haproxy_bin)) {
+        const [versionOk, configOk] = await Promise.all([
+          isPinnedHaproxyVersion(meta.haproxy_bin),
+          testHaproxyConfig(meta.haproxy_bin, hapCfgPath, env),
+        ]);
+        if (versionOk && configOk) { process.env.LB_HAPROXY_BIN = meta.haproxy_bin; return; }
       }
     } catch { }
   }
   logErr('Failed to prepare a HAProxy binary that validates the PQC config.');
-  logErr('If you built to a temp dir, consider installing it: see server/config/haproxy-build.json');
+  logErr(`Pinned build metadata was not usable: ${buildMetaPath}`);
   process.exit(1);
 }
 
@@ -607,7 +631,17 @@ class LBTUI {
   }
   poll() {
     if (!this.metrics.ok()) return;
-    try { const out = execSync(`ps -p ${this.pid} -o %cpu=,%mem=`, { encoding: 'utf8', timeout: 500 }).trim().split(/\s+/); if (out.length >= 2) { this.stats.cpu = out[0]; this.stats.mem = out[1]; } } catch { }
+    try {
+      const out = execFileSync(
+        'ps',
+        ['-p', String(this.pid), '-o', '%cpu=,%mem='],
+        { encoding: 'utf8', timeout: 500 }
+      ).trim().split(/\s+/);
+      if (out.length >= 2) {
+        this.stats.cpu = out[0];
+        this.stats.mem = out[1];
+      }
+    } catch { }
     this.getActiveServers().then(servers => { this.stats.servers = servers.length; this.stats.serverList = servers; this.renderDeb.call(); }).catch(() => { });
     this.getLbPort().then(port => { if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(() => { });
     this.getOnionUrl().then(url => { if (url) this.stats.onionUrl = url; this.renderDeb.call(); }).catch(() => { });
@@ -825,18 +859,22 @@ async function ensureHaproxyCerts() {
 async function ensureStatsCredentials() {
   const credsFile = path.join(repoRoot, 'server', 'config', '.haproxy-stats-creds.pqc');
   const keysFile = path.join(repoRoot, 'server', 'config', '.haproxy-keys.enc');
-  const secureCli = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
+  const secureCredentialsPath = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
+  const loadSecureCredentials = () => import(pathToFileURL(secureCredentialsPath).href);
 
   const hasEnv = process.env.HAPROXY_STATS_USERNAME && process.env.HAPROXY_STATS_PASSWORD;
   const hasKeys = fs.existsSync(keysFile);
 
   if (hasEnv && hasKeys) return;
 
-  // If we have env but no keys then try to save them
   if (hasEnv && !hasKeys) {
     try {
       log('[SECURE-CREDS] Generating missing command encryption keys...');
-      execSync(`${process.execPath} ${JSON.stringify(secureCli)} save ${JSON.stringify(process.env.HAPROXY_STATS_USERNAME)} ${JSON.stringify(process.env.HAPROXY_STATS_PASSWORD)}`, { stdio: 'inherit' });
+      const { saveCredentials } = await loadSecureCredentials();
+      await saveCredentials(
+        process.env.HAPROXY_STATS_USERNAME,
+        process.env.HAPROXY_STATS_PASSWORD
+      );
       if (fs.existsSync(keysFile)) return;
     } catch (e) {
       logErr('[SECURE-CREDS] Failed to generate keys: ' + e.message);
@@ -886,12 +924,11 @@ async function ensureStatsCredentials() {
     const user = await askLine('Enter HAProxy stats username: ');
     const pass = await askPassword('Password: ');
     try {
-      const out = execSync(`${process.execPath} ${JSON.stringify(secureCli)} load-unlocked ${JSON.stringify(user)} ${JSON.stringify(pass)}`, { encoding: 'utf8' });
-      const mUser = out.match(/\bUsername:\s*(.*)/);
-      const mPass = out.match(/\bPassword:\s*(.*)/);
-      if (mUser && mPass) {
-        process.env.HAPROXY_STATS_USERNAME = mUser[1].trim();
-        process.env.HAPROXY_STATS_PASSWORD = mPass[1].trim();
+      const { loadCredentials } = await loadSecureCredentials();
+      const credentials = await loadCredentials({ username: user, password: pass });
+      if (credentials?.username && credentials?.password) {
+        process.env.HAPROXY_STATS_USERNAME = credentials.username;
+        process.env.HAPROXY_STATS_PASSWORD = credentials.password;
         return;
       }
       logErr('Failed to unlock HAProxy stats credentials.');
@@ -912,11 +949,12 @@ async function ensureStatsCredentials() {
   // Create new creds
   if (!canPrompt) {
     const user = 'admin';
-    const pass = execSync('openssl rand -base64 32', { encoding: 'utf8' }).trim();
+    const pass = crypto.randomBytes(32).toString('base64');
     process.env.HAPROXY_STATS_USERNAME = user;
     process.env.HAPROXY_STATS_PASSWORD = pass;
     try {
-      execSync(`${process.execPath} ${JSON.stringify(secureCli)} save ${JSON.stringify(user)} ${JSON.stringify(pass)}`, { stdio: 'inherit' });
+      const { saveCredentials } = await loadSecureCredentials();
+      await saveCredentials(user, pass);
     } catch { }
     return;
   }
@@ -948,7 +986,7 @@ async function ensureStatsCredentials() {
   });
   let password = pass1;
   if (!password) {
-    password = execSync('openssl rand -base64 32', { encoding: 'utf8' }).trim();
+    password = crypto.randomBytes(32).toString('base64');
     console.log(`Generated password: ${password}`);
   } else {
     process.stdout.write('Confirm password: ');
@@ -980,7 +1018,8 @@ async function ensureStatsCredentials() {
   process.env.HAPROXY_STATS_USERNAME = user;
   process.env.HAPROXY_STATS_PASSWORD = password;
   try {
-    execSync(`${process.execPath} ${JSON.stringify(secureCli)} save ${JSON.stringify(user)} ${JSON.stringify(password)}`, { stdio: 'inherit' });
+    const { saveCredentials } = await loadSecureCredentials();
+    await saveCredentials(user, password);
   } catch (e) {
     logErr('Failed to encrypt credentials');
     process.exit(1);
@@ -990,7 +1029,7 @@ async function ensureStatsCredentials() {
 
 (async () => {
   if (!fs.existsSync(lbScript)) {
-    logErr('auto-loadbalancer not found at server/loadbalancer/auto-loadbalancer.js');
+    logErr('auto-loadbalancer not found at server/load-balancer/auto-loadbalancer.js');
     process.exit(1);
   }
 
@@ -1069,7 +1108,6 @@ async function ensureStatsCredentials() {
         const existingPid = pidMatch ? parseInt(pidMatch[1], 10) : null;
 
         if (existingPid) {
-          // Kill existing instance and restart with TUI
           console.log(`\n[INFO] Stopping existing load balancer (PID: ${existingPid})...`);
           try {
             process.kill(existingPid, 'SIGTERM');

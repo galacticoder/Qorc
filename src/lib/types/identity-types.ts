@@ -1,6 +1,6 @@
 import type { PeerCertificateBundle } from './p2p-types';
 
-export const CERTIFIED_IDENTITY_BUNDLE_VERSION = 2 as const;
+export const CERTIFIED_IDENTITY_BUNDLE_VERSION = 3 as const;
 
 export type CertifiedIdentityAuthorityModel = 'account-device-chain';
 export type CertifiedIdentitySignatureAlgorithm = 'ML-DSA-87';
@@ -8,7 +8,7 @@ export type CertifiedIdentityKemAlgorithm = 'ML-KEM-1024';
 export type CertifiedIdentityClassicalKeyAgreementAlgorithm = 'X25519';
 export type CertifiedIdentitySignalIdentityAlgorithm = 'Signal-X25519';
 
-export interface AccountRootCertV2 {
+export interface AccountRootCertV3 {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   authorityModel: CertifiedIdentityAuthorityModel;
   username: string;
@@ -21,7 +21,7 @@ export interface AccountRootCertV2 {
   rootFingerprint: string;
 }
 
-export interface DeviceCertV2 {
+export interface DeviceCertV3 {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   username: string;
   deviceId: string;
@@ -30,7 +30,7 @@ export interface DeviceCertV2 {
   signatureAlgorithm: CertifiedIdentitySignatureAlgorithm;
   accountRootSignature: string;
   signedPayloadDigest: string;
-  attestationFormat: 'qor-peer-certificate-v2';
+  attestationFormat: typeof PROTOCOL_KEYS.PEER_CERTIFICATE_ATTESTATION;
   attestationSignature: string;
   attestedPayloadDigest: string;
   deviceDilithiumPublicKey: string;
@@ -41,7 +41,7 @@ export interface DeviceCertV2 {
   deviceCertificateFingerprint: string;
 }
 
-export interface DeviceSubkeyBindingV2 {
+export interface DeviceSubkeyBindingV3 {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   username: string;
   deviceId: string;
@@ -53,12 +53,11 @@ export interface DeviceSubkeyBindingV2 {
     classicalKeyAgreement: CertifiedIdentityClassicalKeyAgreementAlgorithm;
     signalIdentity: CertifiedIdentitySignalIdentityAlgorithm;
   };
-  inboxId: string;
   signalIdentityX25519PublicKey: string;
+  signalPreKeyBundleDigest: string;
   kyberPublicKey: string;
   dilithiumPublicKey: string;
   x25519PublicKey: string;
-  p2pEndpointUrl?: string;
   issuedAt: number;
   expiresAt: number;
   signedPayloadDigest: string;
@@ -66,22 +65,20 @@ export interface DeviceSubkeyBindingV2 {
   bindingFingerprint: string;
 }
 
-export interface CertifiedPeerBundleV2 {
+export interface CertifiedPeerBundleV3 {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   authorityModel: CertifiedIdentityAuthorityModel;
   username: string;
-  accountRoot: AccountRootCertV2;
-  deviceCert: DeviceCertV2;
-  subkeyBinding: DeviceSubkeyBindingV2;
+  accountRoot: AccountRootCertV3;
+  deviceCert: DeviceCertV3;
+  subkeyBinding: DeviceSubkeyBindingV3;
   peerCertificateFingerprint: string;
   identityRootFingerprint: string;
   bundleFingerprint: string;
-  generatedAt: number;
 }
 
 export interface CertifiedPeerBundleBuildInput {
   username: string;
-  inboxId: string;
   publicKeys: {
     kyberPublicBase64: string;
     dilithiumPublicBase64: string;
@@ -91,13 +88,12 @@ export interface CertifiedPeerBundleBuildInput {
   peerCertificate: PeerCertificateBundle;
   peerCertificateFingerprint?: string;
   accountRootPublicKey: string;
-  accountRootSecretKey: Uint8Array;
-  deviceDilithiumSecretKey: Uint8Array;
+  signAccountRoot: (canonicalPayload: Uint8Array) => Promise<string>;
+  signDevice: (canonicalPayload: Uint8Array) => Promise<string>;
 }
 
 export interface CertifiedPeerBundleValidationContext {
   targetHandle?: string;
-  inboxId?: string;
   publicKeys?: {
     kyberPublicBase64?: string;
     dilithiumPublicBase64?: string;
@@ -112,8 +108,9 @@ export interface CertifiedPeerBundleValidationContext {
 export interface CertifiedPeerBundleValidationResult {
   valid: boolean;
   reason?: string;
-  bundle?: CertifiedPeerBundleV2;
+  bundle?: CertifiedPeerBundleV3;
   identityRootFingerprint?: string;
   bundleFingerprint?: string;
   peerCertificateFingerprint?: string;
 }
+import { PROTOCOL_KEYS } from '../config/protocol-keys';

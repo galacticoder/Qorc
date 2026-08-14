@@ -3,7 +3,10 @@
  */
 
 import { SecureMemory } from '../cryptography/secure-memory';
+import { PostQuantumRandom } from '../cryptography/random';
 import { PQ_UTILS_MAX_DATA_SIZE } from '../constants';
+import { bytesToHex as encodeBytesToHex, concatUint8Arrays } from './byte-utils';
+import { Base64 } from '../cryptography/base64';
 
 export class PostQuantumUtils {
   static timingSafeEqual = SecureMemory.constantTimeCompare;
@@ -125,7 +128,7 @@ export class PostQuantumUtils {
     if (bytes.length > PQ_UTILS_MAX_DATA_SIZE) {
       throw new Error(`Data too large: ${bytes.length} bytes exceeds limit`);
     }
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return encodeBytesToHex(bytes);
   }
 
   static hexToBytes(hex: string): Uint8Array {
@@ -156,51 +159,22 @@ export class PostQuantumUtils {
   }
 
   static base64ToUint8Array(base64: string): Uint8Array {
-    if (typeof base64 !== 'string' || base64.length === 0) {
-      throw new Error('Base64 input must be a non-empty string');
-    }
-
-    const sanitized = base64.replace(/\s+/g, '');
-    if (!/^[-A-Za-z0-9_+/=]*$/.test(sanitized)) {
-      throw new Error('Invalid base64 characters');
-    }
-
     try {
-      const binary = atob(sanitized);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return bytes;
+      return Base64.base64ToUint8Array(base64);
     } catch {
       throw new Error('Failed to decode base64');
     }
   }
 
   static uint8ArrayToBase64(bytes: Uint8Array | ArrayBuffer | Buffer): string {
-    bytes = PostQuantumUtils.asUint8Array(bytes);
-    const chunkSize = 0x8000;
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      chunks.push(String.fromCharCode(...chunk));
-    }
-    return btoa(chunks.join(''));
+    return Base64.arrayBufferToBase64(PostQuantumUtils.asUint8Array(bytes));
   }
 
   static concatBytes(...arrays: Uint8Array[]): Uint8Array {
-    const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const arr of arrays) {
-      result.set(arr, offset);
-      offset += arr.length;
-    }
-    return result;
+    return concatUint8Arrays(...arrays);
   }
 
   static randomBytes(length: number): Uint8Array {
-    const { PostQuantumRandom } = require('./random');
     return PostQuantumRandom.randomBytes(length);
   }
 }

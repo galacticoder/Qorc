@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -14,41 +14,45 @@ interface TorIndicatorProps {
 export function TorIndicator({ variant = 'default' }: TorIndicatorProps) {
   const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());
   const [isRotating, setIsRotating] = useState(false);
+  const mountedRef = useRef(true);
+  const rotationInFlightRef = useRef(false);
   const authPrefix = variant === 'login' || variant === 'signup' ? variant : null;
   const isSupported = torNetworkManager.isSupported();
   const isConnected = isSupported && stats.isConnected;
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
 
     const handleStatsChange = (newStats: TorConnectionStats) => {
-      if (!mounted) return;
+      if (!mountedRef.current) return;
       setStats(newStats);
-      if (newStats.lastCircuitRotation > stats.lastCircuitRotation) {
-        setIsRotating(false);
-      }
     };
     setStats(torNetworkManager.getStats());
 
+    void torNetworkManager.syncWithDaemon().then(() => {
+      if (mountedRef.current) setStats(torNetworkManager.getStats());
+    }).catch(() => { });
+
     torNetworkManager.onStatsChange(handleStatsChange);
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       torNetworkManager.offStatsChange(handleStatsChange);
     };
-  }, [stats.lastCircuitRotation]);
+  }, []);
 
   const handleRotateCircuit = async () => {
+    if (rotationInFlightRef.current) return;
+    rotationInFlightRef.current = true;
     setIsRotating(true);
-    setTimeout(async () => {
-      try {
-        await torNetworkManager.rotateCircuit();
-      } catch {
-        setIsRotating(false);
-      }
+    try {
+      await torNetworkManager.rotateCircuit();
+      if (!mountedRef.current) return;
       setStats(torNetworkManager.getStats());
-      if (torNetworkManager.getStats().lastCircuitRotation === stats.lastCircuitRotation) {
-      }
-    }, 0);
+    } catch {
+    } finally {
+      rotationInFlightRef.current = false;
+      if (mountedRef.current) setIsRotating(false);
+    }
   };
 
   const formatTime = (timestamp: number) => {

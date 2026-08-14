@@ -1,9 +1,9 @@
 /**
- * Renders text onto a canvas element so the DOM never contains actual text
+ * Displays a Rust rendered private message image
  */
 
-import React, { useEffect, useRef, useCallback, useState, memo, useMemo } from 'react';
-import { messageVault } from '../../../lib/security/message-vault';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { nativeMessageContent } from '../../../lib/tauri-bindings';
 
 export interface SecureCanvasTextProps {
     messageId: string;
@@ -17,198 +17,108 @@ export interface SecureCanvasTextProps {
     onContextMenu?: (e: React.MouseEvent) => void;
 }
 
-// Word wrap text for canvas
-const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] => {
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let currentLine = '';
-
-    for (const word of words) {
-        const testLine = currentLine ? `${currentLine} ${word}` : word;
-        const metrics = ctx.measureText(testLine);
-
-        if (metrics.width > maxWidth && currentLine) {
-            lines.push(currentLine);
-            currentLine = word;
-        } else {
-            currentLine = testLine;
-        }
-    }
-
-    if (currentLine) {
-        lines.push(currentLine);
-    }
-
-    return lines;
-};
-
-const resolveCanvasColor = (requestedColor: string, element: HTMLElement | null, isCurrentUser: boolean): string => {
+const cssColorToHex = (
+    requestedColor: string,
+    element: HTMLElement | null,
+    isCurrentUser: boolean,
+): string => {
     const fallback = isCurrentUser ? '#ffffff' : '#0f172a';
-    if (!element || typeof window === 'undefined') {
-        return requestedColor === 'inherit' || requestedColor === 'currentColor' ? fallback : requestedColor;
-    }
-
-    const styles = window.getComputedStyle(element);
-    if (requestedColor === 'inherit' || requestedColor === 'currentColor') {
-        return styles.color || fallback;
-    }
-
-    const varMatch = requestedColor.match(/^var\((--[A-Za-z0-9-_]+)(?:,\s*([^)]+))?\)$/);
-    if (!varMatch) return requestedColor;
-
-    const [, varName, fallbackValue] = varMatch;
-    const resolved = styles.getPropertyValue(varName).trim()
-        || window.getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-    return resolved || fallbackValue?.trim() || fallback;
+    if (!element || typeof window === 'undefined') return fallback;
+    const probe = document.createElement('span');
+    probe.style.position = 'absolute';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    probe.style.color = requestedColor === 'inherit' ? 'currentColor' : requestedColor;
+    element.appendChild(probe);
+    const computed = window.getComputedStyle(probe).color;
+    probe.remove();
+    const match = computed.match(/^rgba?\(\s*(\d+)\s*[, ]\s*(\d+)\s*[, ]\s*(\d+)/i);
+    if (!match) return fallback;
+    const toHex = (value: string) => Math.max(0, Math.min(255, Number(value)))
+        .toString(16)
+        .padStart(2, '0');
+    return `#${toHex(match[1])}${toHex(match[2])}${toHex(match[3])}`;
 };
 
-// Renders text to a canvas element
 export const SecureCanvasText = memo(function SecureCanvasText({
     messageId,
     maxWidth = 400,
     fontSize = 14,
     color = 'inherit',
-    fontFamily = 'Inter, system-ui, sans-serif',
     isCurrentUser = false,
     onCopy,
     onRendered,
     onContextMenu,
 }: SecureCanvasTextProps) {
     const containerRef = useRef<HTMLDivElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-
-    // Initial dimension estimation
-    const initialDimensions = useMemo(() => {
-        return { width: 40, height: fontSize + 8 };
-    }, [fontSize]);
-
+    const initialDimensions = useMemo(
+        () => ({ width: 40, height: Math.ceil(fontSize * 1.4) }),
+        [fontSize],
+    );
     const [dimensions, setDimensions] = useState(initialDimensions);
+    const [imageSource, setImageSource] = useState<string | null>(null);
     const [isVisible, setIsVisible] = useState(false);
-    const [selectableText, setSelectableText] = useState('');
+
+    const onRenderedRef = useRef(onRendered);
+    useEffect(() => { onRenderedRef.current = onRendered; });
+
     useEffect(() => {
-        if (!containerRef.current) return;
-
+        const node = containerRef.current;
+        if (!node || typeof IntersectionObserver === 'undefined') {
+            setIsVisible(true);
+            return;
+        }
         const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries[0]?.isIntersecting) {
-                    setIsVisible(true);
-                    observer.disconnect();
-                }
-            },
-            { threshold: 0.1, rootMargin: '100px' }
+            (entries) => setIsVisible(entries[0]?.isIntersecting === true),
+            { threshold: 0.1, rootMargin: '100px' },
         );
-
-        observer.observe(containerRef.current);
+        observer.observe(node);
         return () => observer.disconnect();
     }, []);
 
-    // Render to canvas when visible
     useEffect(() => {
-        if (!isVisible || !canvasRef.current) return;
-
-        let cancelled = false;
-        const existingCtx = canvasRef.current.getContext('2d');
-        existingCtx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        setSelectableText('');
-
-        const renderSecureContent = async () => {
-            let plaintext: string | null = null;
-            let retries = 0;
-            const maxRetries = 10;
-
-            while (!plaintext && retries < maxRetries) {
-                plaintext = await messageVault.retrieve(messageId);
-                if (plaintext) break;
-
-                if (cancelled) return;
-
-                await new Promise(r => setTimeout(r, 50 * (retries + 1)));
-                retries++;
-            }
-
-            if (cancelled || !plaintext || !canvasRef.current) {
-                return;
-            }
-
-            const canvas = canvasRef.current;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) return;
-
-            // Set font for measurement
-            const resolvedColor = resolveCanvasColor(color, containerRef.current, isCurrentUser);
-            ctx.font = `${fontSize}px ${fontFamily}`;
-
-            // Word wrap
-            const lines = wrapText(ctx, plaintext, maxWidth - 4);
-            const lineHeight = fontSize * 1.4;
-
-            // Calculate dimensions
-            let maxLineWidth = 0;
-            for (const line of lines) {
-                const metrics = ctx.measureText(line);
-                maxLineWidth = Math.max(maxLineWidth, metrics.width);
-            }
-
-            const textWidth = Math.ceil(Math.max(maxLineWidth + 4, 20));
-            const textHeight = Math.ceil(Math.max(lines.length * lineHeight + 4, fontSize + 4));
-
-            // Update dimensions
-            setDimensions({ width: textWidth, height: textHeight });
-
-            // Set canvas size
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = textWidth * dpr;
-            canvas.height = textHeight * dpr;
-            canvas.style.width = `${textWidth}px`;
-            canvas.style.height = `${textHeight}px`;
-            ctx.scale(dpr, dpr);
-
-            // Clear and draw
-            ctx.clearRect(0, 0, textWidth, textHeight);
-            ctx.font = `${fontSize}px ${fontFamily}`;
-            ctx.fillStyle = resolvedColor;
-            ctx.textBaseline = 'top';
-
-            // Draw each line
-            lines.forEach((line, i) => {
-                ctx.fillText(line, 2, 2 + i * lineHeight);
-            });
-
-            // Store text for selection overlay
-            setSelectableText(plaintext);
-
-            onRendered?.();
-
-            // @ts-ignore
-            plaintext = null;
-        };
-
-        renderSecureContent();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [isVisible, messageId, maxWidth, fontSize, color, fontFamily, isCurrentUser]);
-
-    // Handle copy
-    const handleCopy = useCallback(async () => {
-        const selection = window.getSelection();
-        if (selection && selection.toString()) {
+        if (!isVisible) {
+            setImageSource(null);
             return;
         }
+        let cancelled = false;
+        const render = async (): Promise<void> => {
+            const resolvedColor = cssColorToHex(color, containerRef.current, isCurrentUser);
+            for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
+                try {
+                    const rendered = await nativeMessageContent.render(
+                        messageId,
+                        Math.max(20, Math.min(800, Math.floor(maxWidth))),
+                        Math.max(10, Math.min(32, fontSize)),
+                        resolvedColor,
+                    );
+                    if (cancelled) return;
+                    setDimensions({ width: rendered.width, height: rendered.height });
+                    setImageSource(`data:image/png;base64,${rendered.pngBase64}`);
+                    onRenderedRef.current?.();
+                    return;
+                } catch {
+                    if (attempt === 4) return;
+                    await new Promise((resolve) => window.setTimeout(resolve, 50 * (attempt + 1)));
+                }
+            }
+        };
+        void render();
+        return () => {
+            cancelled = true;
+            setImageSource(null);
+        };
+    }, [isVisible, messageId, maxWidth, fontSize, color, isCurrentUser]);
 
-        // Copy full content from vault
-        const content = await messageVault.retrieve(messageId);
-        if (content) {
-            await navigator.clipboard.writeText(content);
-            onCopy?.();
-        }
+    const handleCopy = useCallback(async () => {
+        await nativeMessageContent.copy(messageId);
+        onCopy?.();
     }, [messageId, onCopy]);
 
-    // Keyboard shortcuts
-    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-            handleCopy();
+    const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+            event.preventDefault();
+            void handleCopy().catch(() => { });
         }
     }, [handleCopy]);
 
@@ -227,40 +137,17 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             onContextMenu={onContextMenu}
             tabIndex={0}
         >
-            <canvas
-                ref={canvasRef}
-                style={{
-                    display: 'block',
-                    width: '100%',
-                    height: '100%',
-                }}
-            />
-            {/* Transparent overlay */}
-            {selectableText && (
-                <div
-                    style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: dimensions.width,
-                        height: dimensions.height,
-                        color: 'transparent',
-                        fontSize: fontSize,
-                        fontFamily: fontFamily,
-                        lineHeight: `${fontSize * 1.4}px`,
-                        padding: '2px',
-                        userSelect: 'text',
-                        cursor: 'text',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        overflow: 'hidden',
-                    }}
-                >
-                    {selectableText}
-                </div>
-            )}
+            {imageSource ? (
+                <img
+                    src={imageSource}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    width={dimensions.width}
+                    height={dimensions.height}
+                    style={{ display: 'block', width: '100%', height: '100%', userSelect: 'none' }}
+                />
+            ) : null}
         </div>
     );
 });
-
-export default SecureCanvasText;

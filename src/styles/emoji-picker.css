@@ -1,0 +1,286 @@
+.emoji-picker {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  width: min(360px, calc(100vw - 16px));
+  height: min(480px, calc(100dvh - 16px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--qor-border, hsl(var(--border)));
+  border-radius: 8px;
+  background: var(--qor-dialog-bg, hsl(var(--popover)));
+  box-shadow: var(--qor-shadow, 0 20px 55px rgba(0, 0, 0, 0.3));
+  color: var(--qor-text, hsl(var(--popover-foreground)));
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  isolation: isolate;
+}
+
+.emoji-picker,
+.emoji-picker * {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
+
+.emoji-picker__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--qor-border, hsl(var(--border)));
+}
+
+.emoji-picker__search {
+  display: grid;
+  min-width: 0;
+  height: 34px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid var(--qor-border, hsl(var(--input)));
+  border-radius: 6px;
+  background: var(--qor-control-bg, hsl(var(--background)));
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+}
+
+.emoji-picker__search:focus-within {
+  border-color: var(--qor-accent, hsl(var(--ring)));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--qor-accent, hsl(var(--ring))) 20%, transparent);
+}
+
+.emoji-picker__search input {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.emoji-picker__search input::placeholder {
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  opacity: 1;
+}
+
+.emoji-picker__search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.emoji-picker__clear,
+.emoji-picker__close,
+.emoji-picker__category,
+.emoji-picker__emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  border: 0;
+  border-radius: 6px;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.emoji-picker__clear {
+  width: 22px;
+  height: 22px;
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+}
+
+.emoji-picker__close {
+  width: 34px;
+  height: 34px;
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+}
+
+.emoji-picker__clear:hover,
+.emoji-picker__close:hover,
+.emoji-picker__category:hover,
+.emoji-picker__emoji:hover {
+  background: var(--qor-control-hover, hsl(var(--accent)));
+  color: var(--qor-text, hsl(var(--accent-foreground)));
+}
+
+.emoji-picker__clear:focus-visible,
+.emoji-picker__close:focus-visible,
+.emoji-picker__category:focus-visible,
+.emoji-picker__emoji:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--qor-accent, hsl(var(--ring)));
+}
+
+.emoji-picker__categories {
+  display: grid;
+  grid-auto-columns: 34px;
+  grid-auto-flow: column;
+  flex: 0 0 auto;
+  gap: 1px;
+  padding: 5px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--qor-border, hsl(var(--border)));
+  scrollbar-width: none;
+}
+
+.emoji-picker__categories::-webkit-scrollbar {
+  display: none;
+}
+
+.emoji-picker__category {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+}
+
+.emoji-picker__category[aria-selected="true"] {
+  background: var(--qor-accent-soft, hsl(var(--accent)));
+  color: var(--qor-accent, hsl(var(--foreground)));
+}
+
+.emoji-picker__category[aria-selected="true"]::after {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  left: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  content: "";
+}
+
+.emoji-picker__scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0 9px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--qor-muted-text, hsl(var(--muted-foreground))) transparent;
+  scrollbar-width: thin;
+}
+
+.emoji-picker__section-heading {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--qor-dialog-bg, hsl(var(--popover)));
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.emoji-picker__section-heading span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emoji-picker__section-heading span:last-child {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.emoji-picker__grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.emoji-picker__emoji {
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 1;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.emoji-picker__emoji > span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  line-height: 1.2;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.emoji-picker__state {
+  display: flex;
+  min-height: 250px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  text-align: center;
+}
+
+.emoji-picker__spinner {
+  animation: emoji-picker-spin 0.8s linear infinite;
+}
+
+.emoji-picker__sentinel {
+  width: 100%;
+  height: 1px;
+}
+
+.emoji-picker__footer {
+  display: flex;
+  min-width: 0;
+  height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  overflow: hidden;
+  border-top: 1px solid var(--qor-border, hsl(var(--border)));
+  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  font-size: 12px;
+}
+
+.emoji-picker__footer > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emoji-picker__preview {
+  flex: 0 0 auto;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 17px;
+}
+
+@keyframes emoji-picker-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 380px), (max-height: 520px) {
+  .emoji-picker {
+    width: min(344px, calc(100vw - 16px));
+    height: min(440px, calc(100dvh - 16px));
+  }
+
+  .emoji-picker__emoji {
+    font-size: 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emoji-picker__spinner {
+    animation-duration: 1.6s;
+  }
+}

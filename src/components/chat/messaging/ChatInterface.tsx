@@ -8,33 +8,32 @@ import { User } from "./UserList";
 import { SignalType } from "@/lib/types/signal-types.ts";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/message-handling/useTypingIndicator";
+import { useHasPendingIdentityChange } from "@/lib/security/identity-change-store";
+import {
+  keyTransparencyWarningStore,
+  useKeyTransparencyRecoveryWarning,
+} from "@/lib/key-transparency/warning-store";
+import { keyTransparencyClient } from "@/lib/key-transparency/client";
+import { keyTransparencyEpochStartMs } from "@/lib/key-transparency/crypto";
 import { TypingIndicatorList } from "./TypingIndicatorList";
-import { Video, MoreVertical, ShieldOff } from 'lucide-react';
+import { Video, MoreVertical, ShieldOff, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
 import type { CallState } from "../../../lib/transport/secure-calling-service";
-import type { useAuth } from "@/hooks/auth/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "../calls/BlockUserButton";
-import { blockingSystem } from "@/lib/blocking/blocking-system.ts";
-import { blockStatusCache } from "@/lib/blocking/block-status-cache.ts";
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
-import { EventType } from "@/lib/types/event-types.ts";
+import { useBlockStatus } from '@/hooks/useBlockStatus';
 import {
-  DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_UI_EVENT_RATE_MAX,
-  MAX_EVENT_USERNAME_LENGTH,
   SCROLL_THRESHOLD,
   NEAR_BOTTOM_THRESHOLD,
-  MAX_BACKGROUND_MESSAGES,
-  BACKGROUND_BATCH_SIZE
+  CONVERSATION_SEGMENT_SIZE,
+  SEGMENT_UNLOAD_IDLE_MS,
+  INITIAL_LOAD_DELAY_MS
 } from "../../../lib/constants";
-
-interface HybridKeys {
-  readonly x25519: { readonly private: Uint8Array; readonly publicKeyBase64: string };
-  readonly kyber: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
-  readonly dilithium: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
-}
+import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-limits";
+import type { HybridKeys } from "../../../lib/types/auth-types";
+import type { HybridPublicKeys } from '../../../lib/types/message-sending-types';
 
 interface ChatInterfaceProps {
   readonly onSendMessage: (
@@ -43,7 +42,6 @@ interface ChatInterfaceProps {
     messageSignalType: string,
     replyTo?: MessageReply | null
   ) => Promise<void>;
-  readonly onSendFile: (fileData: unknown) => void;
   readonly messages: ReadonlyArray<Message>;
   readonly setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   readonly isEncrypted?: boolean;
@@ -51,13 +49,13 @@ interface ChatInterfaceProps {
   readonly users: ReadonlyArray<User>;
   readonly selectedConversation?: string;
   readonly saveMessageToLocalDB: (msg: Message) => Promise<void>;
-  readonly callingAuthContext?: ReturnType<typeof useAuth>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
-  readonly getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
+  readonly getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
+  readonly findUser?: (handle: string) => Promise<any>;
+  readonly ensurePeerSession?: (peerUsername: string) => Promise<void>;
   readonly p2pConnected?: boolean;
   readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
-  readonly sendP2PReadReceipt?: (messageId: string, recipient: string) => Promise<void>;
   readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
   readonly markMessageAsRead: (messageId: string) => Promise<void>;
   readonly getSmartReceiptStatus: (message: Message) => Message['receipt'] | undefined;
@@ -68,7 +66,6 @@ interface ChatInterfaceProps {
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
-  onSendFile,
   messages,
   setMessages,
   isEncrypted = true,
@@ -76,13 +73,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   users,
   selectedConversation,
   saveMessageToLocalDB,
-  callingAuthContext,
   getDisplayUsername,
   getKeysOnDemand,
   getPeerHybridKeys,
+  findUser,
+  ensurePeerSession,
   p2pConnected: _p2pConnected = false,
   loadMoreMessages,
-  sendP2PReadReceipt,
   sendServerReadReceipt,
   markMessageAsRead,
   getSmartReceiptStatus,
@@ -91,17 +88,21 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   startCall,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const uiEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
   const displayResolverRef = useRef(getDisplayUsername);
   useEffect(() => { displayResolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
+  // Read by callbacks handed to every rendered row. Depending on `messages`
+  // directly would give those callbacks a new identity on each append, receipt
+  // and reaction, which defeats the memo on every ChatMessage at once.
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const getDisplayUsernameStable = useCallback((username: string) => {
     const fn = displayResolverRef.current;
     return fn ? fn(username) : Promise.resolve(username);
   }, []);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
-  const [isUserBlocked, setIsUserBlocked] = useState<boolean>(false);
+  const isUserBlocked = useBlockStatus(selectedConversation, { eventRateMax: DEFAULT_UI_EVENT_RATE_MAX });
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
@@ -110,17 +111,38 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
-  const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
+  const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation);
+  const keyChangePending = useHasPendingIdentityChange(selectedConversation);
+  const recoveryWarning = useKeyTransparencyRecoveryWarning(selectedConversation);
   const initialScrollDoneRef = useRef<Map<string, boolean>>(new Map());
 
   useEffect(() => {
+    if (!currentUsername) {
+      keyTransparencyWarningStore.clear();
+      return;
+    }
+    void keyTransparencyClient.activateWarningStore(currentUsername).catch(() => undefined);
+  }, [currentUsername]);
+
+  useEffect(() => {
     handleConversationChange();
+    setReplyTo(null);
+    setEditingMessage(null);
     processedInScrollRef.current.clear();
     lastScrollTimeRef.current = 0;
     if (selectedConversation) {
       initialScrollDoneRef.current.delete(selectedConversation);
     }
   }, [selectedConversation, handleConversationChange]);
+
+  useEffect(() => {
+    loadedMessagesCountRef.current.clear();
+    initialScrollDoneRef.current.clear();
+    processedInScrollRef.current.clear();
+    backgroundLoadConversationRef.current = null;
+    setReplyTo(null);
+    setEditingMessage(null);
+  }, [currentUsername]);
 
   // Scroll container to bottom
   const scrollToBottom = useCallback((container: Element) => {
@@ -170,7 +192,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       setHasMoreMessages(true);
       setIsLoadingMore(false);
       if (!loadedMessagesCountRef.current.has(selectedConversation)) {
-        loadedMessagesCountRef.current.set(selectedConversation, 50);
+        loadedMessagesCountRef.current.set(selectedConversation, 0);
       }
     }
   }, [selectedConversation]);
@@ -180,35 +202,42 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
     const conversationToLoad = selectedConversation;
     backgroundLoadConversationRef.current = conversationToLoad;
+    let cancelled = false;
+    const isCurrentLoad = () => (
+      !cancelled && backgroundLoadConversationRef.current === conversationToLoad
+    );
 
     const loadBackgroundMessages = async () => {
+      setIsLoadingMore(true);
       try {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, INITIAL_LOAD_DELAY_MS));
+        if (!isCurrentLoad()) return;
 
-        const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) || 50;
-        const maxMessages = MAX_BACKGROUND_MESSAGES;
-        const batchSize = BACKGROUND_BATCH_SIZE;
+        const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) ?? 0;
 
-        // Load in batches
-        let loadedCount = currentCount;
-        while (loadedCount < maxMessages) {
-          if (backgroundLoadConversationRef.current !== conversationToLoad) break;
-
-          const batch = await loadMoreMessages(conversationToLoad, loadedCount, batchSize);
-          if (batch.length === 0) break;
-
-          loadedCount += batch.length;
-          loadedMessagesCountRef.current.set(conversationToLoad, loadedCount);
-
-          await new Promise(resolve => setTimeout(resolve, 100));
-
-          if (batch.length < batchSize) break;
+        const batch = await loadMoreMessages(
+          conversationToLoad,
+          currentCount,
+          CONVERSATION_SEGMENT_SIZE,
+        );
+        if (!isCurrentLoad()) return;
+        if (batch.length > 0) {
+          loadedMessagesCountRef.current.set(conversationToLoad, currentCount + batch.length);
         }
+        if (batch.length < CONVERSATION_SEGMENT_SIZE) setHasMoreMessages(false);
       } catch {
+      } finally {
+        if (isCurrentLoad()) setIsLoadingMore(false);
       }
     };
 
-    loadBackgroundMessages();
+    void loadBackgroundMessages();
+    return () => {
+      cancelled = true;
+      if (backgroundLoadConversationRef.current === conversationToLoad) {
+        backgroundLoadConversationRef.current = null;
+      }
+    };
   }, [selectedConversation, loadMoreMessages]);
 
   // Handle lazy loading of older messages on scroll
@@ -221,10 +250,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       setIsLoadingMore(true);
 
       try {
-        const currentCount = loadedMessagesCountRef.current.get(selectedConversation) || 50;
-        const moreMessages = await loadMoreMessages(selectedConversation, currentCount, 50);
+        const currentCount = loadedMessagesCountRef.current.get(selectedConversation) ?? 0;
+        const moreMessages = await loadMoreMessages(
+          selectedConversation,
+          currentCount,
+          CONVERSATION_SEGMENT_SIZE,
+        );
 
-        if (moreMessages.length < 50) {
+        if (moreMessages.length < CONVERSATION_SEGMENT_SIZE) {
           setHasMoreMessages(false);
         }
 
@@ -238,111 +271,84 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation, loadMoreMessages, isLoadingMore, hasMoreMessages]);
 
+  // Release segments that were paged in by scrolling up once the view has sat at the bottom long enough that they are clearly not being read
+  const releaseScrolledBackSegments = useCallback(() => {
+    const peer = selectedConversation;
+    if (!peer) return;
+    const loaded = loadedMessagesCountRef.current.get(peer) ?? 0;
+    if (loaded <= CONVERSATION_SEGMENT_SIZE) return;
+
+    setMessages(previous => {
+      const belongsToPeer = (message: Message) => (
+        message.sender === peer || message.recipient === peer
+      );
+      const conversation = previous.filter(belongsToPeer);
+      if (conversation.length <= CONVERSATION_SEGMENT_SIZE) return previous;
+
+      const retainedIds = new Set(
+        conversation.slice(conversation.length - CONVERSATION_SEGMENT_SIZE).map(m => m.id)
+      );
+      const next = previous.filter(message => !belongsToPeer(message) || retainedIds.has(message.id));
+      if (next.length === previous.length) return previous;
+      releaseUnretainedVaultEntries(previous, previous, next);
+      return next;
+    });
+
+    loadedMessagesCountRef.current.set(peer, CONVERSATION_SEGMENT_SIZE);
+
+    // More history still exists on disk scrolling up must be able to page it
+    setHasMoreMessages(true);
+  }, [selectedConversation, setMessages]);
+
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
 
-    const handleScroll = () => handleLazyLoadScroll(scrollContainer);
-    scrollContainer.addEventListener('scroll', handleScroll);
-    return () => scrollContainer.removeEventListener('scroll', handleScroll);
-  }, [handleLazyLoadScroll]);
-
-  // Check blocking status when conversation changes or key material becomes available
-  useEffect(() => {
-    const checkBlockingStatus = async () => {
-      if (!selectedConversation) {
-        setIsUserBlocked(false);
-        setIsBlockedByUser(false);
-        return;
-      }
-
-      try {
-        const passphrase = callingAuthContext?.passphrasePlaintextRef?.current;
-        let keyArg: any = '';
-        if (passphrase && typeof passphrase === 'string' && passphrase.length > 0) {
-          keyArg = passphrase;
-        } else {
-          // Prefer Kyber secret when passphrase is not available
-          let kyberSecret: Uint8Array | undefined = callingAuthContext?.hybridKeysRef?.current?.kyber?.secretKey;
-          if (!kyberSecret && typeof callingAuthContext?.getKeysOnDemand === 'function') {
-            try {
-              const keys = await callingAuthContext.getKeysOnDemand();
-              kyberSecret = keys?.kyber?.secretKey;
-            } catch { }
-          }
-          if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-            keyArg = { kyberSecret };
-          }
-        }
-
-        if (!keyArg) {
-          const cached = blockStatusCache.get(selectedConversation);
-          setIsUserBlocked(cached ?? false);
-          setIsBlockedByUser(false);
-          return;
-        }
-
-        const blocked = await blockingSystem.isUserBlocked(selectedConversation, keyArg);
-        setIsUserBlocked(blocked);
-        blockStatusCache.set(selectedConversation, blocked);
-
-        setIsBlockedByUser(false);
-      } catch {
-        setIsUserBlocked(blockStatusCache.get(selectedConversation) ?? false);
-        setIsBlockedByUser(false);
+    let unloadTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearUnloadTimer = () => {
+      if (unloadTimer !== null) {
+        clearTimeout(unloadTimer);
+        unloadTimer = null;
       }
     };
 
-    checkBlockingStatus();
-  }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current, callingAuthContext?.hybridKeysRef?.current]);
+    const handleScroll = () => {
+      void handleLazyLoadScroll(scrollContainer);
 
-  // Handle block status change events
-  const handleBlockStatusChange = useCallback((event: Event) => {
-    try {
-      const now = Date.now();
-      const bucket = uiEventRateRef.current;
-      if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
-        bucket.windowStart = now;
-        bucket.count = 0;
-      }
-      bucket.count += 1;
-      if (bucket.count > DEFAULT_UI_EVENT_RATE_MAX) {
+      const atBottom = scrollContainer.scrollTop >=
+        scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
+      if (!atBottom) {
+        clearUnloadTimer();
         return;
       }
+      if (unloadTimer !== null) return;
+      unloadTimer = setTimeout(() => {
+        unloadTimer = null;
+        releaseScrolledBackSegments();
+      }, SEGMENT_UNLOAD_IDLE_MS);
+    };
 
-      if (!(event instanceof CustomEvent)) return;
-      const detail = event.detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-      const username = sanitizeUiText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
-      if (!username) return;
-      const isBlocked = (detail as any).isBlocked === true;
-
-      if (username === selectedConversation) {
-        setIsUserBlocked(isBlocked);
-      }
-    } catch { }
-  }, [selectedConversation]);
+    scrollContainer.addEventListener('scroll', handleScroll);
+    return () => {
+      clearUnloadTimer();
+      scrollContainer.removeEventListener('scroll', handleScroll);
+    };
+  }, [handleLazyLoadScroll, releaseScrolledBackSegments]);
 
   useEffect(() => {
-    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
-    return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
-  }, [handleBlockStatusChange]);
+    setIsBlockedByUser(false);
+  }, [selectedConversation]);
 
   // Send read receipt for message
   const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
     const message = messages.find(m => m.id === messageId);
+    if (!message) return;
+    const wireMessageId = message.wireMessageId || message.id;
 
-    if (message?.p2p === true && sendP2PReadReceipt) {
-      try {
-        await sendP2PReadReceipt(messageId, sender);
-      } catch { }
-    } else {
-      await sendServerReadReceipt(messageId, sender);
-    }
-  }, [messages, sendP2PReadReceipt, sendServerReadReceipt]);
+    await sendServerReadReceipt(wireMessageId, sender);
+  }, [messages, sendServerReadReceipt]);
 
-  useReplyUpdates(messages, setMessages, saveMessageToLocalDB);
+  useReplyUpdates(messages, setMessages, saveMessageToLocalDB, currentUsername);
 
   const prevMessagesLengthRef = useRef(messages.length);
   const lastMessageIdRef = useRef<string | null>(null);
@@ -530,20 +536,25 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   // Handle message deletion
   const handleDeleteMessage = useCallback((message: Message) => {
-    onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null);
+    onSendMessage(message.wireMessageId || message.id, "", SignalType.DELETE_MESSAGE, null);
   }, [onSendMessage]);
 
   // Handle message reactions
   const handleReactToMessage = useCallback((targetMessage: Message, emoji: string) => {
     const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
     const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
-    onSendMessage(targetMessage.id, emoji, action, null);
+    onSendMessage(targetMessage.wireMessageId || targetMessage.id, emoji, action, null);
   }, [currentUsername, onSendMessage]);
 
   // Handle message editing
   const handleEditMessage = useCallback(async (newContent: string) => {
     if (editingMessage) {
-      await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
+      await onSendMessage(
+        editingMessage.wireMessageId || editingMessage.id,
+        newContent,
+        SignalType.EDIT_MESSAGE,
+        editingMessage.replyTo,
+      );
       setEditingMessage(null);
     }
   }, [editingMessage, onSendMessage]);
@@ -564,16 +575,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     setEditingMessage(message);
   }, []);
 
-  // Handle inline block status change
-  const handleBlockStatusChangeInline = useCallback((username: string, isBlocked: boolean) => {
-    if (username === selectedConversation) {
-      setIsUserBlocked(isBlocked);
-    }
-  }, [selectedConversation]);
-
   // Handle reply click navigation
   const handleReplyClick = useCallback((replyId: string) => {
-    const el = document.getElementById(`message-${replyId}`);
+    const localId = messagesRef.current.find((message) => message.wireMessageId === replyId)?.id || replyId;
+    const el = document.getElementById(`message-${localId}`);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('bg-secondary/20');
@@ -598,7 +603,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             </div>
           )}
 
-          {selectedConversation && (
+          {selectedConversation && !keyChangePending && (
             <div className="qor-call-pill" role="group" aria-label="Call actions">
               <Button
                 size="sm"
@@ -644,15 +649,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   <div className="w-full">
                     <BlockUserButton
                       username={selectedConversation}
-                      passphraseRef={callingAuthContext?.passphrasePlaintextRef}
-                      kyberSecretRef={callingAuthContext?.hybridKeysRef?.current ? { current: callingAuthContext.hybridKeysRef.current.kyber?.secretKey || null } : undefined}
                       getDisplayUsername={getDisplayUsername}
                       initialBlocked={isUserBlocked}
                       variant="ghost"
                       size="sm"
                       className="w-full justify-start"
                       showText={true}
-                      onBlockStatusChange={handleBlockStatusChangeInline}
                     />
                   </div>
                 </div>
@@ -662,12 +664,35 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
         </div>
       </div>
+      {selectedConversation && recoveryWarning && (
+        <div
+          className="flex items-start gap-2 border-y border-amber-500/30 bg-amber-950/55 px-4 py-2.5 text-sm text-amber-100"
+          role="alert"
+          aria-live="assertive"
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" aria-hidden="true" />
+          <div className="min-w-0">
+            <div className="font-semibold">Account-key recovery pending for {selectedConversation}</div>
+            <p className="mt-0.5 text-xs leading-relaxed text-amber-100/85">
+              Qor verified a recovery-key-authorized replacement request. The existing key remains active until{' '}
+              {new Date(keyTransparencyEpochStartMs(recoveryWarning.activatesAtEpoch)).toLocaleString()}. Treat unexpected recovery as a security warning.
+            </p>
+          </div>
+        </div>
+      )}
       <ScrollArea
         className="qor-message-scroll"
         ref={scrollAreaRef}
       >
         <div className="qor-message-stack">
-          {messages.length === 0 ? (
+          {}
+          {isLoadingMore && (
+            <div className="qor-thread-loading" role="status" aria-live="polite">
+              <span className="qor-thread-loading-spinner" aria-hidden="true" />
+              <span>Loading earlier messages…</span>
+            </div>
+          )}
+          {messages.length === 0 && !isLoadingMore ? (
             <div className="qor-thread-empty">
               No messages yet. Start the conversation!
             </div>
@@ -710,36 +735,35 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       <div
         className="qor-chat-composer-wrap"
       >
-        <ChatInput
-          onSendMessage={handleMessageSend}
-          onSendFile={onSendFile}
-          isEncrypted={isEncrypted}
-          currentUsername={currentUsername}
-          users={users}
-          replyTo={replyTo}
-          onCancelReply={handleCancelReply}
-          editingMessage={editingMessage}
-          onCancelEdit={handleCancelEdit}
-          onEditMessage={handleEditMessage}
-          onTyping={handleLocalTyping}
-          selectedConversation={selectedConversation}
-          getDisplayUsername={getDisplayUsernameStable}
-          disabled={isUserBlocked || isBlockedByUser}
-          getKeysOnDemand={getKeysOnDemand}
-          getPeerHybridKeys={getPeerHybridKeys}
-        />
+        {keyChangePending ? (
+          <div className="qor-chat-composer-blocked px-4 py-3 text-center text-sm text-amber-200/90" role="status">
+            {selectedConversation}'s new security keys are awaiting automatic
+            key-transparency verification. Messaging and calls remain locked.
+          </div>
+        ) : (
+          <ChatInput
+            onSendMessage={handleMessageSend}
+            isEncrypted={isEncrypted}
+            currentUsername={currentUsername}
+            users={users}
+            replyTo={replyTo}
+            onCancelReply={handleCancelReply}
+            editingMessage={editingMessage}
+            onCancelEdit={handleCancelEdit}
+            onEditMessage={handleEditMessage}
+            onTyping={handleLocalTyping}
+            selectedConversation={selectedConversation}
+            getDisplayUsername={getDisplayUsernameStable}
+            disabled={isUserBlocked || isBlockedByUser}
+            getKeysOnDemand={getKeysOnDemand}
+            getPeerHybridKeys={getPeerHybridKeys}
+            findUser={findUser}
+            secureDB={secureDB}
+            ensurePeerSession={ensurePeerSession}
+          />
+        )}
       </div>
     </div>
-  );
-}, (prevProps, nextProps) => {
-  return (
-    prevProps.messages === nextProps.messages &&
-    prevProps.selectedConversation === nextProps.selectedConversation &&
-    prevProps.currentUsername === nextProps.currentUsername &&
-    prevProps.p2pConnected === nextProps.p2pConnected &&
-    prevProps.isEncrypted === nextProps.isEncrypted &&
-    prevProps.users === nextProps.users &&
-    prevProps.currentCall === nextProps.currentCall
   );
 });
 

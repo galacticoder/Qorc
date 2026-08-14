@@ -1718,6 +1718,34 @@ html.light .dialog-content.remove-dialog,
   padding: 80px 0 112px;
 }
 
+.qor-thread-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 0;
+  color: var(--qor-muted-text);
+  font-size: 13px;
+  user-select: none;
+}
+
+.qor-thread-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--qor-muted-text);
+  border-top-color: transparent;
+  animation: qor-thread-loading-spin 0.7s linear infinite;
+}
+
+@keyframes qor-thread-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qor-thread-loading-spinner { animation-duration: 2.4s; }
+}
+
 .qor-thread-empty {
   min-height: 200px;
   display: flex;
@@ -1740,6 +1768,60 @@ html.light .dialog-content.remove-dialog,
 
 .qor-chat-progress {
   padding: 8px 0 0;
+}
+
+.qor-chat-progress-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  margin-bottom: 6px;
+}
+
+.qor-chat-progress-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@keyframes qor-file-progress-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.qor-file-progress-indeterminate {
+  animation: qor-file-progress-indeterminate 1.15s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qor-file-progress-indeterminate {
+    animation: none;
+    transform: translateX(90%);
+  }
+}
+
+.qor-chat-progress-cancel {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--destructive, 0 72% 51%));
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.qor-chat-progress-cancel:hover {
+  background: hsl(var(--destructive, 0 72% 51%) / 0.12);
 }
 
 .qor-input-shell {
@@ -2193,85 +2275,6 @@ html.light .dialog-content.remove-dialog,
   text-align: center;
 }
 
-.auth-simple-trust {
-  display: grid;
-  gap: 12px;
-  border: 1px solid rgba(169, 145, 255, .28);
-  border-radius: 8px;
-  padding: 14px;
-  background: #05040a;
-  color: hsl(var(--foreground));
-}
-
-.auth-simple-trust p,
-.auth-simple-trust span,
-.auth-simple-trust dl,
-.auth-simple-trust dt,
-.auth-simple-trust dd {
-  margin: 0;
-}
-
-.auth-simple-trust p {
-  font-size: 13px;
-  font-weight: 850;
-}
-
-.auth-simple-trust span {
-  color: hsl(var(--muted-foreground));
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.auth-simple-trust dl {
-  display: grid;
-  gap: 6px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .04);
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
-
-.auth-simple-trust dl div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.auth-simple-trust dt {
-  color: hsl(var(--muted-foreground));
-}
-
-.auth-simple-trust dd {
-  color: #a991ff;
-}
-
-.auth-simple-trust-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.auth-simple-trust-actions button {
-  min-height: 38px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.auth-simple-trust-actions button:hover {
-  background: #8069d8;
-}
-
-.auth-simple-trust-actions button:disabled {
-  cursor: default;
-  background: #2a2a31;
-  color: #77727f;
-}
-
 html.light .login-simple-input,
 .light .login-simple-input,
 html.light .signup-simple-input,
@@ -2312,18 +2315,6 @@ html.light .login-simple a:hover,
 html.light .signup-simple a:hover,
 .light .signup-simple a:hover {
   color: #7057c8;
-}
-
-html.light .auth-simple-trust,
-.light .auth-simple-trust {
-  border-color: rgba(71, 54, 35, .14);
-  background: #fffaf2;
-  color: #17131f;
-}
-
-html.light .auth-simple-trust dl,
-.light .auth-simple-trust dl {
-  background: rgba(23, 19, 31, .05);
 }
 
 .screen-setup {
@@ -3069,10 +3060,14 @@ html.light .tor-flat-shell .tor-flat-textarea:focus,
   align-items: center;
   min-height: 38px;
   padding: 0 12px;
+  border: 0;
+  background: transparent;
   border-radius: 8px;
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   font-weight: 850;
+  font-family: inherit;
+  cursor: pointer;
   text-decoration: none;
   transition: color .18s ease, background .18s ease;
 }
@@ -3220,19 +3215,28 @@ html.light .tor-flat-shell .tor-flat-textarea:focus,
   text-align: center;
 }
 
-.login-simple-legal a,
-.login-simple-switch a,
-.signup-simple-legal a,
-.signup-simple-switch a {
+.login-simple-legal button,
+.login-simple-switch button,
+.signup-simple-legal button,
+.signup-simple-switch button {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: hsl(var(--foreground));
+  font: inherit;
   font-weight: 800;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .login-back-setup:hover,
-.login-simple a:hover,
 .signup-back-setup:hover,
-.signup-simple a:hover {
+.login-simple-legal button:hover,
+.login-simple-switch button:hover,
+.signup-simple-legal button:hover,
+.signup-simple-switch button:hover {
   color: #a991ff;
 }
 
@@ -3241,7 +3245,6 @@ html.light .tor-flat-shell .tor-flat-textarea:focus,
   background: rgba(112, 87, 200, .12);
 }
 
-/* Theme toggle shown in the same spot across login / sign up / Tor setup */
 .auth-theme-toggle {
   position: fixed;
   right: 24px;
@@ -3273,85 +3276,6 @@ html.light .tor-flat-shell .tor-flat-textarea:focus,
   font-weight: 750;
   line-height: 1.45;
   text-align: center;
-}
-
-.auth-simple-trust {
-  display: grid;
-  gap: 12px;
-  border: 1px solid rgba(169, 145, 255, .28);
-  border-radius: 8px;
-  padding: 14px;
-  background: #05040a;
-  color: hsl(var(--foreground));
-}
-
-.auth-simple-trust p,
-.auth-simple-trust span,
-.auth-simple-trust dl,
-.auth-simple-trust dt,
-.auth-simple-trust dd {
-  margin: 0;
-}
-
-.auth-simple-trust p {
-  font-size: 13px;
-  font-weight: 850;
-}
-
-.auth-simple-trust span {
-  color: hsl(var(--muted-foreground));
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.auth-simple-trust dl {
-  display: grid;
-  gap: 6px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .04);
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
-
-.auth-simple-trust dl div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.auth-simple-trust dt {
-  color: hsl(var(--muted-foreground));
-}
-
-.auth-simple-trust dd {
-  color: #a991ff;
-}
-
-.auth-simple-trust-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.auth-simple-trust-actions button {
-  min-height: 38px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 850;
-}
-
-.auth-simple-trust-actions button:hover {
-  background: #8069d8;
-}
-
-.auth-simple-trust-actions button:disabled {
-  cursor: default;
-  background: #2a2a31;
-  color: #77727f;
 }
 
 html.light .login-screen-tor,
@@ -3427,14 +3351,14 @@ html.light .signup-simple-submit:disabled:hover,
   color: #c9bcff;
 }
 
-html.light .login-simple-legal a,
-html.light .login-simple-switch a,
-.light .login-simple-legal a,
-.light .login-simple-switch a,
-html.light .signup-simple-legal a,
-html.light .signup-simple-switch a,
-.light .signup-simple-legal a,
-.light .signup-simple-switch a {
+html.light .login-simple-legal button,
+html.light .login-simple-switch button,
+.light .login-simple-legal button,
+.light .login-simple-switch button,
+html.light .signup-simple-legal button,
+html.light .signup-simple-switch button,
+.light .signup-simple-legal button,
+.light .signup-simple-switch button {
   color: #17131f;
 }
 
@@ -3448,16 +3372,3 @@ html.light .signup-simple a:hover,
 .light .signup-simple a:hover {
   color: #7057c8;
 }
-
-html.light .auth-simple-trust,
-.light .auth-simple-trust {
-  border-color: rgba(71, 54, 35, .14);
-  background: #fffaf2;
-  color: #17131f;
-}
-
-html.light .auth-simple-trust dl,
-.light .auth-simple-trust dl {
-  background: rgba(23, 19, 31, .05);
-}
-

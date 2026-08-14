@@ -1,15 +1,16 @@
-import { v4 as uuidv4 } from "uuid";
 import { toast } from "sonner";
 import { SignalType } from "../../lib/types/signal-types";
 import { Message } from '../../components/chat/messaging/types';
-import { dispatchCompleteEvent, dispatchCanceledEvent, detectMimeType, releaseFileEntry } from "../../lib/utils/file-utils";
+import { dispatchCanceledEvent, detectMimeType, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
+import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
+import { bytesToHex } from '../../lib/utils/byte-utils';
+import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 
 // Validate all chunks are present
 export const validateAllChunks = (fileEntry: ExtendedFileState): boolean => {
   for (let i = 0; i < fileEntry.totalChunks; i++) {
     if (fileEntry.decryptedChunks[i] === null || fileEntry.decryptedChunks[i] === undefined) {
-      console.error('[file-assembly] Missing chunk', { chunkIndex: i, filename: fileEntry.safeFilename });
       return false;
     }
   }
@@ -20,67 +21,39 @@ export const validateAllChunks = (fileEntry: ExtendedFileState): boolean => {
 export const assembleFileBlob = (fileEntry: ExtendedFileState): Blob | null => {
   const detectedMime = detectMimeType(fileEntry.safeFilename);
   try {
-    const parts = (fileEntry.decryptedChunks || []).filter((p) => p != null) as Blob[];
+    const parts = (fileEntry.decryptedChunks || [])
+      .filter((part): part is Uint8Array => part instanceof Uint8Array)
+      .map((part) => part as BlobPart);
     return new Blob(parts, { type: detectedMime });
-  } catch (e) {
-    console.error('[file-assembly] Failed to assemble file blob:', e);
+  } catch {
     return null;
   }
 };
 
-// Save file to SecureDB
-export const saveFileToDb = async (
-  secureDB: any,
-  messageId: string,
-  fileBlob: Blob
-): Promise<void> => {
-  if (!secureDB) return;
-
+export const deriveIncomingFileMessageId = async (from: string, wireMessageId: string): Promise<string> => {
+  const input = new TextEncoder().encode(`${PROTOCOL_KEYS.INCOMING_FILE_MESSAGE_ID}\0${from}\0${wireMessageId}`);
+  let digest: Uint8Array | null = null;
   try {
-    const saveResult = await secureDB.saveFile(messageId, fileBlob);
-    if (!saveResult.success && saveResult.quotaExceeded) {
-      toast.warning('Storage limit reached. This file will not persist after restart.', {
-        duration: 5000
-      });
-    }
-  } catch (saveErr) {
-    console.error('[file-assembly] Failed to save file to SecureDB:', saveErr);
-  }
-};
-
-// Convert blob to base64
-export const blobToBase64 = async (fileBlob: Blob): Promise<string | undefined> => {
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const result = reader.result as string;
-        const base64 = result.split(',')[1];
-        resolve(base64);
-      };
-      reader.onerror = reject;
-      reader.readAsDataURL(fileBlob);
-    });
-  } catch (e) {
-    console.error('[file-assembly] Failed to convert blob to base64:', e);
-    return undefined;
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-384', input));
+    return `file-${bytesToHex(digest)}`;
+  } finally {
+    input.fill(0);
+    digest?.fill(0);
   }
 };
 
 // Create file message
 export const createFileMessage = (
   fileEntry: ExtendedFileState,
-  fileUrl: string,
   fileBlob: Blob,
   from: string,
+  messageId: string,
   toUser?: string,
-  originalBase64Data?: string,
-  messageId?: string
 ): Message => {
   const detectedMime = detectMimeType(fileEntry.safeFilename);
   return {
-    id: messageId || fileEntry.messageId || uuidv4(),
-    content: fileUrl,
+    id: messageId,
+    content: '',
     sender: from,
     recipient: toUser,
     timestamp: new Date(),
@@ -91,63 +64,78 @@ export const createFileMessage = (
     fileSize: fileBlob.size,
     mimeType: detectedMime,
     encrypted: true,
-    transport: 'websocket',
-    version: '1.0',
+    p2p: fileEntry.transport === 'p2p',
+    transport: fileEntry.transport,
     receipt: { delivered: false, read: false },
-    originalBase64Data,
+    wireMessageId: fileEntry.messageId,
   };
 };
 
-// Complete file transfer
+
 export const completeFileTransfer = async (
   fileEntry: ExtendedFileState,
-  fileKey: string,
   from: string,
   toUser: string | undefined,
-  store: Record<string, any>,
-  blobCache: { enqueue: (url: string, source: string) => void },
-  secureDBRef: React.RefObject<any | null> | undefined,
-  onNewMessage: (message: Message) => void
-): Promise<boolean> => {
+  secureDB: any | null,
+  onNewMessage: (message: Message) => void,
+  isCurrent: () => boolean = () => true
+): Promise<{ assembled: boolean; durablySaved: boolean }> => {
+  if (!isCurrent()) return { assembled: false, durablySaved: false };
   if (!validateAllChunks(fileEntry)) {
-    console.error('[file-assembly] Transfer incomplete - missing chunks', {
-      from,
-      filename: fileEntry.safeFilename,
-      receivedCount: fileEntry.receivedCount,
-      totalChunks: fileEntry.totalChunks
-    });
-    return false;
+    return { assembled: false, durablySaved: false };
   }
 
   const fileBlob = assembleFileBlob(fileEntry);
   if (!fileBlob) {
-    return false;
+    return { assembled: false, durablySaved: false };
+  }
+  if (!fileEntry.fileSize || fileBlob.size !== fileEntry.fileSize) {
+    return { assembled: false, durablySaved: false };
   }
 
-  const fileUrl = URL.createObjectURL(fileBlob);
-  blobCache.enqueue(fileUrl, fileEntry.safeFilename);
+  if (!fileEntry.messageId) return { assembled: false, durablySaved: false };
+  const messageId = await deriveIncomingFileMessageId(from, fileEntry.messageId);
+  if (!isCurrent()) return { assembled: false, durablySaved: false };
+  const message = createFileMessage(fileEntry, fileBlob, from, messageId, toUser);
+  let durablySaved = false;
+  let duplicate = false;
+  try {
+    const saveResult = secureDB
+      ? await secureDB.storeFileMessage(
+        { ...message, timestamp: message.timestamp.getTime() },
+        fileBlob
+      )
+      : { success: false };
+    durablySaved = !!saveResult?.success;
+    duplicate = !!saveResult?.duplicate;
+    if (!saveResult?.success && saveResult?.quotaExceeded) {
+      toast.warning('Storage limit reached. File delivery is paused until space is available.', {
+        duration: 5000
+      });
+    }
+  } catch {
+  }
 
-  const messageId = fileEntry.messageId || uuidv4();
-  await saveFileToDb(secureDBRef?.current, messageId, fileBlob);
+  if (!isCurrent()) {
+    return { assembled: false, durablySaved: false };
+  }
 
-  const originalBase64Data = await blobToBase64(fileBlob);
-  const detectedMime = detectMimeType(fileEntry.safeFilename);
+  if (!durablySaved) {
+    return { assembled: true, durablySaved: false };
+  }
 
-  const message = createFileMessage(fileEntry, fileUrl, fileBlob, from, toUser, originalBase64Data, messageId);
-  onNewMessage(message);
+  if (!toUser || !fileEntry.messageId) return { assembled: true, durablySaved: false };
+  try {
+    if (!await deliveryReceiptOutbox.queueDelivery(toUser, from, fileEntry.messageId)) {
+      return { assembled: true, durablySaved: false };
+    }
+  } catch {
+    return { assembled: true, durablySaved: false };
+  }
 
-  dispatchCompleteEvent({
-    from,
-    filename: fileEntry.safeFilename,
-    size: fileBlob.size,
-    mimeType: detectedMime,
-    messageId: fileEntry.messageId || ''
-  });
+  if (!duplicate) onNewMessage(message);
 
-  delete store[fileKey];
-  releaseFileEntry(fileEntry);
-
-  return true;
+  return { assembled: true, durablySaved };
 };
 
 // Handle failed file assembly
@@ -155,7 +143,6 @@ export const handleAssemblyFailure = (
   fileEntry: ExtendedFileState,
   fileKey: string,
   store: Record<string, any>,
-  blobCache: { clear: () => void },
   from: string,
   reason: string,
   setLoginError: (err: string) => void,
@@ -163,7 +150,6 @@ export const handleAssemblyFailure = (
 ): void => {
   releaseFileEntry(fileEntry);
   delete store[fileKey];
-  blobCache.clear();
   setLoginError(errorMessage);
   dispatchCanceledEvent({ from, filename: fileEntry.safeFilename, reason });
 };

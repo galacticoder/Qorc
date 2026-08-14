@@ -1,26 +1,21 @@
 import { RefObject } from "react";
-import type { PeerCertificateBundle, HybridKeys, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
-import {
-  toUint8,
-  buildRouteProof,
-  getChannelId,
-  buildAuthenticator
-} from "../../lib/utils/p2p-utils";
+import type { PeerCertificateBundle, CertCacheEntry } from "../../lib/types/p2p-types";
 import { validatePeerCertificateBundle } from "../../lib/utils/peer-certificate-utils";
-import { loadPersistedPeerCert, savePersistedPeerCert, removePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
-import { P2P_ROUTE_PROOF_TTL_MS, MAX_P2P_CERT_CACHE_SIZE, MAX_P2P_ROUTE_PROOF_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
+import { computePeerCertificateFingerprint } from "../../lib/utils/peer-certificate-utils";
+import { loadPersistedPeerCert, savePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
+import { CERT_CLOCK_SKEW_MS, MAX_P2P_CERT_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
+import { isKeyTransparencyAuthorizedPeerCertificate } from "../../lib/key-transparency/verified-material";
 
 // Core cache references used by all certificate helpers
 export interface CertificateRefs {
   peerCertificateCacheRef: RefObject<Map<string, CertCacheEntry>>;
-  routeProofCacheRef: RefObject<Map<string, RouteProofRecord>>;
-  peerAuthCacheRef: RefObject<ReturnType<typeof buildAuthenticator>>;
-  channelSequenceRef: RefObject<Map<string, number>>;
 }
 
-// Optional hooks injected by the hook consumer to fetch certificates or pin a trusted issuer
+// hooks injected by the hook consumer to fetch certificates or pin a trusted issuer
 export interface CertificateOptions {
+  ownerUsername: string;
   fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
+  isCurrentOwner?: () => boolean;
 }
 
 // Certificate retriever that validates signatures
@@ -28,10 +23,47 @@ export function createGetPeerCertificate(
   refs: CertificateRefs,
   options: CertificateOptions
 ) {
-    const cacheValidatedCert = (peerUsername: string, cert: PeerCertificateBundle): void => {
+    const persistedWriteTails = new Map<string, Promise<void>>();
+
+    const isTransparencyAuthorized = (
+      peerUsername: string,
+      cert: PeerCertificateBundle
+    ): boolean => isKeyTransparencyAuthorizedPeerCertificate({
+      account: options.ownerUsername,
+      peer: peerUsername,
+      kyberPublicBase64: cert.kyberPublicKey,
+      dilithiumPublicBase64: cert.dilithiumPublicKey,
+      x25519PublicBase64: cert.x25519PublicKey,
+      peerCertificateFingerprint: computePeerCertificateFingerprint(cert),
+    });
+
+    const cacheValidatedCert = (
+      peerUsername: string,
+      cert: PeerCertificateBundle
+    ): { cert: PeerCertificateBundle; accepted: boolean } => {
+      const existing = refs.peerCertificateCacheRef.current.get(peerUsername);
+      if (existing) {
+        const sameIdentity = computePeerCertificateFingerprint(existing.cert) ===
+          computePeerCertificateFingerprint(cert);
+        const now = Date.now();
+        if (
+          sameIdentity &&
+          existing.cert.issuedAt >= cert.issuedAt &&
+          existing.cert.expiresAt > now - CERT_CLOCK_SKEW_MS &&
+          isTransparencyAuthorized(peerUsername, existing.cert)
+        ) {
+          refs.peerCertificateCacheRef.current.set(peerUsername, {
+            cert: existing.cert,
+            expiresAt: Math.min(existing.cert.expiresAt, now + P2P_PEER_CACHE_TTL_MS),
+          });
+          return { cert: existing.cert, accepted: false };
+        }
+      }
+
+      const snapshot = Object.freeze({ ...cert });
       refs.peerCertificateCacheRef.current.set(peerUsername, {
-        cert,
-        expiresAt: Math.min(cert.expiresAt, Date.now() + P2P_PEER_CACHE_TTL_MS),
+        cert: snapshot,
+        expiresAt: Math.min(snapshot.expiresAt, Date.now() + P2P_PEER_CACHE_TTL_MS),
       });
       if (refs.peerCertificateCacheRef.current.size > MAX_P2P_CERT_CACHE_SIZE) {
         const entries = [...refs.peerCertificateCacheRef.current.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
@@ -40,20 +72,43 @@ export function createGetPeerCertificate(
           refs.peerCertificateCacheRef.current.delete(key);
         }
       }
+      return { cert: snapshot, accepted: true };
+    };
+
+    const persistLatestCachedCert = async (peerUsername: string): Promise<void> => {
+      const previous = persistedWriteTails.get(peerUsername) ?? Promise.resolve();
+      const write = previous.catch(() => { }).then(async () => {
+        if (options.isCurrentOwner?.() === false) return;
+        const latest = refs.peerCertificateCacheRef.current.get(peerUsername)?.cert;
+        if (!latest) return;
+        await savePersistedPeerCert(options.ownerUsername, peerUsername, latest);
+      });
+      const tail = write.then(() => { }, () => { });
+      persistedWriteTails.set(peerUsername, tail);
+      try {
+        await write;
+      } finally {
+        if (persistedWriteTails.get(peerUsername) === tail) {
+          persistedWriteTails.delete(peerUsername);
+        }
+      }
     };
 
   return async (peerUsername: string, bypassCache = false): Promise<PeerCertificateBundle | null> => {
+    const isCurrentOwner = () => options.isCurrentOwner?.() !== false;
+    if (!isCurrentOwner()) return null;
     const now = Date.now();
     const cached = bypassCache ? null : refs.peerCertificateCacheRef.current.get(peerUsername);
-    if (cached && cached.expiresAt > now) {
+    if (cached && cached.expiresAt > now && isTransparencyAuthorized(peerUsername, cached.cert)) {
       return cached.cert;
     }
+    if (cached) refs.peerCertificateCacheRef.current.delete(peerUsername);
 
     if (!bypassCache) {
-      const persisted = await loadPersistedPeerCert(peerUsername);
-      if (persisted) {
-        cacheValidatedCert(peerUsername, persisted);
-        return persisted;
+      const persisted = await loadPersistedPeerCert(options.ownerUsername, peerUsername);
+      if (!isCurrentOwner()) return null;
+      if (persisted && isTransparencyAuthorized(peerUsername, persisted)) {
+        return cacheValidatedCert(peerUsername, persisted).cert;
       }
     }
 
@@ -62,44 +117,20 @@ export function createGetPeerCertificate(
     }
     try {
       const fetched = await options.fetchPeerCertificates(peerUsername, bypassCache);
-      const cert = await validatePeerCertificateBundle(fetched, peerUsername, now);
+      const cert = await validatePeerCertificateBundle(fetched, peerUsername, Date.now());
+      if (!isCurrentOwner()) return null;
       if (!cert) {
         return null;
       }
-      cacheValidatedCert(peerUsername, cert);
-      savePersistedPeerCert(peerUsername, cert);
-      return cert;
+      if (!isTransparencyAuthorized(peerUsername, cert)) return null;
+      const cachedResult = cacheValidatedCert(peerUsername, cert);
+      if (cachedResult.accepted) {
+        await persistLatestCachedCert(peerUsername).catch(() => { });
+      }
+      if (!isCurrentOwner()) return null;
+      return cachedResult.cert;
     } catch {
       return null;
     }
   };
 }
-
-// Removes cached entries for a peer so future requests do a fresh fetch
-export function createInvalidatePeerCert(refs: CertificateRefs) {
-  return (peerUsername: string) => {
-    if (!peerUsername) return;
-    refs.peerCertificateCacheRef.current.delete(peerUsername);
-    
-    removePersistedPeerCert(peerUsername);
-    const keysToDelete: string[] = [];
-    for (const [key] of refs.routeProofCacheRef.current) {
-      if (key.includes(peerUsername)) {
-        keysToDelete.push(key);
-      }
-    }
-    for (const key of keysToDelete) {
-      refs.routeProofCacheRef.current.delete(key);
-    }
-  };
-}
-
-// Derives a deterministic conversation key between the local profile and a peer
-export function createDeriveConversationKey(hybridKeys: HybridKeys | null) {
-  return (peer: string) => {
-    if (!hybridKeys?.dilithium?.publicKeyBase64) return null;
-    return `${hybridKeys.dilithium.publicKeyBase64}:${peer}`;
-  };
-}
-
-// Makes sure a peer proves ownership of their certificate and route-proof before allowing messages

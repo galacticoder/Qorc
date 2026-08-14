@@ -1,29 +1,9 @@
-import cluster from 'cluster';
 import fs from 'fs';
 import https from 'https';
-import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-
-export function parseClusterWorkers(rawValue, { logger = console, defaultWorkers = 1, maxWorkers = 32 } = {}) {
-  const envValue = (rawValue || '').trim();
-  if (!envValue) {
-    return defaultWorkers;
-  }
-
-  const parsed = Number.parseInt(envValue, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    logger?.warn?.(`[BOOTSTRAP] Invalid CLUSTER_WORKERS value '${envValue}', using default: ${defaultWorkers}`);
-    return defaultWorkers;
-  }
-
-  if (parsed > maxWorkers) {
-    logger?.warn?.(`[BOOTSTRAP] CLUSTER_WORKERS value ${parsed} exceeds maximum ${maxWorkers}, using ${maxWorkers}`);
-    return maxWorkers;
-  }
-
-  return parsed;
-}
+import { LOOPBACK_HOST } from '../config/infrastructure.js';
+import { envInt } from '../utils/env.js';
 
 // Basic validation of certificate content
 function validateCertificateContent(key, cert, { logger = console } = {}) {
@@ -34,13 +14,13 @@ function validateCertificateContent(key, cert, { logger = console } = {}) {
 
   const keyStr = key.toString('utf8');
   if (!keyStr.includes('BEGIN') || !keyStr.includes('PRIVATE KEY')) {
-    logger?.error?.('[BOOTSTRAP] Key does not appear to be a valid PEM-encoded private key');
+    logger?.error?.('[BOOTSTRAP] Key is not a valid PEM encoded private key');
     return false;
   }
 
   const certStr = cert.toString('utf8');
   if (!certStr.includes('BEGIN CERTIFICATE') || !certStr.includes('END CERTIFICATE')) {
-    logger?.error?.('[BOOTSTRAP] Certificate does not appear to be a valid PEM-encoded certificate');
+    logger?.error?.('[BOOTSTRAP] Certificate is not a valid PEM encoded certificate');
     return false;
   }
 
@@ -135,46 +115,64 @@ export function createHttpsServer({ app, key, cert }) {
     cert,
     minVersion: 'TLSv1.3',
     maxVersion: 'TLSv1.3',
+    ecdhCurve: 'X25519MLKEM768',
     ciphers: [
       'TLS_AES_256_GCM_SHA384',
       'TLS_CHACHA20_POLY1305_SHA256',
     ].join(':'),
     honorCipherOrder: true,
+    secureOptions: crypto.constants.SSL_OP_NO_TICKET,
     sessionTimeout: 0,
     sessionIdContext: 'no-session-reuse',
     requestCert: false,
-    rejectUnauthorized: false,
   };
+  let server;
+  try {
+    server = https.createServer(httpsOptions, app);
+  } catch (error) {
+    throw new Error(`Hybrid post-quantum TLS is unavailable: ${error.message}`);
+  }
+  server.on('newSession', (_sessionId, _sessionData, callback) => callback());
+  server.on('resumeSession', (_sessionId, callback) => callback(null, null));
 
-  return https.createServer(httpsOptions, app);
+  const requestTimeoutMs = envInt('HTTPS_REQUEST_TIMEOUT_MS', 180_000, 5_000, 300_000);
+  server.headersTimeout = envInt('HTTPS_HEADERS_TIMEOUT_MS', 15_000, 5_000, requestTimeoutMs);
+  server.requestTimeout = requestTimeoutMs;
+  server.keepAliveTimeout = envInt('HTTPS_KEEP_ALIVE_TIMEOUT_MS', 5_000, 1_000, 30_000);
+  server.timeout = envInt('HTTPS_SOCKET_IDLE_TIMEOUT_MS', 120_000, 30_000, 10 * 60_000);
+  server.maxHeadersCount = envInt('HTTPS_MAX_HEADER_COUNT', 64, 16, 256);
+  server.maxRequestsPerSocket = envInt('HTTPS_MAX_REQUESTS_PER_SOCKET', 128, 1, 1_024);
+  server.maxConnections = envInt('HTTPS_MAX_CONNECTIONS', 8_192, 64, 100_000);
+  return server;
 }
 
 export async function createServer({
-  clusterSize,
   createApp,
   createWebSocketServer,
   onServerReady,
-  prepareWorkerContext,
+  prepareServerContext,
   tls: { certPath, keyPath } = {},
   logger = console,
-  onWorkerExit,
-  workerBootstrapTimeoutMs = 30000,
 } = {}) {
   if (typeof createApp !== 'function') {
     throw new Error('createServer requires a createApp function');
   }
 
-  const bindAddr = process.env.BIND_ADDRESS || '127.0.0.1';
-  const loopbacks = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0']);
+  const bindAddr = process.env.BIND_ADDRESS || LOOPBACK_HOST;
+  const loopbacks = new Set([LOOPBACK_HOST, '::1', 'localhost']);
   if (!loopbacks.has(bindAddr)) {
+    (logger?.warn ?? console.warn)(
+      `[BOOTSTRAP] Binding to non loopback address ${bindAddr}`
+    );
   }
 
-  const requestedWorkers = clusterSize ?? process.env.CLUSTER_WORKERS;
-  const workerCount = parseClusterWorkers(requestedWorkers, { logger });
-  const useCluster = workerCount > 1;
+  const configuredWorkers = String(process.env.CLUSTER_WORKERS || '1').trim();
+  if (configuredWorkers !== '' && configuredWorkers !== '1') {
+    throw new Error('CLUSTER_WORKERS greater than 1 is unsupported; scale with independent Redis-backed server nodes');
+  }
 
   const startWorkerInstance = async ({ key, cert, source, context, workerId }) => {
-    const app = await createApp({ context, workerId, isClusterWorker: cluster.isWorker });
+    const app = await createApp({ context, workerId, isClusterWorker: false });
     const server = createHttpsServer({ app, key, cert });
     const wss = typeof createWebSocketServer === 'function' ? await createWebSocketServer({ server, context, workerId }) : null;
 
@@ -185,92 +183,10 @@ export async function createServer({
     return { app, server, wss };
   };
 
-  if (useCluster && cluster.isPrimary) {
-    const { key, cert, source } = loadServerCertificates({ certPath, keyPath, logger });
-    logger?.log?.(`[BOOTSTRAP] TLS source: ${source}`);
-
-    const sharedContext = typeof prepareWorkerContext === 'function'
-      ? await prepareWorkerContext({ key, cert, workerCount, mode: 'primary' })
-      : {};
-
-    logger?.log?.(`[BOOTSTRAP] Primary starting ${workerCount} workers (cpus=${os.cpus().length})`);
-
-    for (let i = 0; i < workerCount; i += 1) {
-      const worker = cluster.fork();
-      worker.on('online', () => {
-        worker.send({
-          type: 'bootstrap:init',
-          tls: { key, cert, source },
-          context: sharedContext,
-          workerId: worker.id,
-        });
-      });
-    }
-
-    const workerRespawns = new Map();
-    const RESPAWN_LIMIT = 5;
-    const RESPAWN_WINDOW_MS = 60000;
-
-    cluster.on('exit', (worker, code, signal) => {
-      if (typeof onWorkerExit === 'function') {
-        onWorkerExit({ worker, code, signal });
-      } else {
-        const now = Date.now();
-        const workerId = worker.id;
-        const respawnData = workerRespawns.get(workerId) || { count: 0, lastRespawn: now };
-
-        if (now - respawnData.lastRespawn > RESPAWN_WINDOW_MS) {
-          respawnData.count = 0;
-        }
-
-        respawnData.count++;
-        respawnData.lastRespawn = now;
-        workerRespawns.set(workerId, respawnData);
-
-        if (respawnData.count > RESPAWN_LIMIT) {
-          logger?.error?.(`[BOOTSTRAP] Worker ${worker.process.pid} respawn limit exceeded (${RESPAWN_LIMIT} respawns in ${RESPAWN_WINDOW_MS}ms). Not respawning.`);
-          logger?.error?.('[BOOTSTRAP] This indicates a critical issue. Please investigate and restart the server manually.');
-          return;
-        }
-
-        logger?.warn?.(`[BOOTSTRAP] Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Respawning... (${respawnData.count}/${RESPAWN_LIMIT})`);
-        const newWorker = cluster.fork();
-        workerRespawns.delete(workerId);
-        workerRespawns.set(newWorker.id, respawnData);
-      }
-    });
-
-    return { mode: 'cluster-primary', workerCount, context: sharedContext };
-  }
-
-  if (useCluster && cluster.isWorker) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error('Timed out waiting for bootstrap init message'));
-      }, workerBootstrapTimeoutMs);
-
-      process.once('message', async (msg) => {
-        clearTimeout(timer);
-
-        if (!msg || msg.type !== 'bootstrap:init') {
-          return reject(new Error('Unexpected bootstrap init payload'));
-        }
-
-        try {
-          const { tls, context, workerId } = msg;
-          const result = await startWorkerInstance({ key: tls.key, cert: tls.cert, source: tls.source, context, workerId });
-          resolve({ mode: 'cluster-worker', ...result, context, workerId });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-  }
-
   const { key, cert, source } = loadServerCertificates({ certPath, keyPath, logger });
   logger?.log?.(`[BOOTSTRAP] TLS source: ${source}`);
-  const context = typeof prepareWorkerContext === 'function'
-    ? await prepareWorkerContext({ key, cert, workerCount: 1, mode: 'single' })
+  const context = typeof prepareServerContext === 'function'
+    ? await prepareServerContext({ key, cert, mode: 'single' })
     : {};
   const result = await startWorkerInstance({ key, cert, source, context, workerId: 0 });
 
@@ -296,7 +212,7 @@ export function registerShutdownHandlers({
     logger?.log?.(`[BOOTSTRAP] Received ${signal}, initiating shutdown...`);
 
     const forceExitTimeout = setTimeout(() => {
-      logger?.warn?.('[BOOTSTRAP] Shutdown timeout - forcing exit');
+      logger?.warn?.('[BOOTSTRAP] Shutdown timeout, forcing exit');
       process.exit(1);
     }, 10000);
 
@@ -313,13 +229,17 @@ export function registerShutdownHandlers({
       });
   };
 
+  const listeners = new Map();
   for (const signal of signals) {
-    process.on(signal, () => wrappedHandler(signal));
+    const listener = () => wrappedHandler(signal);
+    listeners.set(signal, listener);
+    process.on(signal, listener);
   }
 
   return () => {
-    for (const signal of signals) {
-      process.removeListener(signal, wrappedHandler);
+    for (const [signal, listener] of listeners) {
+      process.removeListener(signal, listener);
     }
+    listeners.clear();
   };
 }

@@ -42,6 +42,15 @@ function resolveCrypto(): Crypto {
 export class SecureMemory {
   private static readonly allocatedBuffers = new WeakSet<Uint8Array>();
   private static readonly MAX_BUFFER_SIZE = 1_048_576;
+  private static readonly MAX_RANDOM_FILL_BYTES = 65_536;
+
+  private static fillRandom(buffer: Uint8Array, crypto: Crypto): void {
+    for (let offset = 0; offset < buffer.length; offset += this.MAX_RANDOM_FILL_BYTES) {
+      crypto.getRandomValues(
+        buffer.subarray(offset, Math.min(offset + this.MAX_RANDOM_FILL_BYTES, buffer.length)),
+      );
+    }
+  }
 
   // Create a secure buffer
   static createSecureBuffer(size: number): Uint8Array {
@@ -58,7 +67,7 @@ export class SecureMemory {
     return buffer;
   }
 
-  // Securely zero out a buffer with anti-forensics
+  // Securely zero out a buffer with anti forensics
   static zeroBuffer(buffer: Uint8Array): void {
     if (!(buffer instanceof Uint8Array)) {
       throw new TypeError('Buffer must be Uint8Array');
@@ -83,7 +92,7 @@ export class SecureMemory {
     }
 
     const randomBytes = new Uint8Array(buffer.length);
-    crypto.getRandomValues(randomBytes);
+    this.fillRandom(randomBytes, crypto);
     buffer.set(randomBytes);
     randomBytes.fill(0);
 

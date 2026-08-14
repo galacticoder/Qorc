@@ -6,9 +6,14 @@ import { fileURLToPath } from 'url';
 import { createWriteStream } from 'fs';
 import { pipeline } from 'stream/promises';
 import { extract } from 'tar';
-import { findInPath, sleep } from './lb-utils.js';
+import { findInPath } from './lb-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const HIDDEN_SERVICE_INTRO_POINTS = (() => {
+    const parsed = Number.parseInt(process.env.TOR_HS_INTRO_POINTS || '', 10);
+    return Number.isInteger(parsed) && parsed >= 3 && parsed <= 20 ? parsed : 3;
+})();
 
 export class TorManager {
     constructor(scriptsDir) {
@@ -19,11 +24,13 @@ export class TorManager {
         this.torrcPath = path.join(this.dataDir, 'torrc');
         this.pidPath = path.join(this.dataDir, 'tor.pid');
         this.logPath = path.join(this.dataDir, 'tor.log');
+        this.hsLogPath = path.join(this.dataDir, 'tor-hs.log');
         this.torProcess = null;
         this._onionAddress = null;
         this.lastCheck = 0;
         this.checkInterval = 5000;
         this.isRunningState = false;
+        this.isPublishedState = false;
         this.platform = process.platform;
         this.arch = process.arch;
     }
@@ -45,7 +52,112 @@ export class TorManager {
         return path.join(this.torBundleDir, 'tor');
     }
 
+    getTorEnvironment(torBin) {
+        const env = { ...process.env };
+
+        delete env.OPENSSL_CONF;
+        delete env.OPENSSL_MODULES;
+        delete env.OQS_PROVIDER_MODULE;
+
+        if (path.resolve(torBin) !== path.resolve(this.getTorBinaryPath())) {
+            return env;
+        }
+
+        const bundledLibraryDirs = [
+            this.torBundleDir,
+            path.join(this.torBundleDir, 'lib64'),
+            path.join(this.torBundleDir, 'lib')
+        ].filter((directory) => existsSync(directory));
+        const inheritedLibraryDirs = (process.env.LD_LIBRARY_PATH || '')
+            .split(path.delimiter)
+            .filter(Boolean);
+        env.LD_LIBRARY_PATH = [...new Set([
+            ...bundledLibraryDirs,
+            ...inheritedLibraryDirs
+        ])].join(path.delimiter);
+
+        if (this.platform === 'darwin') {
+            const inheritedDyldDirs = (process.env.DYLD_LIBRARY_PATH || '')
+                .split(path.delimiter)
+                .filter(Boolean);
+            env.DYLD_LIBRARY_PATH = [...new Set([
+                ...bundledLibraryDirs,
+                ...inheritedDyldDirs
+            ])].join(path.delimiter);
+        }
+        return env;
+    }
+
+    async getTorLogSize() {
+        return this.getLogSize(this.logPath);
+    }
+
+    async getHsLogSize() {
+        return this.getLogSize(this.hsLogPath);
+    }
+
+    async getLogSize(logPath) {
+        try {
+            return (await fs.stat(logPath)).size;
+        } catch {
+            return 0;
+        }
+    }
+
+    async hasBootstrappedSince(startOffset) {
+        return this.logContainsSince(
+            this.logPath,
+            startOffset,
+            'Bootstrapped 100% (done): Done'
+        );
+    }
+
+    async hasPublishedDescriptorsSince(startOffset) {
+        const currentPublished = await this.logContainsSince(
+            this.hsLogPath,
+            startOffset,
+            'QOR_HS_DESC_PUBLISHED current'
+        );
+        if (!currentPublished) return false;
+        return this.logContainsSince(
+            this.hsLogPath,
+            startOffset,
+            'QOR_HS_DESC_PUBLISHED next'
+        );
+    }
+
+    async logContainsSince(logPath, startOffset, marker) {
+        let logFile;
+        try {
+            logFile = await fs.open(logPath, 'r');
+            const { size } = await logFile.stat();
+            const normalizedOffset = size >= startOffset ? startOffset : 0;
+            if (size <= normalizedOffset) return false;
+            const maxReadBytes = 256 * 1024;
+            const readOffset = Math.max(normalizedOffset, size - maxReadBytes);
+            const buffer = Buffer.allocUnsafe(size - readOffset);
+            const { bytesRead } = await logFile.read(buffer, 0, buffer.length, readOffset);
+            return buffer.subarray(0, bytesRead)
+                .includes(Buffer.from(marker));
+        } catch {
+            return false;
+        } finally {
+            await logFile?.close().catch(() => {});
+        }
+    }
+
     async getTorBinary() {
+        const configuredTor = process.env.LB_TOR_BIN?.trim();
+        if (configuredTor) {
+            try {
+                await fs.access(configuredTor, fs.constants.X_OK);
+                return configuredTor;
+            } catch {
+                console.error(`[TOR] Configured LB_TOR_BIN is not executable: ${configuredTor}`);
+                return null;
+            }
+        }
+
         // Check for latest bundled tor version
         const bundledTor = this.getTorBinaryPath();
         if (existsSync(bundledTor)) {
@@ -181,6 +293,10 @@ export class TorManager {
         return false;
     }
 
+    isPublished() {
+        return this.isPublishedState;
+    }
+
     async ensureConfig(listenPort) {
         await fs.mkdir(this.dataDir, { recursive: true, mode: 0o700 });
         await fs.mkdir(this.hiddenServiceDir, { recursive: true, mode: 0o700 });
@@ -197,8 +313,10 @@ export class TorManager {
             `DataDirectory ${this.dataDir}`,
             `PidFile ${this.pidPath}`,
             `Log notice file ${this.logPath}`,
+            `Log [rend]info file ${this.hsLogPath}`,
             `HiddenServiceDir ${this.hiddenServiceDir}`,
             `HiddenServicePort 443 127.0.0.1:${listenPort}`,
+            `HiddenServiceNumIntroductionPoints ${HIDDEN_SERVICE_INTRO_POINTS}`,
             `SocksPort 0`,
             `RunAsDaemon 0`,
         ].join('\n');
@@ -207,6 +325,8 @@ export class TorManager {
     }
 
     async start(listenPort) {
+        await this.ensureConfig(listenPort);
+
         if (await this.isRunning()) {
             console.log('[TOR] Tor is already running.');
             this.isRunningState = true;
@@ -214,7 +334,7 @@ export class TorManager {
         }
 
         console.log('[TOR] Starting Tor Hidden Service...');
-        await this.ensureConfig(listenPort);
+        this.isPublishedState = false;
 
         const torBin = await this.getTorBinary();
         if (!torBin) {
@@ -223,28 +343,38 @@ export class TorManager {
         }
 
         try {
+            const startupLogOffset = await this.getTorLogSize();
+            const startupHsLogOffset = await this.getHsLogSize();
             const logStream = await fs.open(this.logPath, 'a');
             this.torProcess = spawn(torBin, ['-f', this.torrcPath], {
                 detached: true,
-                stdio: ['ignore', logStream.fd, logStream.fd]
+                stdio: ['ignore', logStream.fd, logStream.fd],
+                env: this.getTorEnvironment(torBin)
             });
             this.torProcess.unref();
             await logStream.close();
 
-            // Wait for hostname to be generated
-            console.log('[TOR] Waiting for .onion address generation...');
-            for (let i = 0; i < 60; i++) {
+            console.log('[TOR] Waiting for bootstrap and confirmed descriptor publication...');
+            for (let i = 0; ; i++) {
+                if (this.torProcess.exitCode !== null) {
+                    console.error(`[TOR] Tor exited during startup (${this.torProcess.exitCode}).`);
+                    return false;
+                }
                 const addr = await this.getOnionAddress();
-                if (addr) {
+                const bootstrapped = await this.hasBootstrappedSince(startupLogOffset);
+                const published = await this.hasPublishedDescriptorsSince(startupHsLogOffset);
+                if (addr && bootstrapped && published) {
                     console.log(`[TOR] Onion URL: https://${addr}`);
+                    console.log('[TOR] Hidden-service descriptor accepted by an HSDir.');
                     this.isRunningState = true;
+                    this.isPublishedState = true;
                     return true;
                 }
-                await sleep(1000);
+                if (i > 0 && i % 300 === 0) {
+                    console.warn('[TOR] Descriptor publication is still pending');
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1000));
             }
-
-            console.error('[TOR] Timed out waiting for .onion address.');
-            return false;
         } catch (err) {
             console.error('[TOR] Failed to start Tor:', err.message);
             return false;
@@ -260,6 +390,7 @@ export class TorManager {
                 await fs.unlink(this.pidPath).catch(() => { });
             }
             this.isRunningState = false;
+            this.isPublishedState = false;
         } catch (err) {
             console.error('[TOR] Error stopping Tor:', err.message);
         }

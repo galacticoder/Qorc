@@ -1,25 +1,54 @@
 import { SignalType } from '../signals.js';
-import { ConnectionStateManager } from '../session/connection-state.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { withRedisClient } from '../session/redis-client.js';
-import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
-import { deleteCachedPQSession } from '../session/pq-session-storage.js';
-import { validateCapabilityToken } from '../routing/capability-tokens.js';
-import { TimingProtection } from '../routing/timing-protection.js';
-import { BlindSignatureIssuer } from '../security/blind-signatures.js';
-import {
-  registerLocalSocket,
-  unregisterLocalSocket,
-  routeToGlobalMix
-} from '../routing/blind-router.js';
-import { recordWsIngress } from '../diagnostics/runtime-monitor.js';
 
-function envInt(name, fallback, min, max) {
-  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
+import { clearSocketPQSession, sendSecureMessage } from '../messaging/pq-envelope-handler.js';
+import { TimingProtection } from '../routing/timing-protection.js';
+import {
+  unregisterLocalSocket
+} from '../routing/blind-router.js';
+import { envInt } from '../utils/env.js';
+import { createWindowBudget } from '../utils/window-budget.js';
+import { awaitMessageHandlerWithDeadline } from './message-handler-deadline.js';
+
+const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
+
+class WsIngressFrameError extends Error {
+  constructor(closeCode, closeReason, logCode) {
+    super(logCode);
+    this.closeCode = closeCode;
+    this.closeReason = closeReason;
+    this.logCode = logCode;
+  }
+}
+
+function rawMessageByteLength(raw) {
+  if (typeof raw === 'string') return Buffer.byteLength(raw, 'utf8');
+  if (Buffer.isBuffer(raw)) return raw.length;
+  if (raw instanceof ArrayBuffer) return raw.byteLength;
+  if (ArrayBuffer.isView(raw)) return raw.byteLength;
+  if (Array.isArray(raw) && raw.every(Buffer.isBuffer)) {
+    const total = raw.reduce((sum, part) => sum + part.length, 0);
+    if (Number.isSafeInteger(total)) return total;
+  }
+  throw new WsIngressFrameError(1002, 'Invalid frame format', 'INVALID_RAW_FRAME');
+}
+
+function decodeTextFrame(raw, byteLength) {
+  try {
+    if (typeof raw === 'string') return raw;
+    if (Buffer.isBuffer(raw)) return strictTextDecoder.decode(raw);
+    if (raw instanceof ArrayBuffer) return strictTextDecoder.decode(new Uint8Array(raw));
+    if (ArrayBuffer.isView(raw)) {
+      return strictTextDecoder.decode(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+    }
+    if (Array.isArray(raw) && raw.every(Buffer.isBuffer)) {
+      return strictTextDecoder.decode(Buffer.concat(raw, byteLength));
+    }
+  } catch {
+    throw new WsIngressFrameError(1007, 'Invalid UTF-8 payload', 'INVALID_UTF8');
+  }
+  throw new WsIngressFrameError(1002, 'Invalid frame format', 'INVALID_RAW_FRAME');
 }
 
 // Attach WebSocket gateway
@@ -27,13 +56,11 @@ export function attachGateway({
   wss,
   serverHybridKeyPair,
   serverId = null,
-  createSession = ConnectionStateManager.createSession,
-  refreshSession = ConnectionStateManager.refreshSession,
   rateLimiter = rateLimitMiddleware,
-  logger = cryptoLogger,
+  logger = console,
   config,
   onMessage,
-  onConnectionActive,
+  onConnectionClosed,
 }) {
   if (!wss) {
     throw new Error('attachGateway requires a WebSocketServer instance');
@@ -45,86 +72,43 @@ export function attachGateway({
   const {
     bandwidthQuota = 5 * 1024 * 1024,
     bandwidthWindowMs = 60 * 1000,
+    messageQuota = 500,
+    messageWindowMs = 60 * 1000,
     heartbeatIntervalMs = 30000,
     fixedMessageSizeBytes = null,
   } = config || {};
 
-  const SESSION_REFRESH_MIN_INTERVAL_MS = 60_000;
-  const DELIVERY_STALE_THRESHOLD_MS = 5 * 60_000;
-  const HEARTBEAT_MISSED_LIMIT = Math.max(3, Number.parseInt(process.env.WS_HEARTBEAT_MISSED_LIMIT || '6', 10) || 6);
+  const HEARTBEAT_MISSED_LIMIT = envInt('WS_HEARTBEAT_MISSED_LIMIT', 6, 3, 20);
   const LARGE_FRAME_WINDOW_MS = envInt('WS_LARGE_FRAME_WINDOW_MS', 60_000, 1_000, 10 * 60_000);
   const LARGE_FRAME_MAX_COUNT = envInt('WS_LARGE_FRAME_MAX_COUNT', 64, 1, 10_000);
   const LARGE_FRAME_MAX_BYTES = envInt('WS_LARGE_FRAME_MAX_BYTES', 32 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
+  const PENDING_MESSAGE_MAX_COUNT = envInt('WS_PENDING_MESSAGE_MAX_COUNT', 64, 4, 4096);
+  const PENDING_MESSAGE_MAX_BYTES = envInt(
+    'WS_PENDING_MESSAGE_MAX_BYTES',
+    16 * 1024 * 1024,
+    1024 * 1024,
+    256 * 1024 * 1024
+  );
+  const MAX_CONCURRENT_CONNECTIONS = envInt('WS_MAX_CONCURRENT_CONNECTIONS', 4096, 64, 100_000);
+  const MESSAGE_HANDLER_TIMEOUT_MS = envInt(
+    'WS_MESSAGE_HANDLER_TIMEOUT_MS',
+    30_000,
+    1_000,
+    120_000
+  );
 
-  const consumeLargeFrameBudget = (ws, messageBytes) => {
-    const now = Date.now();
-    if (!ws._largeFrameWindowStart || now - ws._largeFrameWindowStart > LARGE_FRAME_WINDOW_MS) {
-      ws._largeFrameWindowStart = now;
-      ws._largeFrameWindowCount = 0;
-      ws._largeFrameWindowBytes = 0;
-    }
-    ws._largeFrameWindowCount = Number(ws._largeFrameWindowCount || 0) + 1;
-    ws._largeFrameWindowBytes = Number(ws._largeFrameWindowBytes || 0) + Math.max(0, messageBytes);
-    return ws._largeFrameWindowCount <= LARGE_FRAME_MAX_COUNT &&
-      ws._largeFrameWindowBytes <= LARGE_FRAME_MAX_BYTES;
-  };
-
-  const safeJsonParse = (raw) => {
-    if (typeof raw !== 'string') return null;
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const hasClaimedInboxRoute = (ws) => {
-    return !!(ws?._claimedInboxRoutes && ws._claimedInboxRoutes.size > 0);
-  };
-
-  const isLocalDeliveryReady = (ws) => {
-    return !!(ws?._unlinkedSession || hasClaimedInboxRoute(ws));
-  };
-
-  const maybeRefreshSession = (ws, reason) => {
-    try {
-      const sid = ws?._sessionId;
-      if (!sid) return;
-      const now = Date.now();
-      const last = Number(ws._lastSessionRefreshAt || 0);
-      if (now - last < SESSION_REFRESH_MIN_INTERVAL_MS) return;
-      ws._lastSessionRefreshAt = now;
-
-      void refreshSession(sid).catch((error) => {
-        logger.warn('[WS] Session refresh failed', {
-          reason,
-          error: error?.message || String(error)
-        });
-      });
-
-      if (!ws._blindSocketId && ws._pqSessionId && isLocalDeliveryReady(ws)) {
-        registerLocalSocket(ws);
-      }
-    } catch {
-    }
-  };
+  const consumeLargeFrameBudget = createWindowBudget({
+    windowMs: LARGE_FRAME_WINDOW_MS,
+    maxCount: LARGE_FRAME_MAX_COUNT,
+    maxBytes: LARGE_FRAME_MAX_BYTES
+  });
 
   let cachedPublicKeyPayload = null;
-  let cachedPublicKeyLogInfo = null;
-
-  const getCachedPublicKeyMessage = async () => {
+  const getCachedPublicKeyPayload = async () => {
     if (cachedPublicKeyPayload) {
-      const message = JSON.stringify({
+      return {
         ...cachedPublicKeyPayload,
         serverTime: Date.now()
-      });
-      return {
-        message,
-        logInfo: {
-          ...cachedPublicKeyLogInfo,
-          originalSize: message.length
-        }
       };
     }
 
@@ -139,12 +123,7 @@ export function attachGateway({
     const kyberPublicBase64 = CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey);
     const x25519PublicBase64 = CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey);
 
-    // Check if server password is required
-    const { getServerPasswordHash } = await import('../config/config.js');
-    const serverPasswordHash = getServerPasswordHash();
-
-    // Get blind signature public key metadata (RSABSSA-PSS)
-    const blindPublicKey = await BlindSignatureIssuer.getPublicKey();
+    const { isServerPasswordGateReady } = await import('../config/config.js');
 
     const keyPayload = {
       type: SignalType.SERVER_PUBLIC_KEY,
@@ -152,65 +131,50 @@ export function attachGateway({
       hybridKeys: {
         kyberPublicBase64,
         dilithiumPublicBase64,
-        x25519PublicBase64,
-        blindPublicKey
+        x25519PublicBase64
       },
-      requiresServerPassword: !!serverPasswordHash,
+      requiresServerPassword: isServerPasswordGateReady(),
     };
-    const keyMessage = JSON.stringify({
+    const currentPayload = {
       ...keyPayload,
       serverTime: Date.now()
-    });
-
-    cachedPublicKeyPayload = keyPayload;
-    cachedPublicKeyLogInfo = {
-      serverId: serverId || 'default',
-      dilithiumPublicKeyLength: Buffer.from(dilithiumPublicBase64, 'base64').length,
-      kyberPublicKeyLength: serverHybridKeyPair.kyber.publicKey.length,
-      originalSize: keyMessage.length,
     };
 
-    return { message: keyMessage, logInfo: cachedPublicKeyLogInfo };
+    cachedPublicKeyPayload = keyPayload;
+    return currentPayload;
   };
-
-  // Add local WebSocket connection using blind routing
-  const addLocalConnection = async (ws) => {
-    if (!ws) return;
-
-    // Only receive ready sockets join local privacy broadcasts
-    if (!isLocalDeliveryReady(ws)) {
-      ws._localDeliveryDeferred = true;
-      return;
-    }
-
-    if (!ws._blindSocketId) {
-      registerLocalSocket(ws);
-    }
-  };
+  const getCachedPublicKeyMessage = async () => JSON.stringify(
+    await getCachedPublicKeyPayload()
+  );
 
   // Remove local WebSocket connection using blind routing
   const removeLocalConnection = async (ws) => {
     if (!ws) return;
 
-    // Unregister socket from blind router
     unregisterLocalSocket(ws);
   };
 
-  const routeToGlobalMixStream = async (sealedEnvelope, options = {}) => {
-    return await routeToGlobalMix(sealedEnvelope, options);
-  };
-
-  // Validate capability token for blind routing
-  const validateBlindAuthToken = async (token) => {
-    return await validateCapabilityToken(token);
-  };
-
   // Handle incoming WebSocket message
-  const handleMessage = async ({ ws, sessionId, message, parsed }) => {
+  const handleMessage = async ({ ws, parsed }) => {
     if (typeof onMessage === 'function') {
       try {
-        await onMessage({ ws, sessionId, message, parsed });
+        if (ws._connectionAbortSignal?.aborted) return { handled: false };
+        const handlerPromise = onMessage({ ws, parsed });
+        await awaitMessageHandlerWithDeadline(handlerPromise, {
+          signal: ws._connectionAbortSignal,
+          timeoutMs: MESSAGE_HANDLER_TIMEOUT_MS
+        });
       } catch (error) {
+        if (error?.code === 'WS_MESSAGE_HANDLER_ABORTED') {
+          return { handled: false };
+        }
+        if (error?.code === 'WS_MESSAGE_HANDLER_TIMEOUT') {
+          throw new WsIngressFrameError(
+            1011,
+            'Message processing timeout',
+            'MESSAGE_HANDLER_TIMEOUT'
+          );
+        }
         logger.error('[WS] Message handler error', {
           error: error.message
         });
@@ -252,91 +216,48 @@ export function attachGateway({
         try {
           ws.ping(() => { });
         } catch { }
-        maybeRefreshSession(ws, 'heartbeat');
       } catch (error) {
         logger.error('[WS] Error during heartbeat:', error);
       }
     }
   }, heartbeatIntervalMs);
 
-  let staleCleanupCursor = '0';
-  const staleConnectionCleanupInterval = setInterval(async () => {
-    try {
-      await withRedisClient(async (client) => {
-        const nowTimestamp = Date.now();
-        const [newCursor, keys] = await client.scan(
-          staleCleanupCursor,
-          'MATCH',
-          'inbox:*',
-          'COUNT',
-          50
-        );
-        staleCleanupCursor = newCursor;
-
-        let totalCleaned = 0;
-
-        for (const key of keys) {
-          try {
-            if (typeof key === 'string' && key.startsWith('inbox:queue:')) {
-              continue;
-            }
-
-            const keyType = await client.type(key);
-            if (keyType !== 'string') {
-              continue;
-            }
-
-            const raw = await client.get(key);
-            const parsed = safeJsonParse(raw);
-            const lastSeen = Number(parsed?.lastSeen || parsed?.registeredAt || 0);
-
-            if (!parsed || !lastSeen || (nowTimestamp - lastSeen) > DELIVERY_STALE_THRESHOLD_MS) {
-              await client.del(key);
-              totalCleaned++;
-            }
-          } catch (err) {
-            logger.warn('[WS] Error cleaning up inbox key', {
-              error: err.message
-            });
-          }
-        }
-
-        if (totalCleaned > 0) {
-          logger.info('[WS] Cleaned up stale inbox entries', {
-            totalCleaned,
-            keysScanned: keys.length,
-          });
-        }
+  wss.on('connection', async (ws) => {
+    const connectionAbortController = new AbortController();
+    ws._connectionAbortSignal = connectionAbortController.signal;
+    let connectionCleanupStarted = false;
+    ws.on('error', (error) => {
+      connectionAbortController.abort();
+      logger.warn('[WS] Socket transport error', {
+        code: typeof error?.code === 'string' ? error.code : 'WS_TRANSPORT_ERROR'
       });
-    } catch (error) {
-      logger.warn('[WS] Error during stale inbox cleanup', { error: error.message });
-    }
-  }, 60_000);
-
-  wss.on('connection', async (ws, req) => {
-    if (typeof onConnectionActive === 'function') {
+    });
+    ws.on('close', async () => {
+      if (connectionCleanupStarted) return;
+      connectionCleanupStarted = true;
+      connectionAbortController.abort();
       try {
-        onConnectionActive();
-      } catch (error) {
-        logger.warn('[WS] Connection activation hook failed', {
-          error: error?.message || String(error)
-        });
+        clearSocketPQSession(ws);
+        await removeLocalConnection(ws);
+        if (typeof onConnectionClosed === 'function') {
+          try { onConnectionClosed(ws); } catch { }
+        }
+      } finally {
+        ws._messageProcessing = null;
+        ws._pendingMessageCount = 0;
+        ws._pendingMessageBytes = 0;
       }
-    }
+    });
 
-    try {
-      ws.upgradeReq = req;
-      ws.headers = req?.headers || {};
-    } catch (_) { }
+    if (wss.clients.size > MAX_CONCURRENT_CONNECTIONS) {
+      logger.warn('[WS] Concurrent connection capacity reached');
+      ws.close(1013, 'Server connection capacity reached');
+      return;
+    }
 
     try {
       const allowed = await rateLimiter.checkConnectionLimit(ws);
       if (!allowed) {
-        logger.warn('[WS] Connection rejected due to rate limiting', {
-          socketId: ws._blindSocketId,
-          code: 1008
-        });
-        ws.close(1008, 'Rate limit exceeded');
         return;
       }
     } catch (error) {
@@ -345,42 +266,24 @@ export function attachGateway({
       return;
     }
 
-    let sessionId;
     let bandwidthUsed = 0;
-    try {
-      sessionId = await createSession();
-      ws._sessionId = sessionId;
-      logger.info('[WS] Created session');
-    } catch (error) {
-      logger.error('[WS] Failed to create session', {
-        error: error.message,
-        code: 1011
-      });
-      ws.close(1011, 'Internal server error');
-      return;
-    }
+    let ingressMessageCount = 0;
+    let ingressMessageWindowStart = Date.now();
 
     ws.isAlive = true;
     ws._missedHeartbeats = 0;
     ws.on('pong', () => {
       ws.isAlive = true;
       ws._missedHeartbeats = 0;
-      ws._lastPongAt = Date.now();
     });
 
     ws.on('ping', () => {
       ws.isAlive = true;
       ws._missedHeartbeats = 0;
-      ws._lastPongAt = Date.now();
-      try {
-        ws.pong();
-      } catch (error) {
-        logger.warn('[WS] Pong failed', { error: error.message });
-      }
     });
 
     try {
-      const { message, logInfo } = await getCachedPublicKeyMessage();
+      const message = await getCachedPublicKeyMessage();
 
       if (ws.readyState !== 1) {
         logger.warn('[WS] Connection closed before key exchange', {
@@ -389,20 +292,12 @@ export function attachGateway({
         return;
       }
 
-      logger.info('[WS] Sending server public keys', {
-        ...logInfo,
-        readyState: ws.readyState,
-        bufferedAmount: ws.bufferedAmount
-      });
-
       ws.send(message, (error) => {
         if (error) {
           logger.error('[WS] Failed to send server public keys', {
             error: error.message,
             readyState: ws.readyState
           });
-        } else {
-          logger.info('[WS] Server public keys delivered to OS buffer');
         }
       });
     } catch (error) {
@@ -415,26 +310,61 @@ export function attachGateway({
       return;
     }
 
-    ws.on('message', async (messageBuffer) => {
+    ws.on('message', async (messageBuffer, isBinary) => {
+      try {
+        if (isBinary === true) {
+          throw new WsIngressFrameError(1003, 'Binary frames are unsupported', 'BINARY_FRAME');
+        }
       const receivedAt = Date.now();
       ws.isAlive = true;
       ws._missedHeartbeats = 0;
-      ws._lastMessageAt = receivedAt;
+
+      if (ws._ingressQueueRejected) return;
+
+      if (receivedAt - ingressMessageWindowStart >= messageWindowMs) {
+        ingressMessageWindowStart = receivedAt;
+        ingressMessageCount = 0;
+      }
+      ingressMessageCount += 1;
+      if (ingressMessageCount > messageQuota) {
+        ws._ingressQueueRejected = true;
+        logger.warn('[WS] Ingress frame rate exceeded', {
+          count: ingressMessageCount,
+          maxCount: messageQuota,
+          windowMs: messageWindowMs
+        });
+        ws.close(1008, 'Message rate exceeded');
+        return;
+      }
+
+      const messageBytes = rawMessageByteLength(messageBuffer);
+      const pendingCount = Number(ws._pendingMessageCount || 0) + 1;
+      const pendingBytes = Number(ws._pendingMessageBytes || 0) + messageBytes;
+      if (pendingCount > PENDING_MESSAGE_MAX_COUNT || pendingBytes > PENDING_MESSAGE_MAX_BYTES) {
+        ws._ingressQueueRejected = true;
+        logger.warn('[WS] Pending message queue exceeded', {
+          pendingCount,
+          pendingBytes,
+          maxCount: PENDING_MESSAGE_MAX_COUNT,
+          maxBytes: PENDING_MESSAGE_MAX_BYTES
+        });
+        ws.close(1008, 'Pending message queue exceeded');
+        return;
+      }
+      ws._pendingMessageCount = pendingCount;
+      ws._pendingMessageBytes = pendingBytes;
 
       const previousMessageProcessing = ws._messageProcessing || Promise.resolve();
       let releaseMessageProcessing = () => {};
       ws._messageProcessing = new Promise((resolve) => {
         releaseMessageProcessing = resolve;
       });
-      await previousMessageProcessing.catch(() => {});
 
       try {
+        await previousMessageProcessing.catch(() => {});
+        if (ws._ingressQueueRejected || ws.readyState !== 1) return;
+
         const now = receivedAt;
-        const messageBytes = Buffer.isBuffer(messageBuffer)
-          ? messageBuffer.length
-          : (messageBuffer instanceof ArrayBuffer
-            ? messageBuffer.byteLength
-            : (typeof messageBuffer === 'string' ? Buffer.byteLength(messageBuffer) : 0));
 
         if (fixedMessageSizeBytes && ws._pqSessionId) {
           if (messageBytes !== fixedMessageSizeBytes) {
@@ -508,82 +438,71 @@ export function attachGateway({
 
         bandwidthUsed += messageBytes;
 
-        let messageString;
-        if (Buffer.isBuffer(messageBuffer)) {
-          messageString = messageBuffer.toString('utf8');
-        } else if (messageBuffer instanceof ArrayBuffer) {
-          messageString = Buffer.from(messageBuffer).toString('utf8');
-        } else if (typeof messageBuffer === 'string') {
-          messageString = messageBuffer;
-        } else {
-          logger.error('[WS] Unknown message format', {
-            type: typeof messageBuffer,
-            constructor: messageBuffer?.constructor?.name
-          });
-          throw new Error('Invalid message format: unknown type');
-        }
+        const messageString = decodeTextFrame(messageBuffer, messageBytes);
 
         try {
-          const parsed = JSON.parse(messageString);
+          let parsed;
+          try {
+            parsed = JSON.parse(messageString);
+          } catch {
+            throw new WsIngressFrameError(1002, 'Invalid JSON payload', 'INVALID_JSON');
+          }
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new Error('Invalid message structure: expected object');
+            throw new WsIngressFrameError(1002, 'Invalid message structure', 'INVALID_MESSAGE_OBJECT');
           }
           if (typeof parsed.type !== 'string' || parsed.type.length === 0 || parsed.type.length > 64) {
-            throw new Error('Invalid or missing message type');
+            throw new WsIngressFrameError(1002, 'Invalid message type', 'INVALID_MESSAGE_TYPE');
           }
-          recordWsIngress(messageBytes, parsed.type);
-
-          await handleMessage({ ws, sessionId, message: messageString, parsed });
-          maybeRefreshSession(ws, 'message');
+          await handleMessage({ ws, parsed });
         } catch (error) {
-          logger.error('[WS] Message processing error', {
-            error: error.message
-          });
-          if (error.message.includes('too large') || error.message.includes('size')) {
-            ws.close(1009, 'Message too large');
-          } else if (error.message.includes('invalid') || error.message.includes('malformed')) {
-            ws.close(1002, 'Invalid message format');
+          if (error instanceof WsIngressFrameError) {
+            ws._ingressQueueRejected = true;
+            logger.warn('[WS] Protocol frame rejected', { code: error.logCode });
+            if (error.logCode === 'MESSAGE_HANDLER_TIMEOUT') {
+              connectionAbortController.abort();
+              try {
+                ws.terminate?.();
+              } catch { }
+            } else {
+              ws.close(error.closeCode, error.closeReason);
+            }
           } else {
+            logger.error('[WS] Message handler failed');
             try {
-              ws.send(JSON.stringify({ type: 'error', message: 'Internal processing error' }));
+              await sendSecureMessage(ws, {
+                type: SignalType.ERROR,
+                message: 'Internal processing error'
+              });
             } catch { }
           }
         }
       } finally {
+        ws._pendingMessageCount = Math.max(0, Number(ws._pendingMessageCount || 0) - 1);
+        ws._pendingMessageBytes = Math.max(0, Number(ws._pendingMessageBytes || 0) - messageBytes);
         releaseMessageProcessing();
       }
-    });
-
-    ws.on('close', async (code, reason) => {
-      if (ws._pqSessionId) {
-        deleteCachedPQSession(ws._pqSessionId);
-      }
-      await removeLocalConnection(ws);
-      if (sessionId) {
+      } catch (error) {
+        ws._ingressQueueRejected = true;
+        const frameError = error instanceof WsIngressFrameError
+          ? error
+          : new WsIngressFrameError(1011, 'Internal processing error', 'INGRESS_PROCESSING_FAILED');
+        logger.warn('[WS] Ingress frame rejected', { code: frameError.logCode });
         try {
-          await ConnectionStateManager.cleanupConnection(sessionId);
-        } catch (error) {
-          logger.error('[WS] Failed to cleanup connection state on close', {
-            error: error.message
-          });
-        }
+          ws.close(frameError.closeCode, frameError.closeReason);
+        } catch { }
       }
-
-      logger.info('[WS] Connection closed', { closed: true });
     });
+
   });
 
   return {
-    stop: () => {
+    stop: async () => {
       clearInterval(heartbeatInterval);
-      clearInterval(staleConnectionCleanupInterval);
-      TimingProtection.stopCoverTraffic();
+      await TimingProtection.stopCoverTraffic();
       logger.info('[WS] Gateway stopped');
     },
-    addLocalConnection,
     removeLocalConnection,
-    routeToGlobalMixStream,
-    validateBlindAuthToken,
+    getServerPublicKeyPayload: getCachedPublicKeyPayload,
     getServerPublicKeyMessage: getCachedPublicKeyMessage,
   };
 }

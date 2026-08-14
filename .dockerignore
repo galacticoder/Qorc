@@ -6,8 +6,16 @@ npm-debug.log
 docs
 electron
 src
+server/config/secrets/
+server/config/secrets/**
 server/config/tor/
 server/config/tor/**
+server/config/certs/
+server/config/certs/**
+server/config/*
+!server/config/config.js
+!server/config/constants.js
+!server/config/secure-credentials.js
 config/pnpm-lock.yaml
 config/*.ts
 config/*.js
@@ -25,3 +33,5 @@ vite.config.*.ts
 pnpm-workspace.yaml
 tenk.json
 **/node_modules
+workers/*/target
+src-tauri/vendor/tor

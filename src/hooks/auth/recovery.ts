@@ -1,29 +1,27 @@
 import { RefObject } from "react";
-import websocketClient from "../../lib/websocket/websocket";
-import { storage } from "../../lib/tauri-bindings";
-import { PinnedServer, generateBlindCredential } from "../../lib/utils/auth-utils";
+import websocketClient, {
+  type ResumeAuthorizationResponse,
+  UnlinkedAuthorizationError,
+} from "../../lib/websocket/websocket";
 import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
-
-interface BlindCredentialRefValue {
-  message: string;
-  inboxId?: string;
-  routeId?: string;
-  blindedMsg: string;
-  blindingFactor: string;
-  n: string;
-  kid: string;
-  modulusLength: number;
-  hash: string;
-  saltLength: number;
-  scheme: string;
-  used?: boolean;
-}
+import {
+  clearLastAuthenticatedAccount,
+  loadLastAuthenticatedAccount,
+  storeLastAuthenticatedAccount,
+} from "../../lib/security/local-account-scope";
+import {
+  type AuthLifecycle,
+  isStaleAuthOperation,
+  wipeStaleAuthResult,
+} from "../../lib/auth/auth-lifecycle";
+import { hasResumeToken } from "../../lib/signals/resume-tokens";
+import { computeBlindUserId } from "../../lib/utils/auth-utils";
+import { getBlindRoutingClient } from "../../lib/transport/blind-routing-client";
 
 export interface RecoveryRefs {
   loginUsernameRef: RefObject<string>;
   originalUsernameRef: RefObject<string>;
-  blindCredentialRef?: RefObject<BlindCredentialRefValue | null>;
-  serverHybridPublicRef?: RefObject<{ blindPublicKey?: any } | null>;
+  recoveryInFlightRef: RefObject<Promise<boolean> | null>;
 }
 
 export interface RecoverySetters {
@@ -37,122 +35,135 @@ export const createAttemptAuthRecovery = (
   refs: RecoveryRefs,
   setters: RecoverySetters,
   accountAuthenticated: boolean,
-  isLoggedIn: boolean
+  isLoggedIn: boolean,
+  lifecycle: AuthLifecycle,
+  completeAuthorization: (response: ResumeAuthorizationResponse) => Promise<void>
 ) => {
   return async (): Promise<boolean> => {
-    if (await isExplicitlyLoggedOut()) {
-      setters.setAuthStatus('');
-      try { setters.setTokenValidationInProgress(false); } catch { }
-      return false;
-    }
-
-    // Attempt to recover username from global storage
-    let storedUsername = refs.loginUsernameRef.current;
-    let storedDisplayName = refs.originalUsernameRef.current;
-
-    if (!storedUsername || !storedDisplayName) {
+    if (refs.recoveryInFlightRef.current) return refs.recoveryInFlightRef.current;
+    const operation = lifecycle.capture();
+    const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
+      const result = await promise;
       try {
-        const recoveringUsername = await storage.get('last_authenticated_username');
-        const recoveringDisplayName = await storage.get('last_authenticated_display_name');
+        lifecycle.assertCurrent(operation);
+      } catch (error) {
+        wipeStaleAuthResult(result);
+        throw error;
+      }
+      return result;
+    };
 
-        if (!storedUsername) storedUsername = recoveringUsername;
-        if (!storedDisplayName) storedDisplayName = recoveringDisplayName || storedUsername;
-      } catch (err) { }
-    }
-
-    if (!storedUsername) {
-      return false;
-    }
-
-    const alreadyAuthenticated = accountAuthenticated && isLoggedIn;
-    if (!alreadyAuthenticated) {
-      try { setters.setTokenValidationInProgress(true); } catch { }
-      setters.setAuthStatus("Recovering...");
-    }
-
-    try {
-      if (!websocketClient.isConnectedToServer()) {
-        await websocketClient.connect();
+    const recovery = (async (): Promise<boolean> => {
+      if (await awaitCurrent(isExplicitlyLoggedOut())) {
+        setters.setAuthStatus('');
+        try { setters.setTokenValidationInProgress(false); } catch { }
+        return false;
       }
 
-      const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
-      const pseudonymHash = computeBlindUserId(storedUsername);
-      refs.loginUsernameRef.current = storedUsername;
+      let storedUsername = refs.loginUsernameRef.current;
+      let storedDisplayName = refs.originalUsernameRef.current;
 
-      if (storedDisplayName) {
-        refs.originalUsernameRef.current = storedDisplayName;
-        setters.setUsername(storedDisplayName);
-        setters.setPseudonym(pseudonymHash);
-      } else {
-        setters.setUsername(storedUsername);
-        setters.setPseudonym(pseudonymHash);
+      if (!storedUsername || !storedDisplayName) {
+        try {
+          const recovered = await awaitCurrent(loadLastAuthenticatedAccount());
+          const recoveringUsername = recovered.username;
+          const recoveringDisplayName = recovered.displayName;
+
+          if (!storedUsername) storedUsername = recoveringUsername;
+          if (!storedDisplayName) storedDisplayName = recoveringDisplayName || storedUsername;
+        } catch (error) {
+          if (isStaleAuthOperation(error)) return false;
+        }
       }
 
-      let blindedToken: string | undefined;
-      try {
-        const blindPublicKey =
-          refs.serverHybridPublicRef?.current?.blindPublicKey ||
-          PinnedServer.get()?.blindPublicKey;
+      if (!storedUsername || (operation.account && operation.account !== storedUsername)) {
+        return false;
+      }
 
-        if (blindPublicKey && refs.blindCredentialRef) {
-          const existing = refs.blindCredentialRef.current;
-          if (!existing || existing.used) {
-            const generated = await generateBlindCredential(storedUsername, blindPublicKey);
-            if (generated) {
-              refs.blindCredentialRef.current = { ...generated, used: false };
-              blindedToken = generated.blindedMsg;
-            }
-          } else {
-            blindedToken = existing.blindedMsg;
+      if (!await awaitCurrent(hasResumeToken(storedUsername))) {
+        if (!accountAuthenticated || !isLoggedIn) {
+          setters.setAuthStatus('');
+          try { setters.setTokenValidationInProgress(false); } catch { }
+        }
+        return false;
+      }
+
+      const alreadyAuthenticated = accountAuthenticated && isLoggedIn;
+      if (!alreadyAuthenticated) {
+        try { setters.setTokenValidationInProgress(true); } catch { }
+        setters.setAuthStatus("Recovering...");
+      }
+
+      try {
+        lifecycle.assertCurrent(operation);
+        const pseudonymHash = computeBlindUserId(storedUsername);
+        refs.loginUsernameRef.current = storedUsername;
+        websocketClient.setUsername(storedUsername);
+
+        if (storedDisplayName) {
+          refs.originalUsernameRef.current = storedDisplayName;
+          setters.setUsername(storedDisplayName);
+          setters.setPseudonym(pseudonymHash);
+        } else {
+          setters.setUsername(storedUsername);
+          setters.setPseudonym(pseudonymHash);
+        }
+
+        try {
+          lifecycle.assertCurrent(operation);
+          getBlindRoutingClient(storedUsername);
+        } catch (error) {
+          if (isStaleAuthOperation(error)) return false;
+        }
+
+        const response = await awaitCurrent(websocketClient.switchToUnlinkedMode(operation.signal));
+        const ready = websocketClient.isUnlinkedSessionReady();
+        if (ready && !alreadyAuthenticated) {
+          await awaitCurrent(completeAuthorization(response));
+        }
+        return ready;
+      } catch (error) {
+        if (isStaleAuthOperation(error) || !lifecycle.isCurrent(operation)) return false;
+        if (error instanceof UnlinkedAuthorizationError) {
+          try {
+            await awaitCurrent(completeAuthorization(error.response));
+          } catch (completionError) {
+            if (isStaleAuthOperation(completionError) || !lifecycle.isCurrent(operation)) return false;
           }
         }
-      } catch { }
-
-      await websocketClient.attemptTokenValidationOnce(
-        'recovery',
-        false,
-        blindedToken ? { blindedToken } : {}
-      );
-
-      return true;
-    } catch {
-      if (!alreadyAuthenticated) {
+        if (!alreadyAuthenticated) {
+          setters.setAuthStatus('');
+          try { setters.setTokenValidationInProgress(false); } catch { }
+        }
+        return false;
+      }
+    })().catch((error): boolean => {
+      if (!isStaleAuthOperation(error) && lifecycle.isCurrent(operation)) {
         setters.setAuthStatus('');
         try { setters.setTokenValidationInProgress(false); } catch { }
       }
       return false;
+    });
+
+    refs.recoveryInFlightRef.current = recovery;
+    try {
+      return await recovery;
+    } finally {
+      if (refs.recoveryInFlightRef.current === recovery) {
+        refs.recoveryInFlightRef.current = null;
+      }
     }
   };
 };
 
 export const createStoreAuthenticationState = () => {
   return async (username: string, originalUsername?: string) => {
-    try {
-      await storage.init();
-      await storage.set('last_authenticated_username', username);
-      if (originalUsername) {
-        await storage.set('last_authenticated_display_name', originalUsername);
-      }
-    } catch (err) {
-      console.error('[Recovery] Failed to store authentication state:', err);
-    }
+    await storeLastAuthenticatedAccount(username, originalUsername);
   };
 };
 
 export const createClearAuthenticationState = () => {
   return async () => {
-    try {
-      await storage.init();
-      await Promise.allSettled([
-        storage.remove('last_authenticated_username'),
-        storage.remove('last_authenticated_display_name'),
-        storage.remove('tok:1'),
-        storage.remove('bg_session_active'),
-        storage.remove('bg_session_last_activity'),
-        storage.remove('bg_session_pending')
-      ]);
-    } catch (err) {
-      console.error('[Recovery] Failed to clear authentication state:', err);
-    }
+    await clearLastAuthenticatedAccount();
   };
 };

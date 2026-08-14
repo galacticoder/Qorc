@@ -1,49 +1,29 @@
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
 import { KYBER_PUBLIC_KEY_LENGTH, DILITHIUM_PUBLIC_KEY_LENGTH, X25519_PUBLIC_KEY_LENGTH } from '../../lib/constants';
 import type { HybridPublicKeys } from '../../lib/types/message-sending-types';
+import { hasPrototypePollutionKeys, isPlainObject } from '../../lib/sanitizers';
+import {
+  isValidDilithiumPublicKeyBase64,
+  isValidKyberPublicKeyBase64,
+  isValidX25519PublicKeyBase64,
+} from '../../lib/utils/messaging-validators';
 
-// Recipient key validator
-export const recipientKeyValidator = () => {
-  const cache = new Map<string, { valid: boolean; expiresAt: number }>();
-  return (keys: HybridPublicKeys | undefined) => {
-    if (!keys) return false;
-    if (!keys.x25519PublicBase64) return false;
-    const compositeKey = `${keys.kyberPublicBase64}:${keys.dilithiumPublicBase64}:${keys.x25519PublicBase64 ?? ''}`;
-    const cached = cache.get(compositeKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.valid;
-    }
-    let valid = true;
-    try {
-      const kyber = CryptoUtils.Base64.base64ToUint8Array(keys.kyberPublicBase64);
-      const dilithium = CryptoUtils.Base64.base64ToUint8Array(keys.dilithiumPublicBase64);
-      if (kyber.length !== KYBER_PUBLIC_KEY_LENGTH || dilithium.length !== DILITHIUM_PUBLIC_KEY_LENGTH) {
-        valid = false;
-      }
-      const x25519 = CryptoUtils.Base64.base64ToUint8Array(keys.x25519PublicBase64);
-      if (x25519.length !== X25519_PUBLIC_KEY_LENGTH) {
-        valid = false;
-      }
-    } catch {
-      valid = false;
-    }
-    cache.set(compositeKey, {
-      valid,
-      expiresAt: Date.now() + 60_000,
-    });
-    return valid;
-  };
-};
+const expectedBase64Length = (bytes: number): number => 4 * Math.ceil(bytes / 3);
 
-// Validate hybrid keys structure
-export const validateHybridKeys = (keys: any): boolean => {
-  if (!keys || typeof keys !== 'object') return false;
-  return (
-    typeof keys.kyberPublicBase64 === 'string' &&
-    keys.kyberPublicBase64.length > 0 &&
-    typeof keys.dilithiumPublicBase64 === 'string' &&
-    keys.dilithiumPublicBase64.length > 0 &&
-    typeof keys.x25519PublicBase64 === 'string' &&
-    keys.x25519PublicBase64.length > 0
-  );
-};
+const hasExactHybridKeyShape = (keys: unknown): keys is Required<HybridPublicKeys> => (
+  isPlainObject(keys) &&
+  !hasPrototypePollutionKeys(keys) &&
+  Object.keys(keys).sort().join(',') === 'dilithiumPublicBase64,kyberPublicBase64,x25519PublicBase64' &&
+  typeof keys.kyberPublicBase64 === 'string' &&
+  keys.kyberPublicBase64.length === expectedBase64Length(KYBER_PUBLIC_KEY_LENGTH) &&
+  typeof keys.dilithiumPublicBase64 === 'string' &&
+  keys.dilithiumPublicBase64.length === expectedBase64Length(DILITHIUM_PUBLIC_KEY_LENGTH) &&
+  typeof keys.x25519PublicBase64 === 'string' &&
+  keys.x25519PublicBase64.length === expectedBase64Length(X25519_PUBLIC_KEY_LENGTH)
+);
+
+export const validateHybridKeys = (keys: unknown): keys is Required<HybridPublicKeys> => (
+  hasExactHybridKeyShape(keys) &&
+  isValidKyberPublicKeyBase64(keys.kyberPublicBase64) &&
+  isValidDilithiumPublicKeyBase64(keys.dilithiumPublicBase64) &&
+  isValidX25519PublicKeyBase64(keys.x25519PublicBase64)
+);

@@ -2,15 +2,9 @@ import { useCallback, useEffect, useRef } from 'react';
 import { Message } from '@/components/chat/messaging/types';
 import { EventType } from '@/lib/types/event-types';
 import { REPLY_MAX_TRACKED_ORIGINS, REPLY_MAX_REPLIES_PER_ORIGIN, REPLY_RATE_LIMIT_WINDOW_MS, REPLY_RATE_LIMIT_MAX_EVENTS } from '@/lib/constants';
-import { sanitizeContent, sanitizeMessageId } from '@/lib/sanitizers';
-import { validateEventDetail } from '../../lib/utils/shared-utils';
-
-const createReplyUpdateError = (code: string) => {
-  const error = new Error(code);
-  error.name = 'ReplyUpdatesError';
-  (error as Error & { code?: string }).code = code;
-  return error;
-};
+import { exactEventDetail, sanitizeMessageId } from '@/lib/sanitizers';
+import { setMessagesWithResult } from '../../lib/utils/set-messages-result';
+import { nativeMessageContent } from '../../lib/tauri-bindings';
 
 const trimOriginMap = (map: Map<string, Set<string>>): void => {
   if (map.size <= REPLY_MAX_TRACKED_ORIGINS) return;
@@ -26,19 +20,27 @@ const trimOriginMap = (map: Map<string, Set<string>>): void => {
 export const useReplyUpdates = (
   messages: readonly Message[],
   onMessagesUpdate: React.Dispatch<React.SetStateAction<Message[]>>,
-  persistMessage?: (msg: Message) => Promise<void>
+  persistMessage?: (msg: Message) => Promise<void>,
+  currentUsername: string = ''
 ) => {
   const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
-  const messageIndexRef = useRef<Map<string, number>>(new Map());
   const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+  const activeAccountRef = useRef(currentUsername);
+  const accountGenerationRef = useRef(0);
+
+  useEffect(() => {
+    if (activeAccountRef.current === currentUsername) return;
+    activeAccountRef.current = currentUsername;
+    accountGenerationRef.current += 1;
+    replyMappingRef.current.clear();
+    rateLimitRef.current = { windowStart: Date.now(), count: 0 };
+  }, [currentUsername]);
 
   // Build and maintain the reply mapping whenever messages change
   useEffect(() => {
     const replyMapping = new Map<string, Set<string>>();
-    const messageIndex = new Map<string, number>();
 
-    messages.forEach((message, index) => {
-      messageIndex.set(message.id, index);
+    messages.forEach((message) => {
       if (message.replyTo?.id) {
         const replyToId = message.replyTo.id;
         if (!replyMapping.has(replyToId)) {
@@ -52,62 +54,72 @@ export const useReplyUpdates = (
     });
 
     replyMappingRef.current = replyMapping;
-    messageIndexRef.current = messageIndex;
     trimOriginMap(replyMappingRef.current);
   }, [messages]);
 
   // Update reply fields when a message is edited
-  const updateReplyFields = useCallback((editedMessageId: string, newContent: string) => {
+  const updateReplyFields = useCallback((editedMessageId: string, contentVaultId: string) => {
+    const account = currentUsername;
+    const generation = accountGenerationRef.current;
+    const isCurrent = () => !!account &&
+      activeAccountRef.current === account &&
+      generation === accountGenerationRef.current;
+    if (!isCurrent()) return;
     const replyingMessageIds = replyMappingRef.current.get(editedMessageId);
 
     if (!replyingMessageIds || replyingMessageIds.size === 0) { return; }
 
-    const toPersist: Message[] = [];
-    onMessagesUpdate((currentMessages) => {
-      const editedIndex = messageIndexRef.current.get(editedMessageId);
-      const editedMessage = editedIndex !== undefined ? currentMessages[editedIndex] : undefined;
-      if (!editedMessage) {
-        return currentMessages;
-      }
+    void (async () => {
+      if (!await nativeMessageContent.has(contentVaultId) || !isCurrent()) return;
+      const updates = await setMessagesWithResult<Message[]>(onMessagesUpdate, (currentMessages) => {
+        if (!isCurrent()) return { next: currentMessages, result: [] };
+        const editedMessage = currentMessages.find(m => (
+          m.id === editedMessageId || m.wireMessageId === editedMessageId
+        ));
+        if (!editedMessage) return { next: currentMessages, result: [] };
 
-      let hasUpdates = false;
-      const updatedMessages = currentMessages.map((msg) => {
-        if (replyingMessageIds.has(msg.id) && msg.replyTo?.id === editedMessageId) {
-          hasUpdates = true;
-          const updated = {
-            ...msg,
-            replyTo: {
-              ...msg.replyTo,
-              content: newContent,
-              sender: editedMessage.sender
-            }
-          } as Message;
-          toPersist.push(updated);
-          return updated;
-        }
-        return msg;
+        const persistedUpdates: Message[] = [];
+        let hasUpdates = false;
+        const updatedMessages = currentMessages.map((msg) => {
+          if (replyingMessageIds.has(msg.id) && msg.replyTo?.id === editedMessageId) {
+            hasUpdates = true;
+            const projected = {
+              ...msg,
+              replyTo: {
+                ...msg.replyTo,
+                content: '',
+                secureContentId: contentVaultId,
+                sender: editedMessage.sender
+              }
+            } as Message;
+            persistedUpdates.push(projected);
+            return projected;
+          }
+          return msg;
+        });
+        return { next: hasUpdates ? updatedMessages : currentMessages, result: persistedUpdates };
       });
-
-      return hasUpdates ? updatedMessages : currentMessages;
-    });
-
-    if (persistMessage && toPersist.length > 0) {
-      (async () => {
-        try {
-          await Promise.allSettled(toPersist.map(m => persistMessage(m)));
-        } catch { }
-      })();
-    }
-  }, [onMessagesUpdate, persistMessage]);
+      if (!isCurrent() || updates.length === 0) return;
+      if (!persistMessage) return;
+      await Promise.allSettled(updates.map((message) => persistMessage(message)));
+    })().catch(() => { });
+  }, [onMessagesUpdate, persistMessage, currentUsername]);
 
   // Update reply fields when a message is deleted
   const handleMessageDeleted = useCallback((deletedMessageId: string) => {
+    const account = currentUsername;
+    const generation = accountGenerationRef.current;
+    const isCurrent = () => !!account &&
+      activeAccountRef.current === account &&
+      generation === accountGenerationRef.current;
+    if (!isCurrent()) return;
     const replyingMessageIds = replyMappingRef.current.get(deletedMessageId);
 
     if (!replyingMessageIds || replyingMessageIds.size === 0) { return; }
 
-    const toPersist: Message[] = [];
-    onMessagesUpdate(currentMessages => {
+    void setMessagesWithResult<Message[]>(onMessagesUpdate, (currentMessages) => {
+      if (!isCurrent()) return { next: currentMessages, result: [] };
+      const updates: Message[] = [];
       let hasUpdates = false;
       const updatedMessages = currentMessages.map(msg => {
         if (replyingMessageIds.has(msg.id) && msg.replyTo?.id === deletedMessageId) {
@@ -117,31 +129,30 @@ export const useReplyUpdates = (
             replyTo: {
               ...msg.replyTo,
               content: '[Message deleted]',
+              secureContentId: undefined,
               sender: msg.replyTo.sender || '[Unknown]'
             }
           } as Message;
-          toPersist.push(updated);
+          updates.push(updated);
           return updated;
         }
         return msg;
       });
 
-      return hasUpdates ? updatedMessages : currentMessages;
+      return { next: hasUpdates ? updatedMessages : currentMessages, result: updates };
+    }).then((updates) => {
+      if (!isCurrent() || updates.length === 0) return;
+      if (!persistMessage) return;
+      void Promise.allSettled(updates.map((message) => persistMessage(message)));
     });
-
-    if (persistMessage && toPersist.length > 0) {
-      (async () => {
-        try {
-          await Promise.allSettled(toPersist.map(m => persistMessage(m)));
-        } catch { }
-      })();
-    }
-  }, [onMessagesUpdate, persistMessage]);
+  }, [onMessagesUpdate, persistMessage, currentUsername]);
 
   // Set up event listeners for message edits and deletions
   useEffect(() => {
     const handleMessageEdit = (event: CustomEvent) => {
       try {
+        const detail = exactEventDetail(event, ['account', 'contentVaultId', 'messageId']);
+        if (!detail || detail.account !== currentUsername) return;
         const now = Date.now();
         const bucket = rateLimitRef.current;
         if (now - bucket.windowStart > REPLY_RATE_LIMIT_WINDOW_MS) {
@@ -153,15 +164,12 @@ export const useReplyUpdates = (
           return;
         }
 
-        if (!validateEventDetail(event.detail)) {
-          throw createReplyUpdateError('INVALID_EVENT_DETAIL');
-        }
-        const messageId = sanitizeMessageId(event.detail.messageId);
-        const newContent = sanitizeContent(event.detail.newContent);
-        if (!messageId || newContent === null) {
+        const messageId = sanitizeMessageId(detail.messageId);
+        const contentVaultId = sanitizeMessageId(detail.contentVaultId);
+        if (!messageId || !contentVaultId) {
           return;
         }
-        updateReplyFields(messageId, newContent);
+        updateReplyFields(messageId, contentVaultId);
       } catch (_error) {
         console.error('[ReplyUpdates] Error handling message edit event:', _error);
       }
@@ -169,6 +177,8 @@ export const useReplyUpdates = (
 
     const handleMessageDelete = (event: CustomEvent) => {
       try {
+        const detail = exactEventDetail(event, ['account', 'messageId']);
+        if (!detail || detail.account !== currentUsername) return;
         const now = Date.now();
         const bucket = rateLimitRef.current;
         if (now - bucket.windowStart >  REPLY_RATE_LIMIT_WINDOW_MS) {
@@ -180,10 +190,7 @@ export const useReplyUpdates = (
           return;
         }
 
-        if (!validateEventDetail(event.detail)) {
-          throw createReplyUpdateError('INVALID_EVENT_DETAIL');
-        }
-        const messageId = sanitizeMessageId(event.detail.messageId);
+        const messageId = sanitizeMessageId(detail.messageId);
         if (!messageId) {
           return;
         }

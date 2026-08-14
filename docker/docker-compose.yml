@@ -2,13 +2,13 @@ services:
   redis:
     profiles: ["server", "loadbalancer", "redis-standalone"]
     build:
-      context: ..
+      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.redis
     hostname: redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
-      - "${REDIS_EXTERNAL_PORT:-6379}:6379"
+      - "${REDIS_BIND_HOST:-0.0.0.0}:${REDIS_EXTERNAL_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
       - redis-certs:/certs
@@ -16,7 +16,7 @@ services:
       - Qor-Chat-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "--tls", "--cert", "/certs/redis-client.crt", "--key", "/certs/redis-client.key", "--cacert", "/certs/redis-ca.crt", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --tls --cert /certs/redis-client.crt --key /certs/redis-client.key --cacert /certs/redis-ca.crt ping | grep -qx PONG"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -24,7 +24,7 @@ services:
   postgres:
     profiles: ["server"]
     build:
-      context: ..
+      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.postgres
     hostname: postgres
     env_file:
@@ -36,7 +36,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - postgres-certs:/var/lib/postgresql/certs
     ports:
-      - "${DB_PORT}:5432" 
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${DB_PORT}:5432"
     networks:
       - Qor-Chat-net
     restart: unless-stopped
@@ -46,54 +46,28 @@ services:
       timeout: 5s
       retries: 30
 
-  pir-worker:
-    profiles: ["server"]
-    build:
-      # builds from hintless source in workers/hintless/upstream
-      context: ../workers/hintless
-      dockerfile: Dockerfile
-    hostname: pir-worker
-    environment:
-      - QOR_PIR_BIND=0.0.0.0:8787
-      - QOR_PIR_PARAMETER_ID=${PIR_WORKER_PARAMETER_ID:-hintless-simplepir-rlwe64-v1}
-      - QOR_PIR_AUTH_TOKEN=${PIR_WORKER_TOKEN:-}
-      - QOR_PIR_MAX_DATABASE_BYTES=${PIR_WORKER_MAX_DATABASE_BYTES:-2147483648}
-      - QOR_PIR_MAX_REQUEST_BYTES=${PIR_WORKER_MAX_REQUEST_BYTES:-268435456}
-    networks:
-      - Qor-Chat-net
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "${PIR_WORKER_CPUS:-0}"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
   server:
     profiles: ["server"]
     build:
-      context: ..
+      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.server
     hostname: server
     ports:
       - "${PORT:-3000}:3000"
     environment:
       - BIND_ADDRESS=0.0.0.0
-      - PIR_WORKER_URL=${PIR_WORKER_URL:-http://pir-worker:8787}
-      - PIR_WORKER_PARAMETER_ID=${PIR_WORKER_PARAMETER_ID:-hintless-simplepir-rlwe64-v1}
-      - PIR_WORKER_SOURCE_COMMIT=49434e086ec56d19546ca6e97353671b690ba19b
-      - PIR_REQUIRE_WORKER=${PIR_REQUIRE_WORKER:-true}
-      - RUNTIME_DIAGNOSTIC_LOG_DIR=${RUNTIME_DIAGNOSTIC_LOG_DIR:-/app/logs}
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${DB_NAME}
+      - PGUSER=postgres
+      - PGPASSWORD=${DATABASE_PASSWORD}
+      - PGSSLROOTCERT=/app/postgres-certs/root.crt
+      - DB_TLS_SERVERNAME=postgres
       - NO_GUI
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
-      pir-worker:
         condition: service_healthy
     env_file:
       - ../.env
@@ -103,6 +77,7 @@ services:
       - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
+      - ../shared:/app/shared:ro
       - ../logs:/app/logs:rw
       - redis-certs:/app/redis-certs:ro
       - postgres-certs:/app/postgres-certs:ro
@@ -111,7 +86,7 @@ services:
   loadbalancer:
     profiles: ["loadbalancer"]
     build:
-      context: ..
+      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.loadbalancer
     hostname: loadbalancer
     ports:
@@ -120,6 +95,10 @@ services:
     env_file:
       - ../.env
     environment:
+      - HAPROXY_BUILD_ROOT=/app/haproxy-build
+      - HAPROXY_HTTPS_PORT=8443
+      - HAPROXY_STATS_PORT=8404
+      - TOR_HS_INTRO_POINTS=${TOR_HS_INTRO_POINTS:-3}
       - REDIS_CA_CERT_PATH=/app/redis-certs/redis-ca.crt
       - REDIS_CLIENT_CERT_PATH=/app/redis-certs/redis-client.crt
       - REDIS_CLIENT_KEY_PATH=/app/redis-certs/redis-client.key
@@ -134,7 +113,9 @@ services:
       - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
+      - ../shared:/app/shared:ro
       - redis-certs:/app/redis-certs:ro
+      - haproxy-build:/app/haproxy-build
     tmpfs:
       - /var/run
     restart: unless-stopped
@@ -155,3 +136,4 @@ volumes:
   postgres-certs:
   redis-data:
   redis-certs:
+  haproxy-build:

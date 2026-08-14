@@ -14,30 +14,19 @@ out/
 .vscode/
 pnpm-lock.yaml
 package-lock.json
-src-tauri/Cargo.lock
 memory.jsonl
 
-
-# Electron builder
-.electron-builder/
-electron-builder-output/
-release/
-
-# Testing
 coverage/
 .nyc_output/
 *.lcov
 
-# Secrets and private keys (server)
 server/config/*
 !server/config/config.js
 !server/config/constants.js
 !server/config/secure-credentials.js
 
-# Client secure storage
 .config/
 
-# Database files
 *.sqlite
 *.sqlite3
 *.db
@@ -47,11 +36,9 @@ server/config/*
 server/database/*.sqlite
 server/database/*.db
 
-# Local certs folder
 certs/*
 !certs/.gitkeep
 
-# Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -59,7 +46,6 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Environment variables
 .env
 .env.local
 .env.development.local
@@ -67,7 +53,6 @@ lerna-debug.log*
 .env.production.local
 .env.*.local
 
-# IDE
 .vscode/
 .idea/
 *.swp
@@ -77,19 +62,16 @@ lerna-debug.log*
 .classpath
 .settings/
 
-# Temporary files
 *.tmp
 *.temp
 *.bak
 *.backup
 tmp/
 
-# NPM
 package-lock.json
 .npm/
 src-tauri/target/
 
-# Yarn
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
@@ -102,7 +84,6 @@ src-tauri/target/
 .yarn/install-state.gz
 yarn-error.log
 
-# sys links
 /postcss.config.js
 /package.json
 /tailwind.config.ts
@@ -111,7 +92,6 @@ yarn-error.log
 /tsconfig.node.json
 /vite.config.ts
 
-# others
 startServer.tls.sh
 bin
 scripts/config/haproxy
@@ -122,3 +102,7 @@ theme-playground.html
 
 logs/
 scripts/generate-tauri-icons.py
+
+src-tauri/binaries/
+
+server/test/

@@ -1,6 +1,8 @@
 import { CryptoUtils } from "../utils/crypto-utils";
-import { MAX_P2P_PEER_CACHE, P2P_ROUTE_PROOF_TTL_MS, CERT_CLOCK_SKEW_MS } from "../constants";
-import { concatUint8Arrays } from "./shared-utils";
+import { P2P_ROUTE_PROOF_TTL_MS, CERT_CLOCK_SKEW_MS } from "../constants";
+import { blake3 } from '@noble/hashes/blake3.js';
+import { bytesToHex } from './byte-utils';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export const createP2PError = (code: string) => {
   const error = new Error(code);
@@ -9,136 +11,136 @@ export const createP2PError = (code: string) => {
   return error;
 };
 
-export const getChannelId = (localKey: string, remoteKey: string) =>
-  localKey < remoteKey ? `${localKey}|${remoteKey}` : `${remoteKey}|${localKey}`;
-
-export const buildAuthenticator = () => {
-  const cache = new Map<string, { expiresAt: number }>();
-  return {
-    memoize(key: string) {
-      const cached = cache.get(key);
-      if (cached && cached.expiresAt > Date.now()) {
-        return true;
-      }
-      return false;
-    },
-    store(key: string, ttlMs: number) {
-      cache.set(key, { expiresAt: Date.now() + ttlMs });
-      if (cache.size > MAX_P2P_PEER_CACHE) {
-        const now = Date.now();
-        for (const [entryKey, entry] of cache) {
-          if (entry.expiresAt <= now) {
-            cache.delete(entryKey);
-          }
-        }
-      }
-    },
-  };
+export const getChannelId = (localKey: string, remoteKey: string, sessionBinding: string) => {
+  if (!/^[a-f0-9]{32}$/.test(sessionBinding)) {
+    throw new Error('Invalid P2P session binding');
+  }
+  const [first, second] = localKey < remoteKey
+    ? [localKey, remoteKey]
+    : [remoteKey, localKey];
+  const digest = blake3(
+    new TextEncoder().encode(`${PROTOCOL_KEYS.P2P_CHANNEL}\0${sessionBinding}\0${first}\0${second}`),
+    { dkLen: 32 }
+  );
+  return bytesToHex(digest);
 };
 
-export const toUint8 = (base64?: string) => {
-  if (!base64) return null;
+export const toUint8 = (base64: unknown, expectedLength: number): Uint8Array | null => {
+  if (
+    typeof base64 !== 'string' ||
+    !Number.isSafeInteger(expectedLength) ||
+    expectedLength <= 0 ||
+    base64.length !== 4 * Math.ceil(expectedLength / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)
+  ) return null;
   try {
-    return CryptoUtils.Base64.base64ToUint8Array(base64);
+    const decoded = CryptoUtils.Base64.base64ToUint8Array(base64);
+    if (
+      decoded.length !== expectedLength ||
+      CryptoUtils.Base64.arrayBufferToBase64(decoded) !== base64
+    ) {
+      decoded.fill(0);
+      return null;
+    }
+    return decoded;
   } catch {
     return null;
   }
 };
 
-export const getCrypto = () => {
-  const cryptoObj = globalThis.crypto;
-  if (!cryptoObj?.subtle) {
-    throw new Error('WebCrypto unavailable');
-  }
-  return cryptoObj;
-};
-
-export const buildRouteProof = async (
-  localDilithiumSecret: Uint8Array,
-  localDilithiumPublic: string,
-  peerDilithiumPublic: string,
+export const buildRouteProof = (
   channelId: string,
   sequence: number,
-) => {
-  const cryptoObj = getCrypto();
-  const nonce = cryptoObj.getRandomValues(new Uint8Array(24));
-  const expiresAt = Date.now() + P2P_ROUTE_PROOF_TTL_MS;
-  const payload = {
-    kind: 'route-proof-v1',
-    nonce: CryptoUtils.Base64.arrayBufferToBase64(nonce),
-    at: Date.now(),
-    expiresAt,
+): {
+  kind: typeof PROTOCOL_KEYS.ROUTE_PROOF_KIND;
+  at: number;
+  expiresAt: number;
+  channelId: string;
+  sequence: number;
+} => {
+  if (!/^[a-f0-9]{64}$/.test(channelId)) throw new Error('Invalid P2P channel ID');
+  if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error('Invalid P2P sequence');
+  const at = Date.now();
+  return {
+    kind: PROTOCOL_KEYS.ROUTE_PROOF_KIND,
+    at,
+    expiresAt: at + P2P_ROUTE_PROOF_TTL_MS,
     channelId,
     sequence,
   };
-  const canonicalPayload = {
-    at: payload.at,
-    channelId: payload.channelId,
-    expiresAt: payload.expiresAt,
-    kind: payload.kind,
-    nonce: payload.nonce,
-    sequence: payload.sequence,
-  };
-  const canonical = new TextEncoder().encode(JSON.stringify(canonicalPayload));
-  const signature = await CryptoUtils.Dilithium.sign(localDilithiumSecret, canonical);
-  return {
-    payload,
-    signature: CryptoUtils.Base64.arrayBufferToBase64(signature),
-  };
 };
 
-export const verifyRouteProof = async (
-  proof: { payload: any; signature: string } | undefined,
-  localDilithiumPublic: string,
-  peerDilithiumPublic: string,
+export const verifyRouteProof = (
+  proof: any,
   channelId: string,
   minSequence: number,
 ) => {
-  if (!proof?.payload || !proof.signature) {
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof)) {
     return false;
   }
-  const { kind, nonce, at, channelId: proofChannel, sequence, expiresAt } = proof.payload;
-  if (kind !== 'route-proof-v1') {
+  if (Object.keys(proof).sort().join(',') !== 'at,channelId,expiresAt,kind,sequence') {
     return false;
   }
-  if (typeof at !== 'number' || typeof expiresAt !== 'number') {
+  const { kind, at, channelId: proofChannel, sequence, expiresAt } = proof;
+  if (kind !== PROTOCOL_KEYS.ROUTE_PROOF_KIND) {
+    return false;
+  }
+  if (!Number.isSafeInteger(at) || !Number.isSafeInteger(expiresAt)) {
     return false;
   }
   const now = Date.now();
-  if (at > (now + CERT_CLOCK_SKEW_MS) || expiresAt <= (now - CERT_CLOCK_SKEW_MS) || expiresAt - at > P2P_ROUTE_PROOF_TTL_MS) {
+  if (
+    at > now + CERT_CLOCK_SKEW_MS ||
+    expiresAt <= now - CERT_CLOCK_SKEW_MS ||
+    expiresAt <= at ||
+    expiresAt - at !== P2P_ROUTE_PROOF_TTL_MS
+  ) {
     return false;
   }
-  if (typeof sequence !== 'number' || sequence < minSequence) {
+  if (!Number.isSafeInteger(sequence) || sequence < minSequence) {
     return false;
   }
-  if (proofChannel !== channelId) {
+  if (typeof proofChannel !== 'string' || proofChannel !== channelId || !/^[a-f0-9]{64}$/.test(proofChannel)) {
     return false;
   }
-  const nonceBytes = toUint8(nonce);
-  if (!nonceBytes || nonceBytes.length !== 24) {
-    return false;
+  return true;
+};
+
+export interface P2PRouteReplayState {
+  highest: number;
+  slots: Array<number | undefined>;
+}
+
+export const createP2PRouteReplayState = (windowSize: number): P2PRouteReplayState => {
+  if (!Number.isSafeInteger(windowSize) || windowSize < 1) {
+    throw new Error('Invalid P2P route replay window');
   }
-  const signatureBytes = toUint8(proof.signature);
-  if (!signatureBytes) {
-    return false;
+  return { highest: 0, slots: new Array<number | undefined>(windowSize) };
+};
+
+export const canAcceptP2PRouteSequence = (
+  state: P2PRouteReplayState,
+  sequence: number,
+  windowSize: number,
+): boolean => {
+  if (
+    !Number.isSafeInteger(state?.highest) || state.highest < 0 ||
+    !Array.isArray(state.slots) || state.slots.length !== windowSize ||
+    !Number.isSafeInteger(sequence) || sequence < 1 ||
+    !Number.isSafeInteger(windowSize) || windowSize < 1
+  ) return false;
+  const minimumRetained = Math.max(1, state.highest - windowSize + 1);
+  return sequence >= minimumRetained && state.slots[sequence % windowSize] !== sequence;
+};
+
+export const commitP2PRouteSequence = (
+  state: P2PRouteReplayState,
+  sequence: number,
+  windowSize: number,
+): void => {
+  if (!canAcceptP2PRouteSequence(state, sequence, windowSize)) {
+    throw new Error('Invalid or replayed P2P route sequence');
   }
-  const canonicalPayload = {
-    at: at,
-    channelId: proofChannel,
-    expiresAt: expiresAt,
-    kind: kind,
-    nonce: nonce,
-    sequence: sequence,
-  };
-  const canonical = new TextEncoder().encode(JSON.stringify(canonicalPayload));
-  const peerKey = toUint8(peerDilithiumPublic);
-  if (!peerKey) {
-    return false;
-  }
-  try {
-    const result = await CryptoUtils.Dilithium.verify(signatureBytes, canonical, peerKey);
-    return result;
-  } catch {
-    return false;
-  }
+  if (sequence > state.highest) state.highest = sequence;
+  state.slots[sequence % windowSize] = sequence;
 };

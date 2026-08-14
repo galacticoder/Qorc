@@ -5,27 +5,12 @@ import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '../../../lib/utils/shared-utils';
+import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
+import { encryptedStorage } from '../../../lib/database/encrypted-storage';
+import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
+import type { ScreenSource } from '../../../lib/types/screen-sharing-types';
 
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
-
-let micMeterCtx: AudioContext | null = null;
-function getMicMeterContext(): AudioContext | null {
-  try {
-    if (micMeterCtx && micMeterCtx.state !== 'closed') return micMeterCtx;
-    const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) return null;
-    micMeterCtx = new AudioCtx();
-    return micMeterCtx;
-  } catch {
-    return null;
-  }
-}
-
-interface ScreenSource {
-  readonly id: string;
-  readonly name: string;
-  readonly type: 'screen' | 'window';
-}
 
 interface CallModalProps {
   readonly call: CallState | null;
@@ -39,7 +24,7 @@ interface CallModalProps {
   readonly onToggleVideo: () => boolean | Promise<boolean>;
   readonly onSwitchCamera: (deviceId: string) => Promise<void>;
   readonly onSwitchMicrophone: (deviceId: string) => Promise<void>;
-  readonly onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
+  readonly onStartScreenShare?: (selectedSource?: ScreenSource) => Promise<void>;
   readonly onStopScreenShare?: () => Promise<void>;
   readonly onGetAvailableScreenSources?: () => Promise<readonly ScreenSource[]>;
   readonly isScreenSharing?: boolean;
@@ -256,35 +241,46 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, [isExpandedScreenShare, remoteScreenStream, isScreenSharing]);
 
   useEffect(() => {
+    if (!localStream || !navigator.mediaDevices?.enumerateDevices) {
+      setMicDevices([]);
+      setVideoDevices([]);
+      return;
+    }
+    let cancelled = false;
     const loadDevices = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
         setMicDevices(devices.filter(d => d.kind === 'audioinput'));
         setVideoDevices(devices.filter(d => d.kind === 'videoinput'));
 
         // Load preferred camera
         try {
-          const { encryptedStorage } = await import('../../../lib/database/encrypted-storage');
-          const saved = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
+          const saved = await encryptedStorage.getItem(STORAGE_KEYS.PREFERRED_CAMERA);
           if (saved && typeof saved === 'string') setPreferredCameraId(saved);
         } catch { }
       } catch (e) {
+        if (cancelled) return;
         console.error("Device enumeration failed", e);
       }
     };
-    loadDevices();
+    void loadDevices();
     navigator.mediaDevices.addEventListener('devicechange', loadDevices);
-    return () => navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
-  }, []);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
+    };
+  }, [localStream]);
 
   useEffect(() => {
     if (localStream) {
       const videoTrack = localStream.getVideoTracks()[0];
       const audioTrack = localStream.getAudioTracks()[0];
+      const handleVideoEnded = () => setIsVideoEnabled(false);
 
       if (videoTrack) {
         setIsVideoEnabled(videoTrack.enabled);
-        videoTrack.onended = () => setIsVideoEnabled(false);
+        videoTrack.addEventListener('ended', handleVideoEnded);
       } else {
         setIsVideoEnabled(false);
       }
@@ -292,41 +288,50 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       if (audioTrack) {
         setIsMuted(!audioTrack.enabled);
       }
+
+      return () => videoTrack?.removeEventListener('ended', handleVideoEnded);
     }
   }, [localStream]);
 
   useEffect(() => {
     if (!localStream) { setMicLevel(0); return; }
-    let rafId = 0;
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let audioContext: AudioContext | null = null;
     let source: MediaStreamAudioSourceNode | null = null;
     let analyser: AnalyserNode | null = null;
 
-    const analyze = () => {
+    const analyze = async () => {
       try {
-        const audioCtx = getMicMeterContext();
-        if (!audioCtx) { setMicLevel(0); return; }
-        analyser = audioCtx.createAnalyser();
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) { setMicLevel(0); return; }
+        audioContext = new AudioCtx();
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        if (cancelled) return;
+        analyser = audioContext.createAnalyser();
         analyser.fftSize = 256;
-        source = audioCtx.createMediaStreamSource(localStream);
+        source = audioContext.createMediaStreamSource(localStream);
         source.connect(analyser);
         const data = new Uint8Array(analyser.frequencyBinCount);
 
-        const loop = () => {
+        const sample = () => {
           if (!analyser) return;
           analyser.getByteFrequencyData(data);
           const avg = data.reduce((a, b) => a + b, 0) / data.length;
           setMicLevel(avg / 128);
-          rafId = requestAnimationFrame(loop);
         };
-        loop();
+        sample();
+        intervalId = setInterval(sample, 100);
       } catch { setMicLevel(0); }
     };
-    analyze();
+    void analyze();
 
     return () => {
-      if (rafId) cancelAnimationFrame(rafId);
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
       try { source?.disconnect(); } catch { }
       try { analyser?.disconnect(); } catch { }
+      try { void audioContext?.close().catch(() => { }); } catch { }
     };
   }, [localStream]);
 
@@ -378,10 +383,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   const handleCameraChange = async (deviceId: string) => {
     try {
-      const { encryptedStorage } = await import('../../../lib/database/encrypted-storage');
-      await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
-      setPreferredCameraId(deviceId);
       await onSwitchCamera(deviceId);
+      setPreferredCameraId(deviceId);
     } catch (err) {
       console.error("Failed to switch camera", err);
     }
@@ -412,12 +415,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
   };
 
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  };
-
   if (!call) return null;
 
   if (isMinimized) {
@@ -437,7 +434,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             <span className="font-medium truncate text-sm">{displayPeerName}</span>
           </div>
           <div className="text-xs text-muted-foreground mt-0.5">
-            {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
+            {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatClockDurationSeconds(callDuration) : 'Calling...'}
           </div>
         </div>
         <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
@@ -525,7 +522,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             <div className="flex flex-col">
               <span className="text-sm font-semibold text-foreground leading-none">{displayPeerName}</span>
               <span className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
+                {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatClockDurationSeconds(callDuration) : 'Calling...'}
               </span>
             </div>
           </div>
@@ -618,7 +615,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
                       key={`slot-${index}`}
                       id={`slot-${index}`}
                       initialPosition={pos}
-                      onPositionChange={(id, newPos) => updatePipPosition(index, newPos)}
+                      onPositionChange={(_id, newPos) => updatePipPosition(index, newPos)}
                       onClick={() => setFocusedView(type)}
                     >
                       {renderStream(type, false)}
@@ -770,10 +767,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         <React.Suspense fallback={null}>
           <ScreenSourceSelectorLazy
             isOpen={showScreenSourceSelector}
-            onSelect={async (source: any) => {
+            onSelect={async (source: ScreenSource) => {
               if (onStartScreenShare) {
                 await onStartScreenShare(source);
-                setShowScreenSourceSelector(false);
               }
             }}
             onClose={() => setShowScreenSourceSelector(false)}

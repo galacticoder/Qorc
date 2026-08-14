@@ -1,20 +1,27 @@
 import { SignalType } from "./signal-types";
 import { SecureConnection, SecureStream } from "../transport/secure-transport";
+import type { HybridEnvelope } from "./crypto-types";
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export interface P2PMessage {
-  type:
-  | 'heartbeat'
-  | 'dummy'
-  | SignalType.SEALED_ENVELOPE
-  id?: string;
+  type: SignalType.SEALED_ENVELOPE;
   from: string;
   to: string;
   timestamp: number;
-  p2p?: boolean;
-  encrypted?: boolean;
-  payload: any;
-  routeProof?: any;
-  signature?: string;
+  payload: {
+    type: SignalType.SEALED_ENVELOPE;
+    messageId: string;
+    fileTransferId?: string;
+    envelope: HybridEnvelope;
+  };
+  routeProof: {
+    kind: typeof PROTOCOL_KEYS.ROUTE_PROOF_KIND;
+    at: number;
+    expiresAt: number;
+    channelId: string;
+    sequence: number;
+  };
+  signature: string;
 }
 
 export interface PeerSession {
@@ -24,51 +31,16 @@ export interface PeerSession {
   state: 'connecting' | 'connected' | 'disconnected' | 'failed';
 }
 
-export interface EncryptedMessage {
-  id: string;
-  from: string;
-  to: string;
-  content: any;
-  timestamp: number;
-  encrypted: boolean;
-  p2p: boolean;
-  transport?: 'p2p';
-  routeProof?: string;
-  messageType?: SignalType.TEXT | SignalType.CHAT | SignalType.MESSAGE | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.EDIT | SignalType.DELETE | SignalType.SIGNAL | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.CALL_SIGNAL | SignalType.SEALED_ENVELOPE;
-  metadata?: any;
-  registrationId?: number;
-  __isRecursive?: boolean;
-}
-
 export interface P2PStatus {
   isInitialized: boolean;
   connectedPeers: string[];
-  transportConnected: boolean;
-  lastError: string | null;
-}
-
-export type P2PSendStatus =
-  | 'sent'
-  | 'queued_not_connected'
-  | 'queued_no_session'
-  | 'fatal_validation'
-  | 'fatal_keys'
-  | 'fatal_transport';
-
-export interface P2PSendResult {
-  status: P2PSendStatus;
-  messageId?: string;
-  errorCode?: string;
-  errorMessage?: string;
 }
 
 export interface PeerCertificateBundle {
   username: string;
-  inboxId?: string;
   dilithiumPublicKey: string;
   kyberPublicKey: string;
   x25519PublicKey: string;
-  p2pEndpointUrl?: string;
   proof: string;
   issuedAt: number;
   expiresAt: number;
@@ -76,54 +48,24 @@ export interface PeerCertificateBundle {
 }
 
 export interface HybridKeys {
+  native: true;
   dilithium: {
-    secretKey: Uint8Array;
     publicKeyBase64: string;
   };
-  kyber?: {
+  kyber: {
     publicKey: Uint8Array;
-    secretKey: Uint8Array;
   };
-  x25519?: {
+  x25519: {
     publicKey: Uint8Array;
-    private: Uint8Array;
   };
-}
-
-export interface RemoteHybridKeys {
-  dilithiumPublicBase64: string;
-  kyberPublicBase64: string;
-  x25519PublicBase64?: string;
-}
-
-export interface RouteProof {
-  payload: {
-    kind: string;
-    nonce: string;
-    at: number;
-    expiresAt: number;
-    from?: string;
-    to?: string;
-    channelId: string;
-    sequence: number;
-  };
-  signature: string;
-}
-
-export interface RouteProofRecord {
-  proof: RouteProof;
-  expiresAt: number;
+  signTranscript: (message: Uint8Array) => Promise<Uint8Array>;
+  respondToHandshake: (
+    kemCiphertext: Uint8Array,
+    peerX25519Public: Uint8Array
+  ) => Promise<{ pqSecret: Uint8Array; x25519Secret: Uint8Array }>;
 }
 
 export interface CertCacheEntry {
   cert: PeerCertificateBundle;
   expiresAt: number;
 }
-
-export type QueuedItem = {
-  to: string;
-  envelope: any;
-  type: SignalType.TEXT | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.SIGNAL | SignalType.CALL_SIGNAL | SignalType.SEALED_ENVELOPE;
-  enqueuedAt: number;
-  ttlMs: number;
-};

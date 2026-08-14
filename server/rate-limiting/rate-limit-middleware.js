@@ -1,481 +1,142 @@
-import { getDistributedRateLimiter } from './distributed-rate-limiter.js';
-import { SignalType } from '../signals.js';
-import crypto from 'crypto';
-import { RATE_LIMIT_CONFIG } from '../config/config.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import {
+  closeDistributedRateLimiter,
+  getDistributedRateLimiter
+} from './distributed-rate-limiter.js';
+import {
+  isAccountAuthSignalType,
+  isRateLimitedAuthSignalType,
+  isServerEntrySignalType,
+  SignalType
+} from '../signals.js';
+
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
-import { privateLookupId } from '../database/core.js';
+import { RATE_LIMIT_CONFIG } from '../config/config.js';
+import {
+  PUBLICATION_ID_RE as PUBLISH_REQUEST_ID_RE,
+  UUID_V4_RE as AUTH_REQUEST_ID_RE
+} from '../utils/patterns.js';
 
-// Rate limiting middleware for WebSocket connections
 export class RateLimitMiddleware {
-	constructor(limiters, { lazy = false } = {}) {
-		this._limiter = null;
-		this._limiterFactory = limiters
-			? async () => limiters
-			: () => getDistributedRateLimiter();
-
-		if (!lazy && !limiters) {
-			this._initializePromise = this._limiterFactory().then((value) => {
-				this._limiter = value;
-				return value;
-			});
-		}
-	}
-
-	async #limiter() {
-		if (this._limiter) {
-			return this._limiter;
-		}
-
-		if (this._initializePromise) {
-			return this._initializePromise;
-		}
-
-		this._initializePromise = this._limiterFactory().then((value) => {
-			this._limiter = value;
-			return value;
-		});
-
-		return this._initializePromise;
-	}
-
-	// Check global connection rate limit
-	async checkConnectionLimit(ws) {
-		if (!this.isValidWebSocket(ws)) {
-			cryptoLogger.warn('[RATE-LIMIT] Invalid WebSocket in connection check');
-			return false;
-		}
-
-		const limiter = await this.#limiter();
-		const result = await limiter.checkGlobalConnectionLimit();
-
-		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Global connection blocked', { reason: result.reason });
-
-			await sendSecureMessage(ws, {
-				type: SignalType.ERROR,
-				message: result.reason,
-				rateLimitInfo: {
-					blocked: true,
-					remainingBlockTime: result.remainingBlockTime,
-					requestId: this.generateSecureRequestId()
-				}
-			});
-
-			ws.close(1008, 'Rate limit exceeded');
-			return false;
-		}
-
-		return true;
-	}
-
-	// Check auth rate limit for connection
-	async checkAuthLimit(ws) {
-		if (!this.isValidWebSocket(ws)) {
-			cryptoLogger.warn('[RATE-LIMIT] Invalid WebSocket in auth check');
-			return false;
-		}
-
-		const limiter = await this.#limiter();
-		const result = await limiter.checkConnectionAuthLimit(ws);
-
-		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Authentication blocked for connection', { reason: result.reason });
-
-			await sendSecureMessage(ws, {
-				type: SignalType.AUTH_ERROR,
-				message: result.reason,
-				rateLimitInfo: {
-					blocked: true,
-					remainingBlockTime: result.remainingBlockTime,
-					requestId: this.generateSecureRequestId()
-				}
-			});
-			return false;
-		}
-
-		return true;
-	}
-
-	// Non-consuming per-user auth status check (long-window, aggregated)
-	async checkUserAuthStatus(principalId) {
-		if (!this.isValidPrincipalId(principalId)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in user auth check');
-			return { allowed: false, reason: 'Invalid user' };
-		}
-		const limiter = await this.#limiter();
-		return limiter.getUserAuthStatus(principalId);
-	}
-
-	// Non-consuming category status (short-window)
-	async getUserCredentialStatus(principalId, category, _ws = undefined) {
-		const limiter = await this.#limiter();
-		return limiter.getUserCategoryStatus(principalId, category, undefined);
-	}
-
-	// Record a credential failure and get attempts/cooldown info
-	async recordCredentialFailure(principalId, category, _ws = undefined) {
-		const limiter = await this.#limiter();
-		return limiter.consumeUserAuthAttempt(principalId, category, undefined);
-	}
-
-	// Check message rate limit
-	async checkMessageLimit(ws, principalId) {
-		if (!this.isValidWebSocket(ws)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in message check');
-			return false;
-		}
-
-		if (!principalId) {
-			cryptoLogger.warn('[RATE-LIMIT] No principalId provided for message rate limit check');
-			return false;
-		}
-
-		if (!this.isValidPrincipalId(principalId)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in message check');
-			return false;
-		}
-
-		const limiter = await this.#limiter();
-		const result = await limiter.checkMessageLimit(principalId);
-
-		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Message blocked for principal', { principalId, reason: result.reason });
-
-			await sendSecureMessage(ws, {
-				type: SignalType.ERROR,
-				message: result.reason,
-				rateLimitInfo: {
-					blocked: true,
-					remainingBlockTime: result.remainingBlockTime,
-					requestId: this.generateSecureRequestId()
-				}
-			});
-			return false;
-		}
-
-		return true;
-	}
-
-	// Apply rate limiting to WebSocket message based on message type
-	async applyMessageRateLimiting(ws, messageType, principalId) {
-		if (!this.isValidMessageType(messageType)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
-			return false;
-		}
-
-		switch (messageType) {
-			case SignalType.ACCOUNT_SIGN_IN:
-			case SignalType.ACCOUNT_SIGN_UP:
-				return this.checkAuthLimit(ws);
-			case SignalType.SEALED_ENVELOPE:
-				return this.checkMessageLimit(ws, principalId);
-			default:
-				return true;
-		}
-	}
-
-	// Get rate limiting statistics with security metrics
-	async getStats() {
-		const limiter = await this.#limiter();
-		const baseStats = await limiter.getStats();
-
-		const securityHealth = await this.getSecurityHealth(baseStats);
-
-		return {
-			...baseStats,
-			securityHealth,
-			recommendations: this._generateRecommendations(baseStats, securityHealth)
-		};
-	}
-
-	/**
-	 * Get real-time security health status from Redis
-	 */
-	async getSecurityHealth(precomputedStats = null) {
-		try {
-			const stats = precomputedStats || (await (await this.#limiter()).getStats());
-
-			const health = {
-				status: 'operational',
-				rateLimiterActive: true,
-				redisConnected: stats.redis?.connected || false,
-				alerts: [],
-				metrics: {
-					activeUsers: stats.users?.activeLimiters || 0,
-					blockedUsers: stats.users?.blocked || 0,
-					globalBlocked: stats.global?.isBlocked || false,
-					activeConnections: stats.connections?.activeLimiters || 0
-				}
-			};
-
-			// Generate alerts based on thresholds
-			if (!stats.redis?.connected) {
-				health.status = 'degraded';
-				health.alerts.push({
-					severity: 'critical',
-					message: 'Redis connection lost - rate limiting may be impaired'
-				});
-			}
-
-			if (stats.users?.blocked > 0) {
-				health.alerts.push({
-					severity: 'warning',
-					message: `${stats.users.blocked} users currently blocked by rate limits`
-				});
-			}
-
-			if (stats.global?.isBlocked) {
-				health.status = 'degraded';
-				health.alerts.push({
-					severity: 'critical',
-					message: 'Global connection limit exceeded - new connections blocked'
-				});
-			}
-
-			// Check for suspicious activity
-			const blockRatio = stats.users.activeLimiters > 0
-				? stats.users.blocked / stats.users.activeLimiters
-				: 0;
-
-			if (blockRatio > 0.1) {
-				health.alerts.push({
-					severity: 'warning',
-					message: `High block rate detected: ${(blockRatio * 100).toFixed(1)}% of active users blocked`
-				});
-			}
-
-			return health;
-		} catch (error) {
-			cryptoLogger.error('[RATE-LIMIT-HEALTH] Failed to get security health', {
-				error: error.message
-			});
-
-			return {
-				status: 'error',
-				rateLimiterActive: false,
-				error: error.message,
-				alerts: [{
-					severity: 'critical',
-					message: 'Failed to retrieve security metrics'
-				}]
-			};
-		}
-	}
-
-	// Generate actionable recommendations based on current state
-	_generateRecommendations(stats, _health) {
-		const recommendations = [];
-
-		if (!stats.redis?.connected) {
-			recommendations.push({
-				priority: 'critical',
-				action: 'Restore Redis connection immediately',
-				impact: 'Rate limiting may be bypassed'
-			});
-		}
-
-		if (stats.users?.blocked > 10) {
-			recommendations.push({
-				priority: 'high',
-				action: 'Review blocked users for potential attack',
-				impact: `${stats.users.blocked} users currently blocked`,
-				details: stats.users?.topAbusers || []
-			});
-		}
-
-		if (stats.global?.isBlocked) {
-			recommendations.push({
-				priority: 'critical',
-				action: 'Investigate connection flood',
-				impact: 'New connections being rejected',
-				blockedUntil: new Date(stats.global.blockedUntil).toISOString()
-			});
-		}
-
-		if (stats.users?.activeLimiters > 10000) {
-			recommendations.push({
-				priority: 'medium',
-				action: 'Monitor Redis memory usage',
-				impact: `${stats.users.activeLimiters} active rate limiters in Redis`
-			});
-		}
-
-		if (recommendations.length === 0) {
-			recommendations.push({
-				priority: 'info',
-				action: 'System operating normally',
-				impact: 'No immediate action required'
-			});
-		}
-
-		return recommendations;
-	}
-
-	// Reset rate limits for a specific user (admin function)
-	async resetUserLimits(principalId) {
-		if (!this.isValidPrincipalId(principalId)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId provided for reset');
-			return false;
-		}
-
-			const limiter = await this.#limiter();
-			try {
-				const hashed = (await (async () => {
-					try { return privateLookupId('rate-limit-principal-v2', principalId.trim()); } catch { return null; }
-				})());
-			if (hashed) {
-				await limiter.userMessageLimiter.delete(hashed);
-				await limiter.userBundleLimiter.delete(hashed);
-				await limiter.userAuthLimiter.delete(hashed);
-				await limiter.authAccountPasswordLimiter.delete(hashed);
-				await limiter.authPassphraseLimiter.delete(hashed);
-				await limiter.authServerPasswordLimiter.delete(hashed);
-				return true;
-			}
-		} catch { }
-		return false;
-	}
-
-	// Reset global connection limits (admin function)
-	async resetGlobalConnectionLimits() {
-		const limiter = await this.#limiter();
-		await limiter.globalConnectionLimiter.delete('global-conn');
-		return true;
-	}
-
-	// Get current rate limit status for a user
-	async getUserStatus(principalId) {
-		if (!this.isValidPrincipalId(principalId)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId provided for status check');
-			return null;
-		}
-
-			const limiter = await this.#limiter();
-			const hashed = (() => {
-				try { return privateLookupId('rate-limit-principal-v2', principalId.trim()); } catch { return null; }
-			})();
-		if (!hashed) return null;
-		const msgInfo = await limiter.userMessageLimiter.get(hashed);
-		const bunInfo = await limiter.userBundleLimiter.get(hashed);
-		const msgCfg = RATE_LIMIT_CONFIG.MESSAGES;
-		const bunCfg = RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS;
-
-			return {
-				messages: msgInfo ? {
-				attempts: msgInfo.consumedPoints || 0,
-				blockedUntil: msgInfo.msBeforeNext ? Date.now() + msgInfo.msBeforeNext : 0,
-				isBlocked: (msgInfo.consumedPoints || 0) >= msgCfg.MAX_MESSAGES && (msgInfo.msBeforeNext || 0) > 0,
-				windowMs: msgCfg.WINDOW_MS
-			} : null,
-			bundleOperations: bunInfo ? {
-				attempts: bunInfo.consumedPoints || 0,
-				blockedUntil: bunInfo.msBeforeNext ? Date.now() + bunInfo.msBeforeNext : 0,
-				isBlocked: (bunInfo.consumedPoints || 0) >= bunCfg.MAX_OPERATIONS && (bunInfo.msBeforeNext || 0) > 0,
-				windowMs: bunCfg.WINDOW_MS
-			} : null
-		};
-	}
-
-	// Get global connection rate limit status
-	async getGlobalConnectionStatus() {
-		const limiter = await this.#limiter();
-		return limiter.getGlobalConnectionStatus();
-	}
-
-	// Security utility functions
-	isValidWebSocket(ws) {
-		return ws && typeof ws === 'object' && typeof ws.send === 'function' && typeof ws.close === 'function';
-	}
-
-	isValidPrincipalId(principalId) {
-		if (!principalId || typeof principalId !== 'string') return false;
-		const trimmed = principalId.trim();
-		if (!trimmed) return false;
-		const PRINCIPAL_ID_REGEX = /^[A-Za-z0-9_-]{3,128}$/;
-		const HEX_ID_REGEX = /^[a-f0-9]{32,128}$/i;
-		return HEX_ID_REGEX.test(trimmed) || PRINCIPAL_ID_REGEX.test(trimmed);
-	}
-
-	isValidMessageType(messageType) {
-		return messageType && typeof messageType === 'string' && messageType.length > 0;
-	}
-
-	generateSecureRequestId() {
-		return crypto.randomBytes(16).toString('hex');
-	}
-
-	// Perform security audit with Redis metrics
-	async performSecurityAudit() {
-		try {
-			const limiter = await this.#limiter();
-			const stats = await limiter.getStats();
-			const health = await this.getSecurityHealth();
-
-			const audit = {
-				timestamp: Date.now(),
-				timestampISO: new Date().toISOString(),
-
-				metrics: {
-					backend: stats.backend,
-					redis: stats.redis,
-					global: stats.global,
-					users: stats.users,
-					connections: stats.connections
-				},
-
-				// Security health assessment
-				securityHealth: health,
-
-				// Top abusers requiring investigation
-				topAbusers: stats.users?.topAbusers || [],
-
-				// Actionable recommendations
-				recommendations: this._generateRecommendations(stats, health),
-
-				// Compliance notes
-				compliance: {
-					rateLimitingActive: stats.redis?.connected || false,
-					ddosProtection: true,
-					abnormalActivity: (stats.users?.blocked || 0) > 10,
-					note: 'All rate limiting data persisted in Redis for cluster-wide enforcement'
-				}
-			};
-
-			cryptoLogger.info('[RATE-LIMIT-SECURITY] Security Audit Complete', {
-				activeUsers: audit.metrics.users.activeLimiters,
-				blockedUsers: audit.metrics.users.blocked,
-				globalBlocked: audit.metrics.global.isBlocked,
-				alertCount: health.alerts?.length || 0
-			});
-
-			return audit;
-		} catch (error) {
-			cryptoLogger.error('[RATE-LIMIT-SECURITY] Audit failed', {
-				error: error.message,
-				stack: error.stack
-			});
-
-			return {
-				timestamp: Date.now(),
-				error: error.message,
-				status: 'failed',
-				recommendations: [{
-					priority: 'critical',
-					action: 'Fix rate limiter immediately',
-					impact: 'Security monitoring unavailable'
-				}]
-			};
-		}
-	}
-
-	async close() {
-		if (this._limiter && typeof this._limiter.close === 'function') {
-			await this._limiter.close();
-		}
-		this._limiter = null;
-		this._initializePromise = null;
-	}
+  constructor(limiter, { lazy = false } = {}) {
+    this._limiter = limiter || null;
+    this._usesSharedLimiter = !limiter;
+    this._limiterFactory = limiter ? async () => limiter : () => getDistributedRateLimiter();
+    this._initializePromise = null;
+    this._socketWindows = new WeakMap();
+    if (!lazy && !limiter) this._initializePromise = this._initialize();
+  }
+
+  async _initialize() {
+    const limiter = await this._limiterFactory();
+    this._limiter = limiter;
+    return limiter;
+  }
+
+  async limiter() {
+    if (this._limiter) return this._limiter;
+    if (!this._initializePromise) {
+      const initialization = this._initialize();
+      this._initializePromise = initialization;
+      initialization.catch(() => {
+        if (this._initializePromise === initialization) this._initializePromise = null;
+      });
+    }
+    return this._initializePromise;
+  }
+
+  async checkConnectionLimit(ws) {
+    if (!ws || typeof ws.send !== 'function' || typeof ws.close !== 'function') return false;
+
+    let result;
+    try {
+      result = await (await this.limiter()).checkGlobalConnectionLimit();
+    } catch {
+      result = { allowed: false };
+    }
+    if (result.allowed) return true;
+
+    console.warn('[RATE-LIMIT] Global connection admission denied');
+    try {
+      await sendSecureMessage(ws, {
+        type: SignalType.ERROR,
+        code: 'CONNECTION_ADMISSION_DENIED',
+        message: 'Connection admission unavailable'
+      });
+    } catch {
+    }
+    ws.close(1013, 'Connection admission unavailable');
+    return false;
+  }
+
+  async applyMessageRateLimiting(ws, messageType, message = undefined) {
+    if (!ws || typeof ws.send !== 'function' || typeof messageType !== 'string') return false;
+    const isAuth = isRateLimitedAuthSignalType(messageType);
+    const isPublish = messageType === SignalType.PUBLISH_DISCOVERY;
+    if (!isAuth && !isPublish) return true;
+
+    const now = Date.now();
+    let window = this._socketWindows.get(ws);
+    if (!window || now - window.startedAt >= 60_000) {
+      window = { startedAt: now, auth: 0, publish: 0 };
+      this._socketWindows.set(ws, window);
+    }
+
+    const key = isAuth ? 'auth' : 'publish';
+    const limit = isAuth
+      ? Math.max(1, RATE_LIMIT_CONFIG.AUTHENTICATION.MAX_ATTEMPTS_PER_CONNECTION)
+      : Math.max(1, RATE_LIMIT_CONFIG.DISCOVERY_PUBLISH.MAX_ATTEMPTS_PER_CONNECTION);
+    window[key] += 1;
+    if (window[key] <= limit) return true;
+
+    const authRequestId = isAccountAuthSignalType(messageType) &&
+      typeof message?.authRequestId === 'string' &&
+      AUTH_REQUEST_ID_RE.test(message.authRequestId)
+      ? message.authRequestId
+      : undefined;
+    const requestId = isServerEntrySignalType(messageType) &&
+      typeof message?.requestId === 'string' &&
+      AUTH_REQUEST_ID_RE.test(message.requestId)
+      ? message.requestId
+      : undefined;
+      
+    const publishRequestId = isPublish &&
+      typeof message?.requestId === 'string' &&
+      PUBLISH_REQUEST_ID_RE.test(message.requestId)
+      ? message.requestId
+      : undefined;
+    if (publishRequestId) {
+      await sendSecureMessage(ws, {
+        type: SignalType.OK,
+        requestId: publishRequestId,
+        op: SignalType.PUBLISH_DISCOVERY,
+        success: false,
+        error: 'rate_limited'
+      });
+      return false;
+    }
+
+    const response = {
+      type: isAuth ? SignalType.AUTH_ERROR : SignalType.ERROR,
+      code: 'SOCKET_RATE_LIMITED',
+      message: 'Request rate exceeded for this connection'
+    };
+    if (authRequestId) response.authRequestId = authRequestId;
+    if (requestId) response.requestId = requestId;
+    await sendSecureMessage(ws, response);
+    return false;
+  }
+
+  async close() {
+    const initialization = this._initializePromise;
+    this._initializePromise = null;
+    const limiter = this._limiter || (initialization ? await initialization.catch(() => null) : null);
+    this._limiter = null;
+    if (this._usesSharedLimiter) {
+      await closeDistributedRateLimiter();
+    } else if (limiter?.close) {
+      await limiter.close();
+    }
+  }
 }
 
-export const rateLimitMiddleware = new RateLimitMiddleware(undefined, { lazy: false });
+export const rateLimitMiddleware = new RateLimitMiddleware(undefined, { lazy: true });

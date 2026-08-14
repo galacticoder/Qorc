@@ -4,25 +4,17 @@ import type { useAuth } from "@/hooks/auth/useAuth";
 
 interface ChatSignalsProps {
   Authentication: ReturnType<typeof useAuth>;
-  Database: any;
-  fileHandler: {
-    handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
-  };
-  encryptedHandler: (message: any) => Promise<void>;
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
+  encryptedHandler: (message: any) => Promise<boolean | void>;
 }
 
-export const useChatSignals = ({ Authentication, Database, fileHandler, encryptedHandler, findUser }: ChatSignalsProps) => {
+export const useChatSignals = ({ Authentication, encryptedHandler }: ChatSignalsProps) => {
   return useCallback(
     async (data: any) => {
       await handleSignalMessages(data, {
         Authentication,
-        Database,
-        handleFileMessageChunk: fileHandler.handleFileMessageChunk,
         handleEncryptedMessagePayload: encryptedHandler,
-        findUser,
       });
     },
-    [Authentication, Database, fileHandler, encryptedHandler, findUser]
+    [Authentication, encryptedHandler]
   );
 };

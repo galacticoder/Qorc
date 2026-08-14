@@ -1,140 +1,134 @@
 {
-    "$schema": "https://schema.tauri.app/config/2",
-    "productName": "Qor",
-    "version": "1.0.0",
-    "identifier": "com.qor.chat",
-    "build": {
-        "frontendDist": "../dist",
-        "beforeBuildCommand": "pnpm run build"
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Qor",
+  "version": "1.0.0",
+  "identifier": "com.qor.chat",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "pnpm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "trayIcon": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true
     },
-    "app": {
-        "withGlobalTauri": false,
-        "trayIcon": {
-            "iconPath": "icons/tray-icon.png",
-            "iconAsTemplate": true
-        },
-        "windows": [
-            {
-                "title": "Qor",
-                "width": 1200,
-                "height": 800,
-                "minWidth": 800,
-                "minHeight": 600,
-                "resizable": true,
-                "fullscreen": false,
-                "center": true,
-                "visible": false,
-                "decorations": true,
-                "transparent": false,
-                "focus": true,
-                "devtools": true,
-                "shadow": true,
-                "backgroundThrottling": "disabled"
-            }
-        ],
-        "security": {
-            "csp": {
-                "default-src": "'self'",
-                "script-src": "'self' 'wasm-unsafe-eval'",
-                "style-src": "'self' 'unsafe-inline'",
-                "style-src-elem": "'self' 'unsafe-inline'",
-                "style-src-attr": "'unsafe-inline'",
-                "img-src": "'self' data: blob: https:",
-                "media-src": "'self' blob: data: mediastream:",
-                "connect-src": "* 'self' wss: ws: https: http: blob: ipc: ipc://localhost http://ipc.localhost https://ipc.localhost",
-                "font-src": "'self' data:",
-                "object-src": "'none'",
-                "base-uri": "'self'",
-                "frame-ancestors": "'none'"
-            },
-            "dangerousDisableAssetCspModification": false,
-            "freezePrototype": true,
-            "pattern": {
-                "use": "brownfield"
-            }
-        }
-    },
-    "bundle": {
-        "active": true,
-        "publisher": "galacticoderr",
-        "homepage": "https://github.com/galacticoder/Qor-Chat",
-        "targets": [
-            "deb",
-            "rpm",
-            "appimage",
-            "app",
-            "dmg",
-            "msi",
-            "nsis"
-        ],
-        "icon": [
-            "icons/32x32.png",
-            "icons/128x128.png",
-            "icons/128x128@2x.png",
-            "icons/icon.png",
-            "icons/icon.icns",
-            "icons/icon.ico"
-        ],
-        "resources": [
-            "binaries/qor-pir-client*"
-        ],
-        "category": "SocialNetworking",
-        "shortDescription": "",
-        "longDescription": "",
-        "copyright": "Copyright © 2026 galacticoderr",
-        "license": "LicenseRef-qorc-Non-Commercial-Copyleft-1.0",
-        "licenseFile": "../LICENSE",
-        "linux": {
-            "appimage": {
-                "bundleMediaFramework": true
-            },
-            "deb": {
-                "files": {
-                    "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
-                },
-                "depends": [
-                    "libwebkit2gtk-4.1-0",
-                    "libgtk-3-0"
-                ]
-            },
-            "rpm": {
-                "files": {
-                    "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
-                },
-                "depends": [
-                    "webkit2gtk4.1",
-                    "gtk3"
-                ]
-            }
-        },
-        "macOS": {
-            "minimumSystemVersion": "10.15",
-            "exceptionDomain": "",
-            "signingIdentity": null,
-            "entitlements": null
-        },
-        "windows": {
-            "certificateThumbprint": null,
-            "tsp": false,
-            "webviewInstallMode": {
-                "type": "downloadBootstrapper"
-            },
-            "nsis": {
-                "installerIcon": "icons/icon.ico",
-                "headerImage": null,
-                "sidebarImage": null,
-                "installMode": "currentUser",
-                "languages": [
-                    "English"
-                ],
-                "displayLanguageSelector": false
-            }
-        }
-    },
-    "plugins": {
-        "shell": {
-            "open": "^https?://"
-        },
-        "fs": {}
+    "windows": [
+      {
+        "label": "main",
+        "title": "Qor",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "focus": true,
+        "devtools": true,
+        "shadow": true,
+        "backgroundThrottling": "disabled"
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "style-src-elem": "'self' 'unsafe-inline'",
+        "style-src-attr": "'unsafe-inline'",
+        "img-src": "'self' data: blob:",
+        "media-src": "'self' blob: mediastream:",
+        "connect-src": "'self' blob: ipc: ipc://localhost http://ipc.localhost https://ipc.localhost",
+        "font-src": "'self' data:",
+        "object-src": "'none'",
+        "frame-src": "'none'",
+        "form-action": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "dangerousDisableAssetCspModification": false,
+      "freezePrototype": true,
+      "pattern": {
+        "use": "brownfield"
+      }
     }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "galacticoderr",
+    "homepage": "https://github.com/galacticoder/Qor-Chat",
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage",
+      "app",
+      "dmg",
+      "msi",
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "SocialNetworking",
+    "shortDescription": "",
+    "longDescription": "",
+    "copyright": "Copyright \u00a9 2026 galacticoderr",
+    "license": "LicenseRef-qorc-Non-Commercial-Copyleft-1.0",
+    "licenseFile": "../LICENSE",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      },
+      "deb": {
+        "files": {
+          "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
+        },
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
+        },
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "entitlements": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "tsp": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": null,
+        "sidebarImage": null,
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    }
+  }
 }

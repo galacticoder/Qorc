@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
-import { stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
+import type { SecureDB } from '../../lib/database/secureDB';
+import { clearCallMediaState, stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
 import { power } from '../../lib/tauri-bindings';
 import {
   setupIncomingCallCallback,
@@ -32,8 +33,9 @@ import {
 export const useCalling = (
   authContext: ReturnType<typeof useAuth>,
   options?: {
-    getPeerKeys?: (username: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
     getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
+    ensurePeerSession?: (username: string) => Promise<void>;
+    secureDBRef?: React.RefObject<SecureDB | null>;
   }
 ) => {
   if (!authContext) {
@@ -44,9 +46,6 @@ export const useCalling = (
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const remoteScreenStreamRef = useRef<MediaStream | null>(null);
-
-  const hasBeenAuthenticatedRef = useRef(false);
-  const authenticatedUsernameRef = useRef<string>('');
 
   const { username, loginUsernameRef, isLoggedIn, accountAuthenticated } = authContext;
 
@@ -85,8 +84,9 @@ export const useCalling = (
     localStreamRef,
     remoteStreamRef,
     remoteScreenStreamRef,
-    getPeerKeys: options?.getPeerKeys,
-    getPeerCertificate: options?.getPeerCertificate
+    getPeerCertificate: options?.getPeerCertificate,
+    ensurePeerSession: options?.ensurePeerSession,
+    secureDBRef: options?.secureDBRef,
   };
 
   const actionSetters: ActionSetters = {
@@ -102,7 +102,9 @@ export const useCalling = (
       stopMediaStream(localStreamRef.current);
       stopMediaStream(remoteStreamRef.current);
       stopMediaStream(remoteScreenStreamRef.current);
-      power.stop(0).catch(() => { });
+      everConnectedRef.current.clear();
+      lastCallTypeRef.current.clear();
+      power.stop().catch(() => { });
     };
   }, []);
 
@@ -110,35 +112,37 @@ export const useCalling = (
     if (serviceRef.current) { return; }
     if (!isValidCallingUsername(currentUsername)) { return; }
     if (!isFullyAuthenticated) { return; }
-    if (hasBeenAuthenticatedRef.current && !isFullyAuthenticated) { return; }
 
     const service = new SecureCallingService(currentUsername);
     serviceRef.current = service;
+    let cancelled = false;
 
-    setupIncomingCallCallback(service, callbackRefs, callbackSetters);
-    setupCallStateChangeCallback(service, callbackRefs, callbackSetters);
+    setupIncomingCallCallback(service, callbackRefs, callbackSetters, currentUsername);
+    setupCallStateChangeCallback(service, callbackRefs, callbackSetters, currentUsername);
     setupStreamCallbacks(service, callbackRefs, callbackSetters);
 
     const initializeService = async (attempt = 0): Promise<void> => {
       try {
-        service.initialize();
-
-        hasBeenAuthenticatedRef.current = true;
-        authenticatedUsernameRef.current = currentUsername;
+        await service.initialize();
+        if (cancelled || serviceRef.current !== service) return;
 
         setCallingService(service);
         setIsInitialized(true);
       } catch (_error) {
+        if (cancelled) return;
         if (attempt < 3) {
           const baseDelay = 500;
           const jitterBytes = PostQuantumRandom.randomBytes(1);
           const jitter = jitterBytes[0] % 200;
+          jitterBytes.fill(0);
           const delay = Math.min(5000, baseDelay * Math.pow(2, attempt)) + jitter;
           await new Promise((resolve) => setTimeout(resolve, delay));
+          if (cancelled) return;
           await initializeService(attempt + 1);
           return;
         }
         console.error('Failed to initialize calling service:', _error);
+        service.destroy();
         serviceRef.current = null;
         setCallingService(null);
         setCurrentCall(null);
@@ -146,41 +150,42 @@ export const useCalling = (
         setRemoteStream(null);
         setRemoteScreenStream(null);
         setIsInitialized(false);
-        hasBeenAuthenticatedRef.current = false;
-        authenticatedUsernameRef.current = '';
       }
     };
 
     initializeService();
 
     return () => {
-      if (serviceRef.current) {
-        serviceRef.current.destroy();
+      cancelled = true;
+      eventDebouncer.current.cancel();
+      service.destroy();
+      void power.stop().catch(() => { });
+      if (serviceRef.current === service) {
         serviceRef.current = null;
       }
       setCallingService(null);
       setCurrentCall(null);
-      stopMediaStream(localStreamRef.current);
-      stopMediaStream(remoteStreamRef.current);
-      stopMediaStream(remoteScreenStreamRef.current);
-      localStreamRef.current = null;
-      remoteStreamRef.current = null;
-      remoteScreenStreamRef.current = null;
-      setLocalStream(null);
-      setRemoteStream(null);
-      setRemoteScreenStream(null);
+      clearCallMediaState(callbackRefs, callbackSetters);
+      everConnectedRef.current.clear();
+      lastCallTypeRef.current.clear();
       setIsInitialized(false);
     };
   }, [currentUsername, isFullyAuthenticated]);
 
   const startCall = useCallback(
     createStartCall(actionRefs, actionSetters, currentUsername),
-    [currentUsername]
+    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession, options?.secureDBRef]
   );
 
-  const answerCall = useCallback(createAnswerCall(actionRefs), []);
+  const answerCall = useCallback(
+    createAnswerCall(actionRefs),
+    [options?.getPeerCertificate, options?.ensurePeerSession]
+  );
 
-  const declineCall = useCallback(createDeclineCall(actionRefs), []);
+  const declineCall = useCallback(
+    createDeclineCall(actionRefs),
+    []
+  );
 
   const endCall = useCallback(createEndCall(actionRefs), []);
 

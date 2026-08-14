@@ -1,21 +1,17 @@
 import Redis from 'ioredis';
 import { createPool } from 'generic-pool';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import fs from 'fs';
+import { envInt } from '../utils/env.js';
 
 const REDIS_URL = process.env.REDIS_URL;
 if (!REDIS_URL) {
-    throw new Error('REDIS_URL must be explicitly configured via environment variable');
+    throw new Error('REDIS_URL must be explicitly configured using an environment variable');
 }
 const REDIS_CLUSTER_NODES = (process.env.REDIS_CLUSTER_NODES || '').trim();
 const USING_CLUSTER = REDIS_CLUSTER_NODES.length > 0;
 
 const REDIS_QUIET_ERRORS = (process.env.REDIS_QUIET_ERRORS || '').toLowerCase() === 'true';
-const REDIS_ERROR_THROTTLE_MS = clampNumber(process.env.REDIS_ERROR_THROTTLE_MS, {
-    min: 1000,
-    max: 60000,
-    defaultValue: 5000,
-});
+const REDIS_ERROR_THROTTLE_MS = envInt('REDIS_ERROR_THROTTLE_MS', 5000, 1000, 60000);
 let lastRedisErrorMessage = null;
 let lastRedisErrorTime = 0;
 
@@ -31,30 +27,30 @@ function logRedisError(context, error) {
 
     lastRedisErrorMessage = msg;
     lastRedisErrorTime = now;
-    cryptoLogger.error(context, error);
+    console.error(context, error);
 }
 
-function clampNumber(value, defaults) {
-    const parsed = Number.parseInt(value ?? defaults.defaultValue, 10);
-    if (!Number.isFinite(parsed)) return defaults.defaultValue;
-    return Math.min(Math.max(parsed, defaults.min), defaults.max);
-}
-
+const REDIS_POOL_MAX = envInt('REDIS_POOL_MAX', 50, 10, 500);
 const POOL_CONFIG = {
-    min: clampNumber(process.env.REDIS_POOL_MIN, { min: 1, max: 100, defaultValue: 4 }),
-    max: clampNumber(process.env.REDIS_POOL_MAX, { min: 10, max: 500, defaultValue: 50 }),
-    acquireTimeoutMillis: clampNumber(process.env.REDIS_POOL_ACQUIRE_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
-    idleTimeoutMillis: clampNumber(process.env.REDIS_POOL_IDLE_TIMEOUT, { min: 10_000, max: 600_000, defaultValue: 180_000 }),
-    evictionRunIntervalMillis: clampNumber(process.env.REDIS_POOL_EVICTION_INTERVAL, { min: 10_000, max: 600_000, defaultValue: 60_000 })
+    min: Math.min(
+        REDIS_POOL_MAX,
+        envInt('REDIS_POOL_MIN', 4, 1, 100)
+    ),
+    max: REDIS_POOL_MAX,
+    acquireTimeoutMillis: envInt('REDIS_POOL_ACQUIRE_TIMEOUT', 15_000, 1000, 60_000),
+    idleTimeoutMillis: envInt('REDIS_POOL_IDLE_TIMEOUT', 180_000, 10_000, 600_000),
+    evictionRunIntervalMillis: envInt('REDIS_POOL_EVICTION_INTERVAL', 60_000, 10_000, 600_000)
 };
 
 let cachedTlsOptions = null;
 
-function getTlsOptions() {
-    if (cachedTlsOptions) {
-        return cachedTlsOptions;
-    }
+function wipeCachedTlsPrivateKey() {
+    const key = cachedTlsOptions?.key;
+    if (Buffer.isBuffer(key)) key.fill(0);
+    cachedTlsOptions = null;
+}
 
+export function buildRedisTlsOptions() {
     const tlsOptions = {
         servername: process.env.REDIS_TLS_SERVERNAME || 'redis',
         rejectUnauthorized: true
@@ -70,8 +66,12 @@ function getTlsOptions() {
         tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
     }
 
-    cachedTlsOptions = tlsOptions;
     return tlsOptions;
+}
+
+function getTlsOptions() {
+    if (!cachedTlsOptions) cachedTlsOptions = buildRedisTlsOptions();
+    return cachedTlsOptions;
 }
 
 function getRedisOptions() {
@@ -80,12 +80,12 @@ function getRedisOptions() {
         retryDelayOnFailover: 100,
         enableAutoPipelining: true,
         reconnectOnError: (err) => /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/.test(err.message),
-        connectTimeout: clampNumber(process.env.REDIS_CONNECT_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
-        commandTimeout: clampNumber(process.env.REDIS_COMMAND_TIMEOUT, { min: 1000, max: 30_000, defaultValue: 10_000 }),
+        connectTimeout: envInt('REDIS_CONNECT_TIMEOUT', 15_000, 1000, 60_000),
+        commandTimeout: envInt('REDIS_COMMAND_TIMEOUT', 10_000, 1000, 30_000),
         socket: {
-            keepAlive: clampNumber(process.env.REDIS_KEEPALIVE, { min: 0, max: 300_000, defaultValue: 30_000 }),
+            keepAlive: envInt('REDIS_KEEPALIVE', 30_000, 0, 300_000),
             noDelay: true,
-            timeout: clampNumber(process.env.REDIS_SOCKET_TIMEOUT, { min: 30_000, max: 600_000, defaultValue: 120_000 })
+            timeout: envInt('REDIS_SOCKET_TIMEOUT', 120_000, 30_000, 600_000)
         },
         tls: getTlsOptions()
     };
@@ -100,8 +100,6 @@ function parseRedisClusterNodes(redisClusterNodes) {
 }
 
 let clusterClient = null;
-const duplicateConnectionPool = new Set();
-const MAX_DUPLICATE_CONNECTIONS = clampNumber(process.env.REDIS_DUPLICATE_POOL_MAX, { min: 1, max: 20, defaultValue: 5 });
 
 if (USING_CLUSTER) {
     try {
@@ -113,17 +111,17 @@ if (USING_CLUSTER) {
                 password: process.env.REDIS_PASSWORD
             }
         });
-        clusterClient.on('ready', () => cryptoLogger.info('Redis cluster client ready'));
+        clusterClient.on('ready', () => console.log('Redis cluster client ready'));
         clusterClient.on('error', (error) => logRedisError('Redis cluster error', error));
     } catch (e) {
-        cryptoLogger.error('Failed to initialize Redis cluster client', e);
+        console.error('Failed to initialize Redis cluster client', e);
     }
 }
 
 const factory = {
     create: async () => {
         if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
-            throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not supported');
+            throw new Error('REDIS_URL must use rediss://');
         }
 
         const client = new Redis(REDIS_URL, {
@@ -133,43 +131,48 @@ const factory = {
         });
 
         client.on('error', (error) => logRedisError('Redis client error', error));
-        client.on('close', () => cryptoLogger.warn('Redis client closed'));
-        client.on('reconnecting', () => cryptoLogger.warn('Redis client reconnecting'));
+        client.on('close', () => console.warn('Redis client closed'));
+        client.on('reconnecting', () => console.warn('Redis client reconnecting'));
 
-        await new Promise((resolve, reject) => {
-            if (client.status === 'ready') {
-                resolve();
-                return;
-            }
+        try {
+            await new Promise((resolve, reject) => {
+                if (client.status === 'ready') {
+                    resolve();
+                    return;
+                }
 
-            let timeout;
-            let readyHandler;
-            let errorHandler;
+                let timeout;
+                let readyHandler;
+                let errorHandler;
 
-            const cleanup = () => {
-                if (timeout) clearTimeout(timeout);
-                if (readyHandler) client.off('ready', readyHandler);
-                if (errorHandler) client.off('error', errorHandler);
-            };
+                const cleanup = () => {
+                    if (timeout) clearTimeout(timeout);
+                    if (readyHandler) client.off('ready', readyHandler);
+                    if (errorHandler) client.off('error', errorHandler);
+                };
 
-            readyHandler = () => {
-                cleanup();
-                resolve();
-            };
+                readyHandler = () => {
+                    cleanup();
+                    resolve();
+                };
 
-            errorHandler = (error) => {
-                cleanup();
-                reject(error);
-            };
+                errorHandler = (error) => {
+                    cleanup();
+                    reject(error);
+                };
 
-            timeout = setTimeout(() => {
-                cleanup();
-                reject(new Error('Redis client connection timeout - neither ready nor error event received within 15 seconds'));
-            }, 15000);
+                timeout = setTimeout(() => {
+                    cleanup();
+                    reject(new Error('Redis client connection timeout'));
+                }, 15000);
 
-            client.once('ready', readyHandler);
-            client.once('error', errorHandler);
-        });
+                client.once('ready', readyHandler);
+                client.once('error', errorHandler);
+            });
+        } catch (error) {
+            client.disconnect(false);
+            throw error;
+        }
 
         return client;
     },
@@ -177,17 +180,17 @@ const factory = {
         try {
             await client.quit();
         } catch (error) {
-            cryptoLogger.error('Error destroying Redis client', error);
+            console.error('Error destroying Redis client', error);
             try {
                 client.disconnect();
             } catch (disconnectError) {
-                cryptoLogger.error('Error disconnecting Redis client', disconnectError);
+                console.error('Error disconnecting Redis client', disconnectError);
             }
         }
     }
 };
 
-export const redisPool = USING_CLUSTER ? null : createPool(factory, POOL_CONFIG);
+const redisPool = USING_CLUSTER ? null : createPool(factory, POOL_CONFIG);
 
 export async function withRedisClient(operation) {
     if (USING_CLUSTER && clusterClient) {
@@ -207,7 +210,7 @@ export async function withRedisClient(operation) {
         }
     } catch (error) {
         if (error.message && error.message.includes('draining')) {
-            throw new Error('Redis pool is shutting down - operation cannot be completed');
+            throw new Error('Redis pool is shutting down ');
         }
         throw error;
     }
@@ -215,7 +218,7 @@ export async function withRedisClient(operation) {
 
 export async function createSubscriber() {
     if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
-        throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not allowed');
+        throw new Error('REDIS_URL must use rediss://');
     }
 
     const sub = new Redis(REDIS_URL, {
@@ -225,42 +228,47 @@ export async function createSubscriber() {
     });
 
     sub.on('error', (error) => logRedisError('Redis subscriber error', error));
-    sub.on('close', () => cryptoLogger.warn('Redis subscriber closed'));
+    sub.on('close', () => console.warn('Redis subscriber closed'));
 
-    await new Promise((resolve, reject) => {
-        if (sub.status === 'ready') {
-            resolve();
-            return;
-        }
+    try {
+        await new Promise((resolve, reject) => {
+            if (sub.status === 'ready') {
+                resolve();
+                return;
+            }
 
-        let timeout;
-        let readyHandler;
-        let errorHandler;
+            let timeout;
+            let readyHandler;
+            let errorHandler;
 
-        const cleanup = () => {
-            if (timeout) clearTimeout(timeout);
-            if (readyHandler) sub.off('ready', readyHandler);
-            if (errorHandler) sub.off('error', errorHandler);
-        };
+            const cleanup = () => {
+                if (timeout) clearTimeout(timeout);
+                if (readyHandler) sub.off('ready', readyHandler);
+                if (errorHandler) sub.off('error', errorHandler);
+            };
 
-        readyHandler = () => {
-            cleanup();
-            resolve();
-        };
+            readyHandler = () => {
+                cleanup();
+                resolve();
+            };
 
-        errorHandler = (error) => {
-            cleanup();
-            reject(error);
-        };
+            errorHandler = (error) => {
+                cleanup();
+                reject(error);
+            };
 
-        timeout = setTimeout(() => {
-            cleanup();
-            reject(new Error('Redis subscriber connection timeout - neither ready nor error event received within 15 seconds'));
-        }, 15000);
+            timeout = setTimeout(() => {
+                cleanup();
+                reject(new Error('Redis subscriber connection timeout'));
+            }, 15000);
 
-        sub.once('ready', readyHandler);
-        sub.once('error', errorHandler);
-    });
+            sub.once('ready', readyHandler);
+            sub.once('error', errorHandler);
+        });
+    } catch (error) {
+        sub.disconnect(false);
+        throw error;
+    }
 
     return sub;
 }
@@ -272,46 +280,36 @@ export async function closeSubscriber(subscriber) {
                 await subscriber.quit();
             }
         } catch (error) {
-            cryptoLogger.error('Error closing subscriber', error);
+            console.error('Error closing subscriber', error);
+            try {
+                subscriber.disconnect(false);
+            } catch {
+            }
         }
     }
 }
 
 export const cleanup = async () => {
-    cryptoLogger.info('Cleaning up Redis resources');
+    console.log('Cleaning up Redis resources');
 
     if (redisPool) {
         try {
             await redisPool.drain();
             await redisPool.clear();
-            cryptoLogger.info('Redis connection pool cleaned up');
+            console.log('Redis connection pool cleaned up');
         } catch (error) {
-            cryptoLogger.error('Error cleaning up Redis pool', error);
+            console.error('Error cleaning up Redis pool', error);
         }
     }
 
-    if (duplicateConnectionPool.size > 0) {
-        cryptoLogger.info('Cleaning up duplicate Redis connections', { count: duplicateConnectionPool.size });
-        const cleanupPromises = Array.from(duplicateConnectionPool).map(async (client) => {
-            try {
-                if (client && client._originalQuit && typeof client._originalQuit === 'function') {
-                    await client._originalQuit();
-                } else if (client && typeof client.quit === 'function') {
-                    await client.quit();
-                }
-            } catch (err) {
-                cryptoLogger.error('Error quitting duplicate connection', err);
-            }
-        });
-        await Promise.all(cleanupPromises);
-        duplicateConnectionPool.clear();
-    }
-
-    if (clusterClient) {
+    const activeClusterClient = clusterClient;
+    clusterClient = null;
+    if (activeClusterClient) {
         try {
-            await clusterClient.quit();
+            await activeClusterClient.quit();
         } catch (err) {
-            cryptoLogger.error('Error quitting cluster client in cleanup', err);
+            console.error('Error quitting cluster client in cleanup', err);
         }
     }
+    wipeCachedTlsPrivateKey();
 };

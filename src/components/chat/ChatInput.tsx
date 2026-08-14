@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { Message } from "./messaging/types";
@@ -9,35 +9,14 @@ import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
 import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
 import { MessageReply } from "./messaging/types";
-import { MAX_FILE_SIZE } from "@/lib/constants";
+import { MAX_FILE_SIZE, MAX_VOICE_NOTE_DURATION_SECONDS } from "@/lib/constants";
 import { sanitizeMessage } from "@/lib/sanitizers";
-import { messageVault } from "@/lib/security/message-vault";
-
-interface HybridKeys {
-  x25519: { private: Uint8Array; publicKeyBase64: string };
-  kyber: { publicKeyBase64: string; secretKey: Uint8Array };
-  dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
-}
-
-interface FileData {
-  id: string;
-  content: string;
-  timestamp: Date;
-  isCurrentUser: boolean;
-  isSystemMessage: boolean;
-  type: string;
-  filename: string;
-  fileSize: number;
-  mimeType: string;
-  sender: string;
-  originalBase64Data: string;
-  size?: number;
-  url?: string;
-}
+import type { HybridKeys } from "@/lib/types/auth-types";
+import type { HybridPublicKeys } from '@/lib/types/message-sending-types';
+import { toast } from "sonner";
 
 interface ChatInputProps {
   onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void;
-  onSendFile: (fileData: FileData) => void;
   isEncrypted: boolean;
 
   currentUsername: string;
@@ -52,13 +31,15 @@ interface ChatInputProps {
   getDisplayUsername?: (username: string) => Promise<string>;
   disabled?: boolean;
   getKeysOnDemand?: () => Promise<HybridKeys | null>;
-  getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
+  getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
+  findUser?: (handle: string) => Promise<any>;
+  secureDB?: any;
+  ensurePeerSession?: (peerUsername: string) => Promise<void>;
 }
 
 // Main chat input component for sending messages and files
 export function ChatInput({
   onSendMessage,
-  onSendFile: _onSendFile,
   currentUsername,
   users,
   replyTo,
@@ -72,34 +53,46 @@ export function ChatInput({
   disabled = false,
   getKeysOnDemand,
   getPeerHybridKeys,
+  findUser,
+  secureDB,
+  ensurePeerSession,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLInputElement>(null);
+  const editingMessageIdRef = useRef<string | null>(null);
 
-  const { sendFile, progress, isSendingFile } = useFileSender(
+  const { sendFile, progress, isSendingFile, fileSendPhase, cancelCurrent } = useFileSender(
     currentUsername,
     selectedConversation,
     users,
     getKeysOnDemand,
     getPeerHybridKeys,
+    findUser,
+    secureDB,
+    ensurePeerSession,
   );
 
   useEffect(() => {
-    const loadEditingContent = async () => {
-      if (editingMessage) {
-        const contentId = editingMessage.secureContentId || editingMessage.id;
-        const vaultContent = await messageVault.retrieve(contentId);
+    if (!editingMessage) {
+      if (editingMessageIdRef.current) setMessage("");
+      editingMessageIdRef.current = null;
+      return;
+    }
 
-        setMessage(vaultContent || "");
-        messageInputRef.current?.focus();
-      }
-    };
+    editingMessageIdRef.current = editingMessage.id;
+    setMessage("");
+    messageInputRef.current?.focus();
+  }, [editingMessage, selectedConversation, currentUsername]);
 
-    loadEditingContent();
-  }, [editingMessage]);
+  useLayoutEffect(() => {
+    editingMessageIdRef.current = null;
+    setMessage("");
+    setShowVoiceRecorder(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [selectedConversation, currentUsername]);
 
   // Handle sending text messages or edits
   const handleSend = useCallback(() => {
@@ -112,9 +105,17 @@ export function ChatInput({
     setMessage("");
 
     const isEdit = !!(editingMessage && onEditMessage);
+    const outboundReply = replyTo
+      ? { ...replyTo, id: replyTo.wireMessageId || replyTo.id }
+      : null;
     const sendPromise = isEdit
-      ? onSendMessage(editingMessage!.id, sanitizedMessage, SignalType.EDIT_MESSAGE, editingMessage!.replyTo)
-      : onSendMessage("", sanitizedMessage, "chat", replyTo ?? null);
+      ? onSendMessage(
+          editingMessage!.wireMessageId || editingMessage!.id,
+          sanitizedMessage,
+          SignalType.EDIT_MESSAGE,
+          editingMessage!.replyTo,
+        )
+      : onSendMessage("", sanitizedMessage, SignalType.MESSAGE, outboundReply);
 
     if (isEdit) { onCancelEdit?.(); } else { onCancelReply?.(); }
 
@@ -125,8 +126,11 @@ export function ChatInput({
 
   // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
+    if (file.size === 0) {
+      return 'File is empty.';
+    }
     if (file.size > MAX_FILE_SIZE) {
-      return 'File is too large. Maximum size is ' + MAX_FILE_SIZE + 'MB.';
+      return 'File is too large. Maximum size is ' + Math.floor(MAX_FILE_SIZE / (1024 * 1024)) + ' MB.';
     }
     return null;
   }, []);
@@ -138,7 +142,7 @@ export function ChatInput({
 
     const validationError = validateFile(file);
     if (validationError) {
-      alert(validationError);
+      toast.error(validationError);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -150,7 +154,7 @@ export function ChatInput({
       await sendFile(file);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      alert('Failed to send file: ' + errorMessage);
+      toast.error('Failed to send file: ' + errorMessage);
     } finally {
       setIsSending(false);
       if (fileInputRef.current) {
@@ -167,14 +171,31 @@ export function ChatInput({
       setIsSending(true);
 
       const timestamp = Date.now();
-      
-      const seconds = Math.max(1, Math.round(durationSec || 0));
-      const filename = `voice-note-${seconds}s-${timestamp}.webm`;
-      const file = new File([audioBlob], filename, { type: audioBlob.type || 'audio/webm' });
+      const seconds = Math.round(durationSec);
+      if (
+        !Number.isSafeInteger(seconds) ||
+        seconds < 1 ||
+        seconds > MAX_VOICE_NOTE_DURATION_SECONDS
+      ) {
+        throw new Error('Voice note duration is invalid');
+      }
+
+      const mimeType = audioBlob.type.split(';', 1)[0].trim().toLowerCase();
+      const extensionByMime: Readonly<Record<string, string>> = {
+        'audio/webm': 'webm',
+        'audio/ogg': 'ogg',
+        'audio/mp4': 'm4a',
+        'audio/mpeg': 'mp3',
+      };
+      const extension = extensionByMime[mimeType];
+      if (!extension) throw new Error('Voice note format is unsupported');
+
+      const filename = `voice-note-${seconds}s-${timestamp}.${extension}`;
+      const file = new File([audioBlob], filename, { type: mimeType });
 
       const validationError = validateFile(file);
       if (validationError) {
-        alert(validationError);
+        toast.error(validationError);
         setIsSending(false);
         setShowVoiceRecorder(false);
         return;
@@ -186,7 +207,7 @@ export function ChatInput({
     } catch (_error) {
       console.error('Failed to send voice note:', _error);
       const msg = _error instanceof Error ? _error.message : 'Unknown error';
-      alert('Failed to send voice note: ' + msg);
+      toast.error('Failed to send voice note: ' + msg);
     } finally {
       setIsSending(false);
     }
@@ -198,7 +219,7 @@ export function ChatInput({
     onTyping();
   }, [onTyping]);
 
-  // Handle keyboard events (Enter to send)
+  // Handle keyboard events
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -208,9 +229,28 @@ export function ChatInput({
 
   return (
     <>
-      {progress > 0 && progress < 1 && (
-        <div className="qor-chat-progress">
-          <ProgressBar progress={progress} />
+      {isSendingFile && (
+        <div className="qor-chat-progress" role="status" aria-live="polite">
+          <div className="qor-chat-progress-label">
+            <span>{fileSendPhase === 'preparing' ? 'Preparing encrypted file…' : 'Sending file…'}</span>
+            <div className="qor-chat-progress-right">
+              {fileSendPhase === 'sending' && progress > 0 && (
+                <span>{Math.round(Math.max(0, Math.min(1, progress)) * 100)}%</span>
+              )}
+              <button
+                type="button"
+                className="qor-chat-progress-cancel"
+                onClick={() => cancelCurrent()}
+                aria-label="Cancel file transfer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+          <ProgressBar
+            progress={progress}
+            indeterminate={fileSendPhase !== 'sending' || progress <= 0}
+          />
         </div>
       )}
 
@@ -283,7 +323,7 @@ export function ChatInput({
             {/* Message Input */}
             <input
               ref={messageInputRef}
-              placeholder="Message..."
+              placeholder={editingMessage ? "Type the complete replacement message…" : "Message..."}
               type="text"
               id="messageInput"
               value={message}

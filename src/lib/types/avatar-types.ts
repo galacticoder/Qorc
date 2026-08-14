@@ -4,8 +4,7 @@ export interface AvatarData {
     data: string;
     mimeType: string;
     hash: string;
-    updatedAt: number;
-    isDefault?: boolean;
+    isDefault: boolean;
 }
 
 export interface ProfileSettings {
@@ -18,15 +17,7 @@ export interface CachedAvatar {
     hash: string;
     cachedAt: number;
     expiresAt: number;
-    isDefault?: boolean;
-}
-
-export interface ProfilePictureMessage {
-    type: 'profile-picture-request' | 'profile-picture-response';
-    hash?: string;
-    data?: string;
-    mimeType?: string;
-    isDefault?: boolean;
+    isDefault: boolean;
 }
 
 export interface AvatarSystemState {
@@ -34,11 +25,7 @@ export interface AvatarSystemState {
     ownAvatar: AvatarData | null;
     settings: ProfileSettings;
     avatarCache: Map<string, CachedAvatar>;
-    pendingRequests: Set<string>;
+    cacheSaveInFlight: Promise<void> | null;
+    cacheSavePending: boolean;
     initialized: boolean;
-    handlerRegistered: boolean;
-    serverFetchTimestamps: Map<string, number>;
-    ownKyberPublicKey: string | null;
-    ownKyberSecretKey: Uint8Array | null;
-    ownAvatarFetchTimestamp: number;
 }

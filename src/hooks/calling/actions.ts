@@ -1,85 +1,37 @@
 import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
-import { isValidCallingUsername, isValidCallId, stopMediaStream } from '../../lib/utils/calling-utils';
-import { PostQuantumUtils } from '../../lib/utils/pq-utils';
+import { clearCallMediaState, isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
 import { isTauri } from '../../lib/tauri-bindings';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
-import { normalizeP2PEndpointUrl } from '../../lib/utils/p2p-endpoint';
 import { toast } from 'sonner';
+import type { SecureDB } from '../../lib/database/secureDB';
+import { blockingSystem } from '../../lib/blocking/blocking-system';
 
-type PeerKeysResponse = {
-  kyberPublicBase64: string;
-  dilithiumPublicBase64: string;
-  x25519PublicBase64?: string;
-};
-
-async function ensurePeerMaterial(refs: ActionRefs, peer: string): Promise<void> {
-  const service = refs.serviceRef.current;
-  if (!service) {
+async function ensurePeerMaterial(
+  refs: ActionRefs,
+  peer: string,
+  expectedService: SecureCallingService
+): Promise<void> {
+  if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling service not initialized');
   }
 
-  let trustedCert: PeerCertificateBundle | null = null;
-  if (refs.getPeerCertificate) {
-    trustedCert = await refs.getPeerCertificate(peer);
-    if (!trustedCert) {
-      throw new Error(`Trusted peer certificate unavailable for ${peer}`);
-    }
+  if (!refs.getPeerCertificate) throw new Error('Peer certificate resolver unavailable');
+  const trustedCert = await refs.getPeerCertificate(peer);
+  if (refs.serviceRef.current !== expectedService) {
+    throw new Error('Calling account changed while resolving peer identity');
   }
-
-  if (!service.hasPeerKeys(peer)) {
-    if (!refs.getPeerKeys) {
-      throw new Error(`No key resolver configured for ${peer}`);
-    }
-
-    const keys = await refs.getPeerKeys(peer);
-    if (!keys) {
-      throw new Error(`No keys available for ${peer}`);
-    }
-
-    const peerKeys = {
-      username: peer,
-      dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
-      kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
-      x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
-    };
-
-    if (trustedCert) {
-      if (
-        trustedCert.dilithiumPublicKey !== keys.dilithiumPublicBase64 ||
-        trustedCert.kyberPublicKey !== keys.kyberPublicBase64 ||
-        trustedCert.x25519PublicKey !== keys.x25519PublicBase64
-      ) {
-        throw new Error(`Peer key material mismatch for ${peer}`);
-      }
-    }
-
-    if (
-      peerKeys.dilithiumPublicKey.length === 0 ||
-      peerKeys.kyberPublicKey.length === 0 ||
-      !peerKeys.x25519PublicKey ||
-      peerKeys.x25519PublicKey.length === 0
-    ) {
-      throw new Error(`Invalid key material for ${peer}`);
-    }
-
-    service.setPeerKeys(peer, peerKeys as any);
+  if (!trustedCert) throw new Error('Trusted peer certificate unavailable');
+  await p2pTransport.registerPeerCertificate(peer, trustedCert);
+  if (refs.serviceRef.current !== expectedService) {
+    throw new Error('Calling account changed while registering peer identity');
   }
-  
-  if (trustedCert) {
-    const kyber = PostQuantumUtils.base64ToUint8Array(trustedCert.kyberPublicKey);
-    const dilithium = PostQuantumUtils.base64ToUint8Array(trustedCert.dilithiumPublicKey);
-    const x25519 = PostQuantumUtils.base64ToUint8Array(trustedCert.x25519PublicKey);
-    if (kyber.length > 0 && dilithium.length > 0 && x25519.length > 0) {
-      p2pTransport.registerPeerIdentity(peer, {
-        username: peer,
-        kyberPublicKey: kyber,
-        dilithiumPublicKey: dilithium,
-        x25519PublicKey: x25519,
-        endpointUrl: normalizeP2PEndpointUrl(trustedCert.p2pEndpointUrl)
-      });
+  if (refs.ensurePeerSession) {
+    await refs.ensurePeerSession(peer);
+    if (refs.serviceRef.current !== expectedService) {
+      throw new Error('Calling account changed while establishing the signaling session');
     }
   }
 }
@@ -89,8 +41,9 @@ export interface ActionRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
   remoteStreamRef: React.RefObject<MediaStream | null>;
   remoteScreenStreamRef: React.RefObject<MediaStream | null>;
-  getPeerKeys?: (username: string) => Promise<PeerKeysResponse | null>;
   getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
+  ensurePeerSession?: (username: string) => Promise<void>;
+  secureDBRef?: React.RefObject<SecureDB | null>;
 }
 
 export interface ActionSetters {
@@ -107,7 +60,8 @@ export const createStartCall = (
   currentUsername: string
 ) => {
   return async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
-    if (!refs.serviceRef.current) {
+    const service = refs.serviceRef.current;
+    if (!service) {
       throw new Error('Calling service not initialized');
     }
 
@@ -130,37 +84,40 @@ export const createStartCall = (
     if (peer === currentUsername) {
       throw new Error('Cannot call yourself');
     }
+    if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peer)) {
+      throw new Error('recipient-blocked');
+    }
 
     try {
-      await ensurePeerMaterial(refs, peer);
+      const db = refs.secureDBRef?.current;
+      if (!db) throw new Error('Secure database is not ready for calling');
+      await db.recordDeliberateContact(peer);
+      if (refs.serviceRef.current !== service || refs.secureDBRef?.current !== db) {
+        throw new Error('Calling account changed while recording deliberate contact');
+      }
 
-      const callId = await refs.serviceRef.current.startCall(peer, callType);
+      await ensurePeerMaterial(refs, peer, service);
+
+      const callId = await service.startCall(peer, callType);
       return callId;
     } catch (_error: any) {
       if (_error.message === 'arbitration-loss') {
         return '';
       }
-      console.error('Failed to start call:', _error);
+      const serviceIsCurrent = refs.serviceRef.current === service;
 
-      if (_error instanceof Error && _error.name === 'NotAllowedError') {
-        console.warn('Permission denied for camera/microphone. Please check your system privacy settings.');
+      if (serviceIsCurrent && _error instanceof Error && _error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
           description: "Access to camera/microphone was denied. Please check your browser permissions in the address bar and system privacy settings."
         });
       }
 
-      unstable_batchedUpdates(() => {
-        setters.setCurrentCall(null);
-        stopMediaStream(refs.localStreamRef.current);
-        stopMediaStream(refs.remoteStreamRef.current);
-        stopMediaStream(refs.remoteScreenStreamRef.current);
-        refs.localStreamRef.current = null;
-        refs.remoteStreamRef.current = null;
-        refs.remoteScreenStreamRef.current = null;
-        setters.setLocalStream(null);
-        setters.setRemoteStream(null);
-        setters.setRemoteScreenStream(null);
-      });
+      if (serviceIsCurrent) {
+        unstable_batchedUpdates(() => {
+          setters.setCurrentCall(null);
+          clearCallMediaState(refs, setters);
+        });
+      }
       throw _error;
     }
   };
@@ -169,7 +126,8 @@ export const createStartCall = (
 // Callback for answering a call
 export const createAnswerCall = (refs: ActionRefs) => {
   return async (callId: string, peer?: string) => {
-    if (!refs.serviceRef.current) {
+    const service = refs.serviceRef.current;
+    if (!service) {
       throw new Error('Calling service not initialized');
     }
 
@@ -184,21 +142,21 @@ export const createAnswerCall = (refs: ActionRefs) => {
       throw new Error('Invalid call ID format');
     }
 
-    const currentCall = (refs.serviceRef.current as any).currentCall;
+    const currentCall = (service as any).currentCall;
 
     try {
-      const peerUsername = (peer || currentCall?.peer || '').trim();
+      const peerUsername = String(currentCall?.peer || '').trim();
       if (!isValidCallingUsername(peerUsername)) {
         throw new Error('Missing peer identity for call answer');
       }
-      await ensurePeerMaterial(refs, peerUsername);
+      if (peer !== undefined && peer.trim() !== peerUsername) {
+        throw new Error('Call answer peer does not match the active call');
+      }
+      await ensurePeerMaterial(refs, peerUsername, service);
 
-      await refs.serviceRef.current.answerCall(callId);
+      await service.answerCall(callId);
     } catch (_error: any) {
-      console.error('Failed to answer call:', _error);
-
-      if (_error.name === 'NotAllowedError') {
-        console.warn('Permission denied for camera/microphone during answerCall.');
+      if (refs.serviceRef.current === service && _error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
           description: "Could not access camera/microphone. Please check your browser and system privacy settings."
         });
@@ -221,19 +179,6 @@ export const createDeclineCall = (refs: ActionRefs) => {
     }
 
     try {
-      const service = refs.serviceRef.current;
-      if (refs.getPeerKeys) {
-        try {
-          const currentCall = (service as any).currentCall;
-          if (currentCall && currentCall.id === callId && currentCall.peer) {
-            const peer = currentCall.peer;
-            await ensurePeerMaterial(refs, peer);
-          }
-        } catch (keyError) {
-          console.warn('Failed to fetch keys for decline call:', keyError);
-        }
-      }
-
       await refs.serviceRef.current.declineCall(callId);
     } catch (_error) {
       console.error('Failed to decline call:', _error);
@@ -317,15 +262,6 @@ export const createStartScreenShare = (refs: ActionRefs) => {
   return async (selectedSource?: { id: string; name: string; type: 'screen' | 'window' }) => {
     if (!refs.serviceRef.current) {
       throw new Error('Calling service not initialized');
-    }
-
-    if (selectedSource) {
-      if (!selectedSource.id || typeof selectedSource.id !== 'string') {
-        throw new Error('Invalid source ID');
-      }
-      if (!selectedSource.type || !['screen', 'window'].includes(selectedSource.type)) {
-        throw new Error('Invalid source type');
-      }
     }
 
     try {

@@ -1,17 +1,19 @@
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+
 import { execFileAsync, findInPath } from './lb-utils.js';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import os from 'os';
-
-const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-const TMPDIR = os.tmpdir();
+import {
+    HAPROXY_PID_FILE as HAPROXY_PID_FILENAME,
+    IS_ROOT,
+    TEMP_DIRECTORY,
+    haproxyStatsDashboardUrl,
+} from '../config/infrastructure.js';
 
 const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH ||
     path.join('/app/server/config', 'haproxy-auto.cfg');
 const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE ||
-    (isRoot && process.platform !== 'win32' ? '/var/run/haproxy-auto.pid' : path.join(TMPDIR, 'haproxy-auto.pid'));
+    (IS_ROOT && process.platform !== 'win32' ? `/var/run/${HAPROXY_PID_FILENAME}` : path.join(TEMP_DIRECTORY, HAPROXY_PID_FILENAME));
 
 export class HAProxyManager {
     constructor() {
@@ -21,13 +23,16 @@ export class HAProxyManager {
         this.maxConsecutiveFailures = 3;
         this.configPath = HAPROXY_CONFIG_PATH;
         this.pidFile = HAPROXY_PID_FILE;
+        this.haproxyBin = process.env.LB_HAPROXY_BIN || process.env.HAPROXY_BIN || 'haproxy';
     }
 
     // Check if HAProxy is installed
     async isInstalled() {
         try {
-            const bin = process.env.HAPROXY_BIN || 'haproxy';
-            return !!findInPath(bin);
+            if (path.isAbsolute(this.haproxyBin)) {
+                return existsSync(this.haproxyBin);
+            }
+            return !!findInPath(this.haproxyBin);
         } catch {
             return false;
         }
@@ -43,13 +48,13 @@ export class HAProxyManager {
                 console.log(`\t  - ${s.serverId} (${s.host}:${s.port})`);
             });
         }
-        console.log(`\tStats Dashboard: http://localhost:${process.env.HAPROXY_STATS_PORT || 8404}/haproxy-stats`);
+        console.log(`\tStats Dashboard: ${haproxyStatsDashboardUrl()}`);
     }
 
     // Start HAProxy with generated configuration
     async start() {
         if (!await this.isInstalled()) {
-            cryptoLogger.warn('[AUTO-LB] HAProxy not installed');
+            console.warn('[AUTO-LB] HAProxy not installed');
             console.log('[WARNING] HAProxy not installed. Install it first (e.g., run: node scripts/install-deps.cjs haproxy), then retry.');
             return false;
         }
@@ -95,11 +100,11 @@ export class HAProxyManager {
             // Clean up stale stats socket if present
             try {
                 const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
-                const statsSock = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
+                const statsSock = process.env.HAPROXY_STATS_SOCKET || path.join(TEMP_DIRECTORY, `haproxy-admin-${uid}.sock`);
                 if (existsSync(statsSock)) { await fs.unlink(statsSock).catch(() => { }); }
             } catch { }
 
-            await execFileAsync('haproxy', ['-f', this.configPath, '-D', '-p', this.pidFile], { env });
+            await execFileAsync(this.haproxyBin, ['-f', this.configPath, '-D', '-p', this.pidFile], { env });
 
             const pid = parseInt(await fs.readFile(this.pidFile, 'utf8'), 10);
             this.haproxyPid = pid;
@@ -108,7 +113,7 @@ export class HAProxyManager {
 
             return true;
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Failed to start HAProxy', error);
+            console.error('[AUTO-LB] Failed to start HAProxy', error);
             console.error('[ERROR] Failed to start HAProxy:', error.message);
 
             this.consecutiveFailures++;
@@ -131,7 +136,7 @@ export class HAProxyManager {
 
                 try {
                     process.kill(pid, 'SIGTERM');
-                    cryptoLogger.info('[AUTO-LB] Stopped HAProxy', { pid });
+                    console.log('[AUTO-LB] Stopped HAProxy', { pid });
                     console.log(`[STOPPED] HAProxy stopped (PID: ${pid})`);
                 } catch (_killError) {
                     console.log(`[WARN] HAProxy process ${pid} not found (may have already exited)`);
@@ -151,7 +156,7 @@ export class HAProxyManager {
                 console.log('[INFO] No HAProxy PID file found (already stopped)');
             }
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Failed to stop HAProxy', error);
+            console.error('[AUTO-LB] Failed to stop HAProxy', error);
             console.error(`[ERROR] Failed to stop HAProxy: ${error.message}`);
         }
     }
@@ -176,16 +181,16 @@ export class HAProxyManager {
                 }
             }
 
-            const { stdout: validationOutput } = await execFileAsync('haproxy', ['-f', this.configPath, '-c'], { env });
-            cryptoLogger.info('[AUTO-LB] HAProxy config validated', { output: validationOutput.trim() });
+            const { stdout: validationOutput } = await execFileAsync(this.haproxyBin, ['-f', this.configPath, '-c'], { env });
+            console.log('[AUTO-LB] HAProxy config validated', { output: validationOutput.trim() });
 
             const oldPid = parseInt(await fs.readFile(this.pidFile, 'utf8'), 10);
-            await execFileAsync('haproxy', ['-f', this.configPath, '-D', '-p', this.pidFile, '-sf', String(oldPid)], { env });
+            await execFileAsync(this.haproxyBin, ['-f', this.configPath, '-D', '-p', this.pidFile, '-sf', String(oldPid)], { env });
 
             const newPid = parseInt(await fs.readFile(this.pidFile, 'utf8'), 10);
             this.haproxyPid = newPid;
 
-            cryptoLogger.info('[AUTO-LB] Reloaded HAProxy', { oldPid, newPid });
+            console.log('[AUTO-LB] Reloaded HAProxy', { oldPid, newPid });
             console.log(`\n[RELOADED] HAProxy configuration updated`);
             console.log(`\tOld PID: ${oldPid} → New PID: ${newPid}`);
             console.log(`\tReload successful\n`);
@@ -193,7 +198,7 @@ export class HAProxyManager {
             this.consecutiveFailures = 0;
             return true;
         } catch (error) {
-            cryptoLogger.error('[AUTO-LB] Failed to reload HAProxy', error);
+            console.error('[AUTO-LB] Failed to reload HAProxy', error);
             console.error('[ERROR] Failed to reload HAProxy:', error.message);
 
             if (error.stderr) {

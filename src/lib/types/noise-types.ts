@@ -1,6 +1,6 @@
 // Noise Protocol Types
 
-import { NOISE_PROTOCOL_VERSION } from "../constants";
+import { PROTOCOL_KEYS } from "../config/protocol-keys";
 
 // Key Pairs
 export interface PQKeyPair {
@@ -20,44 +20,35 @@ export interface PeerKeys {
     x25519PublicKey: Uint8Array;
 }
 
-// Own keypairs
 export interface OwnKeys {
-    kyberKeyPair: PQKeyPair;
-    dilithiumKeyPair: PQKeyPair;
-    x25519KeyPair: X25519KeyPair;
+    kyberPublicKey: Uint8Array;
+    dilithiumPublicKey: Uint8Array;
+    x25519PublicKey: Uint8Array;
+    signTranscript: (message: Uint8Array) => Promise<Uint8Array>;
+    respondToHandshake: (
+        kemCiphertext: Uint8Array,
+        peerX25519Public: Uint8Array
+    ) => Promise<{ pqSecret: Uint8Array; x25519Secret: Uint8Array }>;
 }
 
 // Handshake Message
 export interface HandshakeMessage {
-    version: typeof NOISE_PROTOCOL_VERSION;
+    version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION;
     type: 'init' | 'response';
+    from: string;
+    to: string;
     sessionId: string;
     timestamp: number;
-    ephemeralKyberPublic: Uint8Array;
+    ephemeralKyberPublic?: Uint8Array;
     kemCiphertext: Uint8Array;
     ephemeralX25519Public: Uint8Array;
     signature: Uint8Array;
     signerPublicKey: Uint8Array;
 }
 
-// Session State
-export interface SessionState {
-    sendKey: Uint8Array;
-    receiveKey: Uint8Array;
-    sendNonce: bigint;
-    receiveNonce: bigint;
-    sessionId: string;
-    peerId: string;
-    role: 'initiator' | 'responder';
-    createdAt: number;
-    lastRotation: number;
-    messageCount: number;
-}
-
 // Encrypted Frame
 export interface EncryptedFrame {
     sequence: bigint;
     ciphertext: Uint8Array;
-    nonce: Uint8Array;
     tag: Uint8Array;
 }

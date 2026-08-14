@@ -1,81 +1,50 @@
 import { CryptoUtils } from './crypto-utils';
 import { PostQuantumSignature } from '../cryptography/signature';
 import { PQ_KEM_PUBLIC_KEY_SIZE } from '../constants';
+import { hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
+
+export function isCanonicalBase64OfLength(value: unknown, expectedBytes: number): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length !== 4 * Math.ceil(expectedBytes / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    return false;
+  }
+  let bytes: Uint8Array | null = null;
+  try {
+    bytes = CryptoUtils.Base64.base64ToUint8Array(value);
+    return bytes.length === expectedBytes && CryptoUtils.Base64.arrayBufferToBase64(bytes) === value;
+  } catch {
+    return false;
+  } finally {
+    bytes?.fill(0);
+  }
+}
 
 export function isValidKyberPublicKeyBase64(value: unknown): value is string {
-  if (typeof value !== 'string') {
-    return false;
-  }
-  try {
-    const normalized = value.trim();
-    const bytes = CryptoUtils.Base64.base64ToUint8Array(normalized);
-    if (bytes.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
-      console.warn(`[Validator] Kyber length mismatch. Expected ${PQ_KEM_PUBLIC_KEY_SIZE}, got ${bytes.length}`);
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.warn('[Validator] Kyber decode failed:', e);
-    return false;
-  }
+  return isCanonicalBase64OfLength(value, PQ_KEM_PUBLIC_KEY_SIZE);
 }
 
 export function isValidDilithiumPublicKeyBase64(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  try {
-    const bytes = CryptoUtils.Base64.base64ToUint8Array(value);
-    if (bytes.length !== PostQuantumSignature.sizes.publicKey) {
-      console.warn(`[Validator] Dilithium length mismatch. Expected ${PostQuantumSignature.sizes.publicKey}, got ${bytes.length}`);
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.warn('[Validator] Dilithium decode failed:', e);
-    return false;
-  }
+  return isCanonicalBase64OfLength(value, PostQuantumSignature.sizes.publicKey);
+}
+
+export function isValidDilithiumSignatureBase64(value: unknown): value is string {
+  return isCanonicalBase64OfLength(value, PostQuantumSignature.sizes.signature);
 }
 
 export function isValidX25519PublicKeyBase64(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  try {
-    const bytes = CryptoUtils.Base64.base64ToUint8Array(value);
-    return bytes.length === 32;
-  } catch {
-    return false;
-  }
-}
-
-export function isValidBlindPublicKey(value: unknown): value is {
-  kid: string;
-  n: string;
-  e: string;
-  modulusLength: number;
-  hash: string;
-  saltLength: number;
-  scheme: string;
-} {
-  if (!value || typeof value !== 'object') return false;
-  const key = value as any;
-  if (key.scheme !== 'RSABSSA-PSS' || key.hash !== 'SHA-256') return false;
-  if (typeof key.kid !== 'string' || key.kid.length < 8) return false;
-  if (typeof key.n !== 'string' || typeof key.e !== 'string') return false;
-  if (!Number.isFinite(key.modulusLength) || key.modulusLength < 2048) return false;
-  if (!Number.isFinite(key.saltLength) || key.saltLength < 16) return false;
-  try {
-    const nBytes = CryptoUtils.Base64.base64ToUint8Array(key.n);
-    const eBytes = CryptoUtils.Base64.base64ToUint8Array(key.e);
-    const expectedLen = Math.ceil(key.modulusLength / 8);
-    if (nBytes.length !== expectedLen) return false;
-    if (eBytes.length === 0 || eBytes.length > 8) return false;
-    return true;
-  } catch {
-    return false;
-  }
+  return isCanonicalBase64OfLength(value, 32);
 }
 
 // Return a sanitized copy of input hybrid keys, only keeping fields that validate
 export function sanitizeHybridKeys<T extends Record<string, any> | undefined | null>(keys: T): Partial<T> {
-  if (!keys || typeof keys !== 'object') return {} as Partial<T>;
+  if (
+    !isPlainObject(keys) ||
+    hasPrototypePollutionKeys(keys) ||
+    Object.keys(keys).sort().join(',') !== 'dilithiumPublicBase64,kyberPublicBase64,x25519PublicBase64'
+  ) return {} as Partial<T>;
   const out: Record<string, any> = {};
 
   if (isValidKyberPublicKeyBase64((keys as any).kyberPublicBase64)) {
@@ -88,16 +57,6 @@ export function sanitizeHybridKeys<T extends Record<string, any> | undefined | n
 
   if (isValidX25519PublicKeyBase64((keys as any).x25519PublicBase64)) {
     out.x25519PublicBase64 = (keys as any).x25519PublicBase64;
-  }
-
-  // Preserve blind signature public key metadata
-  if (isValidBlindPublicKey((keys as any).blindPublicKey)) {
-    out.blindPublicKey = (keys as any).blindPublicKey;
-  }
-
-  // Preserve inboxId
-  if (typeof (keys as any).inboxId === 'string') {
-    out.inboxId = (keys as any).inboxId;
   }
 
   return out as Partial<T>;

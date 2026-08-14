@@ -1,24 +1,34 @@
 import { RefObject } from "react";
-import { clearTokenEncryptionKey } from "../../lib/signals/signals";
 import websocketClient from "../../lib/websocket/websocket";
 import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
 import { SecureDB } from "../../lib/database/secureDB";
-import { SecureKeyManager } from "../../lib/database/secure-key-manager";
-import { secureWipeStringRef } from "../../lib/utils/auth-utils";
+import { clearStringRef } from "../../lib/utils/auth-utils";
 import type { HybridKeys } from "../../lib/types/auth-types";
-import { storage, session } from "../../lib/tauri-bindings";
-import { messageVault } from "../../lib/security/message-vault";
-import { removeVaultKey, removeWrappedMasterKey } from "../../lib/cryptography/vault-key";
+import { account, session } from "../../lib/tauri-bindings";
+import { tokenVault } from "../../lib/database/token-vault";
 import { markExplicitLogout } from "../../lib/auth/logout-marker";
+import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
+import { receiptBatcher } from "../message-handling/receipt-batcher";
+import { identityChangeStore } from "../../lib/security/identity-change-store";
+import { blockingSystem } from "../../lib/blocking/blocking-system";
+import { blockStatusCache } from "../../lib/blocking/block-status-cache";
+import { profilePictureSystem } from "../../lib/avatar/profile-picture-system";
+import { resetAvatarStoreClient } from "../../lib/avatar/avatar-store-client";
+import { resetBlindRoutingClient } from "../../lib/transport/blind-routing-client";
+import type { AuthLifecycle } from "../../lib/auth/auth-lifecycle";
+import { clearResumePool } from "../../lib/signals/resume-tokens";
+import { p2pTransport } from "../../lib/transport/p2p-transport";
+import { deliveryReceiptOutbox } from "../../lib/signals/delivery-receipt-outbox";
+import { keyTransparencyClient } from "../../lib/key-transparency/client";
+import { keyTransparencyWarningStore } from "../../lib/key-transparency/warning-store";
 
 export interface LogoutRefs {
   loginUsernameRef: RefObject<string>;
   passwordRef: RefObject<string>;
-  passphraseRef: RefObject<string>;
   passphrasePlaintextRef: RefObject<string>;
-  aesKeyRef: RefObject<CryptoKey | null>;
   hybridKeysRef: RefObject<HybridKeys | null>;
-  keyManagerRef: RefObject<SecureKeyManager | null>;
+  keyManagerOwnerRef: RefObject<string>;
+  getKeysPromiseRef: RefObject<Promise<any> | null>;
 }
 
 export interface LogoutSetters {
@@ -37,34 +47,76 @@ export interface LogoutSetters {
 export const createLogout = (
   refs: LogoutRefs,
   setters: LogoutSetters,
-  clearAuthenticationState: () => Promise<void>
+  clearAuthenticationState: () => Promise<void>,
+  lifecycle: AuthLifecycle
 ) => {
   return async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
-    const usernamesToClear = new Set<string>();
-    const addUsername = (value: unknown) => {
-      if (typeof value === 'string' && value.trim()) {
-        usernamesToClear.add(value.trim());
-      }
-    };
+    const logoutUsername = refs.loginUsernameRef.current;
+    const logoutDatabase = secureDBRef?.current || null;
+    const logoutAccountOwner = logoutDatabase?.getAccountScope() || refs.keyManagerOwnerRef.current;
+    const operation = lifecycle.begin('');
+    let localSecretCleanupFailed = false;
 
-    addUsername(refs.loginUsernameRef.current);
-    try {
-      await storage.init();
-      addUsername(await storage.get('last_authenticated_username'));
-      addUsername(await storage.get('last_authenticated_display_name'));
-    } catch { }
-    try {
-      addUsername(await syncEncryptedStorage.getItem('last_authenticated_username'));
-    } catch { }
+    // Invalidate account bound singleton state before first await
+    unifiedSignalTransport.resetForAccountTransition();
+    deliveryReceiptOutbox.setPersistence(null, null);
+    deliveryReceiptOutbox.setActiveAccount(null);
+    receiptBatcher.setActiveAccount(null);
+    identityChangeStore.clear();
+    blockingSystem.setSecureDB(null);
+    blockStatusCache.clear();
+    profilePictureSystem.setSecureDB(null);
+    resetAvatarStoreClient();
+    resetBlindRoutingClient();
+    keyTransparencyClient.destroy();
+    keyTransparencyWarningStore.clear();
+    syncEncryptedStorage.reset();
+    logoutDatabase?.dispose();
+    if (secureDBRef) secureDBRef.current = null;
+
+    const connectionClose = websocketClient.close({ killSession: true })
+      .then(() => true, () => false);
+    const p2pClose = p2pTransport.shutdown().then(() => true, () => false);
+    try { websocketClient.resetConnectionPrivacyMode(); } catch { }
+    const tokenVaultClear = tokenVault.clearAll().then(() => true, () => false);
+    const resumePoolClear = logoutUsername
+      ? clearResumePool(logoutUsername).then(() => true, () => false)
+      : Promise.resolve(false);
+
+    clearStringRef(refs.passwordRef);
+    clearStringRef(refs.passphrasePlaintextRef);
+    refs.hybridKeysRef.current = null;
+    refs.keyManagerOwnerRef.current = '';
+    refs.getKeysPromiseRef.current = null;
+
+    // Drop in memory account master, private keys, database handle, signal state at the start of teardown
+    if (/^[a-f0-9]{64}$/.test(logoutAccountOwner)) {
+      try { await account.lock(logoutAccountOwner); } catch { localSecretCleanupFailed = true; }
+    } else {
+      if (logoutUsername) {
+        localSecretCleanupFailed = true;
+      }
+    }
+    const [connectionClosed, p2pClosed, tokenVaultCleared, resumePoolCleared] = await Promise.all([
+      connectionClose,
+      p2pClose,
+      tokenVaultClear,
+      resumePoolClear,
+    ]);
+    if (!connectionClosed || !p2pClosed || !tokenVaultCleared || !resumePoolCleared) {
+      localSecretCleanupFailed = true;
+    }
+    if (!lifecycle.isCurrent(operation)) return;
 
     try {
       await markExplicitLogout();
-    } catch { }
+    } catch { localSecretCleanupFailed = true; }
+    if (!lifecycle.isCurrent(operation)) return;
 
-    try {
-      // Kill PQ session on logout
-      await websocketClient.close({ killSession: true }); }
-    catch { }
+    await clearAuthenticationState().catch(() => {
+      localSecretCleanupFailed = true;
+    });
+    if (!lifecycle.isCurrent(operation)) return;
 
     try {
       setters.setTokenValidationInProgress(false);
@@ -73,94 +125,21 @@ export const createLogout = (
     try {
       await session.setBackgroundState(false);
     } catch { }
-
-    await clearAuthenticationState();
-    await clearTokenEncryptionKey();
-    messageVault.clear();
-    try {
-      const { tokenVault } = await import('../../lib/database/token-vault');
-      tokenVault.lock();
-    } catch { }
+    if (!lifecycle.isCurrent(operation)) return;
 
     try {
-      secureWipeStringRef(refs.passwordRef as any);
-      secureWipeStringRef(refs.passphraseRef as any);
-      secureWipeStringRef(refs.passphrasePlaintextRef as any);
-      refs.aesKeyRef.current = null;
-      refs.hybridKeysRef.current = null;
-
       if (typeof window !== 'undefined' && (window as any).gc) {
         (window as any).gc();
       }
     } catch { }
 
-    if (secureDBRef?.current) {
-      secureDBRef.current = null;
-    }
-
-    try {
-      const pseudonym = refs.loginUsernameRef.current || '';
-      if (pseudonym) {
-        // Detailed cleanup of user-specific cryptographic material and tokens
-        await storage.init();
-        await Promise.allSettled([
-          removeVaultKey(pseudonym),
-          removeWrappedMasterKey(pseudonym),
-          refs.keyManagerRef.current?.deleteDatabase() || Promise.resolve(),
-          storage.remove(`key_meta:${pseudonym}`),
-          storage.remove(`key_bundle:${pseudonym}`),
-          storage.remove('tok:1'),
-          storage.remove('last_authenticated_username'),
-          storage.remove('last_authenticated_display_name'),
-          storage.remove('bg_session_active'),
-          storage.remove('bg_session_last_activity'),
-          storage.remove('bg_session_pending')
-        ]);
-      }
-    } catch { }
-
-    try {
-      await storage.init();
-      const perUserCleanup = Array.from(usernamesToClear).flatMap((username) => [
-        removeVaultKey(username),
-        removeWrappedMasterKey(username),
-        storage.remove(`key_meta:${username}`),
-        storage.remove(`key_bundle:${username}`)
-      ]);
-      await Promise.allSettled([
-        ...perUserCleanup,
-        storage.remove('qor_token_vault'),
-        storage.remove('tok:1'),
-        storage.remove('last_authenticated_username'),
-        storage.remove('last_authenticated_display_name'),
-        storage.remove('bg_session_active'),
-        storage.remove('bg_session_last_activity'),
-        storage.remove('bg_session_pending')
-      ]);
-    } catch { }
-
-    // Clear anonymous resume token pool
-    try {
-      const { clearResumePool } = await import('../../lib/signals/resume-tokens');
-      await clearResumePool();
-    } catch { }
-
-    try {
-      await syncEncryptedStorage.removeItem('qorchat_server_pin_v2');
-      await syncEncryptedStorage.removeItem('last_authenticated_username');
-    } catch { }
-
-    if (refs.keyManagerRef.current) {
-      try {
-        refs.keyManagerRef.current.clearKeys();
-        refs.keyManagerRef.current = null;
-      } catch { }
-    }
-
+    if (!lifecycle.isCurrent(operation)) return;
     refs.loginUsernameRef.current = "";
 
     setters.setIsLoggedIn(false);
-    setters.setLoginError(loginErrorMessage);
+    setters.setLoginError(localSecretCleanupFailed
+      ? 'Logged out, but some local secret files could not be deleted.'
+      : loginErrorMessage);
     setters.setAccountAuthenticated(false);
     setters.setIsRegistrationMode(false);
     setters.setIsSubmittingAuth(false);

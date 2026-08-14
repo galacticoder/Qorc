@@ -1,80 +1,42 @@
 import { SecureDB } from '../../lib/database/secureDB';
 import { encryptedStorage, syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
-import { database } from '../../lib/tauri-bindings';
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
-
-// Validate CryptoKey structure
-export const isValidCryptoKey = (key: unknown): key is CryptoKey => {
-  return (
-    key !== null &&
-    typeof key === 'object' &&
-    'type' in key &&
-    'extractable' in key &&
-    'algorithm' in key &&
-    'usages' in key
-  );
-};
+import { account, database } from '../../lib/tauri-bindings';
+import { getCurrentLocalAccountScope } from '../../lib/security/local-account-scope';
+import { STORAGE_KEYS, STORAGE_STORES } from '../../lib/database/storage-keys';
 
 // Initialize SecureDB
 export const initializeSecureDB = async (
   username: string,
-  aesKey: CryptoKey
 ): Promise<SecureDB> => {
-  const rawKey = await crypto.subtle.exportKey('raw', aesKey);
-  const keyB64 = CryptoUtils.Base64.arrayBufferToBase64(rawKey);
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      await database.init(username, keyB64);
-      lastError = null;
-      break;
-    } catch (error) {
-      lastError = error;
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/disk I\/O|database is locked|busy|temporarily unavailable/i.test(message) || attempt === 3) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
-    }
-  }
-  if (lastError) {
-    throw lastError;
+  const accountScope = await getCurrentLocalAccountScope(username);
+  if (!await account.isUnlocked(accountScope)) {
+    throw new Error('Native account is locked');
   }
 
-  const db = new SecureDB(username);
-  await db.initializeWithKey(aesKey);
-  return db;
+  const db = new SecureDB(username, accountScope);
+  try {
+    await db.initializeNative();
+    return db;
+  } catch (error) {
+    db.dispose();
+    await database.lock(accountScope).catch(() => false);
+    throw error;
+  }
 };
 
 // Initialize blocking system
 export const initializeBlockingSystem = async (
-  secureDB: SecureDB,
-  passphrase: string | null,
-  kyberSecret: Uint8Array | null
+  secureDB: SecureDB
 ): Promise<void> => {
   try {
     blockingSystem.setSecureDB(secureDB);
   } catch { }
 
   try {
-    if (passphrase) {
-      await blockingSystem.getBlockedUsers(passphrase);
-    } else if (kyberSecret) {
-      await blockingSystem.getBlockedUsers({ kyberSecret });
-    }
+    await blockingSystem.getBlockedUsers();
   } catch (err) {
     console.error('[initializeBlockingSystem] Failed to load block list:', err);
-    const msg = (err as Error)?.message || String(err);
-    if (/decrypt|BLAKE3|passphrase|corrupt/i.test(msg)) {
-      await Promise.all([
-        secureDB.clearStore('blockListData'),
-        secureDB.clearStore('blockListMeta')
-      ]);
-      if (passphrase) {
-        await blockingSystem.getBlockedUsers(passphrase).catch(() => { });
-      }
-    }
   }
 };
 
@@ -85,9 +47,9 @@ export const storeAuthMetadata = async (
   originalUsername?: string | null
 ): Promise<void> => {
   try {
-    await secureDB.store('auth_metadata', 'username', hashedUsername);
+    await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_USERNAME, hashedUsername);
     if (originalUsername) {
-      await secureDB.store('auth_metadata', 'original_username', originalUsername);
+      await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_ORIGINAL_USERNAME, originalUsername);
     }
   } catch (err) {
     console.error('[storeAuthMetadata] Failed:', err);
@@ -100,13 +62,8 @@ export const initializeEncryptedStorage = async (secureDB: SecureDB): Promise<vo
   try {
     await encryptedStorage.initialize(secureDB);
     await syncEncryptedStorage.initialize();
-  } catch (err) {
-    console.error('[initializeEncryptedStorage] Failed to initialize encrypted storage:', err);
-    const msg = (err as Error)?.message || String(err);
-    if (/decrypt|BLAKE3|passphrase|corrupt/i.test(msg)) {
-      await secureDB.clearStore('encrypted_storage');
-      await encryptedStorage.initialize(secureDB);
-      await syncEncryptedStorage.initialize();
-    }
+  } catch (error) {
+    syncEncryptedStorage.reset();
+    throw error;
   }
 };

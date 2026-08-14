@@ -1,10 +1,9 @@
 //! Application state management
-//!
-//! Centralized state for all application services.
 
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::account_vault::AccountSession;
 use crate::database::DatabaseManager;
 use crate::network::p2p::P2PTransportHandler;
 use crate::network::websocket::WebSocketHandler;
@@ -13,43 +12,24 @@ use crate::storage::SecureStorage;
 use crate::system::notification::NotificationHandler;
 use crate::tor::TorManager;
 
-/// Central application state
 pub struct AppState {
-    /// Secure storage handler
+    pub account_session: RwLock<Option<Arc<AccountSession>>>,
     pub storage: RwLock<Option<Arc<SecureStorage>>>,
-
-    /// Signal Protocol handler
     pub signal_handler: RwLock<Option<Arc<SignalHandler>>>,
-
-    /// Tor manager
     pub tor_manager: RwLock<Option<Arc<TorManager>>>,
-
-    /// WebSocket handler
     pub websocket_handler: RwLock<Option<Arc<WebSocketHandler>>>,
-
-    /// P2P transport handler
     pub p2p_handler: RwLock<Option<Arc<P2PTransportHandler>>>,
-
-    /// Notification handler
     pub notification_handler: RwLock<Option<Arc<NotificationHandler>>>,
-
-    /// Native Encrypted Database
     pub database: RwLock<Option<Arc<DatabaseManager>>>,
-
-    /// Whether window is currently destroyed background mode
-    pub is_window_destroyed: RwLock<bool>,
-
-    /// Power save blocker manager
-    pub power_blocker: RwLock<Option<Arc<crate::system::power::PowerSaveBlocker>>>,
-
-    /// Close to tray setting
+    pub database_lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
+    pub power_blocker: Arc<crate::system::power::PowerSaveBlocker>,
     pub close_to_tray: RwLock<bool>,
 }
 
 impl AppState {
-    /// Create new application state
     pub fn new() -> Self {
         Self {
+            account_session: RwLock::new(None),
             storage: RwLock::new(None),
             signal_handler: RwLock::new(None),
             tor_manager: RwLock::new(None),
@@ -57,12 +37,15 @@ impl AppState {
             p2p_handler: RwLock::new(None),
             notification_handler: RwLock::new(None),
             database: RwLock::new(None),
-            is_window_destroyed: RwLock::new(false),
-            power_blocker: RwLock::new(Some(Arc::new(
-                crate::system::power::PowerSaveBlocker::new(),
-            ))),
+            database_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            power_blocker: Arc::new(crate::system::power::PowerSaveBlocker::new()),
             close_to_tray: RwLock::new(true),
         }
+    }
+
+    /// Get the currently unlocked native account session
+    pub fn account_session(&self) -> Option<Arc<AccountSession>> {
+        self.account_session.read().clone()
     }
 
     /// Get storage handler
@@ -76,11 +59,6 @@ impl AppState {
     }
 
     /// Get Tor manager
-    pub fn tor(&self) -> Option<Arc<TorManager>> {
-        self.tor_manager.read().clone()
-    }
-
-    /// Get Tor manager alias
     pub fn tor_manager(&self) -> Option<Arc<TorManager>> {
         self.tor_manager.read().clone()
     }
@@ -91,37 +69,18 @@ impl AppState {
     }
 
     /// Get P2P handler
-    pub fn p2p(&self) -> Option<Arc<P2PTransportHandler>> {
-        self.p2p_handler.read().clone()
-    }
-
-    /// Get P2P handler alias
     pub fn p2p_handler(&self) -> Option<Arc<P2PTransportHandler>> {
         self.p2p_handler.read().clone()
     }
-
 
     /// Get Database manager
     pub fn database(&self) -> Option<Arc<DatabaseManager>> {
         self.database.read().clone()
     }
 
-    /// Get power blocker
-    pub fn power_blocker(&self) -> Option<Arc<crate::system::power::PowerSaveBlocker>> {
-        self.power_blocker.read().clone()
-    }
-
-    /// Set background mode
-    pub fn set_background_mode(&self, enabled: bool) {
-        // Notify handlers
-        if let Some(ws) = self.websocket() {
-            ws.set_background_mode(enabled);
-        }
-        if let Some(p2p) = self.p2p() {
-            p2p.set_background_mode(enabled);
-        }
-
-        *self.is_window_destroyed.write() = enabled;
+    /// Get the call sleep inhibitor.
+    pub fn power_blocker(&self) -> Arc<crate::system::power::PowerSaveBlocker> {
+        self.power_blocker.clone()
     }
 
     /// Get close to tray setting

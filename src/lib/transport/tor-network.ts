@@ -5,7 +5,6 @@
 import {
   TorConfig,
   TorConnectionStats,
-  TorRequestResult,
   TorCircuitHealth
 } from '../types/tor-types';
 import {
@@ -13,7 +12,7 @@ import {
   TOR_MAX_BACKOFF_MS,
   TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS
 } from '../constants';
-import { tor as tauriTor, websocket as tauriWebsocket, isTauri } from '../tauri-bindings';
+import { tor as tauriTor, websocket as tauriWebsocket, anonymousHttp, isTauri } from '../tauri-bindings';
 import type { TorInfo, TorStatus } from '../tauri-bindings';
 
 const TOR_DEEP_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -27,8 +26,11 @@ export class TorNetworkManager {
   private readonly connectionCallbacks = new Set<(connected: boolean) => void>();
   private circuitRotationTimer: ReturnType<typeof setInterval> | null = null;
   private connectionMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private reinitializationTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionMonitorInFlight = false;
   private initializePromise: Promise<boolean> | null = null;
+  private initializePromiseGeneration: number | null = null;
+  private lifecycleGeneration = 0;
   private monitorBackoffMs = 0;
   private lastManualRotation = 0;
   private lastDeepHealthCheckAt = 0;
@@ -60,7 +62,6 @@ export class TorNetworkManager {
       bootstrapProgress: 0
     };
 
-    if (typeof window !== 'undefined') { }
   }
 
   // Check if Tauri is available
@@ -82,6 +83,14 @@ export class TorNetworkManager {
   }
 
   private applyDaemonState(status: TorStatus | null, info: TorInfo | null): boolean {
+    if (!status && !info) {
+      if (this.stats.isConnected && this.stats.circuitHealth === 'good') {
+        this.stats.circuitHealth = 'degraded';
+      }
+      this.notifyStatsCallbacks();
+      return this.stats.isConnected;
+    }
+
     const running = Boolean(status?.is_running || info?.bootstrapped);
     const bootstrapped = Boolean(status?.bootstrapped || info?.bootstrapped);
     const progress = status?.bootstrap_progress ?? info?.bootstrap_progress ?? 0;
@@ -97,6 +106,15 @@ export class TorNetworkManager {
     }
     if (running) {
       this.config.enabled = true;
+    }
+
+    if (wasConnected && !(running && bootstrapped)) {
+      this.stats.isBootstrapped = bootstrapped;
+      this.stats.bootstrapProgress = progress;
+      this.stats.circuitHealth = 'degraded';
+      this.notifyStatsCallbacks();
+      this.confirmDisconnectAgainstNativeTransport();
+      return this.stats.isConnected;
     }
 
     this.isInitialized = running;
@@ -124,6 +142,33 @@ export class TorNetworkManager {
     return this.stats.isConnected;
   }
 
+  private disconnectConfirmInFlight = false;
+
+  private confirmDisconnectAgainstNativeTransport(): void {
+    if (this.disconnectConfirmInFlight) return;
+    this.disconnectConfirmInFlight = true;
+    const generation = this.lifecycleGeneration;
+    void (async () => {
+      try {
+        const state = await tauriWebsocket.getState().catch(() => null);
+        if (generation !== this.lifecycleGeneration || !this.stats.isConnected) return;
+        if (state?.connected || state?.connecting) {
+          return;
+        }
+
+        this.stats.isConnected = false;
+        this.stats.isBootstrapped = false;
+        this.stats.circuitHealth = 'poor';
+        this.stats.averageLatency = Number.POSITIVE_INFINITY;
+        this.notifyConnectionCallbacks(false);
+        await this.syncBackendTorState();
+        this.scheduleReinitialization();
+      } finally {
+        this.disconnectConfirmInFlight = false;
+      }
+    })();
+  }
+
   private markDisconnected(): void {
     this.isInitialized = false;
     this.stats.isConnected = false;
@@ -134,22 +179,24 @@ export class TorNetworkManager {
     this.notifyConnectionCallbacks(false);
   }
 
-  private async setBackendTorReady(ready: boolean, socksPort?: number): Promise<void> {
+  private async syncBackendTorState(): Promise<void> {
     if (!this.checkTauriAvailable()) {
       return;
     }
 
     try {
-      await tauriWebsocket.setTorReady(ready, socksPort);
+      await tauriWebsocket.syncTorState();
     } catch {
-      // websocket bridge may not be registered during early startup
     }
   }
 
   async syncWithDaemon(): Promise<boolean> {
+    const generation = this.lifecycleGeneration;
     const { status, info } = await this.readDaemonState();
+    if (generation !== this.lifecycleGeneration) return false;
     const connected = this.applyDaemonState(status, info);
-    await this.setBackendTorReady(connected, info?.socks_port || status?.socks_port);
+    await this.syncBackendTorState();
+    if (generation !== this.lifecycleGeneration) return false;
 
     if (connected) {
       this.startCircuitRotation();
@@ -161,12 +208,17 @@ export class TorNetworkManager {
     return connected;
   }
 
-  private async waitForBootstrap(timeoutMs = TOR_BOOTSTRAP_TIMEOUT_MS): Promise<TorInfo | null> {
+  private async waitForBootstrap(
+    timeoutMs = TOR_BOOTSTRAP_TIMEOUT_MS,
+    generation = this.lifecycleGeneration
+  ): Promise<TorInfo | null> {
     const deadline = Date.now() + timeoutMs;
     let latestInfo: TorInfo | null = null;
 
     while (Date.now() < deadline) {
+      if (generation !== this.lifecycleGeneration) return null;
       const { status, info } = await this.readDaemonState();
+      if (generation !== this.lifecycleGeneration) return null;
       latestInfo = info;
       if (this.applyDaemonState(status, info)) {
         return info;
@@ -181,14 +233,20 @@ export class TorNetworkManager {
   }
 
   // Retry with exponential backoff
-  private async retryWithBackoff<T>(operation: () => Promise<T>, maxRetries = this.config.maxRetries): Promise<T> {
+  private async retryWithBackoff<T>(
+    operation: () => Promise<T>,
+    maxRetries = this.config.maxRetries,
+    isCurrent: () => boolean = () => true
+  ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
 
     while (attempt <= maxRetries) {
+      if (!isCurrent()) throw new Error('Tor operation was cancelled');
       try {
         return await operation();
       } catch (_error) {
+        if (!isCurrent()) throw new Error('Tor operation was cancelled');
         lastError = _error;
         attempt += 1;
         if (attempt > maxRetries) break;
@@ -213,7 +271,9 @@ export class TorNetworkManager {
     }
 
     const intervalMs = Math.max(1, this.config.circuitRotationInterval) * 60 * 1000;
+    const generation = this.lifecycleGeneration;
     const timer = setInterval(async () => {
+      if (generation !== this.lifecycleGeneration) return;
       await this.rotateCircuit();
     }, intervalMs);
 
@@ -234,7 +294,9 @@ export class TorNetworkManager {
       clearInterval(this.connectionMonitorTimer);
     }
 
+    const generation = this.lifecycleGeneration;
     const timer = setInterval(async () => {
+      if (generation !== this.lifecycleGeneration) return;
       if (!this.isInitialized) {
         return;
       }
@@ -247,47 +309,58 @@ export class TorNetworkManager {
       try {
         const wasConnected = this.stats.isConnected;
         const { status, info } = await this.readDaemonState();
+        if (generation !== this.lifecycleGeneration) return;
         const connected = this.applyDaemonState(status, info);
-        await this.setBackendTorReady(connected, info?.socks_port || status?.socks_port);
-        await this.checkCircuitHealth(connected, { forceDeep: connected && !wasConnected });
+        await this.syncBackendTorState();
+        if (generation !== this.lifecycleGeneration) return;
+        await this.checkCircuitHealth(connected, {
+          forceDeep: connected && !wasConnected,
+          generation
+        });
+        if (generation !== this.lifecycleGeneration) return;
 
         if (!connected && wasConnected) {
           this.scheduleReinitialization();
         }
       } catch (_error) {
-        console.error('[TOR] Connection monitoring failed:', _error);
-        this.markDisconnected();
-        await this.setBackendTorReady(false);
-        this.scheduleReinitialization();
+        if (generation !== this.lifecycleGeneration) return;
+        console.error('[TOR] Connection monitoring failed, deferring to native transport check:', _error);
+        this.confirmDisconnectAgainstNativeTransport();
       } finally {
-        this.connectionMonitorInFlight = false;
+        if (generation === this.lifecycleGeneration) {
+          this.connectionMonitorInFlight = false;
+        }
       }
     }, TOR_DEFAULT_MONITOR_INTERVAL_MS);
 
     this.connectionMonitorTimer = timer;
   }
 
-  private isInitializing = false;
+  private initializingGeneration: number | null = null;
 
   // Schedule reinitialization
   private scheduleReinitialization(): void {
+    if (this.reinitializationTimer || !this.config.enabled) return;
+    const generation = this.lifecycleGeneration;
     if (this.monitorBackoffMs === 0) {
       this.monitorBackoffMs = 1000;
     } else {
       this.monitorBackoffMs = Math.min(this.monitorBackoffMs * 2, TOR_MAX_BACKOFF_MS);
     }
 
-    setTimeout(async () => {
+    this.reinitializationTimer = setTimeout(async () => {
+      this.reinitializationTimer = null;
+      if (generation !== this.lifecycleGeneration) return;
       if (this.isInitialized && this.stats.isConnected) {
         return;
       }
 
-      if (this.isInitializing) {
+      if (this.initializingGeneration === generation) {
         return;
       }
 
       const success = await this.initialize();
-      if (success) {
+      if (generation === this.lifecycleGeneration && success) {
         this.monitorBackoffMs = 0;
       }
     }, this.monitorBackoffMs);
@@ -301,14 +374,21 @@ export class TorNetworkManager {
     }
     this.connectionMonitorInFlight = false;
 
+    if (this.reinitializationTimer) {
+      clearTimeout(this.reinitializationTimer);
+      this.reinitializationTimer = null;
+    }
+
     this.stopCircuitRotation();
   }
 
   // Check circuit health
   private async checkCircuitHealth(
     connected: boolean,
-    options: { forceDeep?: boolean } = {}
+    options: { forceDeep?: boolean; generation?: number } = {}
   ): Promise<void> {
+    const generation = options.generation ?? this.lifecycleGeneration;
+    if (generation !== this.lifecycleGeneration) return;
     this.stats.connectionAttempts += 1;
     this.stats.lastHealthCheck = Date.now();
 
@@ -335,12 +415,13 @@ export class TorNetworkManager {
     }
 
     const start = performance.now();
-    const test = await tauriTor.testConnection();
+    const test = await tauriTor.verifyConnection();
+    if (generation !== this.lifecycleGeneration) return;
     const latency = performance.now() - start;
     this.lastDeepHealthCheckAt = Date.now();
 
     if (!test.success) {
-      this.stats.circuitHealth = 'poor';
+      this.stats.circuitHealth = 'degraded';
       this.stats.averageLatency = Number.POSITIVE_INFINITY;
       this.notifyStatsCallbacks();
       return;
@@ -359,6 +440,7 @@ export class TorNetworkManager {
 
   // Initialize Tor network
   async initialize(): Promise<boolean> {
+    const generation = this.lifecycleGeneration;
     if (!this.config.enabled) {
       return false;
     }
@@ -367,33 +449,47 @@ export class TorNetworkManager {
       return false;
     }
 
-    if (this.initializePromise) {
+    if (this.initializePromise && this.initializePromiseGeneration === generation) {
       return this.initializePromise;
     }
 
     if (this.isInitialized && this.stats.isConnected) {
-      await this.setBackendTorReady(true, this.config.socksPort);
+      await this.syncBackendTorState();
       return true;
     }
 
-    if (this.isInitializing) {
+    if (this.initializingGeneration === generation) {
       return this.initializePromise ?? false;
     }
 
-    this.initializePromise = (async () => {
-      this.isInitializing = true;
+    const initialization = (async () => {
+      this.initializingGeneration = generation;
+      const isCurrent = () => generation === this.lifecycleGeneration;
 
       try {
         if (await this.syncWithDaemon()) {
           return true;
         }
+        if (!isCurrent()) return false;
 
         const { status } = await this.readDaemonState();
+        if (!isCurrent()) return false;
         if (!status?.is_running) {
-          let result = await this.retryWithBackoff(() => tauriTor.start());
+          let result = await this.retryWithBackoff(
+            () => tauriTor.start(),
+            this.config.maxRetries,
+            isCurrent
+          );
+          if (!isCurrent()) return false;
           if (!result.success && /not configured|torrc|configuration/i.test(result.error || '')) {
             await tauriTor.configure(`SocksPort ${this.config.socksPort}\nControlPort ${this.config.controlPort}`);
-            result = await this.retryWithBackoff(() => tauriTor.start());
+            if (!isCurrent()) return false;
+            result = await this.retryWithBackoff(
+              () => tauriTor.start(),
+              this.config.maxRetries,
+              isCurrent
+            );
+            if (!isCurrent()) return false;
           }
           if (!result.success) {
             throw new Error(result.error || 'Failed to start Tor');
@@ -401,19 +497,23 @@ export class TorNetworkManager {
         }
 
         const info = await this.waitForBootstrap(
-          Math.max(TOR_BOOTSTRAP_TIMEOUT_MS, this.config.connectionTimeout || 0)
+          Math.max(TOR_BOOTSTRAP_TIMEOUT_MS, this.config.connectionTimeout || 0),
+          generation
         );
+        if (!isCurrent()) return false;
 
         if (!info?.bootstrapped) {
           this.stats.failedConnections += 1;
           const latest = await this.readDaemonState();
+          if (!isCurrent()) return false;
           if (latest.status?.is_running) {
             this.applyDaemonState(latest.status, latest.info);
             this.startConnectionMonitoring();
           } else {
             this.markDisconnected();
           }
-          await this.setBackendTorReady(false);
+          await this.syncBackendTorState();
+          if (!isCurrent()) return false;
           return false;
         }
 
@@ -427,17 +527,18 @@ export class TorNetworkManager {
         this.stats.circuitHealth = 'good';
         this.stats.failedConnections = 0;
 
-        await this.setBackendTorReady(true, info.socks_port);
+        await this.syncBackendTorState();
+        if (!isCurrent()) return false;
         this.startCircuitRotation();
         this.startConnectionMonitoring();
 
-        this.testTorConnection().then(verified => {
+        this.testTorConnection(generation).then(verified => {
+          if (!isCurrent()) return;
           this.stats.lastHealthCheck = Date.now();
           if (!verified) {
-            this.stats.isConnected = false;
-            this.stats.isBootstrapped = false;
-            this.stats.circuitHealth = 'poor';
-            this.notifyConnectionCallbacks(false);
+            this.stats.circuitHealth = 'degraded';
+            this.stats.averageLatency = Number.POSITIVE_INFINITY;
+            this.notifyStatsCallbacks();
           } else {
             this.stats.isConnected = true;
             this.stats.isBootstrapped = true;
@@ -449,28 +550,38 @@ export class TorNetworkManager {
 
         return true;
       } catch (_error) {
+        if (!isCurrent()) return false;
         console.error('[TOR] Failed to initialize Tor connection:', _error);
         this.stats.failedConnections += 1;
         this.markDisconnected();
-        await this.setBackendTorReady(false);
+        await this.syncBackendTorState();
         return false;
       } finally {
-        this.isInitializing = false;
+        if (this.initializingGeneration === generation) {
+          this.initializingGeneration = null;
+        }
       }
     })();
+    this.initializePromise = initialization;
+    this.initializePromiseGeneration = generation;
 
     try {
-      return await this.initializePromise;
+      return await initialization;
     } finally {
-      this.initializePromise = null;
+      if (this.initializePromise === initialization) {
+        this.initializePromise = null;
+        this.initializePromiseGeneration = null;
+      }
     }
   }
 
   // Test Tor connection
-  private async testTorConnection(): Promise<boolean> {
+  private async testTorConnection(generation = this.lifecycleGeneration): Promise<boolean> {
     try {
+      if (generation !== this.lifecycleGeneration) return false;
       const startedAt = performance.now();
-      const result = await tauriTor.testConnection();
+      const result = await tauriTor.verifyConnection();
+      if (generation !== this.lifecycleGeneration) return false;
       const latency = performance.now() - startedAt;
       this.lastDeepHealthCheckAt = Date.now();
 
@@ -489,46 +600,9 @@ export class TorNetworkManager {
     }
   }
 
-  // Create Tor WebSocket
-  async createTorWebSocket(url: string): Promise<WebSocket | null> {
-    if (!this.isInitialized) {
-      console.error('[TOR] Tor not initialized cannot create WebSocket');
-      return null;
-    }
-
-    try {
-      const lowerUrl = url.toLowerCase();
-      if (!lowerUrl.startsWith('ws://') && !lowerUrl.startsWith('wss://')) {
-        throw new Error(`Invalid WebSocket URL scheme: ${url.split(':')[0]}. Only ws:// or wss:// allowed.`);
-      }
-      return new WebSocket(url);
-    } catch (_error) {
-      console.error('[TOR] Failed to create Tor WebSocket:', _error);
-      return null;
-    }
-  }
-
-  // Make Tor request
-  async makeRequest(options: {
-    url: string;
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeout?: number;
-  }): Promise<TorRequestResult> {
-    if (!this.isInitialized) {
-      throw new Error('Tor network not initialized');
-    }
-
-    if (!options.url || typeof options.url !== 'string') {
-      throw new Error('Invalid URL provided');
-    }
-
-    throw new Error('Direct Tor HTTP requests not supported - use Tauri backend');
-  }
-
   // Rotate Tor circuit
   async rotateCircuit(): Promise<boolean> {
+    const generation = this.lifecycleGeneration;
     if (!this.isInitialized) {
       console.error('[TOR] Cannot rotate circuit - Tor not initialized');
       return false;
@@ -540,7 +614,12 @@ export class TorNetworkManager {
     }
 
     try {
-      const result = await this.retryWithBackoff(() => tauriTor.rotateCircuit());
+      const result = await this.retryWithBackoff(
+        () => tauriTor.rotateCircuit(),
+        this.config.maxRetries,
+        () => generation === this.lifecycleGeneration
+      );
+      if (generation !== this.lifecycleGeneration) return false;
 
       if (!result.success) {
         console.error('[TOR] Circuit rotation failed');
@@ -591,6 +670,13 @@ export class TorNetworkManager {
 
   // Notify connection callbacks
   private notifyConnectionCallbacks(connected: boolean): void {
+    try {
+      const caller = (new Error().stack || '').split('\n')[2]?.trim();
+      console.log(`[TOR-DIAG] notifyConnectionCallbacks(${connected})`, { caller });
+    } catch { }
+    if (connected) {
+      void anonymousHttp.prewarm().catch(() => { });
+    }
     this.connectionCallbacks.forEach((callback) => {
       try {
         callback(connected);
@@ -661,9 +747,13 @@ export class TorNetworkManager {
 
   // Shutdown Tor network
   async shutdown(): Promise<void> {
+    this.lifecycleGeneration += 1;
+    this.initializePromise = null;
+    this.initializePromiseGeneration = null;
+    this.initializingGeneration = null;
     this.stopAllTimers();
     this.markDisconnected();
-    await this.setBackendTorReady(false);
+    await this.syncBackendTorState();
 
     this.lastManualRotation = 0;
     this.monitorBackoffMs = 0;

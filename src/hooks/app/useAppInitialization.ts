@@ -1,32 +1,22 @@
 import { useEffect, useRef } from 'react';
 import { EventType } from '../../lib/types/event-types';
-import { SignalType } from '../../lib/types/signal-types';
-import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
-import { secureMessageQueue } from '../../lib/database/secure-message-queue';
-import { blockingSystem } from '../../lib/blocking/blocking-system';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
-import websocketClient from '../../lib/websocket/websocket';
 import { torNetworkManager } from '../../lib/transport/tor-network';
 import { notifications, session } from '../../lib/tauri-bindings';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { messageVault } from '../../lib/security/message-vault';
+import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 
 interface AppInitializationProps {
   Authentication: {
     isLoggedIn: boolean;
     accountAuthenticated: boolean;
     loginUsernameRef: React.RefObject<string | null>;
-    originalUsernameRef: React.RefObject<string | null>;
     hybridKeysRef: React.RefObject<any>;
     passphrasePlaintextRef: React.RefObject<string | null>;
-    aesKeyRef: React.RefObject<CryptoKey | null>;
   };
   Database: {
     secureDBRef: React.RefObject<any>;
     dbInitialized: boolean;
-  };
-  fileHandler: {
-    handleFileMessageChunk: (payload: any, context: { from: string; to: string }) => void;
   };
   flushPendingSaves: () => Promise<void>;
   setShowSettings: (show: boolean) => void;
@@ -35,47 +25,9 @@ interface AppInitializationProps {
 export function useAppInitialization({
   Authentication,
   Database,
-  fileHandler,
   flushPendingSaves,
   setShowSettings,
 }: AppInitializationProps) {
-  // Initialize message vault
-  useEffect(() => {
-    messageVault.initialize();
-  }, []);
-
-  // Restore original username from SecureDB
-  useEffect(() => {
-    const restoreOriginalUsername = async () => {
-      const db = Database.secureDBRef.current;
-      const hashedUsername = Authentication.loginUsernameRef.current;
-      const currentOriginal = Authentication.originalUsernameRef.current;
-
-      if (!db || !hashedUsername || !Authentication.isLoggedIn) return;
-      if (currentOriginal && currentOriginal !== hashedUsername) return;
-
-      // Original username is now handled via auth metadata only
-    };
-
-    restoreOriginalUsername();
-  }, [Database.secureDBRef.current, Authentication.isLoggedIn, Authentication.loginUsernameRef.current]);
-
-  // Initialize message queue
-  useEffect(() => {
-    if (Database.secureDBRef.current && Authentication.loginUsernameRef.current) {
-      const initMessageQueue = async () => {
-        try {
-          await secureMessageQueue.initialize(
-            Authentication.loginUsernameRef.current!,
-            Database.secureDBRef.current!
-          );
-        } catch {
-          SecurityAuditLogger.log(SignalType.ERROR, 'message-queue-init-failed', { error: 'unknown' });
-        }
-      };
-      initMessageQueue();
-    }
-  }, [Database.secureDBRef.current, Authentication.loginUsernameRef.current]);
 
   // Initialize profile picture system
   useEffect(() => {
@@ -84,44 +36,6 @@ export function useAppInitialization({
       profilePictureSystem.initialize().catch(() => { });
     }
   }, [Database.secureDBRef.current]);
-
-  // Set keys for profile picture system
-  useEffect(() => {
-    if (Authentication.hybridKeysRef.current?.kyber?.publicKeyBase64 && Authentication.hybridKeysRef.current?.kyber?.secretKey) {
-      profilePictureSystem.setKeys(
-        Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
-        Authentication.hybridKeysRef.current!.kyber!.secretKey
-      );
-    }
-  }, [Authentication.hybridKeysRef.current]);
-
-  // Bridge P2P file chunks into file handler
-  useEffect(() => {
-    const onP2PChunk = (e: Event) => {
-      try {
-        const d: any = (e as CustomEvent).detail || {};
-        if (d && d.payload) {
-          fileHandler.handleFileMessageChunk(d.payload, { from: d.from, to: d.to });
-        }
-      } catch { }
-    };
-    window.addEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
-    return () => window.removeEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
-  }, [fileHandler]);
-
-  // Restore encrypted block list
-  useEffect(() => {
-    const tryRestoreBlockList = async () => {
-      const passphrase = Authentication.passphrasePlaintextRef?.current || '';
-      const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey || null;
-      const key = passphrase ? passphrase : (kyberSecret ? { kyberSecret } : null);
-      if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated || !key || !Database.dbInitialized) return;
-      try {
-        await blockingSystem.downloadFromServer(key as any);
-      } catch { }
-    };
-    tryRestoreBlockList();
-  }, [Authentication.isLoggedIn, Authentication.accountAuthenticated, Authentication.passphrasePlaintextRef?.current, Authentication.aesKeyRef?.current]);
 
   // Handle settings open/close events
   useEffect(() => {
@@ -137,36 +51,42 @@ export function useAppInitialization({
 
   // Load notification settings
   useEffect(() => {
-    try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.notifications) {
-          notifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
+    const applyNotificationSettings = () => {
+      try {
+        const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed.notifications) {
+            notifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
+          }
         }
-      }
-    } catch { }
+      } catch { }
+    };
+    applyNotificationSettings();
+    return syncEncryptedStorage.subscribe(applyNotificationSettings);
   }, []);
 
   // Handle entering background
   const isEnteringBackgroundRef = useRef(false);
+  
+  const flushPendingSavesRef = useRef(flushPendingSaves);
+  flushPendingSavesRef.current = flushPendingSaves;
   useEffect(() => {
     const handleEnteringBackground = async () => {
       isEnteringBackgroundRef.current = true;
 
       try {
-        await flushPendingSaves();
+        await flushPendingSavesRef.current();
       } catch (e) {
         console.error('[App] Failed to flush pending saves:', e);
       }
 
-      const currentUsername = Authentication.loginUsernameRef.current ||
-        syncEncryptedStorage.getItem('last_authenticated_username');
+      const currentUsername = Authentication.loginUsernameRef.current;
       if (currentUsername) {
         try {
           await session.setBackgroundState(true);
         } catch (e) {
-          console.error('[App] Failed to store background username:', e);
+          console.error('[App] Failed to store background state:', e);
         }
       }
 
@@ -176,8 +96,9 @@ export function useAppInitialization({
     return () => {
       window.removeEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
       if (!isEnteringBackgroundRef.current && torNetworkManager.isSupported()) {
+        console.log('[TOR-DIAG] useAppInitialization unmount cleanup: shutting down Tor manager');
         torNetworkManager.shutdown();
       }
     };
-  }, [flushPendingSaves]);
+  }, []);
 }

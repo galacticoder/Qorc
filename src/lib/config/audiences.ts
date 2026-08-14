@@ -1,0 +1,13 @@
+export const ACCOUNT_AUTH_PURPOSE = 'account-auth';
+export const SERVER_ENTRY_PURPOSE = 'server-entry';
+export const AVATAR_BLOB_GET_AUDIENCE = 'avatar/blob/get';
+export const AVATAR_BLOB_PUT_AUDIENCE = 'avatar/blob/put';
+export const AVATAR_POOL_AUDIENCE = 'avatar/pool';
+export const DISCOVERY_BUCKET_AUDIENCE = 'discovery/bucket';
+export const DISCOVERY_MANIFEST_AUDIENCE = 'discovery/manifest';
+export const KEY_TRANSPARENCY_APPEND_AUDIENCE = 'key-transparency/append';
+export const KEY_TRANSPARENCY_SYNC_AUDIENCE = 'key-transparency/sync';
+export const LIVE_ONLY_DELIVERY_POLICY = 'live-only';
+export const OPRF_EVALUATE_AUDIENCE = 'oprf/evaluate';
+export const SPOOL_PIR_AUDIENCE = 'spool/pir';
+export const SPOOL_TAG_INDEX_AUDIENCE = 'spool/tag-index';

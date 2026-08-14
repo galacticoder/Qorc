@@ -1,22 +1,26 @@
 /**
  * Cluster Integration for Server
- * 
- * Integrates ClusterManager with the main server to enable:
- * - Automatic server registration
- * - Multi-server key distribution
- * - Health monitoring
- * - shutdown
  */
 
 import { ClusterManager } from './cluster-manager.js';
 import { generateConfigFromCluster } from '../load-balancer/haproxy-config-generator.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+
 import crypto from 'crypto';
-import os from 'os';
 import path from 'path';
+import {
+  CLUSTER_MASTER_KEY,
+} from '../config/redis-keys.js';
+import { TEMP_DIRECTORY } from '../config/infrastructure.js';
+import {
+  CLUSTER_APPROVED_EVENT,
+  CLUSTER_JOIN_REQUEST_EVENT,
+  CLUSTER_KEYS_ROTATED_EVENT,
+  CLUSTER_PROMOTED_EVENT
+} from './protocol.js';
 
 let clusterManager = null;
 let configUpdateInterval = null;
+let configUpdateTask = null;
 
 // Initialize cluster integration
 export async function initializeCluster({
@@ -37,14 +41,14 @@ export async function initializeCluster({
         const { withRedisClient } = await import('../session/redis-client.js');
         try {
           const existingMaster = await withRedisClient(async (client) => {
-            return await client.get('cluster:master');
+            return await client.get(CLUSTER_MASTER_KEY);
           });
           isPrimary = !existingMaster;
           if (isPrimary) {
-            cryptoLogger.info('[CLUSTER] No existing master found - becoming primary server');
+            console.log('[CLUSTER] No existing master found, becoming primary server');
           }
         } catch (error) {
-          cryptoLogger.warn('[CLUSTER] Could not check for existing master, defaulting to non-primary', error);
+          console.warn('[CLUSTER] Could not check for existing master, defaulting to non-primary', error);
           isPrimary = false;
         }
       }
@@ -52,7 +56,7 @@ export async function initializeCluster({
 
     const enableAutoApprove = autoApprove || process.env.CLUSTER_AUTO_APPROVE === 'true';
 
-    cryptoLogger.info('[CLUSTER] Initializing cluster integration', {
+    console.log('[CLUSTER] Initializing cluster integration', {
       serverId,
       isPrimary,
       autoApprove: enableAutoApprove
@@ -72,11 +76,11 @@ export async function initializeCluster({
       startHAProxyConfigUpdater(clusterManager);
     }
 
-    cryptoLogger.info('[CLUSTER] Cluster integration initialized', { serverId });
+    console.log('[CLUSTER] Cluster integration initialized', { serverId });
 
     return clusterManager;
   } catch (error) {
-    cryptoLogger.error('[CLUSTER] Failed to initialize cluster integration', error);
+    console.error('[CLUSTER] Failed to initialize cluster integration', error);
     throw error;
   }
 }
@@ -90,23 +94,23 @@ function generateServerId() {
 
 // Set up cluster event handlers
 function setupClusterEventHandlers(manager, autoApprove) {
-  manager.on('join-request', async (serverInfo) => {
-    cryptoLogger.info('[CLUSTER] New server requesting to join', {
+  manager.on(CLUSTER_JOIN_REQUEST_EVENT, async (serverInfo) => {
+    console.log('[CLUSTER] New server requesting to join', {
       serverId: serverInfo.serverId,
       requestedAt: new Date(serverInfo.requestedAt).toISOString()
     });
 
     if (autoApprove) {
-      cryptoLogger.warn('[CLUSTER] Auto-approving server (auto-approve is enabled)', {
+      console.warn('[CLUSTER] Auto-approving server (auto-approve is enabled)', {
         serverId: serverInfo.serverId
       });
       try {
         await manager.approveServer(serverInfo.serverId);
       } catch (error) {
-        cryptoLogger.error('[CLUSTER] Failed to auto-approve server', error);
+        console.error('[CLUSTER] Failed to auto-approve server', error);
       }
     } else {
-      cryptoLogger.info('[CLUSTER] Server awaiting manual approval', {
+      console.log('[CLUSTER] Server awaiting manual approval', {
         serverId: serverInfo.serverId,
         message: 'Run: npm run cluster:approve <serverId>'
       });
@@ -115,27 +119,27 @@ function setupClusterEventHandlers(manager, autoApprove) {
 
   // Handle server approved
   manager.on('server-approved', ({ serverId }) => {
-    cryptoLogger.info('[CLUSTER] Server approved and joined cluster', { serverId });
+    console.log('[CLUSTER] Server approved and joined cluster', { serverId });
   });
 
   // Handle server joined
   manager.on('server-joined', ({ serverId }) => {
-    cryptoLogger.info('[CLUSTER] New server joined cluster', { serverId });
+    console.log('[CLUSTER] New server joined cluster', { serverId });
   });
 
   // Handle server removed
   manager.on('server-removed', ({ serverId }) => {
-    cryptoLogger.warn('[CLUSTER] Server removed from cluster', { serverId });
+    console.warn('[CLUSTER] Server removed from cluster', { serverId });
   });
 
   // Handle server dead
   manager.on('server-dead', ({ serverId }) => {
-    cryptoLogger.error('[CLUSTER] Server marked as dead', { serverId });
+    console.error('[CLUSTER] Server marked as dead', { serverId });
   });
 
   // Handle promotion to primary
-  manager.on('promoted-to-primary', () => {
-    cryptoLogger.info('[CLUSTER] This server has been promoted to primary');
+  manager.on(CLUSTER_PROMOTED_EVENT, () => {
+    console.log('[CLUSTER] This server has been promoted to primary');
 
     if (process.env.HAPROXY_AUTO_CONFIG === 'true') {
       startHAProxyConfigUpdater(manager);
@@ -143,18 +147,18 @@ function setupClusterEventHandlers(manager, autoApprove) {
   });
 
   // Handle approval
-  manager.on('approved', () => {
-    cryptoLogger.info('[CLUSTER] This server has been approved and joined the cluster');
+  manager.on(CLUSTER_APPROVED_EVENT, () => {
+    console.log('[CLUSTER] This server has been approved and joined the cluster');
   });
 
   // Handle rejection
   manager.on('rejected', ({ reason }) => {
-    cryptoLogger.error('[CLUSTER] This server was rejected from the cluster', { reason });
+    console.error('[CLUSTER] This server was rejected from the cluster', { reason });
   });
 
   // Handle keys rotated
-  manager.on('keys-rotated', () => {
-    cryptoLogger.info('[CLUSTER] Cluster authentication keys rotated');
+  manager.on(CLUSTER_KEYS_ROTATED_EVENT, () => {
+    console.log('[CLUSTER] Cluster authentication keys rotated');
   });
 }
 
@@ -164,41 +168,47 @@ function startHAProxyConfigUpdater(manager) {
     return;
   }
 
-  const updateInterval = parseInt(process.env.HAPROXY_UPDATE_INTERVAL || '60000', 10);
-  const configPath = process.env.HAPROXY_CONFIG_PATH || (process.platform === 'win32' ? path.join(os.tmpdir(), 'haproxy.cfg') : '/etc/haproxy/haproxy.cfg');
+  const configuredInterval = Number(process.env.HAPROXY_UPDATE_INTERVAL || 60_000);
+  const updateInterval = Number.isSafeInteger(configuredInterval) && configuredInterval >= 5_000
+    ? Math.min(configuredInterval, 3_600_000)
+    : 60_000;
+  const configPath = process.env.HAPROXY_CONFIG_PATH || (process.platform === 'win32' ? path.join(TEMP_DIRECTORY, 'haproxy.cfg') : '/etc/haproxy/haproxy.cfg');
 
-  cryptoLogger.info('[CLUSTER] Starting HAProxy config auto-updater', {
+  console.log('[CLUSTER] Starting HAProxy config auto-updater', {
     interval: updateInterval,
     configPath
   });
 
-  updateHAProxyConfig(manager, configPath).catch(error => {
-    cryptoLogger.error('[CLUSTER] Failed to update HAProxy config', error);
-  });
+  const runUpdate = () => {
+    if (configUpdateTask) return;
+    const task = updateHAProxyConfig(manager, configPath)
+      .catch((error) => {
+        console.error('[CLUSTER] Failed to update HAProxy config', error);
+      })
+      .finally(() => {
+        if (configUpdateTask === task) configUpdateTask = null;
+      });
+    configUpdateTask = task;
+  };
 
-  configUpdateInterval = setInterval(async () => {
-    try {
-      await updateHAProxyConfig(manager, configPath);
-    } catch (error) {
-      cryptoLogger.error('[CLUSTER] Failed to update HAProxy config', error);
-    }
-  }, updateInterval);
+  runUpdate();
+  configUpdateInterval = setInterval(runUpdate, updateInterval);
 }
 
 // Update HAProxy configuration
 async function updateHAProxyConfig(manager, configPath) {
   try {
-    cryptoLogger.log('[CLUSTER] Updating HAProxy configuration');
+    console.log('[CLUSTER] Updating HAProxy configuration');
     const generator = await generateConfigFromCluster(manager, configPath);
 
     if (process.env.HAPROXY_AUTO_RELOAD === 'true') {
       await generator.reloadHAProxy(configPath);
-      cryptoLogger.info('[CLUSTER] HAProxy configuration updated and reloaded');
+      console.log('[CLUSTER] HAProxy configuration updated and reloaded');
     } else {
-      cryptoLogger.info('[CLUSTER] HAProxy configuration updated (reload manually)');
+      console.log('[CLUSTER] HAProxy configuration updated (reload manually)');
     }
   } catch (error) {
-    cryptoLogger.error('[CLUSTER] Failed to update HAProxy configuration', error);
+    console.error('[CLUSTER] Failed to update HAProxy configuration', error);
     throw error;
   }
 }
@@ -264,11 +274,15 @@ export async function removeServer(serverId) {
 
 // Shutdown of cluster integration
 export async function shutdownCluster() {
-  cryptoLogger.info('[CLUSTER] Shutting down cluster integration');
+  console.log('[CLUSTER] Shutting down cluster integration');
 
   if (configUpdateInterval) {
     clearInterval(configUpdateInterval);
     configUpdateInterval = null;
+  }
+  if (configUpdateTask) {
+    await configUpdateTask;
+    configUpdateTask = null;
   }
 
   if (clusterManager) {
@@ -276,7 +290,7 @@ export async function shutdownCluster() {
     clusterManager = null;
   }
 
-  cryptoLogger.info('[CLUSTER] Cluster integration shutdown complete');
+  console.log('[CLUSTER] Cluster integration shutdown complete');
 }
 
 // Register cluster shutdown handlers
@@ -285,12 +299,12 @@ export function registerClusterShutdownHandlers() {
 
   signals.forEach(signal => {
     process.on(signal, async () => {
-      cryptoLogger.info(`[CLUSTER] Received ${signal}, initiating shutdown`);
+      console.log(`[CLUSTER] Received ${signal}, initiating shutdown`);
 
       try {
         await shutdownCluster();
       } catch (error) {
-        cryptoLogger.error('[CLUSTER] Error during cluster shutdown', error);
+        console.error('[CLUSTER] Error during cluster shutdown', error);
       }
 
       process.exit(0);
@@ -298,24 +312,24 @@ export function registerClusterShutdownHandlers() {
   });
 
   process.on('uncaughtException', async (error) => {
-    cryptoLogger.error('[CLUSTER] Uncaught exception, shutting down', error);
+    console.error('[CLUSTER] Uncaught exception, shutting down', error);
 
     try {
       await shutdownCluster();
     } catch (shutdownError) {
-      cryptoLogger.error('[CLUSTER] Error during emergency shutdown', shutdownError);
+      console.error('[CLUSTER] Error during emergency shutdown', shutdownError);
     }
 
     process.exit(1);
   });
 
   process.on('unhandledRejection', async (reason) => {
-    cryptoLogger.error('[CLUSTER] Unhandled rejection, shutting down', { reason });
+    console.error('[CLUSTER] Unhandled rejection, shutting down', { reason });
 
     try {
       await shutdownCluster();
     } catch (shutdownError) {
-      cryptoLogger.error('[CLUSTER] Error during emergency shutdown', shutdownError);
+      console.error('[CLUSTER] Error during emergency shutdown', shutdownError);
     }
 
     process.exit(1);

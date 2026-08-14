@@ -1,12 +1,5 @@
 import { MAX_CLIPBOARD_SIZE, MAX_INPUT_SIZE, RATE_LIMIT_ATTEMPTS, CLIPBOARD_CONTROL_CHARS_REGEX, RATE_LIMIT_WINDOW_MS } from './constants';
 
-interface ClipboardResult {
-  success: boolean;
-  method: 'modern' | 'fallback' | 'failed';
-  error?: string;
-  bytesProcessed: number;
-}
-
 let lastWindowStart = 0;
 let attemptsInWindow = 0;
 
@@ -26,19 +19,7 @@ function enforceRateLimit(): void {
   }
 }
 
-async function checkClipboardPermission(): Promise<boolean> {
-  if (typeof navigator === 'undefined' || !navigator.permissions) {
-    return false;
-  }
-  try {
-    const result = await navigator.permissions.query({ name: 'clipboard-write' as PermissionName });
-    return result.state === 'granted' || result.state === 'prompt';
-  } catch {
-    return false;
-  }
-}
-
-export async function copyTextToClipboard(text: unknown): Promise<ClipboardResult> {
+export async function copyTextToClipboard(text: unknown): Promise<void> {
   enforceRateLimit();
 
   if (typeof text !== 'string') {
@@ -50,47 +31,12 @@ export async function copyTextToClipboard(text: unknown): Promise<ClipboardResul
   }
 
   const sanitized = sanitizeForClipboard(text);
-  const permissionGranted = await checkClipboardPermission();
-
-  let method: ClipboardResult['method'] = 'failed';
-  let success = false;
-  let error: string | undefined;
-
-  try {
-    if (typeof navigator !== 'undefined' && typeof window !== 'undefined') {
-      const canUseAsyncClipboard = Boolean(window.isSecureContext || window.location.hostname === 'localhost') &&
-        !!navigator.clipboard && typeof navigator.clipboard.writeText === 'function' && permissionGranted;
-
-      if (canUseAsyncClipboard) {
-        await navigator.clipboard.writeText(sanitized);
-        method = 'modern';
-        success = true;
-      }
-    }
-  } catch (_err) {
-    error = _err instanceof Error ? _err.message : String(_err);
+  if (
+    typeof navigator === 'undefined' ||
+    !navigator.clipboard ||
+    typeof navigator.clipboard.writeText !== 'function'
+  ) {
+    throw new Error('Secure clipboard API unavailable');
   }
-
-  if (!success) {
-    try {
-      await navigator.clipboard.writeText(sanitized);
-      method = 'modern';
-      success = true;
-    } catch (fallbackError) {
-      error = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-      success = false;
-      method = 'failed';
-    }
-  }
-
-  if (!success && error) {
-    throw new Error(error);
-  }
-
-  return {
-    success,
-    method,
-    error,
-    bytesProcessed: sanitized.length
-  };
+  await navigator.clipboard.writeText(sanitized);
 }

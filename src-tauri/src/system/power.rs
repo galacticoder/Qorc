@@ -1,131 +1,42 @@
-//! Power Save Blocker
-//!
-//! Prevents system sleep during calls
+//! Bounded powersave for active calls
 
-use crate::error::QorResult;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::error::{QorError, QorResult};
+use parking_lot::Mutex;
 
-/// Power save blocker manager
 pub struct PowerSaveBlocker {
-    blockers: RwLock<HashMap<u32, BlockerHandle>>,
-    next_id: AtomicU32,
+    active: Mutex<Option<BlockerHandle>>,
 }
 
-/// Internal blocker handle
 struct BlockerHandle {
-    #[cfg(target_os = "linux")]
-    inhibit_cookie: Option<u32>,
-    #[cfg(target_os = "macos")]
-    assertion_id: Option<u32>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    child: std::process::Child,
     #[cfg(target_os = "windows")]
-    thread_state: Option<u32>,
-    _blocker_type: BlockerType,
-}
-
-/// Type of power save blocking
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum BlockerType {
-    PreventDisplaySleep,
-    PreventSystemSleep,
-}
-
-impl Default for BlockerType {
-    fn default() -> Self {
-        BlockerType::PreventDisplaySleep
-    }
+    worker: WindowsBlocker,
 }
 
 impl PowerSaveBlocker {
-    /// Create new power save blocker manager
     pub fn new() -> Self {
         Self {
-            blockers: RwLock::new(HashMap::new()),
-            next_id: AtomicU32::new(1),
+            active: Mutex::new(None),
         }
     }
 
-    /// Start blocking power save
-    pub fn start(&self, blocker_type: BlockerType) -> QorResult<u32> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-        let handle = self.create_blocker(blocker_type)?;
-        self.blockers.write().insert(id, handle);
-
-        Ok(id)
-    }
-
-    /// Stop blocking power save
-    pub fn stop(&self, id: u32) -> QorResult<bool> {
-        if let Some(handle) = self.blockers.write().remove(&id) {
-            self.release_blocker(handle)?;
-            Ok(true)
-        } else {
-            Ok(false)
+    pub fn start(&self) -> QorResult<bool> {
+        let mut active = self.active.lock();
+        if active.is_some() {
+            return Ok(false);
         }
+        *active = Some(create_blocker()?);
+        Ok(true)
     }
 
-    /// Check if a blocker is active
-    pub fn is_started(&self, id: u32) -> bool {
-        self.blockers.read().contains_key(&id)
-    }
-
-    /// Create platform-specific blocker
-    #[cfg(target_os = "linux")]
-    fn create_blocker(&self, blocker_type: BlockerType) -> QorResult<BlockerHandle> {
-        let cookie = inhibit_sleep_linux(blocker_type)?;
-
-        Ok(BlockerHandle {
-            inhibit_cookie: Some(cookie),
-            _blocker_type: blocker_type,
-        })
-    }
-
-    #[cfg(target_os = "macos")]
-    fn create_blocker(&self, blocker_type: BlockerType) -> QorResult<BlockerHandle> {
-        let assertion_id = create_power_assertion_macos(blocker_type)?;
-
-        Ok(BlockerHandle {
-            assertion_id: Some(assertion_id),
-            _blocker_type: blocker_type,
-        })
-    }
-
-    #[cfg(target_os = "windows")]
-    fn create_blocker(&self, blocker_type: BlockerType) -> QorResult<BlockerHandle> {
-        set_execution_state_windows(blocker_type, true)?;
-
-        Ok(BlockerHandle {
-            thread_state: Some(1),
-            _blocker_type: blocker_type,
-        })
-    }
-
-    /// Release platform-specific blocker
-    #[cfg(target_os = "linux")]
-    fn release_blocker(&self, handle: BlockerHandle) -> QorResult<()> {
-        if let Some(cookie) = handle.inhibit_cookie {
-            uninhibit_sleep_linux(cookie)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn release_blocker(&self, handle: BlockerHandle) -> QorResult<()> {
-        if let Some(assertion_id) = handle.assertion_id {
-            release_power_assertion_macos(assertion_id)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn release_blocker(&self, handle: BlockerHandle) -> QorResult<()> {
-        if handle.thread_state.is_some() {
-            set_execution_state_windows(handle.blocker_type, false)?;
-        }
-        Ok(())
+    pub fn stop(&self) -> QorResult<bool> {
+        let mut active = self.active.lock();
+        let Some(handle) = active.take() else {
+            return Ok(false);
+        };
+        release_blocker(handle)?;
+        Ok(true)
     }
 }
 
@@ -135,119 +46,192 @@ impl Default for PowerSaveBlocker {
     }
 }
 
-// Linux
-
-#[cfg(target_os = "linux")]
-fn inhibit_sleep_linux(blocker_type: BlockerType) -> QorResult<u32> {
-    use std::process::Command;
-
-    let reason = match blocker_type {
-        BlockerType::PreventDisplaySleep => "Qor-Chat call in progress (display)",
-        BlockerType::PreventSystemSleep => "Qor-Chat call in progress (system)",
-    };
-
-    let output = Command::new("gnome-session-inhibit")
-        .args([
-            "--inhibit",
-            "idle:suspend",
-            "--reason",
-            reason,
-            "sleep",
-            "infinity",
-        ])
-        .spawn();
-
-    if output.is_ok() {
-        return Ok(output.unwrap().id());
+impl Drop for PowerSaveBlocker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.active.get_mut().take() {
+            let _ = release_blocker(handle);
+        }
     }
-
-    // Try xdg-screensaver
-    let output = Command::new("xdg-screensaver")
-        .arg("suspend")
-        .arg("1")
-        .output();
-
-    if output.is_ok() {
-        return Ok(1);
-    }
-
-    // Fallback return a dummy cookie
-    Ok(0)
 }
 
 #[cfg(target_os = "linux")]
-fn uninhibit_sleep_linux(cookie: u32) -> QorResult<()> {
-    use std::process::Command;
+fn create_blocker() -> QorResult<BlockerHandle> {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
 
-    if cookie > 0 {
-        let _ = Command::new("kill").arg(cookie.to_string()).output();
-    }
+    let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .ok_or_else(|| {
+            QorError::SystemError("Sleep inhibitor helper is unavailable".to_string())
+        })?;
 
-    // Resume screensaver
-    let _ = Command::new("xdg-screensaver")
-        .arg("resume")
-        .arg("1")
-        .output();
-
-    Ok(())
-}
-
-// macOS
-#[cfg(target_os = "macos")]
-fn create_power_assertion_macos(blocker_type: BlockerType) -> QorResult<u32> {
-    use std::process::Command;
-
-    let args = match blocker_type {
-        BlockerType::PreventDisplaySleep => vec!["-d", "-w"],
-        BlockerType::PreventSystemSleep => vec!["-i", "-w"],
-    };
-
-    let child = Command::new("caffeinate")
-        .args(args)
-        .arg(std::process::id().to_string())
-        .spawn()
-        .map_err(|e| QorError::SystemError(format!("Failed to start caffeinate: {}", e)))?;
-
-    Ok(child.id())
-}
-
-#[cfg(target_os = "macos")]
-fn release_power_assertion_macos(assertion_id: u32) -> QorResult<()> {
-    use std::process::Command;
-
-    // Kill caffeinate process
-    let _ = Command::new("kill").arg(assertion_id.to_string()).output();
-
-    Ok(())
-}
-
-// Windows
-
-#[cfg(target_os = "windows")]
-fn set_execution_state_windows(blocker_type: BlockerType, enable: bool) -> QorResult<()> {
-    unsafe {
-        let flags = if enable {
-            match blocker_type {
-                BlockerType::PreventDisplaySleep => {
-                    winapi::um::winbase::ES_CONTINUOUS
-                        | winapi::um::winbase::ES_DISPLAY_REQUIRED
-                        | winapi::um::winbase::ES_SYSTEM_REQUIRED
-                }
-                BlockerType::PreventSystemSleep => {
-                    winapi::um::winbase::ES_CONTINUOUS | winapi::um::winbase::ES_SYSTEM_REQUIRED
-                }
-            }
-        } else {
-            winapi::um::winbase::ES_CONTINUOUS
-        };
-
-        let result = winapi::um::winbase::SetThreadExecutionState(flags);
-        if result == 0 {
-            return Err(QorError::SystemError(
-                "SetThreadExecutionState failed".to_string(),
-            ));
+    for inhibitor in [
+        "/usr/bin/gnome-session-inhibit",
+        "/bin/gnome-session-inhibit",
+    ] {
+        if !Path::new(inhibitor).is_file() {
+            continue;
+        }
+        if let Ok(child) = Command::new(inhibitor)
+            .args([
+                "--inhibit",
+                "idle:suspend",
+                "--reason",
+                "Qor-Chat call in progress",
+                sleep,
+                "infinity",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            return Ok(BlockerHandle { child });
         }
     }
 
+    for inhibitor in ["/usr/bin/systemd-inhibit", "/bin/systemd-inhibit"] {
+        if !Path::new(inhibitor).is_file() {
+            continue;
+        }
+        if let Ok(child) = Command::new(inhibitor)
+            .args([
+                "--what=idle:sleep",
+                "--mode=block",
+                "--why=Qor-Chat call in progress",
+                sleep,
+                "infinity",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            return Ok(BlockerHandle { child });
+        }
+    }
+
+    Err(QorError::SystemError(
+        "No supported sleep inhibitor is available".to_string(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn create_blocker() -> QorResult<BlockerHandle> {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    let executable = "/usr/bin/caffeinate";
+    if !Path::new(executable).is_file() {
+        return Err(QorError::SystemError(
+            "Sleep inhibitor is unavailable".to_string(),
+        ));
+    }
+    let parent_pid = std::process::id().to_string();
+    let child = Command::new(executable)
+        .args(["-d", "-i", "-w", parent_pid.as_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| QorError::SystemError("Failed to start sleep inhibitor".to_string()))?;
+    Ok(BlockerHandle { child })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn release_blocker(mut handle: BlockerHandle) -> QorResult<()> {
+    match handle.child.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            handle
+                .child
+                .kill()
+                .map_err(|_| QorError::SystemError("Failed to stop sleep inhibitor".to_string()))?;
+            handle
+                .child
+                .wait()
+                .map_err(|_| QorError::SystemError("Failed to reap sleep inhibitor".to_string()))?;
+            Ok(())
+        }
+        Err(_) => Err(QorError::SystemError(
+            "Failed to inspect sleep inhibitor".to_string(),
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsBlocker {
+    stop_tx: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "windows")]
+fn create_blocker() -> QorResult<BlockerHandle> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let thread = std::thread::Builder::new()
+        .name("qor-power-inhibitor".to_string())
+        .spawn(move || {
+            let enabled = set_execution_state_windows(true);
+            let ready = enabled.is_ok();
+            let _ = ready_tx.send(enabled);
+            if ready {
+                let _ = stop_rx.recv();
+                let _ = set_execution_state_windows(false);
+            }
+        })
+        .map_err(|_| QorError::SystemError("Failed to start sleep inhibitor".to_string()))?;
+
+    match ready_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(BlockerHandle {
+            worker: WindowsBlocker {
+                stop_tx,
+                thread: Some(thread),
+            },
+        }),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(QorError::SystemError(error))
+        }
+        Err(_) => {
+            let _ = stop_tx.send(());
+            let _ = thread.join();
+            Err(QorError::SystemError(
+                "Sleep inhibitor startup timed out".to_string(),
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn release_blocker(mut handle: BlockerHandle) -> QorResult<()> {
+    let _ = handle.worker.stop_tx.send(());
+    if let Some(thread) = handle.worker.thread.take() {
+        thread
+            .join()
+            .map_err(|_| QorError::SystemError("Sleep inhibitor thread failed".to_string()))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn set_execution_state_windows(enable: bool) -> Result<(), String> {
+    use winapi::um::winbase::{
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    };
+
+    let flags = if enable {
+        ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+    } else {
+        ES_CONTINUOUS
+    };
+    let result = unsafe { SetThreadExecutionState(flags) };
+    if result == 0 {
+        return Err("SetThreadExecutionState failed".to_string());
+    }
     Ok(())
 }

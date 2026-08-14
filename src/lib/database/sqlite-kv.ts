@@ -3,129 +3,136 @@
  */
 
 import { database } from '../tauri-bindings';
+import { blake3 } from '@noble/hashes/blake3.js';
+import { bytesToHex } from '../utils/byte-utils';
+import { STORAGE_KEY_DOMAINS } from './storage-keys';
 
 export class SQLiteKV {
-  private static instances: Map<string, SQLiteKV> = new Map();
-  private readonly username: string;
+  private static readonly MAX_MUTATION_DELETIONS = 2_048;
+  private readonly namespace: string;
+  private readonly assertCurrent: () => void;
 
-  private constructor(username: string) {
-    this.username = SQLiteKV.sanitizeIdentifier(username);
+  private constructor(accountScope: string, assertCurrent: () => void) {
+    this.namespace = SQLiteKV.accountNamespace(accountScope);
+    this.assertCurrent = assertCurrent;
   }
 
-  static sanitizeIdentifier(value: string): string {
-    return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
-  }
-
-  // Get or create a SQLiteKV instance for a user
-  static async forUser(username: string): Promise<SQLiteKV> {
-    const key = SQLiteKV.sanitizeIdentifier(username);
-    let inst = SQLiteKV.instances.get(key);
-    if (!inst) {
-      inst = new SQLiteKV(username);
-      SQLiteKV.instances.set(key, inst);
+  static accountNamespace(value: string): string {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (!normalized || normalized.length > 120 || /[^a-z0-9._-]/.test(normalized)) {
+      throw new Error('Invalid database owner');
     }
-    return inst;
-  }
-
-  // Purge a user database
-  static async purgeUserDb(username: string): Promise<void> {
-    const key = SQLiteKV.sanitizeIdentifier(username);
-    const inst = SQLiteKV.instances.get(key);
-    if (inst) {
-      SQLiteKV.instances.delete(key);
+    const input = new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.DATABASE_OWNER}\0${normalized}`);
+    const digest = blake3(input, { dkLen: 32 });
+    try {
+      return bytesToHex(digest);
+    } finally {
+      input.fill(0);
+      digest.fill(0);
     }
-    
-    try { await database.clearStore(`kv_data_${key}`); } catch { }
   }
 
-  // KV operations --
+  static async forUser(accountScope: string, assertCurrent: () => void): Promise<SQLiteKV> {
+    assertCurrent();
+    const view = new SQLiteKV(accountScope, assertCurrent);
+    assertCurrent();
+    return view;
+  }
 
   // Set a binary value
   async setBinary(store: string, key: string, value: Uint8Array): Promise<void> {
-    const fullStore = `${this.username}_${store}`;
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
     await database.setSecure(fullStore, key, value);
+    this.assertCurrent();
   }
 
   // Get a binary value
   async getBinary(store: string, key: string): Promise<Uint8Array | null> {
-    const fullStore = `${this.username}_${store}`;
-    return await database.getSecure(fullStore, key);
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
+    const value = await database.getSecure(fullStore, key);
+    this.assertCurrent();
+    return value;
+  }
+
+  async has(store: string, key: string): Promise<boolean> {
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
+    const result = await database.hasSecure(fullStore, key);
+    this.assertCurrent();
+    return result;
   }
 
   // Delete a key
   async delete(store: string, key: string): Promise<void> {
-    const fullStore = `${this.username}_${store}`;
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
     await database.delete(fullStore, key);
+    this.assertCurrent();
   }
 
   async deleteMany(store: string, keys: string[]): Promise<number> {
-    const fullStore = `${this.username}_${store}`;
-    let count = 0;
-    for (const key of keys) {
-      await database.delete(fullStore, key);
-      count++;
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
+    if (keys.length === 0) return 0;
+    for (let offset = 0; offset < keys.length; offset += SQLiteKV.MAX_MUTATION_DELETIONS) {
+      this.assertCurrent();
+      const batch = keys.slice(offset, offset + SQLiteKV.MAX_MUTATION_DELETIONS);
+      await database.mutateSecure([], batch.map((key) => ({ store: fullStore, key })));
+      this.assertCurrent();
     }
-    return count;
+    return keys.length;
   }
 
-  // Scan by store prefix
-  async scanByStorePrefix(prefix: string): Promise<Array<{ store: string; key: string; value: Uint8Array }>> {
-    const results = await database.scanSecure(`${this.username}_${prefix}`);
-    return results.map(([fullStore, key, value]) => {
-      const store = fullStore.startsWith(`${this.username}_`)
-        ? fullStore.substring(this.username.length + 1)
-        : fullStore;
-      return { store, key, value };
-    });
+  async mutate(
+    writes: Array<{ store: string; key: string; value: Uint8Array }>,
+    deletions: Array<{ store: string; key: string }>,
+  ): Promise<void> {
+    this.assertCurrent();
+    const committed = await database.mutateSecure(
+      writes.map(({ store, key, value }) => ({
+        store: `${this.namespace}_${store}`,
+        key,
+        value,
+      })),
+      deletions.map(({ store, key }) => ({
+        store: `${this.namespace}_${store}`,
+        key,
+      })),
+    );
+    this.assertCurrent();
+    if (!committed) throw new Error('Database quota exceeded');
   }
 
-  // Get all entries for a store
-  async entriesForStore(store: string): Promise<Array<{ key: string; value: Uint8Array }>> {
-    const fullStore = `${this.username}_${store}`;
-    const results = await database.listSecure(fullStore);
-    return results.map(([key, value]) => ({ key, value }));
+  async selectorsByStorePrefix(prefix: string): Promise<Array<{ store: string; key: string }>> {
+    this.assertCurrent();
+    const selectors = await database.scanSecureKeys(`${this.namespace}_${prefix}`);
+    this.assertCurrent();
+    const namespacePrefix = `${this.namespace}_`;
+    const results: Array<{ store: string; key: string }> = [];
+    for (const [fullStore, key] of selectors) {
+      if (!fullStore.startsWith(namespacePrefix)) {
+        throw new Error('Database selector escaped its account namespace');
+      }
+      results.push({ store: fullStore.substring(namespacePrefix.length), key });
+    }
+    return results;
+  }
+
+  async keysForStore(store: string): Promise<string[]> {
+    this.assertCurrent();
+    const fullStore = `${this.namespace}_${store}`;
+    const keys = await database.listSecureKeys(fullStore);
+    this.assertCurrent();
+    return keys;
   }
 
   // Clear all entries for a store
   async clearStore(store: string): Promise<number> {
-    const fullStore = `${this.username}_${store}`;
-    await database.clearStore(fullStore);
-    return 1;
-  }
-
-  async setJsonKey(key: string, value: any): Promise<void> {
-    const json = JSON.stringify(value);
-    const encoder = new TextEncoder();
-    await this.setBinary('secure_json', key, encoder.encode(json));
-  }
-
-  // Get a JSON value
-  async getJsonKey<T = any>(key: string): Promise<T | null> {
-    const bytes = await this.getBinary('secure_json', key);
-    if (!bytes) return null;
-    const decoder = new TextDecoder();
-    try {
-      return JSON.parse(decoder.decode(bytes)) as T;
-    } catch {
-      return null;
-    }
-  }
-
-  async deleteJsonKey(key: string): Promise<void> {
-    await this.delete('secure_json', key);
-  }
-
-  async clearSecureKeys(): Promise<void> {
-    await this.clearStore('secure_json');
-  }
-
-  async clearAll(): Promise<void> {
-    await this.clearStore('kv_data');
-    await this.clearStore('secure_json');
-  }
-
-  // Compact database
-  async compact(): Promise<void> {
-    await database.compact();
+    this.assertCurrent();
+    const keys = await this.keysForStore(store);
+    this.assertCurrent();
+    return this.deleteMany(store, keys);
   }
 }
