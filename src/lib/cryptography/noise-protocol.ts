@@ -39,6 +39,9 @@ const acceptedInitiatorHandshakes = new Map<string, number>();
 let acceptedInitiatorHandshakeGeneration = 0;
 const NOISE_REPLAY_WINDOW_SLOTS = Number(NOISE_REPLAY_WINDOW_SIZE);
 const monotonicNow = (): number => globalThis.performance?.now?.() ?? Date.now();
+const CALL_STREAM_CONTEXT_RE = /^call-(?:audio|video|telemetry|screen):[a-f0-9]{16,64}$/;
+const CALL_STREAM_KEY_SALT = new TextEncoder().encode(PROTOCOL_KEYS.NOISE_CALL_STREAM_KEY_SALT);
+const MAX_CALL_STREAM_KEYS = 128;
 
 if (!Number.isSafeInteger(NOISE_REPLAY_WINDOW_SLOTS) || NOISE_REPLAY_WINDOW_SLOTS < 1) {
     throw new Error('Invalid Noise replay window');
@@ -108,6 +111,8 @@ export class PQSession {
     // Session keys derived from shared secrets
     private sendKey: Uint8Array | null = null;
     private receiveKey: Uint8Array | null = null;
+    private sendCallStreamKeys = new Map<string, Uint8Array>();
+    private receiveCallStreamKeys = new Map<string, Uint8Array>();
 
     // Sequence tracking
     private sendSequence: bigint = BigInt(0);
@@ -588,8 +593,50 @@ export class PQSession {
         }
     }
 
+    private resolveCallStreamKey(
+        baseKey: Uint8Array,
+        cache: Map<string, Uint8Array>,
+        context?: string
+    ): Uint8Array {
+        if (context === undefined) return baseKey;
+        if (!CALL_STREAM_CONTEXT_RE.test(context)) {
+            throw new Error('Invalid call stream key context');
+        }
+        const existing = cache.get(context);
+        if (existing) return existing;
+        if (cache.size >= MAX_CALL_STREAM_KEYS) {
+            throw new Error('Call stream key context limit exceeded');
+        }
+        const derived = PostQuantumHash.deriveKey(
+            baseKey,
+            CALL_STREAM_KEY_SALT,
+            `${PROTOCOL_KEYS.NOISE_CALL_STREAM_KEY_CONTEXT_PREFIX}${context}`,
+            32
+        );
+        cache.set(context, derived);
+        return derived;
+    }
+
+    releaseCallStreamContext(context: string): void {
+        if (!CALL_STREAM_CONTEXT_RE.test(context)) return;
+        const sendKey = this.sendCallStreamKeys.get(context);
+        if (sendKey) {
+            SecureMemory.zeroBuffer(sendKey);
+            this.sendCallStreamKeys.delete(context);
+        }
+        const receiveKey = this.receiveCallStreamKeys.get(context);
+        if (receiveKey) {
+            SecureMemory.zeroBuffer(receiveKey);
+            this.receiveCallStreamKeys.delete(context);
+        }
+    }
+
     // Encrypt message
-    async encrypt(plaintext: Uint8Array, aad?: Uint8Array): Promise<EncryptedFrame> {
+    async encrypt(
+        plaintext: Uint8Array,
+        aad?: Uint8Array,
+        callStreamContext?: string
+    ): Promise<EncryptedFrame> {
         if (this.state !== 'established' || !this.sendKey) {
             throw new Error('Session not established');
         }
@@ -602,6 +649,11 @@ export class PQSession {
             throw new Error('Session sequence exhausted');
         }
 
+        const encryptionKey = this.resolveCallStreamKey(
+            this.sendKey,
+            this.sendCallStreamKeys,
+            callStreamContext
+        );
         const sequence = this.sendSequence;
         this.sendSequence = this.sendSequence + BigInt(1);
 
@@ -609,7 +661,7 @@ export class PQSession {
         const nonce = this.deriveNonce(sequence);
         let returnedNonce: Uint8Array | null = null;
         try {
-            const encrypted = await PostQuantumAEAD.encryptAsync(plaintext, this.sendKey, effectiveAad, nonce);
+            const encrypted = await PostQuantumAEAD.encryptAsync(plaintext, encryptionKey, effectiveAad, nonce);
             returnedNonce = encrypted.nonce;
             return { sequence, ciphertext: encrypted.ciphertext, tag: encrypted.tag };
         } finally {
@@ -619,7 +671,11 @@ export class PQSession {
     }
 
     // Decrypt message
-    async decrypt(frame: EncryptedFrame, aad?: Uint8Array): Promise<Uint8Array> {
+    async decrypt(
+        frame: EncryptedFrame,
+        aad?: Uint8Array,
+        callStreamContext?: string
+    ): Promise<Uint8Array> {
         if (this.state !== 'established' || !this.receiveKey) {
             throw new Error('Session not established');
         }
@@ -643,12 +699,17 @@ export class PQSession {
 
         const effectiveAad = aad || new Uint8Array(0);
         const nonce = this.deriveNonce(frame.sequence);
+        const decryptionKey = this.resolveCallStreamKey(
+            this.receiveKey,
+            this.receiveCallStreamKeys,
+            callStreamContext
+        );
         try {
             const plaintext = await PostQuantumAEAD.decryptAsync(
                 frame.ciphertext,
                 nonce,
                 frame.tag,
-                this.receiveKey,
+                decryptionKey,
                 effectiveAad
             );
 
@@ -860,21 +921,6 @@ export class PQSession {
         return this.sessionId;
     }
 
-    exportDirectionalKeyMaterial(): {
-        role: 'initiator' | 'responder';
-        sendKey: Uint8Array;
-        receiveKey: Uint8Array;
-    } {
-        if (this.state !== 'established' || !this.sendKey || !this.receiveKey || !this.isValid()) {
-            throw new Error('Session keys not ready');
-        }
-        return {
-            role: this.role,
-            sendKey: this.sendKey.slice(),
-            receiveKey: this.receiveKey.slice()
-        };
-    }
-
     isValid(): boolean {
         if (this.state !== 'established') {
             return false;
@@ -886,6 +932,14 @@ export class PQSession {
 
     // Destroy the session
     destroy(): void {
+        for (const key of this.sendCallStreamKeys.values()) {
+            SecureMemory.zeroBuffer(key);
+        }
+        this.sendCallStreamKeys.clear();
+        for (const key of this.receiveCallStreamKeys.values()) {
+            SecureMemory.zeroBuffer(key);
+        }
+        this.receiveCallStreamKeys.clear();
         if (this.sendKey) {
             SecureMemory.zeroBuffer(this.sendKey);
             this.sendKey = null;

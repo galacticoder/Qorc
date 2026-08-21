@@ -560,7 +560,14 @@ export function useMessageSender(
       const material = await findUser(peer);
       if (!isCurrent()) return;
       if (material && material.fullBundle) {
-        const validation = await validateSignalBundleForPeerIdentity(currentUser, peer, material.fullBundle, users as any, findUser as any);
+        const validation = await validateSignalBundleForPeerIdentity(
+          currentUser,
+          peer,
+          material.fullBundle,
+          users as any,
+          findUser as any,
+          material,
+        );
         if (!isCurrent() || !validation.valid) return;
         const processed = await signal.processVerifiedPreKeyBundle(currentUser, peer, material.fullBundle);
         if (processed && isCurrent()) {

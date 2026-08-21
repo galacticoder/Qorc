@@ -11,15 +11,13 @@ import { keyTransparencyPeerKey } from './peer-key';
 import { canonicalAuthUsername } from '../sanitizers';
 
 const MAX_AUTHORIZED_PEERS = 2048;
-const AUTHORIZATION_TTL_MS = 24 * 60 * 60 * 1000;
 let verifiedMaterials = new WeakMap<object, {
   account: string;
   peer: string;
-  expiresAt: number;
   authorizationGeneration: number;
 }>();
 const authorizedPeerKeys = new Map<string, {
-  expiresAt: number;
+  verifiedAt: number;
   authorizationGeneration: number;
   rootCommitment: string;
   version: number;
@@ -67,7 +65,7 @@ export function markKeyTransparencyVerifiedMaterial(
     !isValidDilithiumPublicKeyBase64(keys?.dilithiumPublicBase64) ||
     !isValidX25519PublicKeyBase64(keys?.x25519PublicBase64)
   ) throw new Error('Invalid verified key-transparency transport keys');
-  const expiresAt = Date.now() + AUTHORIZATION_TTL_MS;
+  const verifiedAt = Date.now();
   const normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
   const normalizedPeer = canonicalAuthUsername(peer, 'verified key-transparency peer');
   if (
@@ -76,12 +74,26 @@ export function markKeyTransparencyVerifiedMaterial(
     contact.version < 1 ||
     contact.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
   ) throw new Error('Invalid verified key-transparency contact state');
-  const authorizationGeneration = nextAuthorizationGeneration;
-  nextAuthorizationGeneration = nextAuthorizationGeneration >= Number.MAX_SAFE_INTEGER
-    ? 1
-    : nextAuthorizationGeneration + 1;
+  const key = authorizationKey(normalizedAccount, normalizedPeer);
+  const existing = authorizedPeerKeys.get(key);
+  const sameAuthorization = existing?.rootCommitment === contact.rootCommitment &&
+    existing.version === contact.version &&
+    existing.kyberPublicBase64 === keys.kyberPublicBase64 &&
+    existing.dilithiumPublicBase64 === keys.dilithiumPublicBase64 &&
+    existing.x25519PublicBase64 === keys.x25519PublicBase64 &&
+    existing.peerCertificateFingerprint === fingerprint(value.peerCertificateFingerprint, true) &&
+    existing.identityRootFingerprint === fingerprint(value.identityRootFingerprint, true) &&
+    existing.identityBundleFingerprint === fingerprint(value.identityBundleFingerprint, true);
+  const authorizationGeneration = sameAuthorization
+    ? existing.authorizationGeneration
+    : nextAuthorizationGeneration;
+  if (!sameAuthorization) {
+    nextAuthorizationGeneration = nextAuthorizationGeneration >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : nextAuthorizationGeneration + 1;
+  }
   const entry = {
-    expiresAt,
+    verifiedAt,
     authorizationGeneration,
     rootCommitment: contact.rootCommitment,
     version: contact.version,
@@ -95,10 +107,8 @@ export function markKeyTransparencyVerifiedMaterial(
   verifiedMaterials.set(material, {
     account: normalizedAccount,
     peer: normalizedPeer,
-    expiresAt,
     authorizationGeneration,
   });
-  const key = authorizationKey(normalizedAccount, normalizedPeer);
   const revoked = revokedPeers.get(key);
   if (revoked) {
     if (
@@ -119,6 +129,66 @@ export function markKeyTransparencyVerifiedMaterial(
   }
 }
 
+export function hydrateKeyTransparencyVerifiedMaterial(
+  material: object,
+  account: string,
+  peer: string,
+): boolean {
+  if (!material || typeof material !== 'object' || Array.isArray(material)) return false;
+  let normalizedAccount: string;
+  let normalizedPeer: string;
+  let key: string;
+  try {
+    normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
+    normalizedPeer = canonicalAuthUsername(peer, 'verified key-transparency peer');
+    key = authorizationKey(normalizedAccount, normalizedPeer);
+  } catch {
+    return false;
+  }
+  const authorized = authorizedPeerKeys.get(key);
+  if (!authorized) return false;
+  const value = material as Record<string, any>;
+  const keys = value.publicKeys;
+  let peerCertificateFingerprint: string;
+  let identityRootFingerprint: string;
+  let identityBundleFingerprint: string;
+  try {
+    peerCertificateFingerprint = fingerprint(value.peerCertificateFingerprint, true);
+    identityRootFingerprint = fingerprint(value.identityRootFingerprint, true);
+    identityBundleFingerprint = fingerprint(value.identityBundleFingerprint, true);
+  } catch {
+    return false;
+  }
+  if (
+    authorized.kyberPublicBase64 !== keys?.kyberPublicBase64 ||
+    authorized.dilithiumPublicBase64 !== keys?.dilithiumPublicBase64 ||
+    authorized.x25519PublicBase64 !== keys?.x25519PublicBase64 ||
+    authorized.peerCertificateFingerprint !== peerCertificateFingerprint ||
+    authorized.identityRootFingerprint !== identityRootFingerprint ||
+    authorized.identityBundleFingerprint !== identityBundleFingerprint
+  ) return false;
+  verifiedMaterials.set(material, {
+    account: normalizedAccount,
+    peer: normalizedPeer,
+    authorizationGeneration: authorized.authorizationGeneration,
+  });
+  return true;
+}
+
+export function getKeyTransparencyAuthorizedPeerVerifiedAt(
+  account: string,
+  peer: string,
+): number | null {
+  let key: string;
+  try {
+    key = authorizationKey(account, peer);
+  } catch {
+    return null;
+  }
+  const authorized = authorizedPeerKeys.get(key);
+  return authorized?.verifiedAt ?? null;
+}
+
 export function getKeyTransparencyAuthorizedPeerState(
   account: string,
   peer: string,
@@ -131,10 +201,6 @@ export function getKeyTransparencyAuthorizedPeerState(
   }
   const authorized = authorizedPeerKeys.get(key);
   if (!authorized) return null;
-  if (authorized.expiresAt < Date.now()) {
-    authorizedPeerKeys.delete(key);
-    return null;
-  }
   return {
     rootCommitment: authorized.rootCommitment,
     version: authorized.version,
@@ -157,10 +223,6 @@ export function isKeyTransparencyVerifiedMaterial(
   }
   const verified = verifiedMaterials.get(material as object);
   if (!verified) return false;
-  if (verified.expiresAt < Date.now()) {
-    verifiedMaterials.delete(material as object);
-    return false;
-  }
   const authorized = authorizedPeerKeys.get(authorizationKey(normalizedAccount, normalizedPeer));
   return verified.account === normalizedAccount &&
     verified.peer === normalizedPeer &&
@@ -185,10 +247,6 @@ export function isKeyTransparencyAuthorizedPeerKeySet(input: {
   }
   const authorized = authorizedPeerKeys.get(key);
   if (!authorized) return false;
-  if (authorized.expiresAt < Date.now()) {
-    authorizedPeerKeys.delete(key);
-    return false;
-  }
   return authorized.kyberPublicBase64 === input.kyberPublicBase64 &&
     authorized.dilithiumPublicBase64 === input.dilithiumPublicBase64 &&
     authorized.x25519PublicBase64 === input.x25519PublicBase64 &&
@@ -215,10 +273,6 @@ export function isKeyTransparencyAuthorizedPeerCertificate(input: {
   }
   const authorized = authorizedPeerKeys.get(key);
   if (!authorized) return false;
-  if (authorized.expiresAt < Date.now()) {
-    authorizedPeerKeys.delete(key);
-    return false;
-  }
   return authorized.kyberPublicBase64 === input.kyberPublicBase64 &&
     authorized.dilithiumPublicBase64 === input.dilithiumPublicBase64 &&
     authorized.x25519PublicBase64 === input.x25519PublicBase64 &&
@@ -244,10 +298,6 @@ export function captureKeyTransparencyPeerAuthorization(
   }
   const authorized = authorizedPeerKeys.get(key);
   if (!authorized) return null;
-  if (authorized.expiresAt < Date.now()) {
-    authorizedPeerKeys.delete(key);
-    return null;
-  }
   if (
     expectedDilithiumPublicBase64 !== undefined &&
     authorized.dilithiumPublicBase64 !== expectedDilithiumPublicBase64
@@ -279,10 +329,6 @@ export function isKeyTransparencyPeerAuthorizationCurrent(
   }
   const authorized = authorizedPeerKeys.get(key);
   if (!authorized) return false;
-  if (authorized.expiresAt < Date.now()) {
-    authorizedPeerKeys.delete(key);
-    return false;
-  }
   return authorized.authorizationGeneration === authorization.authorizationGeneration &&
     authorized.identityRootFingerprint === authorization.identityRootFingerprint &&
     authorized.identityBundleFingerprint === authorization.identityBundleFingerprint;
@@ -326,16 +372,10 @@ export function isKeyTransparencyPeerRevoked(account: string, peer: string): boo
   }
 }
 
-/**
- * Snapshot of the authorizations and revocations for one account, for persistence.
- * `expiresAt` is carried verbatim so restoring can never widen the trust window.
- * `authorizationGeneration` is deliberately NOT exported: it identifies in-flight
- * material within a single process and is reassigned on restore.
- */
 export function exportKeyTransparencyAuthorizations(account: string): {
   authorized: Array<{
     peer: string;
-    expiresAt: number;
+    verifiedAt: number;
     rootCommitment: string;
     version: number;
     kyberPublicBase64: string;
@@ -354,13 +394,12 @@ export function exportKeyTransparencyAuthorizations(account: string): {
     return { authorized: [], revoked: [] };
   }
   const prefix = `${normalizedAccount}\0`;
-  const now = Date.now();
   const authorized: any[] = [];
   for (const [key, entry] of authorizedPeerKeys) {
-    if (!key.startsWith(prefix) || entry.expiresAt <= now) continue;
+    if (!key.startsWith(prefix)) continue;
     authorized.push({
       peer: key.slice(prefix.length),
-      expiresAt: entry.expiresAt,
+      verifiedAt: entry.verifiedAt,
       rootCommitment: entry.rootCommitment,
       version: entry.version,
       kyberPublicBase64: entry.kyberPublicBase64,
@@ -383,13 +422,12 @@ export function exportKeyTransparencyAuthorizations(account: string): {
   return { authorized, revoked };
 }
 
-// Restore persisted authorizations for one account.
 export function importKeyTransparencyAuthorizations(
   account: string,
   snapshot: {
     authorized: ReadonlyArray<{
       peer: string;
-      expiresAt: number;
+      verifiedAt: number;
       rootCommitment: string;
       version: number;
       kyberPublicBase64: string;
@@ -437,7 +475,11 @@ export function importKeyTransparencyAuthorizations(
     try {
       const peer = canonicalAuthUsername(entry.peer, 'verified key-transparency peer');
       if (revokedNow.has(peer)) continue;
-      if (!Number.isSafeInteger(entry.expiresAt) || entry.expiresAt <= now) continue;
+      if (
+        !Number.isSafeInteger(entry.verifiedAt) ||
+        entry.verifiedAt <= 0 ||
+        entry.verifiedAt > now
+      ) continue;
       if (
         !isValidKyberPublicKeyBase64(entry.kyberPublicBase64) ||
         !isValidDilithiumPublicKeyBase64(entry.dilithiumPublicBase64) ||
@@ -455,7 +497,7 @@ export function importKeyTransparencyAuthorizations(
         : nextAuthorizationGeneration + 1;
       authorizedPeerKeys.delete(key);
       authorizedPeerKeys.set(key, {
-        expiresAt: entry.expiresAt,
+        verifiedAt: entry.verifiedAt,
         authorizationGeneration,
         rootCommitment: entry.rootCommitment,
         version: entry.version,

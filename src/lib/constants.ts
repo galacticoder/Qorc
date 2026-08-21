@@ -62,10 +62,14 @@ export const SEGMENT_UNLOAD_IDLE_MS = 3 * 60 * 1000;
 export const INITIAL_LOAD_DELAY_MS = 500;
 export const MAX_UI_MESSAGES_PER_CONVERSATION = MAX_BACKGROUND_MESSAGES;
 export const MAX_UI_MESSAGES_TOTAL = 2_048;
+export const MAX_CONVERSATION_STORED_MESSAGES = 10_000;
 export const MAX_KNOWN_PEERS = 2_048;
 export const MAX_PEER_AVATAR_CACHE_ENTRIES = 128;
 export const QUALITY_OPTIONS = ['low', 'medium', 'high'] as const;
 export const DEFAULT_QUALITY: QualityOption = 'medium';
+export const TARGET_FPS = 60;
+export const VISUAL_FRAME_SEND_DEADLINE_MS = 400;
+export const VISUAL_FRAME_SEND_DEADLINE_MAX_MS = 1_500;
 export type QualityOption = (typeof QUALITY_OPTIONS)[number];
 export const QUALITY_LABELS: Record<QualityOption, string> = {
   low: 'Low',
@@ -113,6 +117,12 @@ export {
 } from '../../shared/discovery-constants.js';
 
 export const P2P_PEER_CACHE_TTL_MS = 5 * 60 * 1000;
+export const P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS = 8 * 60 * 60 * 1000;
+export const P2P_PEER_TRUST_REFRESH_LEAD_MS = 6 * 60 * 60 * 1000;
+export const P2P_PEER_TRUST_REFRESH_MAX_AGE_MS = 18 * 60 * 60 * 1000;
+export const P2P_PEER_TRUST_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+export const P2P_PEER_TRUST_REFRESH_INITIAL_MIN_MS = 30 * 1000;
+export const P2P_PEER_TRUST_REFRESH_INITIAL_JITTER_MS = 60 * 1000;
 export const P2P_ROUTE_PROOF_TTL_MS = 60 * 1000;
 export const MAX_P2P_CERT_CACHE_SIZE = 128;
 export const MAX_USERNAME_LENGTH = 96;
@@ -182,10 +192,7 @@ export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
 ]);
 export const CALL_TIMEOUT = 60_000;
 export const CALL_RING_TIMEOUT = 60_000;
-export const CALL_AUDIO_PADDING_BLOCK = 128;
 export const CALL_DEVICE_SETTLE_MS = 800;
-export const CALL_KEY_ROTATION_INTERVAL = 10_000;
-
 export const MAX_BLOCK_LIST_SIZE = 10000;
 export const BLOCK_STATUS_CACHE_TTL_MS = 30000;
 export const BLOCK_RATE_LIMIT_WINDOW_MS = 60_000;

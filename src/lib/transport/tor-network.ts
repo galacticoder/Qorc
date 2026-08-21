@@ -670,10 +670,6 @@ export class TorNetworkManager {
 
   // Notify connection callbacks
   private notifyConnectionCallbacks(connected: boolean): void {
-    try {
-      const caller = (new Error().stack || '').split('\n')[2]?.trim();
-      console.log(`[TOR-DIAG] notifyConnectionCallbacks(${connected})`, { caller });
-    } catch { }
     if (connected) {
       void anonymousHttp.prewarm().catch(() => { });
     }

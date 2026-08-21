@@ -8,7 +8,7 @@ pub struct PowerSaveBlocker {
 }
 
 struct BlockerHandle {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     child: std::process::Child,
     #[cfg(target_os = "windows")]
     worker: WindowsBlocker,
@@ -117,29 +117,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
     ))
 }
 
-#[cfg(target_os = "macos")]
-fn create_blocker() -> QorResult<BlockerHandle> {
-    use std::path::Path;
-    use std::process::{Command, Stdio};
-
-    let executable = "/usr/bin/caffeinate";
-    if !Path::new(executable).is_file() {
-        return Err(QorError::SystemError(
-            "Sleep inhibitor is unavailable".to_string(),
-        ));
-    }
-    let parent_pid = std::process::id().to_string();
-    let child = Command::new(executable)
-        .args(["-d", "-i", "-w", parent_pid.as_str()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| QorError::SystemError("Failed to start sleep inhibitor".to_string()))?;
-    Ok(BlockerHandle { child })
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn release_blocker(mut handle: BlockerHandle) -> QorResult<()> {
     match handle.child.try_wait() {
         Ok(Some(_)) => Ok(()),

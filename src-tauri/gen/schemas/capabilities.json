@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the app","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:webview:allow-internal-toggle-devtools","notification:allow-is-permission-granted"]}}
+{"default":{"identifier":"default","description":"Default capability for the app","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:webview:allow-internal-toggle-devtools","dialog:allow-message","notification:allow-is-permission-granted"]}}

@@ -246,6 +246,11 @@ class KeyTransparencyClient {
   private coverMonitorTimer: ReturnType<typeof setTimeout> | null = null;
   private monitorOwner: string | null = null;
   private securityIncidentActive = false;
+  private authorizationRestore: {
+    ownerUsername: string;
+    generation: number;
+    promise: Promise<number>;
+  } | null = null;
 
   destroy(): void {
     this.generation += 1;
@@ -257,6 +262,7 @@ class KeyTransparencyClient {
     if (this.deferredGossipTimer !== null) clearTimeout(this.deferredGossipTimer);
     this.deferredGossipTimer = null;
     this.securityIncidentActive = false;
+    this.authorizationRestore = null;
     clearKeyTransparencyVerifiedMaterials();
     this.stopContactMonitoring();
   }
@@ -756,15 +762,36 @@ class KeyTransparencyClient {
   // Load this accounts persisted peer authorizations
   async restorePersistedAuthorizations(ownerUsername: string): Promise<number> {
     const generation = this.generation;
-    const context = await captureCurrentServerContext();
-    if (await this.hasIncident(context)) return 0;
-    const snapshot = await readKeyTransparencyAuthorizations(context, ownerUsername)
-      .catch(() => null);
-    if (!snapshot) return 0;
-    await assertCurrentServerContext(context);
-    // An account switch or incident between the read and here invalidates it.
-    if (generation !== this.generation || this.securityIncidentActive) return 0;
-    return importKeyTransparencyAuthorizations(ownerUsername, snapshot);
+    const existing = this.authorizationRestore;
+    if (
+      existing &&
+      existing.ownerUsername === ownerUsername &&
+      existing.generation === generation
+    ) return existing.promise;
+
+    const promise = (async (): Promise<number> => {
+      const context = await captureCurrentServerContext();
+      if (await this.hasIncident(context)) return 0;
+      const snapshot = await readKeyTransparencyAuthorizations(context, ownerUsername)
+        .catch(() => null);
+      if (!snapshot) return 0;
+      await assertCurrentServerContext(context);
+      if (generation !== this.generation || this.securityIncidentActive) return 0;
+      return importKeyTransparencyAuthorizations(ownerUsername, snapshot);
+    })();
+    this.authorizationRestore = { ownerUsername, generation, promise };
+    try {
+      const restored = await promise;
+      if (restored === 0 && this.authorizationRestore?.promise === promise) {
+        this.authorizationRestore = null;
+      }
+      return restored;
+    } catch (error) {
+      if (this.authorizationRestore?.promise === promise) {
+        this.authorizationRestore = null;
+      }
+      throw error;
+    }
   }
 
   // Persist the current authorizations/revocations for this account
@@ -1008,7 +1035,7 @@ class KeyTransparencyClient {
         const localRecoveryCommitment = keyTransparencyPublicKeyCommitment(recovery.publicKey);
 
         if (!verified.contact) {
-          console.log(`[KT-DIAG ${new Date().toISOString()}] ensureOwnIdentity: no existing contact, registering own identity`, { owner: input.ownerUsername });
+          console.log(`[KT ${new Date().toISOString()}] ensureOwnIdentity: no existing contact, registering own identity`, { owner: input.ownerUsername });
           try {
             await this.registerOwnIdentity(
               verified.context,
@@ -1019,7 +1046,6 @@ class KeyTransparencyClient {
               input.accountRoot.sign,
               recovery,
             );
-            console.log(`[KT-DIAG ${new Date().toISOString()}] ensureOwnIdentity: registerOwnIdentity returned`, { owner: input.ownerUsername });
           } catch (e) {
             console.log(`[KT-DIAG ${new Date().toISOString()}] ensureOwnIdentity: registerOwnIdentity THREW`, { owner: input.ownerUsername, error: e instanceof Error ? e.message : String(e) });
           }

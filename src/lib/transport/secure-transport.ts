@@ -16,6 +16,7 @@ export type StreamType =
     | SignalType.MESSAGE
     | 'call-audio'
     | 'call-video'
+    | 'call-telemetry'
     | 'call-screen';
 
 // Encrypted frame format
@@ -50,6 +51,36 @@ export interface StreamOptions {
     readonly lossy?: boolean;
 }
 
+export interface StreamWriteOptions {
+    readonly deadline?: number;
+    readonly priority?: 'normal' | 'realtime' | 'visual';
+}
+
+export interface AudioLaneTelemetryEntry {
+    readonly id: string;
+    readonly rttMs: number | null;
+    readonly degradedSamples: number;
+    readonly role: 'active' | 'secondary' | 'standby';
+}
+
+export interface AudioLaneTelemetry {
+    readonly ready: number;
+    readonly target: number;
+    readonly active: number;
+    readonly endpointAvailable: boolean;
+    readonly dialing: number;
+    readonly attempts: number;
+    readonly failures: number;
+    readonly retryInMs: number | null;
+    readonly lastFailure: 'offer-send' | 'dial-timeout' | 'dial-failed' | 'preamble-send' | 'binding-timeout' | 'binding-closed' | 'binding-pressure' | 'binding-read-invalid' | 'binding-frame-invalid' | 'rtt-degraded' | 'lane-closed' | null;
+    readonly selectedLane: string | null;
+    readonly visualLane?: string | null;
+    readonly selectedPath?: 'primary' | 'lane';
+    readonly primaryRttMs?: number | null;
+    readonly rttCeilingMs?: number | null;
+    readonly lanes: readonly AudioLaneTelemetryEntry[];
+}
+
 // Bidirectional stream
 export interface SecureStream {
     readonly id: string;
@@ -58,7 +89,7 @@ export interface SecureStream {
     readonly lossy: boolean;
 
     // Write encrypted data
-    write(data: Uint8Array): Promise<void>;
+    write(data: Uint8Array, options?: StreamWriteOptions): Promise<void>;
 
     // Read decrypted data
     read(): Promise<Uint8Array | null>;
@@ -98,6 +129,10 @@ export interface SecureConnection {
 
     // Public, per-handshake binding used to domain-separate application replay state.
     getSessionBinding(): string | null;
+
+    getAudioLaneTelemetry(): AudioLaneTelemetry | null;
+
+    updatePrimaryPathRtt(rttMs: number): void;
 
     // Close streams and disconnect
     close(reason?: string): Promise<void>;

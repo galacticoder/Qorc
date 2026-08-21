@@ -16,6 +16,7 @@ import { formatRelativeAge } from "../../../lib/utils/date-utils";
 import { SecureCanvasText } from "./SecureCanvasText";
 import { UnreadIndicator } from "./UnreadIndicator";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
+import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
 
 export interface Conversation {
   readonly id: string;
@@ -53,6 +54,7 @@ interface ConversationItemProps {
   readonly onSelect: (username: string) => void;
   readonly onRemove?: (username: string) => void;
   readonly callStatus?: CallStatus;
+  readonly isTyping: boolean;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly onTogglePin?: (username: string) => void;
 }
@@ -63,6 +65,7 @@ const ConversationItem = memo<ConversationItemProps>(({
   onSelect,
   onRemove,
   callStatus,
+  isTyping,
   onTogglePin,
 }) => {
   const displayName = useDisplayUsername({ username: conversation.username });
@@ -143,7 +146,20 @@ const ConversationItem = memo<ConversationItemProps>(({
         </div>
 
         {/* Show unread indicator if there are unread messages and conversation is not selected */}
-        {!isSelected && (conversation.unreadCount ?? 0) > 0 ? (
+        {isTyping && conversation.lastMessageTime ? (
+          <div
+            className="qor-conversation-preview qor-conversation-preview-typing"
+            role="status"
+            aria-label={`${displayName} is typing`}
+          >
+            <span>Typing</span>
+            <span className="qor-conversation-typing-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </div>
+        ) : !isSelected && (conversation.unreadCount ?? 0) > 0 ? (
           <div className="qor-conversation-preview">
             <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
           </div>
@@ -310,6 +326,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   onStartCall,
   onToggleBlock
 }: ConversationListProps) {
+  const { typingUsers } = useTypingIndicatorContext();
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
@@ -317,6 +334,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [blockVersion, setBlockVersion] = useState(0);
+  const typingUserSet = useMemo(() => new Set(typingUsers), [typingUsers]);
 
   useEffect(() => {
     const bump = () => setBlockVersion((v) => v + 1);
@@ -674,6 +692,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                       onRemove={handleRemoveClick}
                       onTogglePin={onTogglePin}
                       callStatus={conversation.username === activePeer ? activeStatus : null}
+                      isTyping={typingUserSet.has(conversation.username) && Boolean(conversation.lastMessageTime)}
                       getDisplayUsername={getDisplayUsername}
                     />
                   );

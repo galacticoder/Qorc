@@ -165,16 +165,17 @@ function normalizeHandle(value: unknown): string {
 function requireValidTimeWindow(
   issuedAt: unknown,
   expiresAt: unknown,
-  now: number
+  now: number,
+  allowExpired: boolean,
 ): string | null {
   if (!Number.isFinite(issuedAt as number) || !Number.isFinite(expiresAt as number)) {
     return 'INVALID_CERTIFICATE_TIME';
   }
   const issued = Math.trunc(issuedAt as number);
   const expires = Math.trunc(expiresAt as number);
-  if (issued > now + CERT_CLOCK_SKEW_MS) return 'CERTIFICATE_NOT_YET_VALID';
-  if (expires <= now - CERT_CLOCK_SKEW_MS) return 'CERTIFICATE_EXPIRED';
   if (expires <= issued) return 'INVALID_CERTIFICATE_WINDOW';
+  if (issued > now + CERT_CLOCK_SKEW_MS) return 'CERTIFICATE_NOT_YET_VALID';
+  if (!allowExpired && expires <= now - CERT_CLOCK_SKEW_MS) return 'CERTIFICATE_EXPIRED';
   return null;
 }
 
@@ -434,6 +435,7 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_SCHEMA_INVALID' };
     }
     const now = Number.isFinite(context.now as number) ? Math.trunc(context.now as number) : Date.now();
+    const allowExpired = context.allowExpired === true;
 
     if (bundle.version !== CERTIFIED_IDENTITY_BUNDLE_VERSION) {
       return { valid: false, reason: 'CERTIFIED_IDENTITY_VERSION_UNSUPPORTED' };
@@ -457,7 +459,7 @@ export async function validateCertifiedPeerBundleV3(
     }
 
     const peerCertificate = context.peerCertificate
-      ? await validatePeerCertificateBundle(context.peerCertificate, bundle.username, now)
+      ? await validatePeerCertificateBundle(context.peerCertificate, bundle.username, now, allowExpired)
       : null;
     if (!peerCertificate) {
       return { valid: false, reason: 'CERTIFIED_IDENTITY_CERTIFICATE_MISSING' };
@@ -466,7 +468,12 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_CERTIFICATE_USERNAME_MISMATCH' };
     }
 
-    const certificateTimeError = requireValidTimeWindow(peerCertificate.issuedAt, peerCertificate.expiresAt, now);
+    const certificateTimeError = requireValidTimeWindow(
+      peerCertificate.issuedAt,
+      peerCertificate.expiresAt,
+      now,
+      allowExpired,
+    );
     if (certificateTimeError) return { valid: false, reason: certificateTimeError };
 
     const root = bundle.accountRoot;
@@ -494,11 +501,11 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_CHAIN_TIME_MISMATCH' };
     }
 
-    const rootTimeError = requireValidTimeWindow(root.issuedAt, root.expiresAt, now);
+    const rootTimeError = requireValidTimeWindow(root.issuedAt, root.expiresAt, now, allowExpired);
     if (rootTimeError) return { valid: false, reason: rootTimeError };
-    const deviceTimeError = requireValidTimeWindow(device.issuedAt, device.expiresAt, now);
+    const deviceTimeError = requireValidTimeWindow(device.issuedAt, device.expiresAt, now, allowExpired);
     if (deviceTimeError) return { valid: false, reason: deviceTimeError };
-    const bindingTimeError = requireValidTimeWindow(binding.issuedAt, binding.expiresAt, now);
+    const bindingTimeError = requireValidTimeWindow(binding.issuedAt, binding.expiresAt, now, allowExpired);
     if (bindingTimeError) return { valid: false, reason: bindingTimeError };
 
     if (root.version !== CERTIFIED_IDENTITY_BUNDLE_VERSION || device.version !== CERTIFIED_IDENTITY_BUNDLE_VERSION || binding.version !== CERTIFIED_IDENTITY_BUNDLE_VERSION) {

@@ -123,7 +123,7 @@ the password does not appear in command arguments. It is not an operator setting
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `PQ_ANONYMOUS_HTTP_MAX_INFLIGHT` | `4`, 1-16 | `server/routes/pq-anonymous-http.js` | Concurrent admitted replay/KEM/decrypt/dispatch/response operations per process. |
+| `PQ_ANONYMOUS_HTTP_MAX_INFLIGHT` | `8`, 5-16 | `server/routes/pq-anonymous-http.js` | Concurrent admitted replay/KEM/decrypt/dispatch/response operations per process. |
 | `PQ_ANONYMOUS_HTTP_MAX_RPS` | `100`, 1-2000 | same | Process wide token bucket for work-valid requests before KEM processing. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 64 KiB opaque failure writes, excess failures close without allocating a response. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS` | `200`, 1-4000 | same | Process wide token bucket for opaque failure writes. |
@@ -273,7 +273,7 @@ the password does not appear in command arguments. It is not an operator setting
 | `OPENSSL_CONF` | Unset | quantum setup/build and load-balancer modules | OpenSSL configuration that loads the selected providers. |
 | `OPENSSL_MODULES` | Unset | same | OpenSSL provider module directory. |
 | `OQS_PROVIDER_MODULE` | Auto-detected | same | Explicit `oqsprovider` module path. |
-| `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH` | Inherited | quantum tooling | Dynamic-library search path for HAProxy/OpenSSL dependencies. |
+| `LD_LIBRARY_PATH` | Inherited | quantum tooling | Dynamic-library search path for HAProxy/OpenSSL dependencies. |
 | `OQS_SIG` | Tool-selected | `scripts/setup-quantum-haproxy.cjs` | Preferred supported PQ signature algorithm for generated PQ certificate tooling. |
 | `FORCE_REBUILD` | `0` | install/build scripts | `1` forces rebuilding quantum dependencies. |
 | `TLS_REDIS_SERVER` | Installer-generated path | `scripts/start-server.cjs` | Repository-local TLS Redis executable override. |
@@ -286,7 +286,7 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `VITE_WS_URL` | Unset | `src/components/setup/ConnectSetup.tsx` | Packaged web-client websocket endpoint, for example `wss://localhost:8443`. |
-| `QOR_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and log filename for multi-instance testing. It is local and is never sent to the server. |
+| `QOR_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and `logs/instance-<id>-logs.txt` output for multi instance testing. |
 | `PROTOC` | Auto-detected | `scripts/start-client.cjs` | Explicit Protocol Buffers compiler path. |
 | `QOR_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
 | `QOR_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
@@ -320,4 +320,4 @@ accepts remote traffic only through TLS with SCRAM-SHA-256 authentication.
 | `BROADCAST_LANE_COVER_PERCENT` | `25` | Share of server cover traffic written to the first-contact lane. Without cover on that lane its entry count is a live readout of how fast new relationships form. |
 | `QOR_PIR_WORKER_PATH` | `workers/ypir/target/release/qor-pir-worker` | Optional override. The Docker image builds the worker to the default path, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
 | `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400` (24h) | Spool retention. No longer tied to a paging ceiling for the tagged lane, which PIR serves directly. |
-| `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768` | Also the PIR database row count. Build time is near-flat in rows, memory is the real constraint at ~400 MiB per worker, and there are two workers. |
+| `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768` | Caps retained logical records. PIR packs each retained record into nine 16 KiB rows, pads the database to a supported matrix shape, and keeps two snapshots during rotation. Memory grows at matrix size boundaries rather than one fixed amount. |

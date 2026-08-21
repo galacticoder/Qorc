@@ -21,7 +21,7 @@ if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
     console.log('  --bundle-only  Build native installer bundles and exit without launching.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
     console.log('Bundles are written to src-tauri/target/release/bundle for the current OS.');
-    console.log('Logs are mirrored to logs/client-instance-<QOR_INSTANCE_ID>.log');
+    console.log('Logs are mirrored to logs/instance-<QOR_INSTANCE_ID>-logs.txt');
     process.exit(0);
 }
 
@@ -30,15 +30,23 @@ process.chdir(repoRoot);
 const runOnly = process.argv.slice(2).some(arg => arg === '--run-only' || arg === '--no-build');
 const bundleOnly = process.argv.slice(2).some(arg => arg === '--bundle-only' || arg === '--no-launch');
 
+if (process.platform !== 'linux' && process.platform !== 'win32') {
+    logErr('Qor desktop supports only Linux and Windows.');
+    process.exit(1);
+}
+
 if (runOnly && bundleOnly) {
     logErr('--run-only and --bundle-only cannot be used together.');
     process.exit(1);
 }
 
-// Save all logs to logs/client-instance-<id>.log
 const instanceId = (process.env.QOR_INSTANCE_ID || '1').trim() || '1';
+if (instanceId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(instanceId)) {
+    logErr('QOR_INSTANCE_ID must contain only letters, numbers, underscores, or hyphens.');
+    process.exit(1);
+}
 const logsDir = path.join(repoRoot, 'logs');
-const logFilePath = path.join(logsDir, `client-instance-${instanceId}.log`);
+const logFilePath = path.join(logsDir, `instance-${instanceId}-logs.txt`);
 
 function clientRuntimeEnv() {
     const env = { ...process.env };
@@ -315,7 +323,7 @@ function launchApp() {
     }
 
     try { fs.mkdirSync(logsDir, { recursive: true }); } catch { }
-    const logStream = fs.createWriteStream(logFilePath, { flags: 'w' });
+    const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
     logStream.write(`# Qor-Chat client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
     console.log(`[CLIENT] Launching built app (instance ${instanceId})... logging to ${path.relative(repoRoot, logFilePath)}`);
 
@@ -331,9 +339,15 @@ function launchApp() {
     runProc.stderr.pipe(process.stderr);
     runProc.stderr.pipe(logStream);
 
-    runProc.on('exit', exitCode => {
-        try { logStream.end(); } catch { }
-        process.exit(exitCode);
+    runProc.on('error', error => {
+        const line = `[CLIENT] Failed to launch app: ${error.message}\n`;
+        process.stderr.write(line);
+        logStream.write(line);
+    });
+
+    runProc.on('close', (exitCode, signal) => {
+        const line = `# Qor-Chat client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
+        logStream.end(line, () => process.exit(exitCode ?? 1));
     });
 }
 
@@ -367,18 +381,14 @@ function removeOldBundleArtifacts() {
 function collectBundleArtifacts() {
     const bundleDir = path.join(tauriDir, 'target', 'release', 'bundle');
     const artifacts = [];
-    const installerPattern = /\.(appimage|deb|dmg|exe|msi|rpm)$/i;
+    const installerPattern = /\.(appimage|deb|exe|msi|rpm)$/i;
 
     function walk(dir) {
         if (!fs.existsSync(dir)) return;
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const fullPath = path.join(dir, entry.name);
             if (entry.isDirectory()) {
-                if (entry.name.endsWith('.app')) {
-                    artifacts.push(fullPath);
-                } else {
-                    walk(fullPath);
-                }
+                walk(fullPath);
             } else if (installerPattern.test(entry.name)) {
                 artifacts.push(fullPath);
             }

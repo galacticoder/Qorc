@@ -314,9 +314,7 @@ export const createHandleAccountSubmit = (
     password: string,
     passphrase: string
   ) => {
-    console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] handleAccountSubmit invoked`, { mode, isSubmittingAuth: state.isSubmittingAuth, accountSubmitInFlight: refs.accountSubmitInFlightRef.current });
     if (state.isSubmittingAuth || refs.accountSubmitInFlightRef.current) {
-      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] handleAccountSubmit: IGNORED (already submitting/in-flight)`);
       return;
     }
     const displayUsername = userInput.trim();

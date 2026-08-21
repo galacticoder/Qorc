@@ -6,7 +6,6 @@ import {
   SPOOL_PIR_LAYOUT,
   SPOOL_PIR_RECORD_BYTES,
   SPOOL_PIR_ROW_BYTES,
-  SPOOL_PIR_ROWS_PER_RECORD,
   splitSpoolPirRecord
 } from '../../shared/spool-pir-layout.js';
 import { SPOOL_TAG_INDEX_POLL_INTERVAL_MS } from '../../shared/spool-tag-protocol.js';
@@ -39,7 +38,7 @@ export function pirWorkerPath() {
 }
 
 function createSlot(worker) {
-  return { worker, snapshot: null, building: false };
+  return { worker, snapshot: null, building: false, activeAnswers: 0 };
 }
 
 function snapshotEpoch(source) {
@@ -73,17 +72,19 @@ function sameIndex(left, right) {
   return true;
 }
 
-function splitPirRecords(records) {
-  const rows = [];
+function validatePirRecords(records) {
   for (const record of records) {
     if (!Buffer.isBuffer(record) || record.length !== SPOOL_PIR_RECORD_BYTES) {
       throw new Error('Invalid fixed-width PIR spool record');
     }
-    for (const output of splitSpoolPirRecord(record)) {
-      rows.push(Buffer.from(output.buffer, output.byteOffset, output.byteLength));
-    }
   }
-  return rows;
+  return records;
+}
+
+function pirRows(records) {
+  return validatePirRecords(records).flatMap((record) => (
+    splitSpoolPirRecord(record).map((row) => Buffer.from(row))
+  ));
 }
 
 async function prepareBuildSlot(slot) {
@@ -131,12 +132,14 @@ export async function stopPirService() {
 }
 
 function availableBuildSlot() {
-  return slots.find((slot) => slot !== publishedSlot && !slot.building) || null;
+  return slots.find((slot) => (
+    slot !== publishedSlot && !slot.building && slot.activeAnswers === 0
+  )) || null;
 }
 
 async function buildAndPublishSnapshot(now) {
   const slot = publishedSlot === null ? slots[0] : availableBuildSlot();
-  if (!slot) throw new Error('No PIR snapshot build slot is available');
+  if (!slot) return publishedSlot?.snapshot?.epoch ?? null;
   slot.building = true;
   
   slot.snapshot = null;
@@ -152,13 +155,11 @@ async function buildAndPublishSnapshot(now) {
     const startedAt = Date.now();
     console.log('[PIR] Spool snapshot build started', {
       epoch,
-      records: source.records.length,
-      rows: source.records.length * SPOOL_PIR_ROWS_PER_RECORD
+      records: source.records.length
     });
     await prepareBuildSlot(slot);
     if (source.records.length > 0) {
-      const rows = splitPirRecords(source.records);
-      await slot.worker.build(epoch, rows, SPOOL_PIR_ROW_BYTES);
+      await slot.worker.build(epoch, pirRows(source.records), SPOOL_PIR_ROW_BYTES);
     }
     slot.snapshot = {
       epoch,
@@ -237,7 +238,12 @@ export async function answerPirQuery(epoch, query, pubParams) {
     candidate.snapshot.records > 0
   ));
   if (!slot) throw new Error('PIR epoch is unavailable');
-  return slot.worker.answer(epoch, query, pubParams);
+  slot.activeAnswers += 1;
+  try {
+    return await slot.worker.answerBatch(epoch, query, pubParams);
+  } finally {
+    slot.activeAnswers = Math.max(0, slot.activeAnswers - 1);
+  }
 }
 
 export function pirEpochWindowMs() {
@@ -251,6 +257,7 @@ export function pirServiceState() {
     retainedEpochs: slots
       .map((slot) => slot.snapshot?.epoch)
       .filter(Number.isSafeInteger),
+    activeAnswers: slots.reduce((total, slot) => total + slot.activeAnswers, 0),
     building: refreshPromise !== null,
     epochMs: PIR_SNAPSHOT_MIN_REFRESH_MS
   };

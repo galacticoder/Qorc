@@ -103,6 +103,7 @@ export interface CertifiedPeerBundleValidationContext {
   peerCertificate?: PeerCertificateBundle;
   peerCertificateFingerprint?: string;
   now?: number;
+  allowExpired?: boolean;
 }
 
 export interface CertifiedPeerBundleValidationResult {

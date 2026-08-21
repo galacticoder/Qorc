@@ -24,7 +24,7 @@ A clear and concise description of what you expected to happen and what actually
 If applicable, add screenshots to help explain your problem.
 
 **Desktop (please complete the following information):**
- - OS: [e.g. Windows (WSL2), macOS, Linux]
+ - OS: [e.g. Windows 11, Ubuntu 24.04]
  - Version [e.g. 22]
 
 **Additional context**

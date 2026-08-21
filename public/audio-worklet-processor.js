@@ -2,7 +2,7 @@ class AudioSenderProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
         this.active = true;
-        this.bufferSize = 2048;
+        this.bufferSize = 960;
         this.buffer = new Float32Array(this.bufferSize);
         this.writeIndex = 0;
         this.port.onmessage = (event) => {
@@ -68,12 +68,12 @@ class AudioReceiverProcessor extends AudioWorkletProcessor {
                 return;
             }
             if (!(e.data instanceof Float32Array) || e.data.length === 0) return;
-            if (e.data.length > 16384) {
+            if (e.data.length !== 960) {
                 e.data.fill(0);
                 return;
             }
             this.buffer.push(e.data);
-            if (this.buffer.length > 12) {
+            if (this.buffer.length > 5) {
                 const dropped = this.buffer.shift();
                 if (dropped) dropped.fill(0);
             }

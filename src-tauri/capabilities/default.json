@@ -9,6 +9,7 @@
         "core:event:allow-listen",
         "core:event:allow-unlisten",
         "core:webview:allow-internal-toggle-devtools",
+        "dialog:allow-message",
         "notification:allow-is-permission-granted"
     ]
 }

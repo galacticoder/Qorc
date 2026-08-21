@@ -23,6 +23,11 @@ const args = process.argv.slice(2);
 const command = args[0];
 const flags = args.slice(1);
 
+if (process.platform !== 'linux' && process.platform !== 'win32') {
+    console.error('[DOCKER] Qor deployment supports only Linux and Windows hosts.');
+    process.exit(1);
+}
+
 const validProfiles = ['server', 'loadbalancer'];
 const validServices = ['redis', 'postgres', 'server', 'loadbalancer'];
 

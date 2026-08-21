@@ -596,6 +596,17 @@ class WorkerChannel {
       }
     });
   }
+
+  terminateWhenIdle(): void {
+    if (this.pending.size !== 0 || this.restarting) return;
+    try { this.worker?.terminate(); } catch { }
+    this.worker = null;
+    this.authToken?.fill(0);
+    this.authToken = null;
+    if (this.stabilityTimer) clearTimeout(this.stabilityTimer);
+    this.stabilityTimer = null;
+    this.restartAttempts = 0;
+  }
 }
 
 export class PostQuantumWorker {
@@ -792,6 +803,9 @@ export class PostQuantumWorker {
     } finally {
       PostQuantumWorker.argon2QueueDepth -= 1;
       release();
+      if (PostQuantumWorker.argon2QueueDepth === 0) {
+        PostQuantumWorker.argon2Channel.terminateWhenIdle();
+      }
     }
   }
 

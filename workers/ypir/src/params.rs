@@ -184,11 +184,12 @@ pub struct YPIRParams {
 mod qor_sizing {
     use super::*;
 
-    /// The spool shape Qor actually serves: one entry per PIR record.
     #[test]
     fn spool_scenario_params_are_sane() {
-        let entry_bytes = 1_568 + 12 + 131_072 + 16;
-        for &num_items in &[1024usize, 4096, 16384] {
+        let entry_bytes = 16 * 1024;
+        let rows_per_record = (1_568usize + 12 + 131_072 + 16).div_ceil(entry_bytes);
+        for &record_count in &[64usize, 219, 455] {
+            let num_items = record_count * rows_per_record;
             let params = params_for_scenario_simplepir(num_items, entry_bytes * 8);
             let db_rows = 1usize << (params.db_dim_1 + params.poly_len_log2);
             let db_cols = params.instances * params.poly_len;
@@ -204,16 +205,18 @@ mod qor_sizing {
 
     #[test]
     fn current_spool_response_fits_the_one_mib_anonymous_class() {
-        let entry_bytes = 1_568 + 12 + 131_072 + 16;
-        let params = params_for_scenario_simplepir(4096, entry_bytes * 8);
+        let entry_bytes = 16 * 1024;
+        let rows_per_record = (1_568usize + 12 + 131_072 + 16).div_ceil(entry_bytes);
+        let params = params_for_scenario_simplepir(219 * rows_per_record, entry_bytes * 8);
         let switched_part_bits = ((params.get_q_prime_1() as f64).log2().ceil() as usize
             + (params.get_q_prime_2() as f64).log2().ceil() as usize)
             * params.poly_len;
         let switched_part_bytes = switched_part_bits.div_ceil(8);
-        let raw_response_bytes = 4 + params.instances * (4 + switched_part_bytes);
+        let row_response_bytes = 4 + params.instances * (4 + switched_part_bytes);
+        let raw_response_bytes = 8 + rows_per_record * (4 + row_response_bytes);
         let base64_response_bytes = raw_response_bytes.div_ceil(3) * 4;
 
-        assert_eq!(raw_response_bytes, 467_100);
+        assert_eq!(raw_response_bytes, 553_220);
         assert!(base64_response_bytes > 512 * 1024);
         assert!(base64_response_bytes + 1024 < 1024 * 1024);
     }

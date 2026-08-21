@@ -372,7 +372,7 @@ impl SecureStorage {
                 file::validate_private_file_metadata(&metadata)?;
                 Some(metadata.len())
             }
-            
+
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
@@ -416,8 +416,7 @@ impl SecureStorage {
 }
 
 impl Drop for SecureStorage {
-    fn drop(&mut self) {
-    }
+    fn drop(&mut self) {}
 }
 
 pub async fn init(state: &AppState, config_dir: PathBuf) -> QorResult<()> {

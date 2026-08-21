@@ -30,27 +30,38 @@ export const stopMediaStream = (stream: MediaStream | null) => {
   } catch { }
 };
 
+export const releaseVisualCanvas = (canvas: HTMLCanvasElement | null): void => {
+  if (!canvas) return;
+  try { canvas.remove(); } catch { }
+  canvas.width = 1;
+  canvas.height = 1;
+};
+
 export const clearCallMediaState = (
   refs: {
     localStreamRef: { current: MediaStream | null };
-    remoteStreamRef: { current: MediaStream | null };
-    remoteScreenStreamRef: { current: MediaStream | null };
+    localVideoCanvasRef: { current: HTMLCanvasElement | null };
+    remoteVideoCanvasRef: { current: HTMLCanvasElement | null };
+    remoteScreenCanvasRef: { current: HTMLCanvasElement | null };
   },
   setters: {
     setLocalStream: (stream: MediaStream | null) => void;
-    setRemoteStream: (stream: MediaStream | null) => void;
-    setRemoteScreenStream: (stream: MediaStream | null) => void;
+    setLocalVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
+    setRemoteVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
+    setRemoteScreenCanvas: (canvas: HTMLCanvasElement | null) => void;
   },
 ): void => {
   stopMediaStream(refs.localStreamRef.current);
-  stopMediaStream(refs.remoteStreamRef.current);
-  stopMediaStream(refs.remoteScreenStreamRef.current);
+  releaseVisualCanvas(refs.remoteVideoCanvasRef.current);
+  releaseVisualCanvas(refs.remoteScreenCanvasRef.current);
   refs.localStreamRef.current = null;
-  refs.remoteStreamRef.current = null;
-  refs.remoteScreenStreamRef.current = null;
+  refs.localVideoCanvasRef.current = null;
+  refs.remoteVideoCanvasRef.current = null;
+  refs.remoteScreenCanvasRef.current = null;
   setters.setLocalStream(null);
-  setters.setRemoteStream(null);
-  setters.setRemoteScreenStream(null);
+  setters.setLocalVideoCanvas(null);
+  setters.setRemoteVideoCanvas(null);
+  setters.setRemoteScreenCanvas(null);
 };
 
 export const isValidMediaDeviceId = (value: unknown): value is string => (
@@ -103,6 +114,10 @@ export const isExactCallSignal = (value: unknown): value is CallSignal => {
       (value.data.callType === 'audio' || value.data.callType === 'video');
   }
 
+  if (value.type === 'answer') {
+    return hasExactKeys(value, CALL_SIGNAL_BASE_KEYS);
+  }
+
   if (
     value.type === 'screen-share-start' ||
     value.type === 'screen-share-ready' ||
@@ -116,7 +131,6 @@ export const isExactCallSignal = (value: unknown): value is CallSignal => {
   }
 
   return (
-    value.type === 'answer' ||
     value.type === 'decline-call' ||
     value.type === 'end-call'
   ) && hasExactKeys(value, CALL_SIGNAL_BASE_KEYS);

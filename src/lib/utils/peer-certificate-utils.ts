@@ -43,7 +43,8 @@ function canonicalKey(value: unknown, length: number): Uint8Array | null {
 export async function validatePeerCertificateBundle(
   fetched: PeerCertificateBundle | null | undefined,
   expectedUsername: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  allowExpired = false,
 ): Promise<PeerCertificateBundle | null> {
   let dilithiumKey: Uint8Array | null = null;
   let kyberKey: Uint8Array | null = null;
@@ -75,7 +76,7 @@ export async function validatePeerCertificateBundle(
     if (!valid) return null;
     const notYetValid = cert.issuedAt > (now + CERT_CLOCK_SKEW_MS);
     const alreadyExpired = cert.expiresAt <= (now - CERT_CLOCK_SKEW_MS);
-    if (notYetValid || alreadyExpired) return null;
+    if (notYetValid || (!allowExpired && alreadyExpired)) return null;
     return cert;
   } catch {
     return null;

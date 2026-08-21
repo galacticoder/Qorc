@@ -2,14 +2,15 @@ import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
-import { clearCallMediaState, stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
+import { clearCallMediaState, stopMediaStream, releaseVisualCanvas, EventDebouncer } from '../../lib/utils/calling-utils';
 import { notifications, power, tray } from '../../lib/tauri-bindings';
 import { toast } from 'sonner';
 
 export interface CallbackRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
-  remoteStreamRef: React.RefObject<MediaStream | null>;
-  remoteScreenStreamRef: React.RefObject<MediaStream | null>;
+  localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   everConnectedRef: React.RefObject<Set<string>>;
   lastCallTypeRef: React.RefObject<Map<string, 'audio' | 'video'>>;
   eventDebouncer: React.RefObject<EventDebouncer>;
@@ -18,11 +19,11 @@ export interface CallbackRefs {
 export interface CallbackSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<CallState | null>>;
   setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
-  setRemoteStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
-  setRemoteScreenStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
+  setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setRemoteScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
 }
 
-// Register the handler for incoming calls
 export const setupIncomingCallCallback = (
   service: SecureCallingService,
   refs: CallbackRefs,
@@ -47,7 +48,6 @@ export const setupIncomingCallCallback = (
   });
 };
 
-// Keep call state updates in sync, emit telemetry, and clean up media when the call changes
 export const setupCallStateChangeCallback = (
   service: SecureCallingService,
   refs: CallbackRefs,
@@ -191,7 +191,7 @@ export const setupCallStateChangeCallback = (
   });
 };
 
-// Track local, remote, and screen share streams
+// Track local capture and remote render surfaces
 export const setupStreamCallbacks = (
   service: SecureCallingService,
   refs: CallbackRefs,
@@ -206,21 +206,28 @@ export const setupStreamCallbacks = (
     });
   });
 
-  service.onRemoteStream((stream) => {
-    const previous = refs.remoteStreamRef.current;
-    if (previous && previous !== stream) stopMediaStream(previous);
+  service.onLocalVideoCanvas((canvas) => {
     unstable_batchedUpdates(() => {
-      refs.remoteStreamRef.current = stream;
-      setters.setRemoteStream(stream);
+      refs.localVideoCanvasRef.current = canvas;
+      setters.setLocalVideoCanvas(canvas);
     });
   });
 
-  service.onRemoteScreenStream((stream) => {
-    const previous = refs.remoteScreenStreamRef.current;
-    if (previous && previous !== stream) stopMediaStream(previous);
+  service.onRemoteVideoCanvas((canvas) => {
+    const previous = refs.remoteVideoCanvasRef.current;
+    if (previous && previous !== canvas) releaseVisualCanvas(previous);
     unstable_batchedUpdates(() => {
-      refs.remoteScreenStreamRef.current = stream;
-      setters.setRemoteScreenStream(stream);
+      refs.remoteVideoCanvasRef.current = canvas;
+      setters.setRemoteVideoCanvas(canvas);
+    });
+  });
+
+  service.onRemoteScreenCanvas((canvas) => {
+    const previous = refs.remoteScreenCanvasRef.current;
+    if (previous && previous !== canvas) releaseVisualCanvas(previous);
+    unstable_batchedUpdates(() => {
+      refs.remoteScreenCanvasRef.current = canvas;
+      setters.setRemoteScreenCanvas(canvas);
     });
   });
 };

@@ -3,8 +3,7 @@ import { SecureCallingService, CallState } from '../../lib/transport/secure-call
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
-import type { SecureDB } from '../../lib/database/secureDB';
-import { clearCallMediaState, stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
+import { clearCallMediaState, stopMediaStream, releaseVisualCanvas, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
 import { power } from '../../lib/tauri-bindings';
 import {
   setupIncomingCallCallback,
@@ -35,7 +34,6 @@ export const useCalling = (
   options?: {
     getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
     ensurePeerSession?: (username: string) => Promise<void>;
-    secureDBRef?: React.RefObject<SecureDB | null>;
   }
 ) => {
   if (!authContext) {
@@ -44,16 +42,18 @@ export const useCalling = (
 
   const eventDebouncer = useRef(debounceEventDispatcher());
   const localStreamRef = useRef<MediaStream | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
-  const remoteScreenStreamRef = useRef<MediaStream | null>(null);
+  const localVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const remoteVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const remoteScreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const { username, loginUsernameRef, isLoggedIn, accountAuthenticated } = authContext;
 
   const [callingService, setCallingService] = useState<SecureCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
+  const [localVideoCanvas, setLocalVideoCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [remoteVideoCanvas, setRemoteVideoCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [remoteScreenCanvas, setRemoteScreenCanvas] = useState<HTMLCanvasElement | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
 
   const serviceRef = useRef<SecureCallingService | null>(null);
@@ -65,8 +65,9 @@ export const useCalling = (
 
   const callbackRefs: CallbackRefs = {
     localStreamRef,
-    remoteStreamRef,
-    remoteScreenStreamRef,
+    localVideoCanvasRef,
+    remoteVideoCanvasRef,
+    remoteScreenCanvasRef,
     everConnectedRef,
     lastCallTypeRef,
     eventDebouncer
@@ -75,33 +76,36 @@ export const useCalling = (
   const callbackSetters: CallbackSetters = {
     setCurrentCall,
     setLocalStream,
-    setRemoteStream,
-    setRemoteScreenStream
+    setLocalVideoCanvas,
+    setRemoteVideoCanvas,
+    setRemoteScreenCanvas
   };
 
   const actionRefs: ActionRefs = {
     serviceRef,
     localStreamRef,
-    remoteStreamRef,
-    remoteScreenStreamRef,
+    localVideoCanvasRef,
+    remoteVideoCanvasRef,
+    remoteScreenCanvasRef,
     getPeerCertificate: options?.getPeerCertificate,
     ensurePeerSession: options?.ensurePeerSession,
-    secureDBRef: options?.secureDBRef,
   };
 
   const actionSetters: ActionSetters = {
     setCurrentCall,
     setLocalStream,
-    setRemoteStream,
-    setRemoteScreenStream
+    setLocalVideoCanvas,
+    setRemoteVideoCanvas,
+    setRemoteScreenCanvas
   };
 
   useEffect(() => {
     return () => {
       eventDebouncer.current.cancel();
       stopMediaStream(localStreamRef.current);
-      stopMediaStream(remoteStreamRef.current);
-      stopMediaStream(remoteScreenStreamRef.current);
+      localVideoCanvasRef.current = null;
+      releaseVisualCanvas(remoteVideoCanvasRef.current);
+      releaseVisualCanvas(remoteScreenCanvasRef.current);
       everConnectedRef.current.clear();
       lastCallTypeRef.current.clear();
       power.stop().catch(() => { });
@@ -147,8 +151,9 @@ export const useCalling = (
         setCallingService(null);
         setCurrentCall(null);
         setLocalStream(null);
-        setRemoteStream(null);
-        setRemoteScreenStream(null);
+        setLocalVideoCanvas(null);
+        setRemoteVideoCanvas(null);
+        setRemoteScreenCanvas(null);
         setIsInitialized(false);
       }
     };
@@ -174,12 +179,12 @@ export const useCalling = (
 
   const startCall = useCallback(
     createStartCall(actionRefs, actionSetters, currentUsername),
-    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession, options?.secureDBRef]
+    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession]
   );
 
   const answerCall = useCallback(
-    createAnswerCall(actionRefs),
-    [options?.getPeerCertificate, options?.ensurePeerSession]
+    createAnswerCall(actionRefs, currentUsername),
+    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession]
   );
 
   const declineCall = useCallback(
@@ -187,7 +192,7 @@ export const useCalling = (
     []
   );
 
-  const endCall = useCallback(createEndCall(actionRefs), []);
+  const endCall = useCallback(createEndCall(actionRefs, actionSetters), []);
 
   const toggleMute = useCallback(createToggleMute(actionRefs), []);
 
@@ -211,8 +216,9 @@ export const useCalling = (
   return {
     currentCall,
     localStream,
-    remoteStream,
-    remoteScreenStream,
+    localVideoCanvas,
+    remoteVideoCanvas,
+    remoteScreenCanvas,
     isInitialized,
     isScreenSharing,
 

@@ -10,9 +10,9 @@ The account root inside a candidate must also match Qor's append-only private
 key-transparency state before any Signal, Hybrid, or P2P key is installed.
 
 This is not fully oblivious retrieval. The server sees publication bucket sets,
-lookup bucket sets, request timing, and traffic volume. The server also operates
-both the OPRF service and the billboard in the default deployment. The exact
-limits are documented below and in
+the individual bucket each lookup request asks for, request timing, and traffic
+volume. The server also operates both the OPRF service and the billboard in the
+default deployment. The exact limits are documented below and in
 `docs/app/USERNAME_ENUMERATION_RESISTANCE.md`.
 
 ## Cryptographic Inputs
@@ -54,16 +54,21 @@ identity chain, and optional encrypted-avatar reference. Routing identifiers and
 avatar bytes are not part of the record.
 
 The client pads this plaintext to a fixed capacity and encrypts it with the
-OPRF-derived key. Every wire record is exactly 64 KiB of canonical base64 text.
-The encrypted true length is inside the ciphertext. A server cannot decrypt the
-bundle or distinguish valid records from random cover records by shape.
+OPRF-derived key. Every wire record is exactly `DISCOVERY_BLOB_BASE64_CHARS`,
+131,072 canonical base64 characters, encoding exactly 98,304 bytes of
+ciphertext. The encrypted true length is inside the ciphertext. A server cannot
+decrypt the bundle or distinguish valid records from random cover records by
+shape.
 
 On lookup, the client decrypts candidate records locally and rejects any record
 that fails exact schema validation, certified identity validation, handle
 binding, key binding, or key-transparency authorization. The client derives the
-handle's stable opaque transparency label from the same VOPRF-derived discovery
-key, verifies the signed map and append-log proofs anonymously, and requires the
-record's account-root commitment to match the current verified state.
+handle's per-epoch transparency label from the same VOPRF-derived discovery key,
+replays the append-only log's epoch records against the server's signed heads
+anonymously, and requires the record's account-root commitment to match the
+current verified state. The log is never queried by label, so authorization
+reveals nothing about which handle is being checked. See
+`docs/app/KEY_TRANSPARENCY.md`.
 
 This prevents the current server from silently returning one account root to
 one established client and an attacker root to another without producing a
@@ -94,7 +99,7 @@ publishing. A publication has one exact wire shape:
     "publishId": "<64 lowercase hex characters>",
     "bucketIds": [0, 1, 2, 3, 4, 5]
   },
-  "encryptedBlob": "<exactly 65536 canonical base64 characters>"
+  "encryptedBlob": "<exactly 131072 canonical base64 characters>"
 }
 ```
 
@@ -134,21 +139,36 @@ Code:
 
 The client obtains a strict manifest through the encrypted
 `discovery/manifest` operation and derives one real bucket from the current
-epoch token. It adds three cryptographically random, distinct cover buckets and
-sends exactly four IDs through the encrypted `discovery/bucket` operation. Both
-use the same outer `/api/anonymous` route but a fresh Tor isolation credential
-and connection for every call.
+epoch token. It adds cover buckets until it holds
+`DISCOVERY_BUCKET_QUERY_COUNT` distinct IDs, four by default, so one real bucket
+is accompanied by three cover buckets.
 
-The server returns all four requested buckets in request order. Each bucket has
-the configured target count, 64 by default. Real records are selected with a
-secret-keyed deterministic rank when a bucket is overloaded, remaining entries
-are fixed-size deterministic decoys. Ordering is also deterministic and
-secret-keyed for the manifest epoch. Responses have strict schema and byte
-limits.
+Cover bucket IDs are not sampled randomly per request. They are derived with
+keyed BLAKE3 over the domain separator, the real token, the manifest epoch, and
+a counter, under a 32-byte scope secret generated fresh for each account
+session. Repeating the same lookup inside one session therefore reproduces the
+same four IDs. Re-randomizing them per request would let an observer intersect
+successive batches for one target and see the real bucket fall out as the common
+element.
 
-Only one token-derived bucket is requested. Looking up both current and previous
-epoch buckets in the same request would let the server intersect the two sets
-and identify the matching publication much more easily.
+Each of the four IDs is then sent as its **own** `discovery/bucket` operation
+with `bucketIds` of length one, in shuffled order, each carrying its own
+epoch-bound proof of work and each on a fresh Tor isolation credential and
+connection. `DISCOVERY_BUCKETS_PER_REQUEST` is fixed at 1 and the server rejects
+any other length, which keeps every discovery response in one padded size class.
+The server never receives the four IDs as a set, it answers four
+indistinguishable single-bucket requests and can only correlate them through
+timing and volume.
+
+Each returned bucket has the configured target count, 64 by default. Real
+records are selected with a secret-keyed deterministic rank when a bucket is
+overloaded, remaining entries are fixed-size deterministic decoys. Ordering is
+also deterministic and secret-keyed for the manifest epoch. Responses have
+strict schema and byte limits.
+
+Only one token-derived bucket is requested per lookup. Looking up both the
+current and previous epoch's buckets would let the server intersect the two
+lookups and identify the matching publication much more easily.
 
 The bucket index is built from bounded active database rows, single-flighted,
 revision-checked, and cached. A small LRU caches fully padded buckets to avoid
@@ -164,11 +184,11 @@ Code:
 
 ## Avoiding The Lookup
 
-A lookup is expensive , four buckets of 64 blobs each, 60-100s over Tor in
-practice , so the result is saved per peer and reused when it is provably
-still current.
+A lookup is expensive , four requests of one 8.5 MiB bucket each, 64 blobs per
+bucket, 60-100s over Tor in practice , so the result is saved per peer and
+reused when it is provably still current.
 
-`src/lib/discovery/saved-discovery-material.ts` stores the validated material
+`src/lib/discovery/persisted-discovery-material.ts` stores the validated material
 in the same account-scoped native secure store the P2P dial path uses for peer
 certificates. Two rules make that safe:
 
@@ -178,23 +198,35 @@ certificates. Two rules make that safe:
   transparency checks and falls through to the lookup that would have happened
   anyway.
 - **Revocation clears it.** Dropping only the in-memory copies would let a
-  revoked peer's keys return from disk on the next start , precisely the state
+  revoked peer's keys return from disk on the next start, precisely the state
   revocation exists to prevent.
 
-Verifying an inbound peer's Signal bundle used to force a full lookup
-unconditionally, most often triggered by nothing more meaningful than a failed
-P2P dial. A refetch is a blunt way to answer a narrow question , *is what I
-already hold still current?* , and key transparency answers that directly from
-data already synced. `validateSignalBundleForPeerIdentity` now reuses the
-saved record only when all of the following hold:
+Verifying an inbound peer's Signal bundle evaluates the saved record against
+the key-transparency state already synced by the client. It performs a network
+lookup only when that local validation cannot establish that the material is
+current. `validateSignalBundleForPeerIdentity` reuses the saved record only when
+all of the following hold:
 
 1. the record carries the transparency state it was accepted under,
 2. that root commitment and version still match the peer's live authorized state,
    and
 3. its key set and all three fingerprints still match the live authorization.
 
-Any drift, any missing piece, and it falls through to the forced lookup. The
-check is therefore never weaker , only cheaper when the answer is already known.
+Any drift or missing piece falls through to the forced lookup. The check is
+therefore never weaker, only cheaper when the answer is already known.
+
+Loading a saved record associates that object with the existing authorization
+generation. It does not replace the authorization, mark the record freshly
+verified, or invalidate another concurrent reader. A verified peer identity has
+no time-based hard cutoff. It remains authorized until the transparency monitor
+observes a root change, the peer is explicitly revoked, or a server-scoped
+security incident clears the authorization. The persisted `verifiedAt` value is
+only a freshness scheduler. Known peers are checked in the background every 15
+minutes, transparency refresh is due after 18 hours without a successful check,
+and certificate renewal starts during the certificate's final six hours. A
+failed refresh leaves the retained material available to messaging and calling
+while later background checks retry. Newly discovered material still requires
+an unexpired certificate and complete transparency verification.
 
 A deliberately rejected alternative: publishing a per-record hash alongside the
 blob and fetching it by PIR as a version check. It would have worked, but a
@@ -212,17 +244,21 @@ The service does not receive a plaintext handle, unblinded OPRF token,
 decryption key, decrypted record, or local match result. It does observe:
 
 - the six buckets associated with each delayed publication row,
-- the four buckets in each lookup request,
+- the single bucket named by each lookup request,
 - the opaque publication ID for the row's lease,
 - request and connection timing, traffic volume, and coarse expiry,
 - the number of active rows up to configured capacity classes.
+
+A lookup issues four such requests, so an operator that can group them by timing
+recovers the four-bucket set. Circuit isolation and shuffled order raise the
+cost of that grouping, they do not make it impossible.
 
 Before decryption, the outer route exposes only request timing and a 64 KiB
 request class for discovery operations. The destination server decrypts the
 operation and therefore still learns whether it is evaluating OPRF, serving a
 manifest, or serving a bucket, plus the operation body described above. A bucket
-response is always 18 MiB and a manifest/OPRF response is always 64 KiB, so the
-response class remains observable to the network path.
+response is always 8,912,896 bytes, 8.5 MiB, and a manifest/OPRF response is
+always 64 KiB, so the response class remains observable to the network path.
 
 The three cover lookup buckets hide which single requested bucket is real from
 an observer that cannot derive the token. They do not protect against an
@@ -234,10 +270,13 @@ provide private information retrieval or malicious-server username-enumeration
 resistance.
 
 Key transparency does not remove that enumeration boundary. The combined VOPRF
-operator can derive a guessed handle's discovery key and stable transparency
-label, then inspect that label's public map history. Transparency limits silent
-key substitution after the signer/handle history is established, it is not a
-private-membership protocol against the authority that computes the label.
+operator can derive a guessed handle's discovery key, re-derive its per-epoch
+transparency labels, and scan the epoch records it already stores for matches.
+The labels are unlinkable across epochs to anyone without the discovery key, but
+the operator holding the OPRF secret can recompute them for a guessed handle.
+Transparency limits silent key substitution after the signer/handle history is
+established, it is not a private-membership protocol against the authority that
+can derive the label.
 
 Every anonymous HTTP call uses a new random Tor SOCKS authentication identity,
 which prevents deliberate circuit reuse across OPRF, discovery, avatar, and

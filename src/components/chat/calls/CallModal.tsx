@@ -9,15 +9,17 @@ import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 import { encryptedStorage } from '../../../lib/database/encrypted-storage';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import type { ScreenSource } from '../../../lib/types/screen-sharing-types';
+import { nativeCamera } from '../../../lib/tauri-bindings';
 
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
 
 interface CallModalProps {
   readonly call: CallState | null;
   readonly localStream: MediaStream | null;
-  readonly remoteStream: MediaStream | null;
-  readonly remoteScreenStream?: MediaStream | null;
-  readonly onAnswer: () => void;
+  readonly localVideoCanvas: HTMLCanvasElement | null;
+  readonly remoteVideoCanvas: HTMLCanvasElement | null;
+  readonly remoteScreenCanvas?: HTMLCanvasElement | null;
+  readonly onAnswer: () => void | Promise<void>;
   readonly onDecline: () => void;
   readonly onEndCall: () => void;
   readonly onToggleMute: () => boolean | Promise<boolean>;
@@ -30,43 +32,34 @@ interface CallModalProps {
   readonly isScreenSharing?: boolean;
 }
 
-const VideoStreamDisplay = memo(({
-  stream,
-  muted = false,
+const CanvasDisplay = memo(({
+  canvas,
   className,
-  objectFit = 'cover',
-  mirror = false
+  objectFit = 'cover'
 }: {
-  stream: MediaStream | null;
-  muted?: boolean;
+  canvas: HTMLCanvasElement | null;
   className?: string;
   objectFit?: 'cover' | 'contain';
-  mirror?: boolean;
 }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-    } else if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-  }, [stream]);
+    const host = hostRef.current;
+    if (!host || !canvas) return;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.display = 'block';
+    canvas.style.objectFit = objectFit;
+    host.replaceChildren(canvas);
+    return () => {
+      if (canvas.parentElement === host) canvas.remove();
+    };
+  }, [canvas, objectFit]);
 
-  if (!stream) return null;
-
-  return (
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted={muted}
-      className={cn("w-full h-full pointer-events-none", className, mirror && "scale-x-[-1]")}
-      style={{ objectFit }}
-    />
-  );
+  if (!canvas) return null;
+  return <div ref={hostRef} className={cn('overflow-hidden', className)} />;
 });
-VideoStreamDisplay.displayName = 'VideoStreamDisplay';
+CanvasDisplay.displayName = 'CanvasDisplay';
 
 // PIP Component
 const DraggablePip = ({
@@ -155,8 +148,9 @@ const DraggablePip = ({
 export const CallModal: React.FC<CallModalProps> = memo(({
   call,
   localStream,
-  remoteStream,
-  remoteScreenStream,
+  localVideoCanvas,
+  remoteVideoCanvas,
+  remoteScreenCanvas,
   onAnswer,
   onDecline,
   onEndCall,
@@ -202,7 +196,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, []);
 
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
-  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [videoDevices, setVideoDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
   const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
   const [hasOpenedScreenShare, setHasOpenedScreenShare] = useState(false);
@@ -233,12 +227,17 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const isIncoming = call?.direction === 'incoming';
   const isRinging = call?.status === 'ringing';
   const isVideoCall = call?.type === 'video';
+  const answerCall = useCallback(() => {
+    void Promise.resolve(onAnswer()).catch(error => {
+      console.error('Failed to answer call:', error);
+    });
+  }, [onAnswer]);
 
   useEffect(() => {
-    if (isExpandedScreenShare && !remoteScreenStream && !isScreenSharing) {
+    if (isExpandedScreenShare && !remoteScreenCanvas && !isScreenSharing) {
       setIsExpandedScreenShare(false);
     }
-  }, [isExpandedScreenShare, remoteScreenStream, isScreenSharing]);
+  }, [isExpandedScreenShare, remoteScreenCanvas, isScreenSharing]);
 
   useEffect(() => {
     if (!localStream || !navigator.mediaDevices?.enumerateDevices) {
@@ -249,10 +248,13 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     let cancelled = false;
     const loadDevices = async () => {
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
+        const [devices, cameras] = await Promise.all([
+          navigator.mediaDevices.enumerateDevices(),
+          isVideoCall ? nativeCamera.devices() : Promise.resolve([]),
+        ]);
         if (cancelled) return;
         setMicDevices(devices.filter(d => d.kind === 'audioinput'));
-        setVideoDevices(devices.filter(d => d.kind === 'videoinput'));
+        setVideoDevices(cameras.map(camera => ({ deviceId: camera.device_id, label: camera.label })));
 
         // Load preferred camera
         try {
@@ -270,28 +272,17 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       cancelled = true;
       navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
     };
-  }, [localStream]);
+  }, [localStream, isVideoCall]);
 
   useEffect(() => {
-    if (localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
-      const audioTrack = localStream.getAudioTracks()[0];
-      const handleVideoEnded = () => setIsVideoEnabled(false);
-
-      if (videoTrack) {
-        setIsVideoEnabled(videoTrack.enabled);
-        videoTrack.addEventListener('ended', handleVideoEnded);
-      } else {
-        setIsVideoEnabled(false);
-      }
-
-      if (audioTrack) {
-        setIsMuted(!audioTrack.enabled);
-      }
-
-      return () => videoTrack?.removeEventListener('ended', handleVideoEnded);
+    if (!localStream) {
+      setIsVideoEnabled(isVideoCall);
+      return;
     }
-  }, [localStream]);
+    const audioTrack = localStream.getAudioTracks()[0];
+    setIsVideoEnabled(isVideoCall);
+    if (audioTrack) setIsMuted(!audioTrack.enabled);
+  }, [localStream, isVideoCall, call?.id]);
 
   useEffect(() => {
     if (!localStream) { setMicLevel(0); return; }
@@ -441,9 +432,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
           {isIncoming && isRinging ? (
             <>
               <button
-                onClick={() => {
-                  onAnswer();
-                }}
+                onClick={answerCall}
                 className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors"
                 title="Answer"
               >
@@ -527,7 +516,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             </div>
           </div>
           <div className="flex items-center gap-1">
-            {(remoteScreenStream || isScreenSharing) && (
+            {(remoteScreenCanvas || isScreenSharing) && (
               <button
                 onClick={() => setIsExpandedScreenShare(prev => !prev)}
                 className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
@@ -550,9 +539,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         {/* Main Stage */}
         <div className="flex-1 bg-black relative overflow-hidden group" ref={mainStageRef}>
           {(() => {
-            const hasRemoteScreen = remoteScreenStream && remoteScreenStream.getVideoTracks().length > 0;
-            const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().length > 0;
-            const hasLocalVideo = localStream && (isVideoEnabled || isScreenSharing) && localStream.getVideoTracks().length > 0;
+            const hasRemoteScreen = remoteScreenCanvas !== null;
+            const hasRemoteVideo = remoteVideoCanvas !== null;
+            const hasLocalVideo = Boolean(localVideoCanvas && isVideoCall);
 
             type StreamType = 'remote-screen' | 'remote-cam' | 'local';
             const availableStreams: StreamType[] = [];
@@ -576,13 +565,13 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
             const renderStream = (type: StreamType, _isMain: boolean) => {
               if (type === 'remote-screen') {
-                return <VideoStreamDisplay stream={remoteScreenStream} objectFit="contain" className="w-full h-full" />;
+                return <CanvasDisplay canvas={remoteScreenCanvas ?? null} objectFit="contain" className="w-full h-full" />;
               }
               if (type === 'remote-cam') {
-                return <VideoStreamDisplay stream={remoteStream} className="w-full h-full" />;
+                return <CanvasDisplay canvas={remoteVideoCanvas} className="w-full h-full" />;
               }
               if (type === 'local') {
-                return <VideoStreamDisplay stream={localStream} mirror={!isScreenSharing} muted className="w-full h-full" />;
+                return <CanvasDisplay canvas={localVideoCanvas} className={cn('w-full h-full', !isVideoEnabled && 'invisible')} />;
               }
               return null;
             };
@@ -641,7 +630,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               </button>
               <button
                 onClick={() => {
-                  onAnswer();
+                  answerCall();
                   setIsMinimized(true);
                 }}
                 className="h-14 w-14 rounded-full bg-emerald-600 hover:bg-emerald-700 flex items-center justify-center text-white transition-all hover:scale-110 shadow-lg shadow-green-900/20"
@@ -697,7 +686,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
               {/* Video Control */}
               {isVideoCall && (
-                <div className={cn("flex items-center bg-secondary/50 rounded-full border border-border transition-opacity", videoDevices.length === 0 && "opacity-50 grayscale cursor-not-allowed")}>
+                <div className="flex items-center bg-secondary/50 rounded-full border border-border transition-opacity">
                   <button
                     onClick={async () => {
                       const enabled = await onToggleVideo();
@@ -705,17 +694,15 @@ export const CallModal: React.FC<CallModalProps> = memo(({
                     }}
                     className={cn(
                       "w-12 h-12 rounded-l-full flex items-center justify-center transition-colors",
-                      !isVideoEnabled ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground",
-                      videoDevices.length === 0 && "pointer-events-none text-muted-foreground"
+                      !isVideoEnabled ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground"
                     )}
-                    disabled={videoDevices.length === 0}
                   >
                     {!isVideoEnabled ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
                   </button>
                   <div className="w-[1px] h-6 bg-border" />
                   <Popover>
                     <PopoverTrigger asChild disabled={videoDevices.length === 0}>
-                      <button className="w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                      <button className={cn("w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors", videoDevices.length === 0 && "opacity-50")}>
                         <ChevronDown className="w-3.5 h-3.5" />
                       </button>
                     </PopoverTrigger>

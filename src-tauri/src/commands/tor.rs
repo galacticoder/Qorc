@@ -3,6 +3,7 @@
 //! Tauri commands for Tor process management
 
 use tauri::State;
+use tracing::warn;
 
 use crate::state::AppState;
 use crate::tor::{
@@ -17,7 +18,14 @@ pub async fn tor_configure(config: TorConfig, state: State<'_, AppState>) -> Res
         .tor_manager()
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
 
-    tor.configure(&config).await.map_err(|e| e.safe_message())
+    let configured = tor.configure(&config).await.map_err(|e| e.safe_message())?;
+    if let Some(pir_tor) = state.inner().pir_tor_manager() {
+        pir_tor
+            .configure(&config)
+            .await
+            .map_err(|e| e.safe_message())?;
+    }
+    Ok(configured)
 }
 
 /// Start Tor process
@@ -28,7 +36,22 @@ pub async fn tor_start(state: State<'_, AppState>) -> Result<TorStartResult, Str
         .tor_manager()
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
 
-    tor.start().await.map_err(|e| e.safe_message())
+    let result = tor.start().await.map_err(|e| e.safe_message())?;
+    if result.success
+        && let Some(pir_tor) = state.inner().pir_tor_manager()
+    {
+        match pir_tor.mirror_configuration_from(&tor).await {
+            Ok(_) => match pir_tor.start().await {
+                Ok(pir_result) if !pir_result.success => {
+                    warn!("[TOR-PIR] dedicated process did not start")
+                }
+                Err(_) => warn!("[TOR-PIR] dedicated process start failed"),
+                _ => {}
+            },
+            Err(_) => warn!("[TOR-PIR] dedicated process configuration failed"),
+        }
+    }
+    Ok(result)
 }
 
 /// Stop Tor process
@@ -40,6 +63,9 @@ pub async fn tor_stop(state: State<'_, AppState>) -> Result<bool, String> {
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
 
     let stopped = tor.stop().await.map_err(|e| e.safe_message())?;
+    if let Some(pir_tor) = state.inner().pir_tor_manager() {
+        pir_tor.stop().await.map_err(|e| e.safe_message())?;
+    }
     if let Some(ws) = state.inner().websocket() {
         let _control_guard = ws.lock_control().await;
         ws.set_tor_ready(false);

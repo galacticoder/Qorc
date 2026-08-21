@@ -23,17 +23,25 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 2.  **Install dependencies:**
     ```bash
-    node scripts/install-deps.cjs --all
+    node scripts/install-deps.cjs --server
+    node scripts/install-deps.cjs --client
     ```
+    Run both. The `--all` preset covers the server and edge toolchain only, it
+    does not install pnpm, Rust, or Tauri, so the client will not build without
+    `--client`. The installer targets Linux.
 
 3.  **Generate Certificates:**
     ```bash
     node scripts/generate_tls.cjs
     ```
 
-4.  **Start the Application:**
+4.  **Set a server password:** add `SERVER_PASSWORD` (12-512 characters) to
+    `.env`. The launchers generate the remaining required values on first run.
+    See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md).
+
+5.  **Start the Application:**
     *   **Server:** `node scripts/start-docker.cjs server`
-    *   **Client:** `node scripts/start-docker.cjs client`
+    *   **Client:** `node scripts/start-client.cjs`
 
 ## Development Workflow
 
@@ -44,20 +52,27 @@ This project and everyone participating in it is governed by the [Qor Code of Co
     git checkout -b feature/your-feature-name
     ```
 4.  **Make your changes.**
-5.  **Run linting** to ensure code quality:
+5.  **Run linting and type checking:**
     ```bash
-    npm run lint
+    pnpm lint
+    pnpm exec tsc -p tsconfig.app.json --noEmit
     ```
-6.  **Commit your changes** with descriptive commit messages.
-7.  **Push to your fork:**
+    Always pass `-p tsconfig.app.json`. The root `tsconfig.json` has an empty
+    `files` array, so a bare `tsc` type checks nothing and exits 0.
+6.  **Run the security tests** if you touched anything under `server/`:
+    ```bash
+    pnpm test:security
+    ```
+7.  **Commit your changes** with descriptive commit messages.
+8.  **Push to your fork:**
     ```bash
     git push origin feature/your-feature-name
     ```
-8.  **Open a Pull Request** against the `main` branch of the original repository.
+9.  **Open a Pull Request** against the `main` branch of the original repository.
 
 ## Style Guide
 
-*   **Linting:** This project uses ESLint. Please ensure your code passes linting before submitting a PR (`npm run lint`).
+*   **Linting:** This project uses ESLint. Please ensure your code passes linting before submitting a PR (`pnpm lint`). The project is pnpm-only, `pnpm-lock.yaml` is the committed lockfile.
 *   **Formatting:** Try to follow the existing code style.
 *   **TypeScript:** Use TypeScript for all new UI code (`.ts`, `.tsx`).
 
@@ -73,7 +88,7 @@ If you find a bug, please create an issue on GitHub. Include:
 ## Suggesting Enhancements
 
 I love hearing about new ideas. If you have a suggestion:
-1.  Check existing issues to see if it has already been proposed.
+1.  Check existing issues to see if it has already been posted.
 2.  Open a new issue describing the enhancement and why it would be useful.
 
 Thank you for contributing!

@@ -46,7 +46,14 @@ export function parseAuthenticatedCallSignal(ctx: CallSignalContext): CallSignal
     authenticatedCallSignal = Object.freeze({
       ...base,
       type: 'offer',
-      data: Object.freeze({ callType: callSignalData.data.callType })
+      data: Object.freeze({
+        callType: callSignalData.data.callType
+      })
+    });
+  } else if (callSignalData.type === 'answer') {
+    authenticatedCallSignal = Object.freeze({
+      ...base,
+      type: 'answer'
     });
   } else if (
     callSignalData.type === 'screen-share-start' ||

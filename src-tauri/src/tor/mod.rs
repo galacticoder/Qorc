@@ -1068,11 +1068,7 @@ impl TorManager {
         if !lib_dirs.is_empty()
             && let Ok(lib_path) = std::env::join_paths(&lib_dirs)
         {
-            env.push((OsString::from("LD_LIBRARY_PATH"), lib_path.clone()));
-
-            if self.platform == "macos" {
-                env.push((OsString::from("DYLD_LIBRARY_PATH"), lib_path));
-            }
+            env.push((OsString::from("LD_LIBRARY_PATH"), lib_path));
         }
 
         let mut path_entries = vec![self.tor_dir.clone(), self.tor_dir.join(TRANSPORT_DIR)];
@@ -1839,6 +1835,31 @@ impl TorManager {
         Ok(true)
     }
 
+    pub async fn mirror_configuration_from(&self, source: &TorManager) -> QorResult<bool> {
+        let source_config = fs::read_to_string(&source.config_path).await.map_err(|_| {
+            QorError::TorProcess("Primary Tor configuration is unavailable".to_string())
+        })?;
+        if source_config.len() > MAX_CONFIG_SIZE {
+            return Err(QorError::TorProcess(
+                "Primary Tor configuration is too large".to_string(),
+            ));
+        }
+        let source_dir = source.tor_dir.to_string_lossy();
+        let target_dir = self.tor_dir.to_string_lossy();
+        let portable = source_config
+            .lines()
+            .filter(|line| {
+                !matches!(
+                    line.split_whitespace().next(),
+                    Some("DataDirectory" | "SocksPort" | "ControlPort")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace(source_dir.as_ref(), target_dir.as_ref());
+        self.configure(&TorConfig { config: portable }).await
+    }
+
     /// Start Tor process
     pub async fn start(&self) -> QorResult<TorStartResult> {
         let _operation_guard = self.operation_lock.lock().await;
@@ -2131,24 +2152,33 @@ impl TorManager {
 
     pub async fn publish_onion_service(
         &self,
-        virtual_port: u16,
-        local_port: u16,
+        port_mappings: &[(u16, u16)],
     ) -> QorResult<PublishedOnionService> {
-        if virtual_port == 0 || local_port == 0 {
+        if port_mappings.is_empty()
+            || port_mappings.len() > 8
+            || port_mappings
+                .iter()
+                .any(|(virtual_port, local_port)| *virtual_port == 0 || *local_port == 0)
+        {
             return Err(QorError::InvalidArgument(
                 "Invalid onion service port".to_string(),
             ));
         }
         let control_port = self.get_control_port();
         let cookie_path = self.control_cookie_path();
+        let port_mappings = port_mappings.to_vec();
 
         tokio::task::spawn_blocking(move || {
             let mut conn = Self::control_authenticate(control_port, &cookie_path)?;
-            writeln!(
-                conn.stream,
-                "ADD_ONION NEW:ED25519-V3 Flags=DiscardPK Port={},127.0.0.1:{}",
-                virtual_port, local_port
-            )?;
+            write!(conn.stream, "ADD_ONION NEW:ED25519-V3 Flags=DiscardPK")?;
+            for (virtual_port, local_port) in port_mappings {
+                write!(
+                    conn.stream,
+                    " Port={},127.0.0.1:{}",
+                    virtual_port, local_port
+                )?;
+            }
+            writeln!(conn.stream)?;
 
             let mut service_id: Option<String> = None;
             for _ in 0..MAX_CONTROL_RESPONSE_LINES {
@@ -2404,4 +2434,32 @@ pub async fn init(app_data_path: PathBuf) -> QorResult<Arc<TorManager>> {
     let _stale = manager.cleanup_orphaned_processes_sync();
     manager.materialize_embedded_bundle().await?;
     Ok(Arc::new(manager))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pir_manager_uses_distinct_runtime_and_mirrored_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "qor-pir-tor-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let primary = TorManager::new(root.join("primary"));
+        let pir = TorManager::new(root.join("pir"));
+        primary
+            .configure(&TorConfig {
+                config: "ClientOnly 1".to_string(),
+            })
+            .await
+            .unwrap();
+        pir.mirror_configuration_from(&primary).await.unwrap();
+        let config = std::fs::read_to_string(&pir.config_path).unwrap();
+        assert_ne!(primary.tor_path, pir.tor_path);
+        assert_ne!(primary.config_path, pir.config_path);
+        assert!(config.contains(&pir.tor_dir.join("data").to_string_lossy().to_string()));
+        assert!(!config.contains(&primary.tor_dir.to_string_lossy().to_string()));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

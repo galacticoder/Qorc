@@ -19,19 +19,26 @@ import { PROTOCOL_KEYS } from '../config/protocol-keys';
 const confirmationEncoder = new TextEncoder();
 const MAX_PENDING_ENCRYPT_OPERATIONS = 128;
 const MAX_PENDING_ENCRYPT_BYTES = 4 * MAX_MESSAGE_FRAME_SIZE;
+const MAX_PENDING_REALTIME_ENCRYPT_OPERATIONS = 5;
+const MAX_PENDING_VISUAL_ENCRYPT_OPERATIONS = 1;
 const MAX_PENDING_DECRYPT_OPERATIONS = 128;
 const MAX_PENDING_DECRYPT_BYTES = 4 * MAX_MESSAGE_FRAME_SIZE;
 
 interface PendingEncryptInput {
     plaintext: Uint8Array;
     aad?: Uint8Array;
+    callStreamContext?: string;
     byteLength: number;
     released: boolean;
+    priority: 'normal' | 'realtime' | 'visual';
+    resolve: (value: Uint8Array) => void;
+    reject: (reason: unknown) => void;
 }
 
 interface PendingDecryptInput {
     data: Uint8Array;
     aad?: Uint8Array;
+    callStreamContext?: string;
     byteLength: number;
     released: boolean;
 }
@@ -43,12 +50,14 @@ export function clearP2PNoiseHandshakeReplayCache(): void {
 // Noise session wrapper
 export class PQNoiseSession {
     private session: PQSession;
-    private encryptTail: Promise<void> = Promise.resolve();
+    private encryptQueue: PendingEncryptInput[] = [];
+    private encryptProcessing = false;
     private decryptTail: Promise<void> = Promise.resolve();
     private pendingEncryptInputs = new Set<PendingEncryptInput>();
     private pendingEncryptBytes = 0;
     private pendingDecryptInputs = new Set<PendingDecryptInput>();
     private pendingDecryptBytes = 0;
+    private retiredCallStreamContexts = new Set<string>();
     private destroyed = false;
 
     private constructor(session: PQSession) {
@@ -126,12 +135,69 @@ export class PQNoiseSession {
     }
 
     // Encrypt message
-    async encrypt(plaintext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
+    async encrypt(
+        plaintext: Uint8Array,
+        aad?: Uint8Array,
+        priority: 'normal' | 'realtime' | 'visual' = 'normal',
+        callStreamContext?: string
+    ): Promise<Uint8Array> {
         if (this.destroyed) throw new Error('P2P Noise session is destroyed');
-        if (!(plaintext instanceof Uint8Array) || (aad !== undefined && !(aad instanceof Uint8Array))) {
+        if (
+            !(plaintext instanceof Uint8Array) ||
+            (aad !== undefined && !(aad instanceof Uint8Array)) ||
+            (callStreamContext !== undefined && typeof callStreamContext !== 'string')
+        ) {
             throw new Error('Invalid P2P Noise encryption input');
         }
         const byteLength = plaintext.byteLength + (aad?.byteLength ?? 0);
+        if (callStreamContext) this.retiredCallStreamContexts.delete(callStreamContext);
+        if (priority === 'realtime') {
+            const realtimePending = Array.from(this.pendingEncryptInputs)
+                .filter(input => input.priority === 'realtime').length;
+            if (realtimePending >= MAX_PENDING_REALTIME_ENCRYPT_OPERATIONS) {
+                const oldestRealtime = this.encryptQueue.findIndex(input => input.priority === 'realtime');
+                if (oldestRealtime >= 0) {
+                    const [dropped] = this.encryptQueue.splice(oldestRealtime, 1);
+                    dropped.reject(new Error('Realtime encryption superseded'));
+                    this.releasePendingEncryptInput(dropped);
+                } else {
+                    throw new Error('P2P realtime encryption is busy');
+                }
+            }
+            while (
+                this.pendingEncryptInputs.size >= MAX_PENDING_ENCRYPT_OPERATIONS ||
+                this.pendingEncryptBytes + byteLength > MAX_PENDING_ENCRYPT_BYTES
+            ) {
+                const oldestNormal = this.encryptQueue.findIndex(input => input.priority !== 'realtime');
+                if (oldestNormal < 0) break;
+                const [dropped] = this.encryptQueue.splice(oldestNormal, 1);
+                dropped.reject(new Error('Lower-priority encryption superseded by realtime media'));
+                this.releasePendingEncryptInput(dropped);
+            }
+        } else if (priority === 'visual') {
+            const visualPending = Array.from(this.pendingEncryptInputs)
+                .filter(input => input.priority === 'visual').length;
+            if (visualPending >= MAX_PENDING_VISUAL_ENCRYPT_OPERATIONS) {
+                const oldestVisual = this.encryptQueue.findIndex(input => input.priority === 'visual');
+                if (oldestVisual >= 0) {
+                    const [dropped] = this.encryptQueue.splice(oldestVisual, 1);
+                    dropped.reject(new Error('Visual encryption superseded'));
+                    this.releasePendingEncryptInput(dropped);
+                } else {
+                    throw new Error('P2P visual encryption is busy');
+                }
+            }
+            while (
+                this.pendingEncryptInputs.size >= MAX_PENDING_ENCRYPT_OPERATIONS ||
+                this.pendingEncryptBytes + byteLength > MAX_PENDING_ENCRYPT_BYTES
+            ) {
+                const oldestNormal = this.encryptQueue.findIndex(input => input.priority === 'normal');
+                if (oldestNormal < 0) break;
+                const [dropped] = this.encryptQueue.splice(oldestNormal, 1);
+                dropped.reject(new Error('Normal encryption superseded by visual media'));
+                this.releasePendingEncryptInput(dropped);
+            }
+        }
         if (
             this.pendingEncryptInputs.size >= MAX_PENDING_ENCRYPT_OPERATIONS ||
             byteLength > MAX_PENDING_ENCRYPT_BYTES ||
@@ -139,35 +205,55 @@ export class PQNoiseSession {
         ) {
             throw new Error('P2P Noise encryption queue is full');
         }
-        const input: PendingEncryptInput = {
-            plaintext: plaintext.slice(),
-            ...(aad ? { aad: aad.slice() } : {}),
-            byteLength,
-            released: false
-        };
-        this.pendingEncryptInputs.add(input);
-        this.pendingEncryptBytes += byteLength;
-
-        const operation = this.encryptTail
-            .catch(() => {})
-            .then(async () => {
-                if (this.destroyed) throw new Error('P2P Noise session is destroyed');
-                const frame = await this.session.encrypt(input.plaintext, input.aad);
-                try {
-                    return encodeFrame(frame.sequence, frame.ciphertext, frame.tag);
-                } finally {
-                    frame.ciphertext.fill(0);
-                    frame.tag.fill(0);
-                }
-            });
-        const trackedOperation = operation.finally(() => {
-            this.releasePendingEncryptInput(input);
+        return new Promise<Uint8Array>((resolve, reject) => {
+            const input: PendingEncryptInput = {
+                plaintext: plaintext.slice(),
+                ...(aad ? { aad: aad.slice() } : {}),
+                ...(callStreamContext ? { callStreamContext } : {}),
+                byteLength,
+                released: false,
+                priority,
+                resolve,
+                reject,
+            };
+            this.pendingEncryptInputs.add(input);
+            this.pendingEncryptBytes += byteLength;
+            this.encryptQueue.push(input);
+            void this.drainEncryptQueue();
         });
-        this.encryptTail = trackedOperation.then(
-            () => {},
-            () => {}
-        );
-        return trackedOperation;
+    }
+
+    private async drainEncryptQueue(): Promise<void> {
+        if (this.encryptProcessing) return;
+        this.encryptProcessing = true;
+        try {
+            while (!this.destroyed && this.encryptQueue.length > 0) {
+                const realtimeIndex = this.encryptQueue.findIndex(input => input.priority === 'realtime');
+                const visualIndex = this.encryptQueue.findIndex(input => input.priority === 'visual');
+                const index = realtimeIndex >= 0 ? realtimeIndex : visualIndex >= 0 ? visualIndex : 0;
+                const input = this.encryptQueue.splice(index, 1)[0];
+                try {
+                    if (this.destroyed) throw new Error('P2P Noise session is destroyed');
+                    const frame = await this.session.encrypt(
+                        input.plaintext,
+                        input.aad,
+                        input.callStreamContext
+                    );
+                    try {
+                        input.resolve(encodeFrame(frame.sequence, frame.ciphertext, frame.tag));
+                    } finally {
+                        frame.ciphertext.fill(0);
+                        frame.tag.fill(0);
+                    }
+                } catch (error) {
+                    input.reject(error);
+                } finally {
+                    this.releasePendingEncryptInput(input);
+                }
+            }
+        } finally {
+            this.encryptProcessing = false;
+        }
     }
 
     private releasePendingEncryptInput(input: PendingEncryptInput): void {
@@ -177,15 +263,25 @@ export class PQNoiseSession {
         input.aad?.fill(0);
         this.pendingEncryptInputs.delete(input);
         this.pendingEncryptBytes = Math.max(0, this.pendingEncryptBytes - input.byteLength);
+        if (input.callStreamContext) this.releaseRetiredCallStreamContext(input.callStreamContext);
     }
 
     // Decrypt message
-    async decrypt(data: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
+    async decrypt(
+        data: Uint8Array,
+        aad?: Uint8Array,
+        callStreamContext?: string
+    ): Promise<Uint8Array> {
         if (this.destroyed) throw new Error('P2P Noise session is destroyed');
-        if (!(data instanceof Uint8Array) || (aad !== undefined && !(aad instanceof Uint8Array))) {
+        if (
+            !(data instanceof Uint8Array) ||
+            (aad !== undefined && !(aad instanceof Uint8Array)) ||
+            (callStreamContext !== undefined && typeof callStreamContext !== 'string')
+        ) {
             throw new Error('Invalid P2P Noise decryption input');
         }
         const byteLength = data.byteLength + (aad?.byteLength ?? 0);
+        if (callStreamContext) this.retiredCallStreamContexts.delete(callStreamContext);
         if (
             this.pendingDecryptInputs.size >= MAX_PENDING_DECRYPT_OPERATIONS ||
             byteLength > MAX_PENDING_DECRYPT_BYTES ||
@@ -196,6 +292,7 @@ export class PQNoiseSession {
         const input: PendingDecryptInput = {
             data: data.slice(),
             ...(aad ? { aad: aad.slice() } : {}),
+            ...(callStreamContext ? { callStreamContext } : {}),
             byteLength,
             released: false
         };
@@ -213,7 +310,11 @@ export class PQNoiseSession {
                     tag: decoded.tag
                 };
                 try {
-                    return await this.session.decrypt(frame, input.aad);
+                    return await this.session.decrypt(
+                        frame,
+                        input.aad,
+                        input.callStreamContext
+                    );
                 } finally {
                     frame.ciphertext.fill(0);
                     frame.tag.fill(0);
@@ -236,6 +337,25 @@ export class PQNoiseSession {
         input.aad?.fill(0);
         this.pendingDecryptInputs.delete(input);
         this.pendingDecryptBytes = Math.max(0, this.pendingDecryptBytes - input.byteLength);
+        if (input.callStreamContext) this.releaseRetiredCallStreamContext(input.callStreamContext);
+    }
+
+    releaseCallStreamContext(context: string): void {
+        if (this.destroyed || typeof context !== 'string' || context.length === 0) return;
+        this.retiredCallStreamContexts.add(context);
+        this.releaseRetiredCallStreamContext(context);
+    }
+
+    private releaseRetiredCallStreamContext(context: string): void {
+        if (!this.retiredCallStreamContexts.has(context)) return;
+        for (const input of this.pendingEncryptInputs) {
+            if (input.callStreamContext === context) return;
+        }
+        for (const input of this.pendingDecryptInputs) {
+            if (input.callStreamContext === context) return;
+        }
+        this.retiredCallStreamContexts.delete(context);
+        this.session.releaseCallStreamContext(context);
     }
 
     async createKeyConfirmation(from: string, to: string): Promise<Uint8Array> {
@@ -281,24 +401,20 @@ export class PQNoiseSession {
         return this.session.getBindingId();
     }
 
-    exportDirectionalKeyMaterial(): {
-        role: 'initiator' | 'responder';
-        sendKey: Uint8Array;
-        receiveKey: Uint8Array;
-    } {
-        return this.session.exportDirectionalKeyMaterial();
-    }
-
     // Destroy session
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
+        for (const input of this.encryptQueue.splice(0)) {
+            input.reject(new Error('P2P Noise session is destroyed'));
+        }
         for (const input of Array.from(this.pendingEncryptInputs)) {
             this.releasePendingEncryptInput(input);
         }
         for (const input of Array.from(this.pendingDecryptInputs)) {
             this.releasePendingDecryptInput(input);
         }
+        this.retiredCallStreamContexts.clear();
         this.session.destroy();
     }
 }

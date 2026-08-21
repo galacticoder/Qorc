@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../../contexts/ThemeContext';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
@@ -17,11 +17,7 @@ import {
   sanitizeEventUsername,
 } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
-import {
-  SCREEN_SHARING_FRAMERATES,
-  SCREEN_SHARING_RESOLUTIONS,
-  type ScreenSharingSettings,
-} from '../../lib/types/screen-sharing-types';
+import { type ScreenSharingSettings } from '../../lib/types/screen-sharing-types';
 import {
   DEFAULT_EVENT_RATE_MAX,
   DEFAULT_EVENT_RATE_WINDOW_MS,
@@ -80,7 +76,6 @@ const sectionGroups: Array<{
   },
 ];
 
-const visibleResolutionIds = ['native', '1080p', '720p'] as const;
 const qualityButtonLabels: Record<QualityOption, string> = {
   low: 'Low',
   medium: 'Balanced',
@@ -228,13 +223,6 @@ export const AppSettings = React.memo(function AppSettings({
   const displayUsername = currentDisplayName || currentUsername || 'User';
   const copyUsername = currentDisplayName || currentUsername || '';
   const blockingAvailable = Boolean(currentUsername);
-
-  const visibleResolutions = useMemo(
-    () => visibleResolutionIds
-      .map((id) => SCREEN_SHARING_RESOLUTIONS.find((resolution) => resolution.id === id))
-      .filter((resolution): resolution is NonNullable<typeof resolution> => Boolean(resolution)),
-    []
-  );
 
   const saveSettings = useCallback((updates: Partial<{
     notifications: NotificationSettings;
@@ -516,16 +504,6 @@ export const AppSettings = React.memo(function AppSettings({
     if (key === 'preferredSpeakerId') setPreferredSpeakerId(value);
     if (key === 'preferredCameraId') setPreferredCameraId(value);
     saveSettings({ [key]: value });
-  };
-
-  const handleResolutionChange = (resolutionId: string) => {
-    const resolution = SCREEN_SHARING_RESOLUTIONS.find((item) => item.id === resolutionId);
-    if (!resolution) return;
-    screenSharingSettings.setResolution(resolution).catch(() => toast.error('Failed to update resolution'));
-  };
-
-  const handleFrameRateChange = (frameRate: number) => {
-    screenSharingSettings.setFrameRate(frameRate).catch(() => toast.error('Failed to update frame rate'));
   };
 
   const handleQualityChange = (quality: QualityOption) => {
@@ -959,53 +937,17 @@ export const AppSettings = React.memo(function AppSettings({
                 <div>
                   <span className="pane-kicker">Calling</span>
                   <h2 className="pane-title">Voice & Video</h2>
-                  <p className="pane-subtitle">Screen sharing behavior.</p>
+                  <p className="pane-subtitle">Camera and screen sharing quality.</p>
                 </div>
               </header>
 
               <div className="settings-section">
-                <h3 className="section-title">Screen Sharing</h3>
+                <h3 className="section-title">Video Quality</h3>
                 <div className="settings-list">
                   <div className="setting-row">
                     <div>
-                      <div className="setting-label">Resolution</div>
-                      <div className="setting-description">Choose the capture resolution for screen sharing.</div>
-                    </div>
-                    <div className="segmented" role="group" aria-label="Resolution">
-                      {visibleResolutions.map((resolution) => (
-                        <button
-                          key={resolution.id}
-                          className={screenSettings?.resolution.id === resolution.id ? 'active' : ''}
-                          type="button"
-                          onClick={() => handleResolutionChange(resolution.id)}
-                        >
-                          {resolution.id === 'native' ? 'Native' : resolution.id}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Frame Rate</div>
-                      <div className="setting-description">Higher frame rates use more bandwidth.</div>
-                    </div>
-                    <div className="segmented" role="group" aria-label="Frame Rate">
-                      {SCREEN_SHARING_FRAMERATES.map((fps) => (
-                        <button
-                          key={fps}
-                          className={screenSettings?.frameRate === fps ? 'active' : ''}
-                          type="button"
-                          onClick={() => handleFrameRateChange(fps)}
-                        >
-                          {fps} FPS
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="setting-row">
-                    <div>
                       <div className="setting-label">Quality</div>
-                      <div className="setting-description">Balance video quality and bandwidth usage.</div>
+                      <div className="setting-description">Set the preferred quality ceiling. Calls target 60 FPS and adapt resolution and bitrate when needed.</div>
                     </div>
                     <div className="segmented" role="group" aria-label="Quality">
                       {QUALITY_OPTIONS.map((quality) => (
@@ -1024,7 +966,7 @@ export const AppSettings = React.memo(function AppSettings({
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Reset settings</div>
-                      <div className="setting-description">Restore screen sharing defaults.</div>
+                      <div className="setting-description">Restore the video quality default.</div>
                     </div>
                     <button className="action" type="button" onClick={() => screenSharingSettings.resetToDefaults().catch(() => toast.error('Failed to reset settings'))}>
                       Reset to Defaults

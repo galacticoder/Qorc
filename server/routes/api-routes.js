@@ -31,7 +31,10 @@ import { deriveAuthRootKey } from '../crypto/auth-root.js';
 import { SERVER_CONSTANTS } from '../config/constants.js';
 import { SPOOL_TAG_PROTOCOL } from '../../shared/spool-tag-protocol.js';
 import { answerPirQuery, readReadyPirTagIndex } from '../pir/pir-service.js';
-import { SPOOL_PIR_LAYOUT } from '../../shared/spool-pir-layout.js';
+import {
+  SPOOL_PIR_EPOCH_UNAVAILABLE,
+  SPOOL_PIR_LAYOUT
+} from '../../shared/spool-pir-layout.js';
 import { KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY, KEY_TRANSPARENCY_APPEND_POW_DOMAIN, KEY_TRANSPARENCY_DELTA_MAX_EPOCHS, KEY_TRANSPARENCY_POW_EPOCH_MS, KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY, KEY_TRANSPARENCY_SYNC_POW_DOMAIN, exactPlainObject, isKeyTransparencyHash, isKeyTransparencyLabel, keyTransparencyPowEpoch } from '../../shared/key-transparency-protocol.js';
 import {
   appendKeyTransparency,
@@ -216,6 +219,10 @@ router.post('/spool/pir', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     res.status(200).json({ ok: true, response: response.toString('base64') });
   } catch (error) {
+    if (error?.message === 'PIR epoch is unavailable') {
+      fail(res, 409, SPOOL_PIR_EPOCH_UNAVAILABLE);
+      return;
+    }
     console.error('[API] Spool PIR request failed', error);
     fail(res, 503, 'spool_pir_unavailable');
   }

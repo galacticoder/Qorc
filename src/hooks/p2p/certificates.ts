@@ -3,22 +3,19 @@ import type { PeerCertificateBundle, CertCacheEntry } from "../../lib/types/p2p-
 import { validatePeerCertificateBundle } from "../../lib/utils/peer-certificate-utils";
 import { computePeerCertificateFingerprint } from "../../lib/utils/peer-certificate-utils";
 import { loadPersistedPeerCert, savePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
-import { CERT_CLOCK_SKEW_MS, MAX_P2P_CERT_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
+import { MAX_P2P_CERT_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
 import { isKeyTransparencyAuthorizedPeerCertificate } from "../../lib/key-transparency/verified-material";
 
-// Core cache references used by all certificate helpers
 export interface CertificateRefs {
   peerCertificateCacheRef: RefObject<Map<string, CertCacheEntry>>;
 }
 
-// hooks injected by the hook consumer to fetch certificates or pin a trusted issuer
 export interface CertificateOptions {
   ownerUsername: string;
   fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
   isCurrentOwner?: () => boolean;
 }
 
-// Certificate retriever that validates signatures
 export function createGetPeerCertificate(
   refs: CertificateRefs,
   options: CertificateOptions
@@ -49,12 +46,11 @@ export function createGetPeerCertificate(
         if (
           sameIdentity &&
           existing.cert.issuedAt >= cert.issuedAt &&
-          existing.cert.expiresAt > now - CERT_CLOCK_SKEW_MS &&
           isTransparencyAuthorized(peerUsername, existing.cert)
         ) {
           refs.peerCertificateCacheRef.current.set(peerUsername, {
             cert: existing.cert,
-            expiresAt: Math.min(existing.cert.expiresAt, now + P2P_PEER_CACHE_TTL_MS),
+            expiresAt: now + P2P_PEER_CACHE_TTL_MS,
           });
           return { cert: existing.cert, accepted: false };
         }
@@ -63,7 +59,7 @@ export function createGetPeerCertificate(
       const snapshot = Object.freeze({ ...cert });
       refs.peerCertificateCacheRef.current.set(peerUsername, {
         cert: snapshot,
-        expiresAt: Math.min(snapshot.expiresAt, Date.now() + P2P_PEER_CACHE_TTL_MS),
+        expiresAt: Date.now() + P2P_PEER_CACHE_TTL_MS,
       });
       if (refs.peerCertificateCacheRef.current.size > MAX_P2P_CERT_CACHE_SIZE) {
         const entries = [...refs.peerCertificateCacheRef.current.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
@@ -94,7 +90,11 @@ export function createGetPeerCertificate(
       }
     };
 
-  return async (peerUsername: string, bypassCache = false): Promise<PeerCertificateBundle | null> => {
+  return async (
+    peerUsername: string,
+    bypassCache = false,
+    cacheOnly = false,
+  ): Promise<PeerCertificateBundle | null> => {
     const isCurrentOwner = () => options.isCurrentOwner?.() !== false;
     if (!isCurrentOwner()) return null;
     const now = Date.now();
@@ -105,12 +105,14 @@ export function createGetPeerCertificate(
     if (cached) refs.peerCertificateCacheRef.current.delete(peerUsername);
 
     if (!bypassCache) {
-      const persisted = await loadPersistedPeerCert(options.ownerUsername, peerUsername);
+      const persisted = await loadPersistedPeerCert(options.ownerUsername, peerUsername, true);
       if (!isCurrentOwner()) return null;
       if (persisted && isTransparencyAuthorized(peerUsername, persisted)) {
         return cacheValidatedCert(peerUsername, persisted).cert;
       }
     }
+
+    if (cacheOnly) return null;
 
     if (!options?.fetchPeerCertificates) {
       return null;

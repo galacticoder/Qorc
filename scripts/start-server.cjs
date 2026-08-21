@@ -8,9 +8,9 @@ const { URL } = require('url');
 
 const repoRoot = path.resolve(__dirname, '..');
 
-if (process.platform === 'win32') {
-  console.error('[ERROR] Windows is not supported for server deployment. Use Docker instead:');
-  console.error('[ERROR]   node scripts\start-server.cjs server');
+if (process.platform !== 'linux') {
+  console.error('[ERROR] Native server deployment supports only Linux. Use Docker instead:');
+  console.error('[ERROR]   node scripts/start-docker.cjs server');
   process.exit(1);
 }
 
@@ -520,66 +520,26 @@ async function ensurePostgresBootstrap() {
   const safeDb = String(dbName).replace(/"/g, '""');
   const safePassword = String(password).replace(/'/g, "''");
 
-  if (process.platform === 'darwin') {
-    try {
-      const env = { ...process.env, PGPASSWORD: safePassword };
+  try {
+    execFileSync('sudo', [
+      '-u', 'postgres',
+      'psql',
+      '-c',
+      `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`,
+    ], { stdio: 'inherit' });
+  } catch (err) {
+    logErr('[DB] CREATE USER via sudo psql failed (may already exist).');
+  }
 
-      try {
-        execFileSync('createuser', ['-s', '-e', safeUser], {
-          stdio: 'inherit',
-          env
-        });
-      } catch (err) {
-        if (!err.stderr || !err.stderr.includes('already exists')) {
-          logErr('[DB] CREATE USER failed (may already exist).');
-        }
-      }
-
-      try {
-        const alterPasswordSQL = `ALTER USER "${safeUser}" WITH PASSWORD '${safePassword}';`;
-        execFileSync('psql', ['-d', 'postgres', '-c', alterPasswordSQL], {
-          stdio: 'inherit',
-          env
-        });
-      } catch (err) {
-        logErr('[DB] ALTER USER password failed.');
-      }
-
-      try {
-        execFileSync('createdb', ['-O', safeUser, '-e', safeDb], {
-          stdio: 'inherit',
-          env
-        });
-      } catch (err) {
-        if (!err.stderr || !err.stderr.includes('already exists')) {
-          logErr('[DB] CREATE DATABASE failed (may already exist).');
-        }
-      }
-    } catch (err) {
-      logErr('[DB] macOS Postgres bootstrap failed. Ensure PostgreSQL is running.');
-    }
-  } else {
-    try {
-      execFileSync('sudo', [
-        '-u', 'postgres',
-        'psql',
-        '-c',
-        `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`,
-      ], { stdio: 'inherit' });
-    } catch (err) {
-      logErr('[DB] CREATE USER via sudo psql failed (may already exist).');
-    }
-
-    try {
-      execFileSync('sudo', [
-        '-u', 'postgres',
-        'psql',
-        '-c',
-        `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`,
-      ], { stdio: 'inherit' });
-    } catch (err) {
-      logErr('[DB] CREATE DATABASE via sudo psql failed (may already exist).');
-    }
+  try {
+    execFileSync('sudo', [
+      '-u', 'postgres',
+      'psql',
+      '-c',
+      `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`,
+    ], { stdio: 'inherit' });
+  } catch (err) {
+    logErr('[DB] CREATE DATABASE via sudo psql failed (may already exist).');
   }
 }
 

@@ -1057,6 +1057,48 @@ html.light .qor-conversation-empty-lines span,
   color: rgba(255, 255, 255, .82);
 }
 
+.qor-conversation-preview-typing {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-accent-primary);
+  font-weight: 600;
+}
+
+.qor-conversation-typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 12px;
+}
+
+.qor-conversation-typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: qor-conversation-typing-bounce 1.2s infinite ease-in-out;
+}
+
+.qor-conversation-typing-dots span:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.qor-conversation-typing-dots span:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+@keyframes qor-conversation-typing-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: .45;
+  }
+  30% {
+    transform: translateY(-2px);
+    opacity: 1;
+  }
+}
+
 .qor-conversation-controls {
   position: absolute;
   right: 6px;

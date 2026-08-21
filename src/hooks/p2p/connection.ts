@@ -158,11 +158,7 @@ export function createConnectToPeer(
       throw createP2PError('LOCAL_KEYS_MISSING');
     }
 
-    // Prefer cached certificate first
-    let cert = await getPeerCertificate(peerUsername);
-    if (!cert) {
-      cert = await getPeerCertificate(peerUsername, true);
-    }
+    const cert = await getPeerCertificate(peerUsername);
     if (!cert) {
       throw createP2PError('PEER_CERT_MISSING');
     }
@@ -189,7 +185,7 @@ export function createConnectToPeer(
   };
 }
 
-// Queries whether the peer currently appears connected in state
+// Queries whether peer currently appears connected in state
 export function createIsPeerConnected(connectedPeers: string[]) {
   return (peerUsername: string): boolean => {
     if (!peerUsername) return false;

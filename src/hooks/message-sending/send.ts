@@ -164,7 +164,8 @@ export const requestBundleForRetry = async (
           recipientUsername,
           material.fullBundle,
           users as any,
-          findUser as any
+          findUser as any,
+          material,
         );
         if (!isCurrent()) return;
         if (!validation.valid) {

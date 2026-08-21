@@ -61,7 +61,15 @@ unseen entry's probe against its own detection key, and issues one PIR query per
 match (`spool/pir`). Neither request carries a selector, an account, or a
 recipient. The server publishes the tag index and PIR database as one completed
 snapshot, its opaque snapshot ID prevents positions from being answered against
-a different ordering.
+a different ordering. Each 132,668-byte logical record is packed into nine
+fixed 16 KiB PIR rows. The native client batches all nine private row queries
+with one expansion-parameter set, the server returns all nine encrypted answers
+through one anonymous request, and the client reconstructs the record locally.
+Tag-index and PIR requests use a dedicated Tor daemon, SOCKS listener, circuit
+pool, and single-request queue. One record is retrieved at a time, so catch-up
+traffic cannot occupy the primary daemon or anonymous queue used by discovery,
+key transparency, messaging, and calls. A worker snapshot is not recycled while
+it has queued answers.
 
 Code:
 
@@ -82,8 +90,8 @@ detection scheme, and the PIR cost model.
 
 Every sealed envelope carries an 8-byte one-time `tag`. It exists so a recipient
 can find its own entries by downloading a compact index rather than trial
-decapsulating the whole spool. The index is tiny relative to the roughly 18 KiB
-of raw cryptographic fields in each retrievable record.
+decapsulating the whole spool. The index is tiny relative to the 132,668 bytes
+in each retrievable record.
 
 The recipient publishes an X25519 **detection public key** in its discovery
 blob. For every message, the sender generates a fresh ephemeral key, computes
@@ -111,12 +119,8 @@ broadcast. See `docs/app/PRIVATE_SPOOL_RETRIEVAL.md`.
 content , so PIR records are uniform by construction rather than by filtering.
 Anything else is rejected on append (`global_mix_spool_unsupported_size`).
 
-There used to be two size classes and a filter, and it broke ordinary messaging
-silently: the earlier 16 KiB rung could not hold the nested Signal-PQ, Hybrid,
-and transparency-head envelope, so ordinary messages became large, were skipped
-by the spool writer, and were acknowledged anyway. STANDARD is now 128 KiB,
-durable sends are forced into it, and the server rejects an off-size durable
-request before acknowledging it.
+Durable sends use the 128 KiB STANDARD frame, and the server rejects an off-size
+durable request before acknowledging it.
 
 **File chunks are not retrievable while offline.** They use the 256 KiB frame,
 travel live or over P2P, and are never spooled , a uniform 262 KiB PIR record
@@ -164,6 +168,10 @@ Code:
 - P2P writes wait for an end-to-end receipt and spool the same encrypted payload
   on timeout.
 - Duplicate Signal ciphertexts and message IDs are rejected locally.
+- A probe is persisted as consumed after its envelope reaches an authenticated
+  terminal result, including a duplicate, stale counter, blocked message, or
+  already-processed envelope. Temporary sender verification and Signal-session
+  failures remain retryable.
 - Native Signal receive-ratchet state and plaintext staging commit atomically.
   Once that durable stage succeeds, retrieval may advance past the entry even if
   later application/database work fails, the native pending row remains

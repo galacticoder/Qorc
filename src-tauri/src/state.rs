@@ -1,11 +1,14 @@
 //! Application state management
 
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
+use tokio::sync::mpsc;
 
 use crate::account_vault::AccountSession;
+use crate::audio_codec::AudioCodecState;
+use crate::camera_capture::CameraCaptureState;
 use crate::database::DatabaseManager;
-use crate::network::p2p::P2PTransportHandler;
+use crate::network::p2p::{P2PEvent, P2PTransportHandler};
 use crate::network::websocket::WebSocketHandler;
 use crate::signal_protocol::SignalHandler;
 use crate::storage::SecureStorage;
@@ -13,12 +16,19 @@ use crate::system::notification::NotificationHandler;
 use crate::tor::TorManager;
 
 pub struct AppState {
+    pub audio_codec: AudioCodecState,
+    pub camera_capture: Arc<CameraCaptureState>,
     pub account_session: RwLock<Option<Arc<AccountSession>>>,
     pub storage: RwLock<Option<Arc<SecureStorage>>>,
     pub signal_handler: RwLock<Option<Arc<SignalHandler>>>,
     pub tor_manager: RwLock<Option<Arc<TorManager>>>,
+    pub pir_tor_manager: RwLock<Option<Arc<TorManager>>>,
     pub websocket_handler: RwLock<Option<Arc<WebSocketHandler>>>,
     pub p2p_handler: RwLock<Option<Arc<P2PTransportHandler>>>,
+    pub p2p_event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<P2PEvent>>>,
+    pub p2p_subscription: RwLock<Option<String>>,
+    pub p2p_subscription_changed: tokio::sync::Notify,
+    pub p2p_receive_active: AtomicBool,
     pub notification_handler: RwLock<Option<Arc<NotificationHandler>>>,
     pub database: RwLock<Option<Arc<DatabaseManager>>>,
     pub database_lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
@@ -29,12 +39,19 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            audio_codec: AudioCodecState::new(),
+            camera_capture: Arc::new(CameraCaptureState::new()),
             account_session: RwLock::new(None),
             storage: RwLock::new(None),
             signal_handler: RwLock::new(None),
             tor_manager: RwLock::new(None),
+            pir_tor_manager: RwLock::new(None),
             websocket_handler: RwLock::new(None),
             p2p_handler: RwLock::new(None),
+            p2p_event_receiver: tokio::sync::Mutex::new(None),
+            p2p_subscription: RwLock::new(None),
+            p2p_subscription_changed: tokio::sync::Notify::new(),
+            p2p_receive_active: AtomicBool::new(false),
             notification_handler: RwLock::new(None),
             database: RwLock::new(None),
             database_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -61,6 +78,10 @@ impl AppState {
     /// Get Tor manager
     pub fn tor_manager(&self) -> Option<Arc<TorManager>> {
         self.tor_manager.read().clone()
+    }
+
+    pub fn pir_tor_manager(&self) -> Option<Arc<TorManager>> {
+        self.pir_tor_manager.read().clone()
     }
 
     /// Get WebSocket handler
@@ -103,6 +124,9 @@ impl Default for AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         if let Some(tor) = self.tor_manager.get_mut().as_ref().cloned() {
+            tor.shutdown_now();
+        }
+        if let Some(tor) = self.pir_tor_manager.get_mut().as_ref().cloned() {
             tor.shutdown_now();
         }
     }

@@ -5,7 +5,10 @@ import { taggedLaneRetriever } from '../../lib/spool/tagged-lane-retriever';
 
 // Offline retrieval
 interface OfflineMessagesProps {
-  encryptedHandlerRef: React.RefObject<(msg: any) => Promise<boolean>>;
+  encryptedHandlerRef: React.RefObject<(
+    msg: any,
+    deliverySource?: 'live' | 'spool-pir',
+  ) => Promise<boolean>>;
   hybridKeysRef: React.RefObject<any>;
   isReady: boolean;
   username?: string | null;
@@ -38,7 +41,7 @@ export function useOfflineMessages({
           username,
           async (msg) => {
             if (hybridKeysRef.current?.native !== true) return false;
-            return (await encryptedHandlerRef.current(msg)) !== false;
+            return (await encryptedHandlerRef.current(msg, 'spool-pir')) !== false;
           }
         );
         taggedLaneRetriever.start();

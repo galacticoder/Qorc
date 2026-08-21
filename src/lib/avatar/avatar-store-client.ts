@@ -66,6 +66,19 @@ const decoyCache = new Map<string, { ids: string[]; expiresAt: number }>();
 const scheduledUploads = new Set<ReturnType<typeof setTimeout>>();
 let accountGeneration = 0;
 
+type AvatarPutResult = 'success' | 'retry' | 'deferred';
+
+function isAvatarTransportReady(): boolean {
+    return websocketClient.isConnectedToServer() &&
+        websocketClient.isUnlinkedMode() &&
+        websocketClient.isUnlinkedSessionReady() &&
+        websocketClient.isPQSessionEstablished();
+}
+
+function isDeferredAvatarTransportError(message: string): boolean {
+    return /Authenticated PQ server transport is unavailable|Authenticated server transport changed|Anonymous server-entry authorization is unavailable|Anonymous account authorization is unavailable/i.test(message);
+}
+
 async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState | null> {
     const now = Date.now();
     const currentEpoch = Math.floor(now / DISCOVERY_EPOCH_DURATION_MS);
@@ -137,11 +150,12 @@ async function putAvatarBlob(
     blobId: string,
     data: string,
     generation: number
-): Promise<boolean> {
+): Promise<AvatarPutResult> {
     let token: AnonymousToken | null = null;
     let redemption: Awaited<ReturnType<PrivacyPassClient['prepareRedemption']>> | null = null;
     try {
-        if (generation !== accountGeneration) return false;
+        if (generation !== accountGeneration) return 'retry';
+        if (!isAvatarTransportReady()) return 'deferred';
         const context = await captureCurrentServerContext();
         const assertOwner = async () => {
             if (generation !== accountGeneration) throw new Error('Avatar account changed');
@@ -156,13 +170,14 @@ async function putAvatarBlob(
             AVATAR_PUT_POW_DIFFICULTY
         );
         await assertOwner();
-        if (powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)) return false;
+        if (powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)) return 'retry';
+        if (!isAvatarTransportReady()) return 'deferred';
         const serverEntryAuthorization = await websocketClient.reserveServerEntryAuthorization();
         await assertOwner();
-        if (!serverEntryAuthorization) return false;
+        if (!serverEntryAuthorization) return 'deferred';
         [token] = await tokenVault.reserveResumeTokens(1);
         await assertOwner();
-        if (!token) return false;
+        if (!token) return 'deferred';
         redemption = await new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE).prepareRedemption(token);
         await assertOwner();
         const authorization = PrivacyPassHelpers.formatResponse(redemption);
@@ -185,17 +200,19 @@ async function putAvatarBlob(
             Object.keys(resp).join(',') === 'ok' &&
             resp.ok === true;
         if (!ok) console.warn('[AVATAR] blob PUT rejected by server', { error: resp?.error || 'unknown' });
-        return ok;
+        return ok ? 'success' : 'retry';
     } catch (e: any) {
+        const message = e?.message || String(e);
+        if (isDeferredAvatarTransportError(message) || !isAvatarTransportReady()) {
+            return 'deferred';
+        }
         const now = Date.now();
-        const details = { error: e?.message || String(e) };
+        const details = { error: message };
         if (now - lastAvatarPutTransportWarnAt > AVATAR_PUT_TRANSPORT_WARN_INTERVAL_MS) {
             lastAvatarPutTransportWarnAt = now;
             console.warn('[AVATAR] blob PUT threw (transport)', details);
-        } else {
-            console.log('[AVATAR] blob PUT still failing (transport)', details);
         }
-        return false;
+        return 'retry';
     } finally {
         redemption?.nullifier.fill(0);
         redemption?.mac.fill(0);
@@ -216,9 +233,9 @@ function scheduleJitteredUpload(
     const timer = setTimeout(async () => {
         scheduledUploads.delete(timer);
         if (generation !== accountGeneration) { onComplete?.(false); return; }
-        const ok = await putAvatarBlob(blobId, data, generation);
+        const result = await putAvatarBlob(blobId, data, generation);
         if (generation !== accountGeneration) { onComplete?.(false); return; }
-        if (ok) {
+        if (result === 'success') {
             try {
                 await onSuccess?.();
             } catch {
@@ -226,6 +243,10 @@ function scheduleJitteredUpload(
                 return;
             }
             onComplete?.(true);
+            return;
+        }
+        if (result === 'deferred') {
+            scheduleJitteredUpload(blobId, data, attempt, onSuccess, generation, onComplete);
             return;
         }
         if (attempt + 1 < AVATAR_UPLOAD_MAX_ATTEMPTS) {

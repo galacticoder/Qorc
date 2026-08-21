@@ -4,15 +4,12 @@
 
 import {
   ScreenSharingSettings,
-  ScreenSharingResolution,
-  cloneScreenSharingSettings,
-  SCREEN_SHARING_RESOLUTIONS,
-  SCREEN_SHARING_FRAMERATES
+  cloneScreenSharingSettings
 } from '../types/screen-sharing-types';
 import { CryptoUtils } from '../utils/crypto-utils';
 import { encryptedStorage } from './encrypted-storage';
-import { PostQuantumRandom } from '../cryptography/random';
 import { SecureMemory } from '../cryptography/secure-memory';
+import { PostQuantumRandom } from '../cryptography/random';
 import {
   DEFAULT_QUALITY,
   QUALITY_OPTIONS,
@@ -59,27 +56,14 @@ function isTorMode(): boolean {
   }
 }
 
-// Build default resolution
-function buildDefaultResolution(): ScreenSharingResolution {
-  const viable = SCREEN_SHARING_RESOLUTIONS.filter(r => !r.isNative);
-  const pool = viable.length > 0 ? viable : SCREEN_SHARING_RESOLUTIONS;
-  const random = PostQuantumRandom.randomBytes(2);
-  try {
-    const idx = random.reduce((acc, byte) => (acc + byte) % pool.length, 0);
-    return { ...pool[idx] };
-  } finally {
-    SecureMemory.zeroBuffer(random);
-  }
-}
-
 // Deep validate settings
 function deepValidateSettings(settings: any): settings is InternalSettings {
   if (
     !settings ||
     typeof settings !== 'object' ||
     Array.isArray(settings) ||
-    Object.keys(settings).length !== 4 ||
-    !['resolution', 'frameRate', 'quality', 'updatedAt'].every(key =>
+    Object.keys(settings).length !== 2 ||
+    !['quality', 'updatedAt'].every(key =>
       Object.prototype.hasOwnProperty.call(settings, key)
     )
   ) {
@@ -90,37 +74,7 @@ function deepValidateSettings(settings: any): settings is InternalSettings {
     return false;
   }
   
-  const { resolution, frameRate, quality } = settings;
-  if (!resolution || typeof resolution !== 'object') {
-    return false;
-  }
-  
-  if (Array.isArray(resolution)) {
-    return false;
-  }
-  const { id, name, width, height, isNative } = resolution;
-  const preset = SCREEN_SHARING_RESOLUTIONS.find(candidate => candidate.id === id);
-  if (!preset) {
-    return false;
-  }
-  const expectedResolutionKeys = preset.isNative === undefined
-    ? ['id', 'name', 'width', 'height']
-    : ['id', 'name', 'width', 'height', 'isNative'];
-  if (
-    Object.keys(resolution).length !== expectedResolutionKeys.length ||
-    !expectedResolutionKeys.every(key => Object.prototype.hasOwnProperty.call(resolution, key)) ||
-    name !== preset.name ||
-    width !== preset.width ||
-    height !== preset.height ||
-    isNative !== preset.isNative
-  ) {
-    return false;
-  }
-  
-  if (typeof frameRate !== 'number' || !SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
-    return false;
-  }
-  
+  const { quality } = settings;
   if (!QUALITY_OPTIONS.includes(quality as any)) {
     return false;
   }
@@ -382,8 +336,6 @@ export class ScreenSharingSettingsManager {
       const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(decrypted));
       if (!deepValidateSettings(parsed)) return null;
       return {
-        resolution: { ...parsed.resolution },
-        frameRate: parsed.frameRate,
         quality: parsed.quality,
         updatedAt: parsed.updatedAt
       };
@@ -405,8 +357,6 @@ export class ScreenSharingSettingsManager {
   // Load settings from storage or return default
   private createDefaultSettings(): InternalSettings {
     return {
-      resolution: buildDefaultResolution(),
-      frameRate: 30,
       quality: DEFAULT_QUALITY,
       updatedAt: Date.now()
     };
@@ -489,8 +439,6 @@ export class ScreenSharingSettingsManager {
         throw new Error('Screen sharing settings account changed during update');
       }
       const current: InternalSettings = {
-        resolution: { ...this.settings.resolution },
-        frameRate: this.settings.frameRate,
         quality: this.settings.quality,
         updatedAt: this.settings.updatedAt
       };
@@ -530,37 +478,6 @@ export class ScreenSharingSettingsManager {
     return cloneScreenSharingSettings(this.settings!);
   }
 
-  // Set resolution
-  public async setResolution(resolution: ScreenSharingResolution): Promise<void> {
-    this.enforceRateLimit('setResolution');
-    const validResolution = resolution && typeof resolution === 'object'
-      ? SCREEN_SHARING_RESOLUTIONS.find(r => r.id === resolution.id)
-      : undefined;
-    if (!validResolution) {
-      throw new Error('Invalid resolution preset');
-    }
-    const nextResolution = { ...validResolution };
-    await this.mutateSettings(this.accountGeneration, settings => ({
-      ...settings,
-      resolution: nextResolution,
-      updatedAt: Date.now()
-    }));
-  }
-
-  // Set frame rate
-  public async setFrameRate(frameRate: number): Promise<void> {
-    this.enforceRateLimit('setFrameRate');
-    if (!SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
-      throw new Error('Invalid frame rate preset');
-    }
-    
-    await this.mutateSettings(this.accountGeneration, settings => ({
-      ...settings,
-      frameRate,
-      updatedAt: Date.now()
-    }));
-  }
-
   // Set quality
   public async setQuality(quality: string): Promise<void> {
     this.enforceRateLimit('setQuality');
@@ -584,34 +501,17 @@ export class ScreenSharingSettingsManager {
     const keys = Object.keys(newSettings);
     if (
       keys.length === 0 ||
-      keys.some(key => !['resolution', 'frameRate', 'quality'].includes(key))
+      keys.some(key => key !== 'quality')
     ) {
       throw new Error('Invalid settings update');
     }
 
-    let resolution: ScreenSharingResolution | undefined;
-    if (newSettings.resolution !== undefined) {
-      const preset = newSettings.resolution && typeof newSettings.resolution === 'object'
-        ? SCREEN_SHARING_RESOLUTIONS.find(candidate => candidate.id === newSettings.resolution!.id)
-        : undefined;
-      if (!preset) throw new Error('Invalid resolution preset');
-      resolution = { ...preset };
-    }
-    const frameRate = newSettings.frameRate;
-    if (
-      frameRate !== undefined &&
-      !SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])
-    ) {
-      throw new Error('Invalid frame rate preset');
-    }
     const quality = newSettings.quality;
     if (quality !== undefined && !QUALITY_OPTIONS.includes(quality as QualityOption)) {
       throw new Error('Invalid quality preset');
     }
 
     await this.mutateSettings(this.accountGeneration, settings => ({
-      resolution: resolution ?? settings.resolution,
-      frameRate: frameRate ?? settings.frameRate,
       quality: quality ?? settings.quality,
       updatedAt: Date.now()
     }));

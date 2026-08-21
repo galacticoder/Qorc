@@ -758,8 +758,6 @@ export class ClusterManager extends EventEmitter {
             cleanedCount,
             message: 'Removed ghost servers from previous crashes'
           });
-        } else {
-          console.log('[CLUSTER] No stale servers found - cluster is clean');
         }
       });
     } catch (error) {

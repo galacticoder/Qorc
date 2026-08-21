@@ -28,6 +28,7 @@ import {
   ML_KEM_1024_CIPHERTEXT_BYTES as ML_KEM_CIPHERTEXT_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES as ML_KEM_PUBLIC_KEY_BYTES
 } from '../../shared/crypto-sizes.js';
+import { DISCOVERY_BUCKET_QUERY_COUNT } from '../../shared/discovery-constants.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
   HASH_OUTPUT_BYTES,
@@ -60,6 +61,7 @@ const REQUEST_CLASS_BYTES = new Map([
 
 const RESPONSE_SMALL_BYTES = 64 * 1024;
 const RESPONSE_KEY_TRANSPARENCY_BYTES = 512 * 1024;
+const RESPONSE_PIR_BYTES = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES = 8912896;
 
@@ -100,10 +102,15 @@ const OPERATION_POLICY = Object.freeze({
   [KEY_TRANSPARENCY_APPEND_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
   'oprf/evaluate': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
   'spool/tag-index': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES }),
-  'spool/pir': Object.freeze({ requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES })
+  'spool/pir': Object.freeze({ requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 5, responseBytes: RESPONSE_PIR_BYTES })
 });
 
-const MAX_INFLIGHT = envInt('PQ_ANONYMOUS_HTTP_MAX_INFLIGHT', 4, 1, 16);
+const MAX_INFLIGHT = envInt(
+  'PQ_ANONYMOUS_HTTP_MAX_INFLIGHT',
+  2 * DISCOVERY_BUCKET_QUERY_COUNT,
+  DISCOVERY_BUCKET_QUERY_COUNT + 1,
+  16
+);
 const MAX_REQUESTS_PER_SECOND = envInt('PQ_ANONYMOUS_HTTP_MAX_RPS', 100, 1, 2_000);
 const MAX_FAILURE_INFLIGHT = envInt('PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT', 16, 1, 64);
 const MAX_FAILURES_PER_SECOND = envInt('PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS', 200, 1, 4_000);

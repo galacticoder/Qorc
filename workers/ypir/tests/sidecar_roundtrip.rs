@@ -1,6 +1,4 @@
-//! Drives the two real binaries against each other: the client sidecar builds a
-//! query, the worker answers it, the client decodes it. Neither ever sees the
-//! other's internals, which is the arrangement Qor actually deploys.
+//! Drives the two real binaries against each other
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -8,8 +6,11 @@ use std::process::{Child, Command, Stdio};
 const OP_QUERY: u8 = 1;
 const OP_DECODE: u8 = 2;
 const OP_DISCARD: u8 = 3;
+const OP_QUERY_BATCH: u8 = 4;
+const OP_DECODE_BATCH: u8 = 5;
 const OP_BUILD: u8 = 1;
 const OP_ANSWER: u8 = 2;
+const OP_ANSWER_BATCH: u8 = 4;
 
 const ENTRY_BYTES: usize = 8192 + 16;
 const COUNT: usize = 256;
@@ -114,8 +115,52 @@ fn client_and_worker_complete_a_private_retrieval() {
         assert_eq!(decoded, records[target], "row {target} did not round-trip");
     }
 
-    // Two queries for the same row must not produce the same bytes, or a server
-    // could tell that a client asked for something twice.
+    let targets = [3usize, 17, COUNT - 2];
+    let mut batch_request = Vec::new();
+    batch_request.extend_from_slice(&(COUNT as u32).to_le_bytes());
+    batch_request.extend_from_slice(&(ENTRY_BYTES as u32).to_le_bytes());
+    batch_request.extend_from_slice(&(targets.len() as u32).to_le_bytes());
+    for target in targets {
+        batch_request.extend_from_slice(&(target as u32).to_le_bytes());
+    }
+    let (status, generated) = call(&mut client, OP_QUERY_BATCH, &batch_request);
+    assert_eq!(
+        status,
+        0,
+        "batch query: {}",
+        String::from_utf8_lossy(&generated)
+    );
+    let session_id = &generated[0..4];
+    let query_len = u32::from_le_bytes(generated[4..8].try_into().unwrap()) as usize;
+    let params_len = u32::from_le_bytes(generated[8..12].try_into().unwrap()) as usize;
+    let mut answer = Vec::new();
+    answer.extend_from_slice(&epoch.to_le_bytes());
+    answer.extend_from_slice(&(query_len as u32).to_le_bytes());
+    answer.extend_from_slice(&generated[12..12 + query_len]);
+    answer.extend_from_slice(&generated[12 + query_len..12 + query_len + params_len]);
+    let (status, response) = call(&mut worker, OP_ANSWER_BATCH, &answer);
+    assert_eq!(
+        status,
+        0,
+        "batch answer: {}",
+        String::from_utf8_lossy(&response)
+    );
+    let mut decode = Vec::with_capacity(4 + response.len());
+    decode.extend_from_slice(session_id);
+    decode.extend_from_slice(&response);
+    let (status, decoded) = call(&mut client, OP_DECODE_BATCH, &decode);
+    assert_eq!(
+        status,
+        0,
+        "batch decode: {}",
+        String::from_utf8_lossy(&decoded)
+    );
+    let expected = targets
+        .iter()
+        .flat_map(|target| records[*target].iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(decoded, expected);
+
     let mut request = Vec::new();
     request.extend_from_slice(&(COUNT as u32).to_le_bytes());
     request.extend_from_slice(&(ENTRY_BYTES as u32).to_le_bytes());
@@ -137,8 +182,6 @@ fn client_and_worker_complete_a_private_retrieval() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Sizes the anonymous-tunnel classes. A PIR request and response must fit a
-/// fixed class or the transport cannot carry them without leaking length.
 #[test]
 fn reports_wire_sizes_for_transport_classes() {
     let mut client = spawn("qor-pir-client");
@@ -156,7 +199,7 @@ fn reports_wire_sizes_for_transport_classes() {
             query_len + params_len
         );
     }
-    // Response size decides the download class, so measure it rather than guess.
+    
     let records: Vec<Vec<u8>> = (0..COUNT).map(|i| record(i as u64 + 1)).collect();
     let dir = std::env::temp_dir().join(format!("qor-pir-size-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

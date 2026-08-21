@@ -69,6 +69,8 @@ import {
 } from '../../lib/key-transparency/verified-material';
 import { awaitPeerIdentityRevocation } from '../../lib/key-transparency/revocation';
 import { resolveTrustedPeerHybridPublicKeys } from '../../lib/utils/signal-bundle-utils';
+import { detectionTagForProbe } from '../../lib/spool/detection-key';
+import { loadConsumedSpoolProbeCache } from '../../lib/spool/consumed-probe-cache';
 
 const P2P_SESSION_RESET_COOLDOWN_MS = 10 * 1000;
 const SEALED_DECAP_NEG_CACHE_MAX = 20000;
@@ -575,7 +577,12 @@ export function useEncryptedMessageHandler(
       encryptedMessage: any,
       options: {
         source?: 'external' | 'native-pending';
-        __status?: { notReady: boolean; durablyStaged: boolean };
+        __status?: {
+          notReady: boolean;
+          durablyStaged: boolean;
+          authenticated: boolean;
+          spoolTerminal: boolean;
+        };
       } = {}
     ) => {
       const accountGeneration = accountGenerationRef.current;
@@ -641,6 +648,18 @@ export function useEncryptedMessageHandler(
       const candidateSealedEnvelope = isSealedEnvelope
         ? (encryptedMessage?.envelope || encryptedMessage?.payload)
         : null;
+      if (candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION) {
+        const expectedDetectionTag = await detectionTagForProbe(
+          currentUser,
+          candidateSealedEnvelope.probe,
+        );
+        if (abortIfStale()) return;
+        if (expectedDetectionTag === null) {
+          if (options.__status) options.__status.notReady = true;
+          return;
+        }
+        if (expectedDetectionTag !== candidateSealedEnvelope.tag) return;
+      }
       const sealedEnvelopeCacheKey = candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION
         ? computeSealedEnvelopeCacheKey(candidateSealedEnvelope)
         : null;
@@ -658,7 +677,13 @@ export function useEncryptedMessageHandler(
       if (envelopeDedupKey) {
         const processed = processedEnvelopeIdsRef.current.get(envelopeDedupKey);
         if (processed) {
-          await requeueCachedDeliveryReceipt(processed.deliveryReceipt);
+          if (
+            await requeueCachedDeliveryReceipt(processed.deliveryReceipt) &&
+            options.__status
+          ) {
+            options.__status.authenticated = true;
+            options.__status.spoolTerminal = true;
+          }
           return;
         }
       }
@@ -714,6 +739,10 @@ export function useEncryptedMessageHandler(
         let transportWrapperMessageId = isP2PTransport ? envelopeMessageId : null;
         const commitAuthenticatedMessage = () => {
           if (abortIfStale()) return;
+          if (options.__status) {
+            options.__status.authenticated = true;
+            options.__status.spoolTerminal = true;
+          }
           const entry: ProcessedDedupEntry = {
             processedAt: Date.now(),
             deliveryReceipt: authenticatedReplayReceipt,
@@ -936,8 +965,10 @@ export function useEncryptedMessageHandler(
           try {
             material = await findUser(peerUsername).catch(() => null);
             if (
-              typeof material?.fullBundle?.identityKeyBase64 !== 'string' ||
+              material &&
+              (typeof material.fullBundle?.identityKeyBase64 !== 'string' ||
               material.fullBundle.identityKeyBase64 !== presentedIdentity
+              )
             ) {
               material = await findUser(peerUsername, { forceRefresh: true });
             }
@@ -1047,32 +1078,64 @@ export function useEncryptedMessageHandler(
               if (options.__status) options.__status.notReady = true;
               return;
             }
-            let material: any;
-            let trusted: Awaited<ReturnType<typeof resolveTrustedPeerHybridPublicKeys>>;
-            try {
-              material = await findUser(pendingPeer, { forceRefresh: true });
-              if (abortIfStale()) return;
-              trusted = await resolveTrustedPeerHybridPublicKeys(
+            const resolvePendingIdentity = async (forceRefresh: boolean) => {
+              const material = await findUser(
+                pendingPeer,
+                forceRefresh ? { forceRefresh: true } : undefined,
+              );
+              if (abortIfStale()) return null;
+              const trusted = await resolveTrustedPeerHybridPublicKeys(
                 currentUser,
                 pendingPeer,
-                material
+                material,
               );
+              const currentSignalIdentity = typeof material?.fullBundle?.identityKeyBase64 === 'string'
+                ? material.fullBundle.identityKeyBase64
+                : '';
+              if (
+                !trusted.valid ||
+                !trusted.hybridKeys ||
+                !trusted.peerCertificateFingerprint ||
+                !trusted.identityRootFingerprint ||
+                !trusted.identityBundleFingerprint ||
+                !/^[A-Za-z0-9+/]{44}$/.test(currentSignalIdentity)
+              ) {
+                return null;
+              }
+              const authorization = captureKeyTransparencyPeerAuthorization(
+                currentUser,
+                pendingPeer,
+                trusted.hybridKeys.dilithiumPublicBase64,
+              );
+              if (!authorization) return null;
+              return { currentSignalIdentity, trusted, authorization };
+            };
+            let resolvedPendingIdentity;
+            try {
+              resolvedPendingIdentity = await resolvePendingIdentity(false);
+              if (
+                resolvedPendingIdentity && (
+                resolvedPendingIdentity.currentSignalIdentity !== encryptedMessage.senderIdentityKey ||
+                resolvedPendingIdentity.authorization.identityRootFingerprint !== encryptedMessage.identityRootFingerprint ||
+                resolvedPendingIdentity.authorization.identityBundleFingerprint !== encryptedMessage.identityBundleFingerprint
+                )
+              ) {
+                resolvedPendingIdentity = await resolvePendingIdentity(true);
+              }
             } catch {
               if (options.__status) options.__status.notReady = true;
               return;
             }
-            const currentSignalIdentity = typeof material?.fullBundle?.identityKeyBase64 === 'string'
-              ? material.fullBundle.identityKeyBase64
-              : '';
-            if (
-              !trusted.valid ||
-              !trusted.hybridKeys ||
-              !trusted.peerCertificateFingerprint ||
-              !trusted.identityRootFingerprint ||
-              !trusted.identityBundleFingerprint ||
-              !/^[A-Za-z0-9+/]{44}$/.test(currentSignalIdentity)
-            ) {
+            if (!resolvedPendingIdentity) {
               if (options.__status) options.__status.notReady = true;
+              return;
+            }
+            const { currentSignalIdentity, trusted, authorization } = resolvedPendingIdentity;
+            if (
+              currentSignalIdentity !== encryptedMessage.senderIdentityKey ||
+              authorization.identityRootFingerprint !== encryptedMessage.identityRootFingerprint ||
+              authorization.identityBundleFingerprint !== encryptedMessage.identityBundleFingerprint
+            ) {
               return;
             }
             try {
@@ -1087,22 +1150,6 @@ export function useEncryptedMessageHandler(
               }
             } catch {
               if (options.__status) options.__status.notReady = true;
-              return;
-            }
-            const authorization = captureKeyTransparencyPeerAuthorization(
-              currentUser,
-              pendingPeer,
-              trusted.hybridKeys.dilithiumPublicBase64,
-            );
-            if (!authorization) {
-              if (options.__status) options.__status.notReady = true;
-              return;
-            }
-            if (
-              currentSignalIdentity !== encryptedMessage.senderIdentityKey ||
-              authorization.identityRootFingerprint !== encryptedMessage.identityRootFingerprint ||
-              authorization.identityBundleFingerprint !== encryptedMessage.identityBundleFingerprint
-            ) {
               return;
             }
             verifiedPending = {
@@ -1240,6 +1287,8 @@ export function useEncryptedMessageHandler(
             ) {
               return;
             }
+            await keyTransparencyClient.restorePersistedAuthorizations(currentUser).catch(() => 0);
+            if (abortIfStale()) return;
             const senderWasRevoked = isKeyTransparencyPeerRevoked(currentUser, senderUsernameHint);
             if (senderWasRevoked) {
               if (hasVerifiedP2PSender) return;
@@ -1325,8 +1374,10 @@ export function useEncryptedMessageHandler(
                       ) {
                         return { trust: cachedTrust, fromCache: true };
                       }
+                    } else {
+                      return { trust: null, fromCache: false };
                     }
-                    
+
                     const fresh = await findUser(senderUsernameHint, { forceRefresh: true });
                     return {
                       trust: fresh
@@ -1516,7 +1567,13 @@ export function useEncryptedMessageHandler(
               if (preKeyDedupKey) {
                 const processed = processedPreKeyMessagesRef.current.get(preKeyDedupKey);
                 if (processed) {
-                  await requeueCachedDeliveryReceipt(processed.deliveryReceipt);
+                  if (
+                    await requeueCachedDeliveryReceipt(processed.deliveryReceipt) &&
+                    options.__status
+                  ) {
+                    options.__status.authenticated = true;
+                    options.__status.spoolTerminal = true;
+                  }
                   return;
                 }
               }
@@ -1525,7 +1582,13 @@ export function useEncryptedMessageHandler(
             if (signalCipherKey) {
               const processed = processedSignalCiphertextsRef.current.get(signalCipherKey);
               if (processed) {
-                await requeueCachedDeliveryReceipt(processed.deliveryReceipt);
+                if (
+                  await requeueCachedDeliveryReceipt(processed.deliveryReceipt) &&
+                  options.__status
+                ) {
+                  options.__status.authenticated = true;
+                  options.__status.spoolTerminal = true;
+                }
                 return;
               }
             }
@@ -1901,54 +1964,6 @@ export function useEncryptedMessageHandler(
               commitAuthenticatedMessage();
               return;
             }
-
-            const db = secureDBRef?.current;
-            if (!db || !isDatabaseReady) {
-              commitAuthenticatedMessage();
-              return;
-            }
-            let hasDeliberateContact = false;
-            try {
-              hasDeliberateContact = await db.hasDeliberateContact(callSignal.from);
-            } catch {
-              commitAuthenticatedMessage();
-              return;
-            }
-            if (abortIfStale() || secureDBRef?.current !== db) return;
-
-            if (!hasDeliberateContact) {
-              const at = Date.now();
-              window.dispatchEvent(new CustomEvent(EventType.UI_CALL_LOG, {
-                detail: {
-                  account: currentUser,
-                  at,
-                  callId: callSignal.callId,
-                  isOutgoing: false,
-                  isVideo: callSignal.data.callType === 'video',
-                  historyOnly: true,
-                  peer: callSignal.from,
-                  type: 'declined',
-                }
-              }));
-              commitAuthenticatedMessage();
-              const decline = {
-                type: 'decline-call' as const,
-                callId: callSignal.callId,
-                from: currentUser,
-                to: callSignal.from,
-                timestamp: at,
-              };
-              void unifiedSignalTransport.send(
-                callSignal.from,
-                { content: JSON.stringify(decline) },
-                SignalType.CALL_SIGNAL,
-              ).then((result) => {
-                if (!result.success) {
-                  console.warn('[CALL-SIGNAL-RECV] immediate decline was not transmitted');
-                }
-              }).catch(() => { });
-              return;
-            }
           }
 
           dispatchAuthenticatedCallSignal(callSignal);
@@ -2112,9 +2127,18 @@ export function useEncryptedMessageHandler(
   );
 
   const enqueueEncryptedMessage = useCallback(
-    (encryptedMessage: any, source: 'external' | 'native-pending'): Promise<boolean> => {
+    (
+      encryptedMessage: any,
+      source: 'external' | 'native-pending',
+      deliverySource: 'live' | 'spool-pir' = 'live',
+    ): Promise<boolean> => {
       const accountGeneration = accountGenerationRef.current;
-      const status = { notReady: false, durablyStaged: false };
+      const status = {
+        notReady: false,
+        durablyStaged: false,
+        authenticated: false,
+        spoolTerminal: false,
+      };
       if (processingDepthRef.current >= MAX_INBOUND_PROCESSING_QUEUE) {
         console.warn('[EncryptedMessageHandler] inbound processing queue saturated, dropping message', {
           depth: processingDepthRef.current
@@ -2138,15 +2162,43 @@ export function useEncryptedMessageHandler(
       }).catch(() => { });
       
       return run.then(
-        () => !status.notReady || status.durablyStaged,
+        async () => {
+          const accepted = deliverySource === 'spool-pir'
+            ? status.spoolTerminal || status.durablyStaged
+            : !status.notReady || status.durablyStaged;
+          if (
+            source === 'external' &&
+            (status.spoolTerminal || status.durablyStaged) &&
+            accountGeneration === accountGenerationRef.current
+          ) {
+            const envelope = encryptedMessage?.type === SignalType.SEALED_ENVELOPE
+              ? (encryptedMessage?.envelope || encryptedMessage?.payload)
+              : null;
+            if (
+              envelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION &&
+              typeof envelope.probe === 'string'
+            ) {
+              try {
+                const cache = await loadConsumedSpoolProbeCache(loginUsernameRef.current || '');
+                if (accountGeneration === accountGenerationRef.current) {
+                  await cache.remember([envelope.probe]);
+                }
+              } catch { }
+            }
+          }
+          return accepted;
+        },
         () => status.durablyStaged,
       );
     },
-    [handleEncryptedMessageCallback]
+    [handleEncryptedMessageCallback, loginUsernameRef]
   );
 
   const serializedEncryptedMessageHandler = useCallback(
-    (encryptedMessage: any): Promise<boolean> => enqueueEncryptedMessage(encryptedMessage, 'external'),
+    (
+      encryptedMessage: any,
+      deliverySource: 'live' | 'spool-pir' = 'live',
+    ): Promise<boolean> => enqueueEncryptedMessage(encryptedMessage, 'external', deliverySource),
     [enqueueEncryptedMessage]
   );
 

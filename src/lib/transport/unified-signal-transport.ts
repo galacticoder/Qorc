@@ -30,7 +30,6 @@ import {
 import { blockingSystem } from '../blocking/blocking-system';
 import { canonicalBase64Shape, isHybridEnvelopeWireShape } from './envelope-shape';
 
-const FORCE_DISCOVERY_REFRESH_COOLDOWN_MS = 10_000;
 const ENCRYPTION_DENIAL_FRESH_MS = 60_000;
 const REDELIVER_MAX_AGE_MS = OUTBOUND_RETRY_MAX_AGE_MS;
 const CALL_SIGNAL_QUEUE_MAX_WAIT_MS = 5_000;
@@ -56,7 +55,6 @@ const MAX_PRIORITY_BURST = 4;
 const MAX_DURABLE_ACK_BYTES = 16 * 1024 * 1024;
 const DURABLE_ACK_RETRY_MS = 30_000;
 const DURABLE_ACK_RESTORE_RETRY_BASE_MS = 1000;
-const MAX_FORCE_REFRESH_COOLDOWNS = 512;
 
 const ACK_TRACKED_SIGNAL_TYPES: ReadonlySet<SignalType> = new Set([
     SignalType.MESSAGE,
@@ -105,10 +103,9 @@ class UnifiedSignalTransport {
     private recipientPolicyGeneration = 0;
     private recipientPolicyEpochs = new Map<string, number>();
     private deliveryAckGeneration = 0;
-    private encryptionProvider: ((to: string, payload: any, type: SignalType, options?: { forceDiscoveryRefresh?: boolean }) => Promise<any>) | null = null;
+    private encryptionProvider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null = null;
     private lastEncryptionDenial: { to: string; type: string; reason: string; at: number } | null = null;
     private p2pSender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null = null;
-    private forceRefreshCooldownUntil: Map<string, number> = new Map();
     private pendingRedelivery: Map<string, {
         to: string;
         envelope: any;
@@ -221,8 +218,6 @@ class UnifiedSignalTransport {
     }
 
     private cancelPeerTraffic(peer: string): void {
-        this.forceRefreshCooldownUntil.delete(peer);
-
         const queue = this.sendQueues.get(peer);
         if (queue) {
             for (const task of queue.high) task.cancel('recipient-blocked');
@@ -333,7 +328,7 @@ class UnifiedSignalTransport {
     }
 
     // Register a provider that encrypts payloads
-    setEncryptionProvider(provider: ((to: string, payload: any, type: SignalType, options?: { forceDiscoveryRefresh?: boolean }) => Promise<any>) | null): void {
+    setEncryptionProvider(provider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null): void {
         this.encryptionProvider = provider;
     }
 
@@ -925,8 +920,7 @@ class UnifiedSignalTransport {
 
     private async sealForServer(
         envelopeToSend: any,
-        peer: string,
-        allowUntargeted: boolean = false
+        peer: string
     ): Promise<{ sealed: any; tag: string }> {
         if (!canonicalBase64Shape(envelopeToSend?.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE })) {
             throw new Error('Invalid recipient ML-KEM routing key');
@@ -951,7 +945,7 @@ class UnifiedSignalTransport {
             const context = detectionKey
                 ? await nextOutboundTag(client.identity, peer, detectionKey)
                 : null;
-            if (!context && !allowUntargeted) {
+            if (!context) {
                 throw new Error(`Spool tagging requires the detection key for ${peer}`);
             }
             const sealed = await client.createSealedEnvelope(
@@ -962,8 +956,9 @@ class UnifiedSignalTransport {
                 },
                 {
                     forceLargeFrame: typeof envelopeToSend.fileTransferId === 'string',
-                    forceStandardFrame: !allowUntargeted,
-                    ...(context ? { tag: context.tag, probe: context.probe } : {})
+                    forceStandardFrame: typeof envelopeToSend.fileTransferId !== 'string',
+                    tag: context.tag,
+                    probe: context.probe
                 }
             );
 
@@ -987,56 +982,15 @@ class UnifiedSignalTransport {
         if (initialPolicyFailure) return initialPolicyFailure;
         const encryptionProvider = this.encryptionProvider;
         const p2pSender = this.p2pSender;
-        // Get encrypted envelope
+        
         if (!encryptionProvider) {
             console.error('[MSG-SEND] no encryption provider set');
             return { success: false, transport: 'server', error: 'Encryption provider not set' };
         }
 
-        let forceRefreshAttempted = false;
-        let forceRefreshResult: any | null = null;
-        const refreshDiscoveryMaterialOnce = async (reason: string): Promise<any | null> => {
-            if (policyFailure()) return null;
-            if (forceRefreshAttempted) return forceRefreshResult;
-            forceRefreshAttempted = true;
-            const refreshKey = to.trim().toLowerCase();
-
-            const now = Date.now();
-            const cooldownUntil = this.forceRefreshCooldownUntil.get(refreshKey) || 0;
-            if (now < cooldownUntil) return null;
-
-            console.warn('[UnifiedTransport] One-shot discovery refresh retry', { reason });
-            const refreshed = await encryptionProvider(to, payload, type, { forceDiscoveryRefresh: true }).catch(() => null);
-            if (policyFailure()) return null;
-
-            if (!refreshed) {
-                this.forceRefreshCooldownUntil.delete(refreshKey);
-                while (this.forceRefreshCooldownUntil.size >= MAX_FORCE_REFRESH_COOLDOWNS) {
-                    const oldest = this.forceRefreshCooldownUntil.keys().next().value;
-                    if (typeof oldest !== 'string') break;
-                    this.forceRefreshCooldownUntil.delete(oldest);
-                }
-                this.forceRefreshCooldownUntil.set(refreshKey, Date.now() + FORCE_DISCOVERY_REFRESH_COOLDOWN_MS);
-            } else {
-                this.forceRefreshCooldownUntil.delete(refreshKey);
-            }
-            forceRefreshResult = refreshed;
-            return forceRefreshResult;
-        };
-
-        let encryptedResult = await encryptionProvider(to, payload, type, { forceDiscoveryRefresh: false });
+        const encryptedResult = await encryptionProvider(to, payload, type);
         const postEncryptionPolicyFailure = policyFailure();
         if (postEncryptionPolicyFailure) return postEncryptionPolicyFailure;
-        if (!encryptedResult && type !== SignalType.CALL_SIGNAL) {
-            const refreshed = await refreshDiscoveryMaterialOnce('initial-encryption-failure');
-            if (refreshed) {
-                encryptedResult = refreshed;
-            }
-        } else {
-            this.forceRefreshCooldownUntil.delete(to.trim().toLowerCase());
-        }
-        const postRefreshPolicyFailure = policyFailure();
-        if (postRefreshPolicyFailure) return postRefreshPolicyFailure;
         if (!encryptedResult) {
             const denial = this.lastEncryptionDenial;
             const reason = denial &&
@@ -1131,11 +1085,7 @@ class UnifiedSignalTransport {
                 return { success: false, transport: 'server', error: 'valid recipientKyberPublicBase64 required' };
             }
 
-            const { sealed: sealedEnvelope } = await this.sealForServer(
-                envelopeToSend,
-                to,
-                isLiveOnlySignalType(type)
-            );
+            const { sealed: sealedEnvelope } = await this.sealForServer(envelopeToSend, to);
             const postSealPolicyFailure = policyFailure();
             if (postSealPolicyFailure) return postSealPolicyFailure;
 
@@ -1901,10 +1851,6 @@ class UnifiedSignalTransport {
         }
     }
 
-    clearRefreshCooldowns(): void {
-        this.forceRefreshCooldownUntil.clear();
-    }
-
     resetForAccountTransition(): void {
         clearDetectionKeyCaches();
         this.accountGeneration += 1;
@@ -1925,7 +1871,6 @@ class UnifiedSignalTransport {
         this.recoveryClearPending.clear();
         this.recoveryClearTask = null;
 
-        this.forceRefreshCooldownUntil.clear();
         this.pendingRedelivery.clear();
         this.redeliveryInFlight.clear();
         this.redeliveryNormalFlushRequested = false;

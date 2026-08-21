@@ -114,9 +114,6 @@ export function useEventHandlers({
           next[index] = nextUser;
           return next;
         });
-        window.dispatchEvent(new CustomEvent(EventType.P2P_FETCH_PEER_CERT, {
-          detail: { account: currentUsername, peer: username },
-        }));
       } catch { }
     };
 

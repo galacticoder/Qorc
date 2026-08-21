@@ -2,6 +2,7 @@ import type { Message } from '../../components/chat/messaging/types';
 import {
   MAX_UI_MESSAGES_PER_CONVERSATION,
   MAX_UI_MESSAGES_TOTAL,
+  MAX_CONVERSATION_STORED_MESSAGES,
 } from '../constants';
 
 export const setBoundedMapEntry = <K, V>(
@@ -34,21 +35,29 @@ const conversationKey = (message: Message): string => {
   return `unscoped\0${sender}\0${recipient}`;
 };
 
-export const boundMessageState = (messages: Message[]): Message[] => {
+export const boundMessageState = (messages: Message[], activePeer?: string | null): Message[] => {
   if (messages.length === 0) return messages;
   const conversationCounts = new Map<string, number>();
   const retained = new Uint8Array(messages.length);
   let retainedCount = 0;
+  let inactiveRetainedCount = 0;
 
   // Message arrays are kept in chronological/insertion order
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (retainedCount >= MAX_UI_MESSAGES_TOTAL) break;
     const key = conversationKey(messages[index]);
     const count = conversationCounts.get(key) || 0;
-    if (count >= MAX_UI_MESSAGES_PER_CONVERSATION) continue;
+    const isActiveConversation = !!activePeer && (
+      messages[index].sender === activePeer || messages[index].recipient === activePeer
+    );
+    const conversationLimit = isActiveConversation
+      ? MAX_CONVERSATION_STORED_MESSAGES
+      : MAX_UI_MESSAGES_PER_CONVERSATION;
+    if (!isActiveConversation && inactiveRetainedCount >= MAX_UI_MESSAGES_TOTAL) continue;
+    if (count >= conversationLimit) continue;
     conversationCounts.set(key, count + 1);
     retained[index] = 1;
     retainedCount += 1;
+    if (!isActiveConversation) inactiveRetainedCount += 1;
   }
 
   if (retainedCount === messages.length) return messages;

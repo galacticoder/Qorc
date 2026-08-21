@@ -8,9 +8,11 @@ import { captureCurrentServerContext } from '../security/local-account-scope';
 import { fetchSpoolTagIndex } from './tag-index-client';
 import { fetchSpoolEntries, sealedEnvelopeFromRecord } from './pir-fetch';
 import { detectionTagForProbe, ownDetectionPublicKeyHex } from './detection-key';
+import { loadConsumedSpoolProbeCache } from './consumed-probe-cache';
 
 const testedProbes = new Set<string>();
-const MAX_TESTED_PROBES = 200_000;
+const MAX_TESTED_PROBES = 32_768;
+let activeProbeScope: string | null = null;
 
 export type TaggedLaneCandidateCallback = (
   message: { type: SignalType; envelope: unknown }
@@ -25,6 +27,13 @@ export interface TaggedLaneRetrieverOptions {
 export async function retrieveTaggedLaneOnce(
   options: TaggedLaneRetrieverOptions
 ): Promise<{ fetched: number; delivered: number } | null> {
+  const consumedProbeCache = await loadConsumedSpoolProbeCache(options.owner);
+  if (activeProbeScope !== consumedProbeCache.scope) {
+    testedProbes.clear();
+    activeProbeScope = consumedProbeCache.scope;
+  }
+  for (const probe of consumedProbeCache.probes) testedProbes.add(probe);
+
   const index = await fetchSpoolTagIndex(options.serverUrl);
   if (!index || index.tags.length === 0) {
     console.log(
@@ -47,22 +56,13 @@ export async function retrieveTaggedLaneOnce(
     }
   }
   if (testedProbes.size > MAX_TESTED_PROBES) {
-    for (const probe of Array.from(testedProbes).slice(0, testedProbes.size - MAX_TESTED_PROBES)) {
+    while (testedProbes.size > MAX_TESTED_PROBES) {
+      const probe = testedProbes.values().next().value;
+      if (typeof probe !== 'string') break;
       testedProbes.delete(probe);
     }
   }
 
-  console.log('[SPOOL-PIR] detection pass', JSON.stringify({
-    entries: index.tags.length,
-    probes: index.probes.filter(Boolean).length,
-    tested: testedProbes.size,
-    matched: matchedPositions.length,
-    detectKey8: (await ownDetectionPublicKeyHex(options.owner).catch(() => null))?.slice(0, 8) ?? null,
-  }));
-  console.log(
-    '[SPOOL-PIR] index tail',
-    index.tags.slice(-8).map((t) => t.slice(0, 8)).join(' ')
-  );
   if (matchedPositions.length === 0) {
     return { fetched: 0, delivered: 0 };
   }
@@ -76,6 +76,7 @@ export async function retrieveTaggedLaneOnce(
   );
 
   let delivered = 0;
+  const consumedProbes: string[] = [];
   for (const [position, record] of records) {
     const envelope = sealedEnvelopeFromRecord(
       record,
@@ -90,6 +91,7 @@ export async function retrieveTaggedLaneOnce(
       });
       if (accepted !== false) {
         testedProbes.add(index.probes[position]);
+        consumedProbes.push(index.probes[position]);
         delivered += 1;
       }
     } catch (error) {
@@ -98,6 +100,9 @@ export async function retrieveTaggedLaneOnce(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+  if (consumedProbes.length > 0) {
+    await consumedProbeCache.remember(consumedProbes);
   }
 
   return { fetched: records.size, delivered };
@@ -112,7 +117,10 @@ class TaggedLaneRetriever {
   private deliver: TaggedLaneCandidateCallback | null = null;
 
   configure(owner: string, deliver: TaggedLaneCandidateCallback) {
-    if (this.owner !== null && this.owner !== owner) testedProbes.clear();
+    if (this.owner !== null && this.owner !== owner) {
+      testedProbes.clear();
+      activeProbeScope = null;
+    }
     this.owner = owner;
     this.deliver = deliver;
   }

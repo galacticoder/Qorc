@@ -178,7 +178,6 @@ const MAX_WS_INBOUND_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WS_INBOUND_BUFFERED_FRAMES: usize = 4096;
 pub const WS_EVENT_CHANNEL_CAPACITY: usize = MAX_WS_INBOUND_BUFFERED_FRAMES + 16;
 
-
 pub fn release_ws_inbound_bytes(n: usize) {
     if n > 0 {
         let _ = WS_INBOUND_BUFFERED_FRAMES.fetch_update(
@@ -945,7 +944,7 @@ impl WebSocketHandler {
                     {
                         break;
                     }
-                    
+
                     error!(
                         "[WS] read failed for token={}: {}",
                         connection_token, read_error
@@ -1018,7 +1017,7 @@ impl WebSocketHandler {
                         .as_ref()
                         .map(|entry| entry.connection_token == connection_token)
                         .unwrap_or(false);
-                        
+
                     if !generation_is_current && queued.reservation.is_some() {
                         break;
                     }
@@ -1108,7 +1107,7 @@ impl WebSocketHandler {
                     error: Some("WebSocket connection generation changed".to_string()),
                 });
             }
-            
+
             if payload.len() > MAX_WS_MESSAGE_BYTES {
                 return Ok(SendResult {
                     success: false,
@@ -1133,7 +1132,7 @@ impl WebSocketHandler {
             deserializer
                 .end()
                 .map_err(|_| QorError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
-                
+
             let Some(queued) =
                 QueuedWsMessage::reserved(Message::Text(payload), entry.pending_writes)
             else {

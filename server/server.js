@@ -1,4 +1,9 @@
 import nodeCrypto from 'crypto';
+
+if (process.platform !== 'linux') {
+  throw new Error('Native server deployment supports only Linux');
+}
+
 if (!global.crypto) {
   global.crypto = nodeCrypto.webcrypto;
 }

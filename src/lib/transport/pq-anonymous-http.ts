@@ -56,6 +56,7 @@ const REQUEST_PIR_BYTES = 2 * 1024 * 1024;
 const REQUEST_LARGE_BYTES = 512 * 1024;
 const RESPONSE_SMALL_BYTES = 64 * 1024;
 const RESPONSE_KEY_TRANSPARENCY_BYTES = 512 * 1024;
+const RESPONSE_PIR_BYTES = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES = 8912896;
 
@@ -94,22 +95,45 @@ const OPERATION_POLICY: Readonly<Record<AnonymousHttpOperation, {
   [KEY_TRANSPARENCY_APPEND_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
   [OPRF_EVALUATE_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
   [SPOOL_TAG_INDEX_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES },
-  [SPOOL_PIR_AUDIENCE]: { requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES },
+  [SPOOL_PIR_AUDIENCE]: { requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 5, responseBytes: RESPONSE_PIR_BYTES },
 });
 
-let activeRequests = 0;
-const requestWaiters: Array<{
+interface RequestWaiter {
   resolve: () => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-}> = [];
+}
 
-async function acquireRequestSlot(): Promise<() => void> {
-  if (activeRequests < MAX_CONCURRENT_REQUESTS) {
-    activeRequests += 1;
-    return releaseRequestSlot;
+interface RequestLaneState {
+  active: number;
+  readonly maxActive: number;
+  readonly maxQueued: number;
+  readonly waiters: RequestWaiter[];
+}
+
+const primaryRequestLane: RequestLaneState = {
+  active: 0,
+  maxActive: MAX_CONCURRENT_REQUESTS,
+  maxQueued: MAX_QUEUED_REQUESTS,
+  waiters: [],
+};
+const pirRequestLane: RequestLaneState = {
+  active: 0,
+  maxActive: 1,
+  maxQueued: 16,
+  waiters: [],
+};
+
+function isPirTransportOperation(operation: AnonymousHttpOperation): boolean {
+  return operation === SPOOL_TAG_INDEX_AUDIENCE || operation === SPOOL_PIR_AUDIENCE;
+}
+
+async function acquireRequestSlot(lane: RequestLaneState): Promise<() => void> {
+  if (lane.active < lane.maxActive) {
+    lane.active += 1;
+    return () => releaseRequestSlot(lane);
   }
-  if (requestWaiters.length >= MAX_QUEUED_REQUESTS) {
+  if (lane.waiters.length >= lane.maxQueued) {
     throw new Error('Anonymous transport queue is full');
   }
 
@@ -118,24 +142,24 @@ async function acquireRequestSlot(): Promise<() => void> {
       resolve,
       reject,
       timer: setTimeout(() => {
-        const index = requestWaiters.indexOf(waiter);
-        if (index >= 0) requestWaiters.splice(index, 1);
+        const index = lane.waiters.indexOf(waiter);
+        if (index >= 0) lane.waiters.splice(index, 1);
         reject(new Error('Anonymous transport queue timed out'));
       }, QUEUE_TIMEOUT_MS),
     };
-    requestWaiters.push(waiter);
+    lane.waiters.push(waiter);
   });
-  return releaseRequestSlot;
+  return () => releaseRequestSlot(lane);
 }
 
-function releaseRequestSlot(): void {
-  const waiter = requestWaiters.shift();
+function releaseRequestSlot(lane: RequestLaneState): void {
+  const waiter = lane.waiters.shift();
   if (waiter) {
     clearTimeout(waiter.timer);
     waiter.resolve();
     return;
   }
-  activeRequests = Math.max(0, activeRequests - 1);
+  lane.active = Math.max(0, lane.active - 1);
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
@@ -358,7 +382,11 @@ async function executeAnonymousHttpRequest(
     request.set(encryptedRequest.tag, REQUEST_TAG_OFFSET);
     request.set(encryptedRequest.ciphertext, REQUEST_CIPHERTEXT_OFFSET);
 
-    const nativeResponse = await anonymousHttp.fetch(request, expectedServerUrl);
+    const nativeResponse = await anonymousHttp.fetch(
+      request,
+      expectedServerUrl,
+      isPirTransportOperation(operation) ? 'pir' : 'primary'
+    );
     if (!websocketClient.isConnectionPrivacyEpochCurrent(connectionPrivacyEpoch)) {
       throw new Error('Authenticated server transport changed during anonymous request');
     }
@@ -489,7 +517,9 @@ export async function anonymousHttpFetch(
   if (!websocketClient.isConnectionPrivacyEpochCurrent(connectionPrivacyEpoch)) {
     throw new Error('Authenticated PQ server transport is unavailable');
   }
-  const release = await acquireRequestSlot();
+  const release = await acquireRequestSlot(
+    isPirTransportOperation(operation) ? pirRequestLane : primaryRequestLane
+  );
   try {
     if (!websocketClient.isConnectionPrivacyEpochCurrent(connectionPrivacyEpoch)) {
       throw new Error('Authenticated server transport changed while anonymous request was queued');

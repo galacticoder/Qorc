@@ -96,7 +96,6 @@ export function useAppInitialization({
     return () => {
       window.removeEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
       if (!isEnteringBackgroundRef.current && torNetworkManager.isSupported()) {
-        console.log('[TOR-DIAG] useAppInitialization unmount cleanup: shutting down Tor manager');
         torNetworkManager.shutdown();
       }
     };

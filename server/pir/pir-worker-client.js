@@ -10,6 +10,7 @@ import { TEMP_DIRECTORY } from '../config/infrastructure.js';
 const OP_BUILD = 1;
 const OP_ANSWER = 2;
 const OP_INFO = 3;
+const OP_ANSWER_BATCH = 4;
 
 const STATUS_OK = 0;
 
@@ -196,6 +197,20 @@ export class PirWorkerClient {
     return this.#request(
       OP_ANSWER,
       Buffer.concat([header, query, pubParams]),
+      REQUEST_TIMEOUT_MS
+    );
+  }
+
+  async answerBatch(epoch, queryBatch, pubParams) {
+    if (!Buffer.isBuffer(queryBatch) || !Buffer.isBuffer(pubParams)) {
+      throw new Error('Invalid PIR batch query');
+    }
+    const header = Buffer.allocUnsafe(8);
+    header.writeUInt32LE(epoch >>> 0, 0);
+    header.writeUInt32LE(queryBatch.length, 4);
+    return this.#request(
+      OP_ANSWER_BATCH,
+      Buffer.concat([header, queryBatch, pubParams]),
       REQUEST_TIMEOUT_MS
     );
   }

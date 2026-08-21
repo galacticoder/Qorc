@@ -1,3 +1,6 @@
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("Qor YPIR supports only Linux and Windows");
+
 pub mod bits;
 pub mod client;
 pub mod convolution;

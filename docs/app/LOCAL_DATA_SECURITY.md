@@ -162,9 +162,15 @@ reject that store even when its name is guessed.
 ### Message History Window
 
 Conversation metadata uses 50-message encrypted segments. A renderer request
-may load at most one 50-message page, and React retains at most 50 messages for
-one conversation. Private text is not part of those segments, and the renderer
-has no raw-text history retrieval API.
+may load at most one 50-message page. Scrolling upward loads successive pages
+while preserving the current viewport. Opening a conversation loads only its
+newest 50-message page. Pages explicitly loaded while scrolling upward remain
+available during that browsing session without replacing the newest page. Once
+the view returns to the bottom and remains there for three minutes, those extra
+older pages are released and the newest 50 messages remain. Inactive
+conversations retain at most 50 records each and 2,048 in total. Private text is
+not part of those segments, and the renderer has no raw text history retrieval
+API.
 
 On receive, Rust first commits the authenticated Signal ratchet and complete
 plaintext to the native pending-decrypt record. For `message` and

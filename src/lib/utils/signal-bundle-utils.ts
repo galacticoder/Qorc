@@ -4,9 +4,9 @@ import { validateCertifiedPeerBundleV3 } from './certified-identity-utils';
 import {
   captureKeyTransparencyPeerAuthorization,
   getKeyTransparencyAuthorizedPeerState,
+  hydrateKeyTransparencyVerifiedMaterial,
   isKeyTransparencyAuthorizedPeerKeySet,
   isKeyTransparencyVerifiedMaterial,
-  markKeyTransparencyVerifiedMaterial,
 } from '../key-transparency/verified-material';
 import {
   discoveryMaterialStillVouchedFor,
@@ -14,12 +14,10 @@ import {
 } from '../discovery/persisted-discovery-material';
 import { persistPeerDetectionKey } from '../spool/detection-key';
 
-// peers discovery material for an identity check, without refetching it when nothing has changed
-async function discoveryMaterialForIdentityCheck(
-  accountUsername: string,
-  peerUsername: string,
-  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
-): Promise<any> {
+export async function loadTrustedPersistedDiscoveryMaterial(
+    accountUsername: string,
+    peerUsername: string
+): Promise<any | null> {
   try {
     const record = await loadPersistedDiscoveryMaterial(accountUsername, peerUsername);
     const material = discoveryMaterialStillVouchedFor(
@@ -43,7 +41,17 @@ async function discoveryMaterialForIdentityCheck(
     ) {
       const live = getKeyTransparencyAuthorizedPeerState(accountUsername, peerUsername);
       if (live) {
-        markKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername, live);
+        if (!hydrateKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername)) {
+          return null;
+        }
+        const certified = await validateCertifiedDiscoveryMaterial(
+          accountUsername,
+          peerUsername,
+          material,
+          undefined,
+          true,
+        );
+        if (!certified.valid) return null;
         await persistPeerDetectionKey(
           accountUsername,
           peerUsername,
@@ -54,6 +62,16 @@ async function discoveryMaterialForIdentityCheck(
     }
   } catch {
   }
+  return null;
+}
+
+async function discoveryMaterialForIdentityCheck(
+  accountUsername: string,
+  peerUsername: string,
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+): Promise<any> {
+  const persisted = await loadTrustedPersistedDiscoveryMaterial(accountUsername, peerUsername);
+  if (persisted) return persisted;
   return findUser(peerUsername, { forceRefresh: true });
 }
 
@@ -99,7 +117,8 @@ async function validateCertifiedDiscoveryMaterial(
   accountUsername: string,
   peerUsername: string,
   material: any,
-  observedFullBundle?: unknown
+  observedFullBundle?: unknown,
+  allowExpired = false,
 ): Promise<{
   valid: boolean;
   reason?: string;
@@ -117,7 +136,8 @@ async function validateCertifiedDiscoveryMaterial(
     publicKeys: material?.publicKeys,
     fullBundle: observedFullBundle ?? material?.fullBundle,
     peerCertificate: material?.peerCertificate,
-    peerCertificateFingerprint: material?.peerCertificateFingerprint
+    peerCertificateFingerprint: material?.peerCertificateFingerprint,
+    allowExpired,
   });
   if (!certified.valid) {
     return { valid: false, reason: certified.reason || 'CERTIFIED_IDENTITY_INVALID' };
@@ -149,7 +169,8 @@ export async function validateSignalBundleForPeerIdentity(
   peerUsername: string,
   bundle: any,
   users?: PeerIdentityLike[] | null,
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
+  discoveryMaterial?: any,
 ): Promise<SignalBundleValidationResult> {
   const normalizedPeerUsername = typeof peerUsername === 'string' ? peerUsername.trim() : '';
   if (!normalizedPeerUsername) {
@@ -183,7 +204,11 @@ export async function validateSignalBundleForPeerIdentity(
   }
 
   try {
-    const material = await discoveryMaterialForIdentityCheck(accountUsername, normalizedPeerUsername, findUser);
+    const material = discoveryMaterial ?? await discoveryMaterialForIdentityCheck(
+      accountUsername,
+      normalizedPeerUsername,
+      findUser,
+    );
     const certified = await validateCertifiedDiscoveryMaterial(
       accountUsername,
       normalizedPeerUsername,

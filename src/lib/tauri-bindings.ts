@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Base64 } from './cryptography/base64';
 import { PROTOCOL_KEYS } from './config/protocol-keys';
+import type { AudioLaneTelemetry } from './transport/secure-transport';
 
 function serializeJsonForNative(value: unknown): string {
     const encoded = JSON.stringify(value);
@@ -19,6 +20,55 @@ export interface NativeScreenSource {
     name: string;
     source_type: string;
 }
+
+export interface NativeCameraDevice {
+    device_id: string;
+    label: string;
+}
+
+export interface NativeCameraFrame {
+    sequence: number;
+    capturedAt: number;
+    width: number;
+    height: number;
+    enabled: boolean;
+    jpeg: Uint8Array;
+}
+
+const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null => {
+    const bytes = new Uint8Array(value);
+    if (bytes.byteLength === 32 && bytes.every(byte => byte === 0)) return null;
+    if (bytes.byteLength <= 32 || bytes.byteLength > 4 * 1024 * 1024 + 32) {
+        throw new Error('Invalid native camera frame length');
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const sequence = Number(view.getBigUint64(4, false));
+    const capturedAt = Number(view.getBigUint64(12, false));
+    const width = view.getUint16(20, false);
+    const height = view.getUint16(22, false);
+    const payloadLength = view.getUint32(24, false);
+    const jpeg = bytes.subarray(32);
+    if (
+        view.getUint8(0) !== 1 || view.getUint8(1) !== 1 || view.getUint8(2) > 1 ||
+        view.getUint8(3) !== 0 || view.getUint32(28, false) !== 0 ||
+        !Number.isSafeInteger(sequence) || sequence <= 0 ||
+        !Number.isSafeInteger(capturedAt) || capturedAt <= 0 ||
+        width < 2 || height < 2 || width > 1280 || height > 720 ||
+        width * height > 1280 * 720 || payloadLength !== jpeg.byteLength ||
+        jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
+        jpeg[jpeg.byteLength - 2] !== 0xff || jpeg[jpeg.byteLength - 1] !== 0xd9
+    ) {
+        throw new Error('Invalid native camera frame');
+    }
+    return {
+        sequence,
+        capturedAt,
+        width,
+        height,
+        enabled: view.getUint8(2) === 1,
+        jpeg,
+    };
+};
 
 export interface TorStatus {
     is_running: boolean;
@@ -388,8 +438,45 @@ export const pir = {
         invoke<NativePirQuery>('pir_generate_query', { count, entryBytes, targetRow }),
     decodeResponse: (response: string, sessionId: number) =>
         invoke<string>('pir_decode_response', { response, sessionId }),
+    generateBatchQuery: (count: number, entryBytes: number, targetRows: number[]) =>
+        invoke<NativePirQuery>('pir_generate_batch_query', { count, entryBytes, targetRows }),
+    decodeBatchResponse: (response: string, sessionId: number) =>
+        invoke<string>('pir_decode_batch_response', { response, sessionId }),
     discardQuery: (sessionId: number) =>
         invoke<void>('pir_discard_query', { sessionId }),
+};
+
+export const audioCodec = {
+    start: (sessionId: string) => invoke<boolean>('audio_opus_start', { sessionId }),
+    stop: (sessionId: string) => invoke<boolean>('audio_opus_stop', { sessionId }),
+    encode: (sessionId: string, pcm: Uint8Array) =>
+        invoke<ArrayBuffer>('audio_opus_encode', pcm, {
+            headers: { 'x-qor-audio-session': sessionId },
+        }).then(value => new Uint8Array(value)),
+    decode: (sessionId: string, packet: Uint8Array, fec = false) =>
+        invoke<ArrayBuffer>('audio_opus_decode', packet, {
+            headers: {
+                'x-qor-audio-session': sessionId,
+                'x-qor-opus-fec': fec ? '1' : '0',
+            },
+        }).then(value => new Uint8Array(value)),
+};
+
+export const nativeCamera = {
+    devices: () => invoke<NativeCameraDevice[]>('camera_devices'),
+    start: (
+        sessionId: string,
+        deviceId: string | null,
+        width: number,
+        height: number,
+        frameRate: number,
+    ) => invoke<boolean>('camera_capture_start', { sessionId, deviceId, width, height, frameRate }),
+    setEnabled: (sessionId: string, enabled: boolean) =>
+        invoke<boolean>('camera_capture_set_enabled', { sessionId, enabled }),
+    pull: (sessionId: string, afterSequence: number) =>
+        invoke<ArrayBuffer>('camera_capture_pull', { sessionId, afterSequence })
+            .then(parseNativeCameraFrame),
+    stop: (sessionId: string) => invoke<boolean>('camera_capture_stop', { sessionId }),
 };
 
 export const p2p = {
@@ -398,21 +485,42 @@ export const p2p = {
     disconnect: (connectionId: string, connectionToken?: number) =>
         invoke<boolean>('p2p_disconnect', { connectionId, connectionToken }),
     rotateIdentity: () => invoke<string>('p2p_rotate_identity'),
-    send: (connectionId: string, connectionToken: number, message: unknown) =>
-        invoke<{ success: boolean; error?: string }>('p2p_send', {
-            connectionId,
-            connectionToken,
-            messageJson: serializeJsonForNative(message),
-        }),
+    send: (
+        connectionId: string,
+        connectionToken: number,
+        message: unknown,
+        options?: {
+            deadline?: number;
+            priority?: 'normal' | 'realtime' | 'visual';
+            audioEndpoint?: string;
+            audioLaneRttCeiling?: number;
+        }
+    ) => {
+        const body = message instanceof Uint8Array
+            ? message
+            : new TextEncoder().encode(serializeJsonForNative(message));
+        return invoke<{ success: boolean; error?: string; audioLanes?: AudioLaneTelemetry }>('p2p_send', body, {
+            headers: {
+                'x-qor-p2p-connection': connectionId,
+                'x-qor-p2p-token': String(connectionToken),
+                'x-qor-p2p-deadline': String(options?.deadline ?? 0),
+                'x-qor-p2p-audio-endpoint': options?.audioEndpoint ?? '',
+                'x-qor-p2p-audio-rtt-ceiling': String(options?.audioLaneRttCeiling ?? 0),
+            },
+        });
+    },
     authenticateConnection: (connectionId: string, connectionToken: number) =>
         invoke<boolean>('p2p_authenticate_connection', { connectionId, connectionToken }),
     getLocalEndpoint: () => invoke<string | null>('p2p_local_endpoint'),
 };
 
 export const anonymousHttp = {
-    fetch: (body: Uint8Array, expectedServerUrl: string) =>
+    fetch: (body: Uint8Array, expectedServerUrl: string, lane: 'primary' | 'pir' = 'primary') =>
         invoke<ArrayBuffer>('anonymous_api_fetch', body, {
-            headers: { [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl },
+            headers: {
+                [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
+                'x-qor-anonymous-transport-lane': lane,
+            },
         }),
     prewarm: () => invoke<boolean>('prewarm_anonymous_transport'),
 };
@@ -425,7 +533,7 @@ export const notifications = {
 export const system = {
     getInstanceId: () => invoke<string>('get_instance_id'),
     openExternal: (url: string) => invoke<boolean>('open_external', { url }),
-    requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'enumerate') =>
+    requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'enumerate') =>
         invoke<boolean>('request_media_access', { kind }),
     getScreenSources: () => invoke<NativeScreenSource[]>('get_screen_sources'),
 };
@@ -479,7 +587,30 @@ export const tray = {
 export const events = {
     onWsMessage: (callback: (data: unknown) => void) => listen('ws-message', (e) => callback(e.payload)),
     onWsLifecycle: (callback: (data: unknown) => void) => listen('ws-lifecycle', (e) => callback(e.payload)),
-    onP2PMessage: (callback: (data: unknown) => void) => listen('p2p-message', (e) => callback(e.payload)),
+    onP2PMessage: async (callback: (data: unknown) => void) => {
+        const subscriptionId = crypto.randomUUID();
+        let active = true;
+        let consecutiveFailures = 0;
+        await invoke<boolean>('p2p_subscribe', { subscriptionId });
+        void (async () => {
+            while (active) {
+                try {
+                    const data = await invoke<ArrayBuffer>('p2p_receive', { subscriptionId });
+                    consecutiveFailures = 0;
+                    if (active && data.byteLength > 0) callback(data);
+                } catch {
+                    if (!active) return;
+                    consecutiveFailures += 1;
+                    if (consecutiveFailures >= 3) return;
+                    await new Promise(resolve => setTimeout(resolve, 250));
+                }
+            }
+        })();
+        return () => {
+            active = false;
+            void invoke<boolean>('p2p_unsubscribe', { subscriptionId }).catch(() => { });
+        };
+    },
 };
 
 export function isTauri(): boolean {
@@ -492,7 +623,7 @@ export function isTauri(): boolean {
 }
 
 export async function requireNativeMediaAccess(
-    kind: 'audio' | 'video' | 'audio-video'
+    kind: 'audio' | 'video' | 'audio-video' | 'camera'
 ): Promise<void> {
     if (!isTauri()) return;
     const granted = await system.requestMediaAccess(kind);

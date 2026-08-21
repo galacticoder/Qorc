@@ -3,6 +3,8 @@
 //! All IPC commands exposed to frontend
 
 pub mod account;
+pub mod audio;
+pub mod camera;
 pub mod crypto;
 pub mod discovery;
 pub mod message_content;

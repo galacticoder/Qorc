@@ -12,6 +12,7 @@ out/
 .parcel-cache/
 .vite/
 .vscode/
+*.tsbuildinfo
 pnpm-lock.yaml
 package-lock.json
 memory.jsonl
@@ -106,3 +107,9 @@ scripts/generate-tauri-icons.py
 src-tauri/binaries/
 
 server/test/
+workers/ypir/tests/
+scripts/test-*.cjs
+**/__tests__/
+**/*.test.*
+**/*.spec.*
+commit-message.txt

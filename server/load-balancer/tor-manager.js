@@ -31,7 +31,6 @@ export class TorManager {
         this.checkInterval = 5000;
         this.isRunningState = false;
         this.isPublishedState = false;
-        this.platform = process.platform;
         this.arch = process.arch;
     }
 
@@ -76,15 +75,6 @@ export class TorManager {
             ...inheritedLibraryDirs
         ])].join(path.delimiter);
 
-        if (this.platform === 'darwin') {
-            const inheritedDyldDirs = (process.env.DYLD_LIBRARY_PATH || '')
-                .split(path.delimiter)
-                .filter(Boolean);
-            env.DYLD_LIBRARY_PATH = [...new Set([
-                ...bundledLibraryDirs,
-                ...inheritedDyldDirs
-            ])].join(path.delimiter);
-        }
         return env;
     }
 

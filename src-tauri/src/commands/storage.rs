@@ -148,6 +148,7 @@ mod tests {
             crate::storage_keys::KEY_TRANSPARENCY_CONTACT_PREFIX,
             crate::storage_keys::KEY_TRANSPARENCY_WARNING_PREFIX,
             crate::storage_keys::KEY_TRANSPARENCY_MONITOR_PREFIX,
+            crate::storage_keys::SPOOL_CONSUMED_PROBES_PREFIX,
             crate::storage_keys::SPOOL_DETECTION_PREFIX,
             crate::storage_keys::SPOOL_PEER_DETECTION_PREFIX,
             crate::storage_keys::DISCOVERY_MATERIAL_PREFIX,

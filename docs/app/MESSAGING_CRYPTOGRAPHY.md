@@ -10,7 +10,7 @@ P2P protocols. `docs/app/MESSAGING.md` describes delivery and durability.
 | Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq-v2` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
 | End-to-end outer envelope | `hybrid-envelope-v2` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
 | Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
-| Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD |
+| Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and call-stream subkeys |
 | WebSocket session | `pq-ws-7` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD |
 | Anonymous HTTP tunnel | `qor-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
 | Account-root transparency | `qor-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
@@ -103,19 +103,19 @@ Code:
 
 ## P2P Session
 
-`hybrid-mlkem1024-mldsa87-session-v5` uses both ML-KEM-1024 and X25519 when
-deriving directional session keys. ML-DSA-87 signatures authenticate the complete
-handshake against certified peer keys, and both sides verify key-confirmation
-frames before marking the connection ready. Encrypted frames carry strict
-counters and replay state.
+`hybrid-mlkem1024-mldsa87-session-v5` combines both endpoints' ML-KEM-1024 and
+X25519 shared-secret contributions with the authenticated handshake transcript.
+HKDF-BLAKE3 produces 64 bytes and assigns independent 32-byte send and receive
+keys according to the initiator or responder role. ML-DSA-87 signatures
+authenticate the complete handshake against certified peer keys, and both sides
+verify encrypted key-confirmation frames before marking the connection ready.
 
-The enclosing transport is a Tor onion-service stream. Tor's own circuit
-cryptography is classical, so the P2P transport contributes no post-quantum key
-exchange of its own: the
-`hybrid-mlkem1024-mldsa87-session-v5` application session above is the sole
-source of PQ confidentiality and peer authentication on this path, and it is
-required unconditionally. There is no application relay, ambient discovery,
-port mapping, or gateway probing. Every peer connection is dialled through Tor.
+The enclosing network transport is a Tor onion-service stream. Tor's circuit
+cryptography is classical and contributes no post-quantum key exchange. The
+required `hybrid-mlkem1024-mldsa87-session-v5` application P2P session is the
+source of PQ confidentiality and peer authentication on this path. There is no
+application relay, ambient discovery, port mapping, or gateway probing. Every
+peer connection is dialled through Tor.
 
 Application messages receive another ML-DSA signature and a monotonic route
 proof bound to the active session and peer certificates. These prove transport
@@ -124,14 +124,48 @@ authorization, the inner libsignal identity remains the conversation identity.
 The P2P renderer and transport retain only the three certified public identity
 keys. Device ML-DSA transcript signatures and the static responder ML-KEM/X25519
 operations run in Rust. The native P2P operation returns only two 32-byte
-handshake-scoped shared secrets because the short-lived Noise session is still
-implemented in JavaScript, those secrets are zeroed after directional session
-keys are derived. Persistent private keys are never copied into the P2P hook,
-service, connection, or transport objects.
+handshake-scoped shared secrets. The short-lived Noise session runs in
+JavaScript, and those secrets are zeroed after directional session keys are
+derived. Persistent private keys are never copied into the P2P hook, service,
+connection, or transport objects.
 
-Calls derive separate direction-, call-, and media-kind-bound keys from this
-session. Their frame encryption, rotation, and replay rules are documented in
-`docs/app/CALLING.md`.
+Message streams use the directional session key. Each call stream derives a
+32-byte subkey with HKDF-BLAKE3, the salt
+`qor-call-stream-key-salt-v1`, and the info value
+`qor-call-stream-key-v1:<completeStreamId>`. Accepted contexts are
+`call-audio`, `call-video`, `call-telemetry`, and `call-screen` followed by a
+16–64 character lowercase hexadecimal identifier. The complete stream ID is
+also AEAD additional data, so changing the media kind, call ID, or screen stream
+causes authentication failure. At most 128 call-stream contexts are cached,
+retired and session-owned keys are wiped.
+
+P2P data uses the 32-byte selected directional key in this composed symmetric
+construction:
+
+1. SHA3-512 expands it into independent 32-byte AES and XChaCha keys.
+2. AES-256-GCM encrypts the plaintext with the first 12 bytes of a 36-byte
+   nonce and the stream ID as additional data.
+3. XChaCha20-Poly1305 encrypts that result with the remaining 24 nonce bytes and
+   the same additional data.
+4. A domain-separated 32-byte keyed BLAKE3 tag authenticates the final
+   ciphertext, additional data, and full nonce.
+
+The transmitted encrypted frame is a big-endian 32-bit total length, a
+big-endian 64-bit session sequence, the composed ciphertext, and the 32-byte
+BLAKE3 tag. The two AEAD tags add 32 ciphertext bytes, producing 76 bytes of
+authenticated-frame overhead in total. The nonce is derived from the session
+sequence rather than transmitted. A 32,768-slot session replay window permits
+bounded reordering between the primary and four media Tor TCP lanes, it records a
+sequence only after complete authentication. Sessions expire after 24 hours or
+sequence exhaustion.
+
+Call payloads use the selected stream key at this P2P boundary. The calling
+service submits an audio batch containing one to four ordered 20 ms Opus packets,
+a visual batch containing one to two exact raw VP8 frames with 32-byte visual
+headers, or a telemetry probe or keyframe request directly to
+the P2P frame operation. The media lanes change scheduling and TCP head-of-line
+behavior without changing the cryptographic frame. `docs/app/CALLING.md`
+specifies the media formats, queue bounds, and transport layout.
 
 Code:
 
@@ -179,7 +213,9 @@ client decapsulates them.
 
 The wire has three request classes—64 KiB, 512 KiB, and 2 MiB—and four response
 classes: 64 KiB, 512 KiB, 4 MiB, and 8.5 MiB. Ten operations share this route,
-including key-transparency sync and append. A fresh Tor SOCKS isolation credential and
+including key-transparency sync and append. Tag-index and PIR retrieval use a
+dedicated Tor daemon, SOCKS listener, circuit pool, and single-request queue,
+the remaining anonymous operations use the primary Tor daemon. A fresh Tor SOCKS isolation credential and
 HTTP/1.1 connection are used per request. Intermediaries do not see the operation
 name, but they can see the outer size class and timing. The destination server
 must decrypt the operation to execute it, so this tunnel does not hide the
@@ -257,7 +293,7 @@ correlation information, but peers do not learn each other's IP addresses.
 Local message plaintext is also bounded. Durable history is encrypted by the
 native SQLCipher and authenticated row-encryption layers. Conversation database
 segments, IPC pages, and per-conversation renderer state are capped at 50
-messages. Loading another page replaces the renderer's bounded metadata window;
+messages. Loading another page replaces the renderer's bounded metadata window,
 stored private text remains in native content records rather than accumulating
 in JavaScript. See `docs/app/LOCAL_DATA_SECURITY.md` for the account master,
 database key hierarchy, Signal storage, token pools, and threat boundaries.

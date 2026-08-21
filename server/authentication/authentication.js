@@ -746,7 +746,6 @@ export class AccountAuthHandler {
           ws._loginAuthRequestId = authRequestId;
           ws._loginAuthChannelBinding = authChannelBinding;
           authChannelBinding = null;
-source.
           powChallenge = createPowChallenge(await getAuthVerificationDifficulty());
           ws._loginPowSeed = powChallenge.seed;
           ws._loginPowDifficulty = powChallenge.difficulty;

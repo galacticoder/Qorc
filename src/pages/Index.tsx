@@ -60,12 +60,9 @@ import { useConnectionSetup } from "../hooks/app/useConnectionSetup";
 import { useBackgroundResume } from "../hooks/app/useBackgroundResume";
 import { useDiscovery } from "../hooks/discovery/useDiscovery";
 import { keyTransparencyClient } from "../lib/key-transparency/client";
-import { captureKeyTransparencyPeerAuthorization } from "../lib/key-transparency/verified-material";
 import { getInstanceLocalStorageItem, setInstanceLocalStorageItem } from "../lib/runtime/instance-storage";
 import { boundMessageState, releaseUnretainedVaultEntries } from "../lib/utils/message-state-limits";
 import { hasResumeToken } from "../lib/signals/resume-tokens";
-import { p2pTransport } from "../lib/transport/p2p-transport";
-import { loadPersistedPeerEndpoint } from "../lib/p2p/persisted-peer-cert";
 
 const COLD_SEND_P2P_DIAL_BUDGET_MS = 3000;
 
@@ -81,13 +78,14 @@ const ChatApp: React.FC = () => {
   const { allowEvent } = useRateLimiter(LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS);
   const [messages, setMessagesState] = useState<Message[]>([]);
   const messagesRef = useRef<Message[]>([]);
+  const activeConversationRef = useRef<string | null>(null);
   const setMessages = useMemo(() => {
     const fn = ((action: React.SetStateAction<Message[]>) => {
       const prev = messagesRef.current;
       const next = typeof action === 'function'
         ? (action as (p: Message[]) => Message[])(prev)
         : action;
-      const bounded = boundMessageState(next);
+      const bounded = boundMessageState(next, activeConversationRef.current);
       releaseUnretainedVaultEntries(prev, next, bounded);
       messagesRef.current = bounded;
       setMessagesState(bounded);
@@ -111,27 +109,18 @@ const ChatApp: React.FC = () => {
 
   // Discovery Service
   const discoveryUsername = Authentication.isLoggedIn ? Authentication.loginUsernameRef.current || undefined : undefined;
-  const { findUser, ensurePublished } = useDiscovery(
+  const { findUser } = useDiscovery(
     discoveryUsername,
     Authentication.hybridKeysRef
   );
-  const [authorizationRestoreReadyFor, setAuthorizationRestoreReadyFor] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    setAuthorizationRestoreReadyFor(null);
     if (!Authentication.isLoggedIn || !discoveryUsername) return;
     keyTransparencyClient.startContactMonitoring(discoveryUsername);
 
     void keyTransparencyClient.restorePersistedAuthorizations(discoveryUsername)
-      .then(() => {
-        if (!cancelled) setAuthorizationRestoreReadyFor(discoveryUsername);
-      })
-      .catch(() => {
-        if (!cancelled) setAuthorizationRestoreReadyFor(discoveryUsername);
-      });
+      .catch(() => { });
     return () => {
-      cancelled = true;
       keyTransparencyClient.stopContactMonitoring(discoveryUsername);
     };
   }, [Authentication.isLoggedIn, discoveryUsername]);
@@ -169,9 +158,6 @@ const ChatApp: React.FC = () => {
   const { loadMoreConversationMessages, flushPendingSaves } = Database;
 
   const usersRef = useRef<User[]>([]);
-  const discoveryWarmedPeersRef = useRef<Set<string>>(new Set());
-  const p2pWarmedPeersRef = useRef<Set<string>>(new Set());
-  const activeConversationRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     usersRef.current = Database.users;
   }, [Database.users]);
@@ -365,7 +351,7 @@ const ChatApp: React.FC = () => {
     if (selectedConversation && typeof messageSender?.prefetchSessionForPeer === 'function') {
       try { messageSender.prefetchSessionForPeer(selectedConversation); } catch { }
     }
-  }, [selectedConversation, messageSender]);
+  }, [selectedConversation, messageSender.prefetchSessionForPeer]);
 
   const currentDisplayName = useDisplayUsername({
     username: Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || ''
@@ -404,12 +390,10 @@ const ChatApp: React.FC = () => {
       users: Database.users,
     }
   );
-
-  const callingHook = useCalling(Authentication, {
-    getPeerCertificate: fetchPeerCertificates,
-    ensurePeerSession: messageSender.prefetchSessionForPeer,
-    secureDBRef: Database.secureDBRef,
-  });
+  const knownP2PPeers = useMemo(
+    () => Database.users.map(user => user.username).sort(),
+    [Database.users]
+  );
 
   const p2pMessaging = useP2PMessaging(
     Database.dbInitialized ? p2pUsername : '',
@@ -417,12 +401,17 @@ const ChatApp: React.FC = () => {
     {
       fetchPeerCertificates,
       handleEncryptedMessagePayload: encryptedHandler,
-      ensureDiscoveryPublished: ensurePublished,
       onServiceReady: (service) => {
         p2pServiceRef.current = service;
-      }
+      },
+      knownPeers: knownP2PPeers,
     }
   );
+
+  const callingHook = useCalling(Authentication, {
+    getPeerCertificate: p2pMessaging.getPeerCertificateForCall,
+    ensurePeerSession: messageSender.prefetchSessionForPeer,
+  });
 
   // Update P2P sender whenever service becomes ready
   useEffect(() => {
@@ -462,99 +451,6 @@ const ChatApp: React.FC = () => {
     return () => unifiedSignalTransport.setP2PSender(null);
   }, [p2pMessaging.p2pStatus.isInitialized, p2pMessaging.connectToPeer, p2pMessaging.isPeerConnected]);
   
-  useEffect(() => {
-    if (!Authentication.isLoggedIn || !p2pMessaging.p2pStatus.isInitialized) return;
-
-    void ensurePublished(false).catch(() => { });
-    const onResume = () => { void ensurePublished(false).catch(() => { }); };
-    window.addEventListener('focus', onResume);
-    window.addEventListener('online', onResume);
-
-    return () => {
-      window.removeEventListener('focus', onResume);
-      window.removeEventListener('online', onResume);
-    };
-  }, [Authentication.isLoggedIn, p2pMessaging.p2pStatus.isInitialized, ensurePublished]);
-
-  // Warm discovery
-  useEffect(() => {
-    if (!Authentication.isLoggedIn) {
-      discoveryWarmedPeersRef.current.clear();
-      return;
-    }
-    if (!findUser) return;
-    const activeAccount = Authentication.loginUsernameRef.current || '';
-    if (!activeAccount || authorizationRestoreReadyFor !== activeAccount) return;
-    const peers = Database.users
-      .map((user) => user?.username)
-      .filter((name): name is string => typeof name === 'string' && name.length > 0);
-    if (peers.length === 0) return;
-
-    const pending = peers.filter((peer) =>
-      !discoveryWarmedPeersRef.current.has(peer) &&
-      !captureKeyTransparencyPeerAuthorization(activeAccount, peer)
-    );
-    if (pending.length === 0) return;
-    for (const peer of pending) discoveryWarmedPeersRef.current.add(peer);
-
-    let cancelled = false;
-    void (async () => {
-      for (const peer of pending) {
-        if (cancelled) return;
-        await findUser(peer).catch(() => null);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [
-    Authentication.isLoggedIn,
-    Authentication.loginUsernameRef,
-    authorizationRestoreReadyFor,
-    findUser,
-    Database.users,
-  ]);
-
-  useEffect(() => {
-    if (!Authentication.isLoggedIn) {
-      p2pWarmedPeersRef.current.clear();
-      return;
-    }
-    if (!p2pMessaging.p2pStatus.isInitialized) return;
-    const activeAccount = Authentication.loginUsernameRef.current || '';
-    if (!activeAccount || authorizationRestoreReadyFor !== activeAccount) return;
-
-    const pending = Database.users
-      .map((user) => user?.username)
-      .filter((name): name is string =>
-        typeof name === 'string' &&
-        name.length > 0 &&
-        !p2pWarmedPeersRef.current.has(name) &&
-        !p2pMessaging.isPeerConnected(name)
-      );
-    if (pending.length === 0) return;
-    for (const peer of pending) p2pWarmedPeersRef.current.add(peer);
-
-    let cancelled = false;
-    void (async () => {
-      for (const peer of pending) {
-        if (cancelled) return;
-        const hasRoute = p2pTransport.hasAuthenticatedEndpoint(peer) ||
-          !!(await loadPersistedPeerEndpoint(activeAccount, peer).catch(() => null));
-        if (cancelled) return;
-        if (!hasRoute) continue;
-        await p2pMessaging.connectToPeer(peer).catch(() => { });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [
-    Authentication.isLoggedIn,
-    Authentication.loginUsernameRef,
-    authorizationRestoreReadyFor,
-    p2pMessaging.p2pStatus.isInitialized,
-    p2pMessaging.connectToPeer,
-    p2pMessaging.isPeerConnected,
-    Database.users,
-  ]);
-
   const getOrCreateUser = useCallback((username: string): User => {
     let targetUser = Database.users.find(user => user.username === username);
     if (!targetUser) {
@@ -595,10 +491,8 @@ const ChatApp: React.FC = () => {
     isLoggedIn: Authentication.isLoggedIn,
     loginUsernameRef: Authentication.loginUsernameRef,
     getPeerHybridKeys,
-    users: Database.users,
     getKeysOnDemand: Authentication.getKeysOnDemand,
-    findUser,
-    ensureDiscoveryPublished: ensurePublished
+    findUser
   });
 
   // Message actions
@@ -1009,8 +903,9 @@ const ChatApp: React.FC = () => {
             <CallModalLazy
               call={callingHook.currentCall}
               localStream={callingHook.localStream}
-              remoteStream={callingHook.remoteStream}
-              remoteScreenStream={callingHook.remoteScreenStream}
+              localVideoCanvas={callingHook.localVideoCanvas}
+              remoteVideoCanvas={callingHook.remoteVideoCanvas}
+              remoteScreenCanvas={callingHook.remoteScreenCanvas}
               onAnswer={() => callingHook.currentCall && callingHook.answerCall(callingHook.currentCall.id, callingHook.currentCall.peer)}
               onDecline={() => callingHook.currentCall && callingHook.declineCall(callingHook.currentCall.id)}
               onEndCall={callingHook.endCall}

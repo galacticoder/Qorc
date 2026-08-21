@@ -13,9 +13,112 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 const ONION_VIRTUAL_PORT: u16 = 9_735;
+const ONION_AUDIO_VIRTUAL_PORT: u16 = 9_736;
 const ONION_DIAL_TIMEOUT_SECS: u64 = 45;
 const ONION_PUBLISH_RETRY_SECS: u64 = 5;
 const ONION_PUBLISH_RETRY_MAX_SECS: u64 = 120;
+const AUDIO_LANE_OFFER_PREFIX: &[u8] = b"QOR-AUDIO-LANE-OFFER-v2\0";
+const AUDIO_LANE_PREAMBLE_PREFIX: &[u8] = b"QOR-AUDIO-LANE-v2\0";
+const AUDIO_LANE_TOKEN_BYTES: usize = 32;
+const AUDIO_LANE_TARGET_COUNT: usize = 4;
+const AUDIO_LANE_ACTIVE_COUNT: usize = 1;
+const AUDIO_LANE_SWITCH_MIN_GAIN_MS: u64 = 75;
+const AUDIO_LANE_SWITCH_MIN_GAIN_PERCENT: u64 = 10;
+const AUDIO_LANE_SWITCH_CONFIRMATIONS: u8 = 3;
+const AUDIO_LANE_FRAME_DATA: u8 = 1;
+const AUDIO_LANE_FRAME_PING: u8 = 2;
+const AUDIO_LANE_FRAME_PONG: u8 = 3;
+const AUDIO_LANE_FRAME_READY: u8 = 4;
+const AUDIO_LANE_FRAME_HEADER_BYTES: usize = 9;
+const AUDIO_LANE_PROBE_INTERVAL_SECS: u64 = 2;
+const AUDIO_LANE_PROBE_TIMEOUT_SECS: u64 = 6;
+const AUDIO_LANE_BIND_TIMEOUT_SECS: u64 = 10;
+const AUDIO_LANE_RETRY_BASE_SECS: u64 = 5;
+const AUDIO_LANE_RETRY_MAX_SECS: u64 = 60;
+const MAX_PENDING_AUDIO_LANES: usize = 64;
+
+enum AudioLaneFrame<'a> {
+    Data { frame_id: u64, data: &'a [u8] },
+    Ping(u64),
+    Pong(u64),
+    Ready,
+}
+
+fn encode_audio_lane_frame(kind: u8, id: u64, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(AUDIO_LANE_FRAME_HEADER_BYTES + data.len());
+    frame.push(kind);
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn parse_audio_lane_frame(frame: &[u8]) -> Option<AudioLaneFrame<'_>> {
+    if frame.len() < AUDIO_LANE_FRAME_HEADER_BYTES {
+        return None;
+    }
+    let id = u64::from_be_bytes(frame[1..9].try_into().ok()?);
+    if id == 0 {
+        return None;
+    }
+    match frame[0] {
+        AUDIO_LANE_FRAME_DATA if frame.len() > AUDIO_LANE_FRAME_HEADER_BYTES => {
+            Some(AudioLaneFrame::Data {
+                frame_id: id,
+                data: &frame[AUDIO_LANE_FRAME_HEADER_BYTES..],
+            })
+        }
+        AUDIO_LANE_FRAME_PING if frame.len() == AUDIO_LANE_FRAME_HEADER_BYTES => {
+            Some(AudioLaneFrame::Ping(id))
+        }
+        AUDIO_LANE_FRAME_PONG if frame.len() == AUDIO_LANE_FRAME_HEADER_BYTES => {
+            Some(AudioLaneFrame::Pong(id))
+        }
+        AUDIO_LANE_FRAME_READY if frame.len() == AUDIO_LANE_FRAME_HEADER_BYTES => {
+            Some(AudioLaneFrame::Ready)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct AudioReceiveWindow {
+    high: u64,
+    seen: u128,
+}
+
+impl AudioReceiveWindow {
+    fn accept(&mut self, frame_id: u64) -> bool {
+        if frame_id == 0 {
+            return false;
+        }
+        if self.high == 0 {
+            self.high = frame_id;
+            self.seen = 1;
+            return true;
+        }
+        if frame_id > self.high {
+            let shift = frame_id - self.high;
+            self.seen = if shift >= u128::BITS as u64 {
+                0
+            } else {
+                self.seen << shift
+            };
+            self.seen |= 1;
+            self.high = frame_id;
+            return true;
+        }
+        let distance = self.high - frame_id;
+        if distance >= u128::BITS as u64 {
+            return false;
+        }
+        let mask = 1u128 << distance;
+        if self.seen & mask != 0 {
+            return false;
+        }
+        self.seen |= mask;
+        true
+    }
+}
 
 fn is_valid_onion_host(host: &str) -> bool {
     match host.strip_suffix(".onion") {
@@ -27,6 +130,7 @@ fn is_valid_onion_host(host: &str) -> bool {
 struct OnionEndpoint {
     onion_service: crate::tor::PublishedOnionService,
     listener: TcpListener,
+    audio_listener: TcpListener,
 }
 
 /// One peer connection
@@ -59,13 +163,24 @@ async fn create_onion_endpoint() -> QorResult<OnionEndpoint> {
         .local_addr()
         .map_err(|e| QorError::Network(format!("Failed to read P2P listener port: {}", e)))?
         .port();
+    let audio_listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| QorError::Network(format!("Failed to bind P2P audio listener: {}", e)))?;
+    let audio_local_port = audio_listener
+        .local_addr()
+        .map_err(|e| QorError::Network(format!("Failed to read P2P audio listener port: {}", e)))?
+        .port();
     let onion_service = tor
-        .publish_onion_service(ONION_VIRTUAL_PORT, local_port)
+        .publish_onion_service(&[
+            (ONION_VIRTUAL_PORT, local_port),
+            (ONION_AUDIO_VIRTUAL_PORT, audio_local_port),
+        ])
         .await?;
     info!("[P2P] onion service published for inbound peer connections");
     Ok(OnionEndpoint {
         onion_service,
         listener,
+        audio_listener,
     })
 }
 
@@ -100,17 +215,15 @@ fn spawn_onion_endpoint_publisher(
             if command_tx.is_closed() {
                 return;
             }
-            
+
             retry_secs = (retry_secs * 2).min(ONION_PUBLISH_RETRY_MAX_SECS);
         }
     });
 }
 
-async fn accept_when_published(endpoint: Option<&Arc<OnionEndpoint>>) -> Option<PeerConnection> {
-    match endpoint {
-        Some(endpoint) => endpoint.accept().await,
-        None => std::future::pending().await,
-    }
+enum IncomingConnection {
+    Regular(PeerConnection),
+    AudioLane([u8; AUDIO_LANE_TOKEN_BYTES], PeerConnection),
 }
 
 static INBOUND_CONNECTION_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -120,11 +233,38 @@ impl OnionEndpoint {
         self.onion_service.onion_host()
     }
 
-    async fn accept(&self) -> Option<PeerConnection> {
-        let (stream, _peer) = self.listener.accept().await.ok()?;
-        let _ = stream.set_nodelay(true);
-        let sequence = INBOUND_CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed);
-        Some(PeerConnection::new(format!("inbound:{}", sequence), stream))
+    async fn accept(&self) -> Option<IncomingConnection> {
+        tokio::select! {
+            accepted = self.listener.accept() => {
+                let (stream, _peer) = accepted.ok()?;
+                let _ = stream.set_nodelay(true);
+                let sequence = INBOUND_CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed);
+                Some(IncomingConnection::Regular(PeerConnection::new(
+                    format!("inbound:{}", sequence),
+                    stream,
+                )))
+            }
+            accepted = self.audio_listener.accept() => {
+                let (mut stream, _peer) = accepted.ok()?;
+                let _ = stream.set_nodelay(true);
+                let preamble_len = AUDIO_LANE_PREAMBLE_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES;
+                let mut preamble = vec![0u8; preamble_len];
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    stream.read_exact(&mut preamble),
+                ).await.ok()?.ok()?;
+                if !preamble.starts_with(AUDIO_LANE_PREAMBLE_PREFIX) {
+                    return None;
+                }
+                let mut token = [0u8; AUDIO_LANE_TOKEN_BYTES];
+                token.copy_from_slice(&preamble[AUDIO_LANE_PREAMBLE_PREFIX.len()..]);
+                let sequence = INBOUND_CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed);
+                Some(IncomingConnection::AudioLane(
+                    token,
+                    PeerConnection::new(format!("audio-inbound:{}", sequence), stream),
+                ))
+            }
+        }
     }
 }
 
@@ -171,6 +311,18 @@ impl PeerConnection {
         Ok(())
     }
 
+    async fn send_preamble(&self, data: &[u8]) -> Result<(), String> {
+        let mut write = self.write.lock().await;
+        write
+            .write_all(data)
+            .await
+            .map_err(|error| format!("write preamble: {}", error))?;
+        write
+            .flush()
+            .await
+            .map_err(|error| format!("flush preamble: {}", error))
+    }
+
     async fn recv_frame<F>(&self, frame_policy: F) -> Result<(Vec<u8>, bool), FrameReadError>
     where
         F: FnOnce() -> (usize, bool),
@@ -195,7 +347,7 @@ impl PeerConnection {
 
         let mut read = self.read.lock().await;
         let mut len_buf = [0u8; 4];
-        
+
         let header_result = tokio::select! {
             result = read.read_exact(&mut len_buf) => result,
             _ = close_rx.changed() => return Err(FrameReadError::Closed),
@@ -204,7 +356,7 @@ impl PeerConnection {
             return Err(FrameReadError::Invalid(format!("read len: {}", error)));
         }
         let len = u32::from_le_bytes(len_buf) as usize;
-        
+
         let (max_frame_bytes, authenticated_at_header) = frame_policy();
         if len == 0 {
             return Err(FrameReadError::Invalid("Empty frame".to_string()));
@@ -256,16 +408,24 @@ impl PeerConnection {
     }
 }
 
-
-async fn dial_onion_peer(socks_port: u16, onion_host: &str) -> Result<TcpStream, String> {
+async fn dial_onion_peer(
+    socks_port: u16,
+    onion_host: &str,
+    virtual_port: u16,
+) -> Result<TcpStream, String> {
     if !is_valid_onion_host(onion_host) {
         return Err("invalid onion host".to_string());
     }
     let proxy = format!("127.0.0.1:{}", socks_port);
-    let target = (onion_host.to_string(), ONION_VIRTUAL_PORT);
+    let target = (onion_host.to_string(), virtual_port);
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(ONION_DIAL_TIMEOUT_SECS),
-        tokio_socks::tcp::Socks5Stream::connect(proxy.as_str(), target),
+        tokio_socks::tcp::Socks5Stream::connect_with_password(
+            proxy.as_str(),
+            target,
+            &format!("p2p-{}", uuid::Uuid::new_v4().simple()),
+            "isolate",
+        ),
     )
     .await
     .map_err(|_| "onion dial timeout".to_string())?
@@ -274,13 +434,21 @@ async fn dial_onion_peer(socks_port: u16, onion_host: &str) -> Result<TcpStream,
 }
 
 async fn connect_onion_peer(socks_port: u16, onion_host: &str) -> Result<PeerConnection, String> {
-    let stream = dial_onion_peer(socks_port, onion_host).await?;
+    let stream = dial_onion_peer(socks_port, onion_host, ONION_VIRTUAL_PORT).await?;
+    let _ = stream.set_nodelay(true);
+    Ok(PeerConnection::new(onion_host.to_string(), stream))
+}
+
+async fn connect_onion_audio_peer(
+    socks_port: u16,
+    onion_host: &str,
+) -> Result<PeerConnection, String> {
+    let stream = dial_onion_peer(socks_port, onion_host, ONION_AUDIO_VIRTUAL_PORT).await?;
     let _ = stream.set_nodelay(true);
     Ok(PeerConnection::new(onion_host.to_string(), stream))
 }
 
 use crate::error::{QorError, QorResult};
-use crate::json_bounds::enforce_bounded_json_structure;
 
 const REQUEST_TIMEOUT_SECS: u64 = ONION_DIAL_TIMEOUT_SECS + 15;
 const _: () = assert!(
@@ -312,6 +480,7 @@ const MAX_CONCURRENT_DIALS: usize = 16;
 const MAX_PENDING_INCOMING_HANDSHAKES: usize = 32;
 const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
 const PER_CONNECTION_SEND_QUEUE: usize = 64;
+const PER_CONNECTION_REALTIME_SEND_QUEUE: usize = 5;
 const MAX_PREAUTH_FRAMES_PER_CONNECTION: usize = 12;
 const MAX_PREAUTH_BYTES_PER_CONNECTION: usize = 256 * 1024;
 const MAX_PREAUTH_FRAME_BYTES: usize = 24 * 1024;
@@ -491,27 +660,72 @@ fn is_canonical_base64_payload(value: &str) -> bool {
     }
 }
 
-fn parse_authenticated_frame(buf: &[u8]) -> Option<serde_json::Value> {
+fn parse_authenticated_frame(buf: &[u8]) -> Option<Vec<u8>> {
     if buf == br#"{"type":"__keepalive"}"# {
-        return Some(serde_json::json!({ "type": "__keepalive" }));
+        return Some(buf.to_vec());
     }
-    let payload = buf
-        .strip_prefix(b"\"")?
-        .strip_suffix(b"\"")
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())?;
-    is_canonical_base64_payload(payload).then(|| serde_json::Value::String(payload.to_string()))
+    is_valid_authenticated_frame(buf).then(|| buf.to_vec())
 }
 
 fn is_valid_authenticated_frame(buf: &[u8]) -> bool {
     if buf == br#"{"type":"__keepalive"}"# {
         return true;
     }
-    buf.strip_prefix(b"\"")
-        .and_then(|bytes| bytes.strip_suffix(b"\""))
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .is_some_and(is_canonical_base64_payload)
+    if buf.len() < 2 {
+        return false;
+    }
+    let id_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    if id_len == 0 || id_len > 96 || 2 + id_len >= buf.len() {
+        return false;
+    }
+    let Some(stream_id) = std::str::from_utf8(&buf[2..2 + id_len]).ok() else {
+        return false;
+    };
+    let Some((stream_type, suffix)) = stream_id.split_once(':') else {
+        return false;
+    };
+    matches!(
+        stream_type,
+        "message" | "call-audio" | "call-video" | "call-telemetry" | "call-screen"
+    ) && (16..=64).contains(&suffix.len())
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_realtime_audio_frame(buf: &[u8]) -> bool {
+    if buf.len() < 2 {
+        return false;
+    }
+    let id_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    id_len > 0
+        && 2 + id_len <= buf.len()
+        && std::str::from_utf8(&buf[2..2 + id_len])
+            .is_ok_and(|stream_id| stream_id.starts_with("call-audio:"))
+}
+
+fn is_realtime_visual_frame(buf: &[u8]) -> bool {
+    if buf.len() < 2 {
+        return false;
+    }
+    let id_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    id_len > 0
+        && 2 + id_len <= buf.len()
+        && std::str::from_utf8(&buf[2..2 + id_len]).is_ok_and(|stream_id| {
+            stream_id.starts_with("call-video:") || stream_id.starts_with("call-screen:")
+        })
+}
+
+fn parse_audio_lane_offer(buf: &[u8]) -> Option<[u8; AUDIO_LANE_TOKEN_BYTES]> {
+    if buf.len() != AUDIO_LANE_OFFER_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES
+        || !buf.starts_with(AUDIO_LANE_OFFER_PREFIX)
+    {
+        return None;
+    }
+    let mut token = [0u8; AUDIO_LANE_TOKEN_BYTES];
+    token.copy_from_slice(&buf[AUDIO_LANE_OFFER_PREFIX.len()..]);
+    Some(token)
+}
 
 fn is_allowed_preauth_frame(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
@@ -613,13 +827,13 @@ fn is_allowed_preauth_frame(value: &serde_json::Value) -> bool {
     }
 }
 
-fn parse_preauthentication_frame(buf: &[u8]) -> Option<serde_json::Value> {
+fn parse_preauthentication_frame(buf: &[u8]) -> Option<Vec<u8>> {
     let shape = serde_json::from_slice::<PreauthenticationWireShape>(buf).ok()?;
     if !shape.has_exact_variant_shape() {
         return None;
     }
     let value = serde_json::from_slice::<serde_json::Value>(buf).ok()?;
-    is_allowed_preauth_frame(&value).then_some(value)
+    is_allowed_preauth_frame(&value).then(|| buf.to_vec())
 }
 
 static OUTBOUND_QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -722,6 +936,54 @@ fn try_reserve_incoming_handshake() -> Option<IncomingHandshakeReservation> {
         .map(|_| IncomingHandshakeReservation)
 }
 
+fn spawn_onion_endpoint_acceptor(
+    endpoint: Arc<OnionEndpoint>,
+    command_tx: mpsc::UnboundedSender<WorkerCommand>,
+    identity_generation: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Some(incoming) = endpoint.accept().await else {
+                if command_tx.is_closed() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            };
+            match incoming {
+                IncomingConnection::Regular(connection) => {
+                    let Some(permit) = try_reserve_incoming_handshake() else {
+                        connection.close(1013u32, b"handshake capacity");
+                        continue;
+                    };
+                    if command_tx
+                        .send(WorkerCommand::IncomingEstablished {
+                            identity_generation,
+                            result: Ok(connection),
+                            _permit: permit,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                IncomingConnection::AudioLane(token, connection) => {
+                    if command_tx
+                        .send(WorkerCommand::IncomingAudioLane {
+                            identity_generation,
+                            token,
+                            connection,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn validate_handshake_identity(identity: &str) -> QorResult<()> {
     let len = identity.len();
     if !(3..=100).contains(&len)
@@ -800,6 +1062,39 @@ pub struct P2PConnectResult {
 pub struct P2PSendResult {
     pub success: bool,
     pub error: Option<String>,
+    #[serde(rename = "audioLanes", skip_serializing_if = "Option::is_none")]
+    pub audio_lanes: Option<AudioLaneTelemetry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioLaneTelemetry {
+    pub ready: usize,
+    pub target: usize,
+    pub active: usize,
+    #[serde(rename = "endpointAvailable")]
+    pub endpoint_available: bool,
+    pub dialing: usize,
+    pub attempts: u64,
+    pub failures: u64,
+    #[serde(rename = "retryInMs")]
+    pub retry_in_ms: Option<u64>,
+    #[serde(rename = "lastFailure")]
+    pub last_failure: Option<String>,
+    #[serde(rename = "selectedLane")]
+    pub selected_lane: Option<String>,
+    #[serde(rename = "visualLane")]
+    pub visual_lane: Option<String>,
+    pub lanes: Vec<AudioLaneTelemetryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioLaneTelemetryEntry {
+    pub id: String,
+    #[serde(rename = "rttMs")]
+    pub rtt_ms: Option<u64>,
+    #[serde(rename = "degradedSamples")]
+    pub degraded_samples: u8,
+    pub role: String,
 }
 
 /// P2P transport event
@@ -828,10 +1123,59 @@ pub enum P2PEvent {
         connection_id: String,
         #[serde(rename = "connectionToken")]
         connection_token: u64,
-        data: serde_json::Value,
+        data: Vec<u8>,
         #[serde(skip)]
         byte_len: usize,
     },
+}
+
+impl P2PEvent {
+    pub fn reserved_byte_len(&self) -> usize {
+        match self {
+            Self::Message { byte_len, .. } => *byte_len,
+            _ => 0,
+        }
+    }
+
+    pub fn into_bridge_bytes(self) -> Option<Vec<u8>> {
+        let (kind, connection_id, connection_token, payload) = match self {
+            Self::Connected {
+                connection_id,
+                connection_token,
+            } => (1u8, connection_id, connection_token, Vec::new()),
+            Self::Closed {
+                connection_id,
+                connection_token,
+                code,
+                reason,
+            } => {
+                let reason = reason.unwrap_or_default();
+                let reason_bytes = reason.as_bytes();
+                let reason_len = u16::try_from(reason_bytes.len()).ok()?;
+                let mut payload = Vec::with_capacity(4 + reason_bytes.len());
+                payload.extend_from_slice(&code.to_be_bytes());
+                payload.extend_from_slice(&reason_len.to_be_bytes());
+                payload.extend_from_slice(reason_bytes);
+                (2u8, connection_id, connection_token, payload)
+            }
+            Self::Message {
+                connection_id,
+                connection_token,
+                data,
+                ..
+            } => (3u8, connection_id, connection_token, data),
+        };
+        let id = connection_id.as_bytes();
+        let id_len = u16::try_from(id.len()).ok()?;
+        let mut output = Vec::with_capacity(15 + id.len() + payload.len());
+        output.extend_from_slice(b"QPB1");
+        output.push(kind);
+        output.extend_from_slice(&connection_token.to_be_bytes());
+        output.extend_from_slice(&id_len.to_be_bytes());
+        output.extend_from_slice(id);
+        output.extend_from_slice(&payload);
+        Some(output)
+    }
 }
 
 // Worker
@@ -859,6 +1203,8 @@ enum WorkerCommand {
         connection_id: String,
         connection_token: u64,
         data: Vec<u8>,
+        audio_onion_host: Option<String>,
+        audio_lane_rtt_ceiling_ms: Option<u64>,
         deadline: tokio::time::Instant,
         resp: oneshot::Sender<P2PSendResult>,
         _permit: OutboundReservation,
@@ -873,7 +1219,7 @@ enum WorkerCommand {
         resp: oneshot::Sender<Result<String, String>>,
         _permit: ControlReservation,
     },
-    
+
     EndpointPublished {
         identity_generation: u64,
         endpoint: Arc<OnionEndpoint>,
@@ -889,12 +1235,49 @@ enum WorkerCommand {
         result: Result<PeerConnection, String>,
         _permit: IncomingHandshakeReservation,
     },
+    IncomingAudioLane {
+        identity_generation: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        connection: PeerConnection,
+    },
+    AudioLaneOffer {
+        identity_generation: u64,
+        connection_id: String,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    },
+    AudioLaneDialCompleted {
+        identity_generation: u64,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        result: Result<PeerConnection, String>,
+    },
+    AudioLaneRtt {
+        identity_generation: u64,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        rtt_ms: u64,
+    },
+    AudioLaneFailed {
+        identity_generation: u64,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    },
+    InboundAudioLaneClosed {
+        identity_generation: u64,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    },
+    ExpirePendingAudioLane {
+        identity_generation: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    },
     AuthenticationExpired {
         connection_id: String,
         connection_token: u64,
         identity_generation: u64,
     },
-    
+
     ConnectionLost {
         connection_id: String,
         connection_token: u64,
@@ -905,8 +1288,130 @@ enum WorkerCommand {
 struct QueuedSend {
     data: Vec<u8>,
     deadline: tokio::time::Instant,
+    audio_lanes: Option<AudioLaneTelemetry>,
     resp: oneshot::Sender<P2PSendResult>,
     _permit: OutboundReservation,
+}
+
+struct SendQueues {
+    normal: mpsc::Sender<QueuedSend>,
+    realtime: mpsc::Sender<QueuedSend>,
+}
+
+#[derive(Clone)]
+struct OutboundAudioLane {
+    token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    connection: Arc<PeerConnection>,
+    rtt_ms: Option<u64>,
+    degraded_samples: u8,
+}
+
+impl OutboundAudioLane {
+    fn score(&self) -> u64 {
+        self.rtt_ms.unwrap_or(1_500)
+    }
+}
+
+fn audio_lane_rtt_is_eligible(rtt_ms: Option<u64>, ceiling_ms: u64) -> bool {
+    rtt_ms.is_some_and(|rtt| rtt <= ceiling_ms)
+}
+
+fn audio_lane_has_meaningful_gain(current_rtt_ms: u64, challenger_rtt_ms: u64) -> bool {
+    let gain = current_rtt_ms.saturating_sub(challenger_rtt_ms);
+    let percentage_gain = current_rtt_ms
+        .saturating_mul(AUDIO_LANE_SWITCH_MIN_GAIN_PERCENT)
+        .saturating_add(99)
+        / 100;
+    gain >= AUDIO_LANE_SWITCH_MIN_GAIN_MS.max(percentage_gain)
+}
+
+#[derive(Default)]
+struct AudioLaneSelection {
+    selected: Option<[u8; AUDIO_LANE_TOKEN_BYTES]>,
+    challenger: Option<[u8; AUDIO_LANE_TOKEN_BYTES]>,
+    challenger_samples: u8,
+}
+
+impl AudioLaneSelection {
+    fn select(&mut self, token: [u8; AUDIO_LANE_TOKEN_BYTES]) {
+        self.selected = Some(token);
+        self.challenger = None;
+        self.challenger_samples = 0;
+    }
+
+    fn remove(&mut self, token: [u8; AUDIO_LANE_TOKEN_BYTES]) {
+        if self.selected == Some(token) {
+            self.selected = None;
+        }
+        if self.challenger == Some(token) {
+            self.challenger = None;
+            self.challenger_samples = 0;
+        }
+    }
+
+    fn observe(
+        &mut self,
+        ranked: &[([u8; AUDIO_LANE_TOKEN_BYTES], u64)],
+        updated_token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    ) {
+        let Some(&(best_token, best_rtt_ms)) = ranked.first() else {
+            self.selected = None;
+            self.challenger = None;
+            self.challenger_samples = 0;
+            return;
+        };
+        let Some(selected_token) = self.selected else {
+            self.select(best_token);
+            return;
+        };
+        let Some((_, selected_rtt_ms)) = ranked
+            .iter()
+            .find(|(token, _)| *token == selected_token)
+            .copied()
+        else {
+            self.select(best_token);
+            return;
+        };
+        if best_token == selected_token {
+            self.challenger = None;
+            self.challenger_samples = 0;
+            return;
+        }
+        if !audio_lane_has_meaningful_gain(selected_rtt_ms, best_rtt_ms) {
+            self.challenger = None;
+            self.challenger_samples = 0;
+            return;
+        }
+        if self.challenger.is_some_and(|token| token != best_token) {
+            self.challenger = None;
+            self.challenger_samples = 0;
+        }
+        if updated_token != best_token {
+            return;
+        }
+        if self.challenger == Some(best_token) {
+            self.challenger_samples = self.challenger_samples.saturating_add(1);
+        } else {
+            self.challenger = Some(best_token);
+            self.challenger_samples = 1;
+        }
+        if self.challenger_samples >= AUDIO_LANE_SWITCH_CONFIRMATIONS {
+            self.select(best_token);
+        }
+    }
+}
+
+struct InboundAudioLane {
+    token: [u8; AUDIO_LANE_TOKEN_BYTES],
+    connection: Arc<PeerConnection>,
+}
+
+#[derive(Default)]
+struct AudioLaneSetupStatus {
+    attempts: u64,
+    failures: u64,
+    last_failure: Option<&'static str>,
+    consecutive_failed_batches: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -924,7 +1429,7 @@ enum WorkerEvent {
     Message {
         connection_id: String,
         connection_token: u64,
-        data: serde_json::Value,
+        data: Vec<u8>,
         byte_len: usize,
     },
 }
@@ -938,14 +1443,27 @@ enum FrameReadError {
 
 struct IrohWorker {
     endpoint: Option<Arc<OnionEndpoint>>,
+    endpoint_accept_task: Option<tokio::task::JoinHandle<()>>,
     local_node_id: Arc<RwLock<Option<String>>>,
     connections: HashMap<String, Arc<PeerConnection>>,
     alias_to_node: HashMap<String, String>,
     node_to_aliases: HashMap<String, HashSet<String>>,
     connection_tokens: HashMap<String, u64>,
-    send_queues: HashMap<u64, mpsc::Sender<QueuedSend>>,
+    send_queues: HashMap<u64, SendQueues>,
     authenticated_connections: Arc<RwLock<HashSet<u64>>>,
     authentication_timeout_tasks: HashMap<u64, tokio::task::JoinHandle<()>>,
+    outbound_audio_lanes: HashMap<u64, Vec<OutboundAudioLane>>,
+    inbound_audio_lanes: HashMap<u64, Vec<InboundAudioLane>>,
+    audio_receive_windows: HashMap<u64, Arc<parking_lot::Mutex<AudioReceiveWindow>>>,
+    pending_audio_offers: HashMap<[u8; AUDIO_LANE_TOKEN_BYTES], (u64, String, u64)>,
+    pending_audio_connections: HashMap<[u8; AUDIO_LANE_TOKEN_BYTES], PeerConnection>,
+    audio_lane_dials: HashMap<u64, HashSet<[u8; AUDIO_LANE_TOKEN_BYTES]>>,
+    audio_lane_next_dial_at: HashMap<u64, tokio::time::Instant>,
+    audio_lane_onion_hosts: HashMap<u64, String>,
+    audio_lane_setup_status: HashMap<u64, AudioLaneSetupStatus>,
+    audio_lane_frame_ids: HashMap<u64, u64>,
+    audio_lane_selections: HashMap<u64, AudioLaneSelection>,
+    visual_lane_selections: HashMap<u64, [u8; AUDIO_LANE_TOKEN_BYTES]>,
     pending_dials: HashMap<String, u64>,
     next_connection_token: u64,
     next_dial_token: u64,
@@ -963,6 +1481,7 @@ impl IrohWorker {
 
         Ok(Self {
             endpoint: None,
+            endpoint_accept_task: None,
             local_node_id,
             connections: HashMap::new(),
             alias_to_node: HashMap::new(),
@@ -971,6 +1490,18 @@ impl IrohWorker {
             send_queues: HashMap::new(),
             authenticated_connections: Arc::new(RwLock::new(HashSet::new())),
             authentication_timeout_tasks: HashMap::new(),
+            outbound_audio_lanes: HashMap::new(),
+            inbound_audio_lanes: HashMap::new(),
+            audio_receive_windows: HashMap::new(),
+            pending_audio_offers: HashMap::new(),
+            pending_audio_connections: HashMap::new(),
+            audio_lane_dials: HashMap::new(),
+            audio_lane_next_dial_at: HashMap::new(),
+            audio_lane_onion_hosts: HashMap::new(),
+            audio_lane_setup_status: HashMap::new(),
+            audio_lane_frame_ids: HashMap::new(),
+            audio_lane_selections: HashMap::new(),
+            visual_lane_selections: HashMap::new(),
             pending_dials: HashMap::new(),
             next_connection_token: 1,
             next_dial_token: 1,
@@ -1070,6 +1601,27 @@ impl IrohWorker {
         })
     }
 
+    fn clear_audio_lanes_for_token(&mut self, connection_token: u64, reason: &[u8]) {
+        if let Some(lanes) = self.outbound_audio_lanes.remove(&connection_token) {
+            for lane in lanes {
+                lane.connection.close(0u32, reason);
+            }
+        }
+        if let Some(lanes) = self.inbound_audio_lanes.remove(&connection_token) {
+            for lane in lanes {
+                lane.connection.close(0u32, reason);
+            }
+        }
+        self.audio_receive_windows.remove(&connection_token);
+        self.audio_lane_dials.remove(&connection_token);
+        self.audio_lane_next_dial_at.remove(&connection_token);
+        self.audio_lane_onion_hosts.remove(&connection_token);
+        self.audio_lane_setup_status.remove(&connection_token);
+        self.audio_lane_frame_ids.remove(&connection_token);
+        self.audio_lane_selections.remove(&connection_token);
+        self.visual_lane_selections.remove(&connection_token);
+    }
+
     async fn close_connection_token(
         &mut self,
         connection_token: u64,
@@ -1084,6 +1636,7 @@ impl IrohWorker {
             .collect();
         if connection_ids.is_empty() {
             self.send_queues.remove(&connection_token);
+            self.clear_audio_lanes_for_token(connection_token, b"primary connection closed");
             self.authenticated_connections
                 .write()
                 .remove(&connection_token);
@@ -1101,6 +1654,9 @@ impl IrohWorker {
             self.unbind_alias(connection_id);
         }
         self.send_queues.remove(&connection_token);
+        self.clear_audio_lanes_for_token(connection_token, b"primary connection closed");
+        self.pending_audio_offers
+            .retain(|_, (token, _, _)| *token != connection_token);
         self.authenticated_connections
             .write()
             .remove(&connection_token);
@@ -1131,17 +1687,29 @@ impl IrohWorker {
                 .await;
         }
 
-        if !self.bind_alias(connection_id.clone(), node_id) {
+        if !self.bind_alias(connection_id.clone(), node_id.clone()) {
             connection.close(1013u32, b"alias limit");
             return None;
         }
         let connection_token = self.issue_connection_token(&connection_id);
+        if is_valid_onion_host(&node_id) {
+            self.audio_lane_onion_hosts
+                .insert(connection_token, node_id.clone());
+        }
         let connection = Arc::new(connection);
         self.connections
             .insert(connection_id.clone(), connection.clone());
 
-        let (send_tx, send_rx) = mpsc::channel(PER_CONNECTION_SEND_QUEUE);
-        self.send_queues.insert(connection_token, send_tx);
+        let (normal_send_tx, normal_send_rx) = mpsc::channel(PER_CONNECTION_SEND_QUEUE);
+        let (realtime_send_tx, realtime_send_rx) =
+            mpsc::channel(PER_CONNECTION_REALTIME_SEND_QUEUE);
+        self.send_queues.insert(
+            connection_token,
+            SendQueues {
+                normal: normal_send_tx,
+                realtime: realtime_send_tx,
+            },
+        );
 
         if event_tx
             .try_send(WorkerEvent::Connected {
@@ -1193,7 +1761,8 @@ impl IrohWorker {
                 connection_token,
                 identity_generation,
                 write_generation_guard,
-                send_rx,
+                normal_send_rx,
+                realtime_send_rx,
                 write_command_tx,
                 write_connection_lost_notified,
             )
@@ -1220,34 +1789,13 @@ impl IrohWorker {
         mut command_rx: mpsc::UnboundedReceiver<WorkerCommand>,
         event_tx: mpsc::Sender<WorkerEvent>,
     ) {
-        loop {
-            tokio::select! {
-                Some(cmd) = command_rx.recv() => {
-                    match cmd {
-                        WorkerCommand::Shutdown => {
-                            self.shutdown().await;
-                            break;
-                        }
-                        command => self.handle_command(command, &event_tx).await,
-                    }
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                WorkerCommand::Shutdown => {
+                    self.shutdown().await;
+                    break;
                 }
-                Some(incoming) = accept_when_published(self.endpoint.as_ref()) => {
-                    let Some(permit) = try_reserve_incoming_handshake() else {
-                        incoming.close(1013u32, b"handshake capacity");
-                        continue;
-                    };
-                    let command_tx = self.self_command_tx.clone();
-                    let identity_generation = self.identity_generation.load(Ordering::Acquire);
-                    tokio::spawn(async move {
-                        let result: Result<PeerConnection, String> = Ok(incoming);
-                        let _ = command_tx.send(WorkerCommand::IncomingEstablished {
-                            identity_generation,
-                            result,
-                            _permit: permit,
-                        });
-                    });
-                }
-                else => break,
+                command => self.handle_command(command, &event_tx).await,
             }
         }
     }
@@ -1255,13 +1803,41 @@ impl IrohWorker {
     async fn shutdown(&mut self) {
         self.identity_generation.fetch_add(1, Ordering::AcqRel);
         *self.local_node_id.write() = None;
-        
+
+        if let Some(task) = self.endpoint_accept_task.take() {
+            task.abort();
+        }
         self.endpoint.take();
         self.pending_dials.clear();
         for connection in self.connections.values() {
             connection.close(0u32.into(), b"transport shutdown");
         }
         self.connections.clear();
+        for lanes in self.outbound_audio_lanes.values() {
+            for lane in lanes {
+                lane.connection.close(0u32, b"transport shutdown");
+            }
+        }
+        for lanes in self.inbound_audio_lanes.values() {
+            for lane in lanes {
+                lane.connection.close(0u32, b"transport shutdown");
+            }
+        }
+        for connection in self.pending_audio_connections.values() {
+            connection.close(0u32, b"transport shutdown");
+        }
+        self.outbound_audio_lanes.clear();
+        self.inbound_audio_lanes.clear();
+        self.pending_audio_connections.clear();
+        self.pending_audio_offers.clear();
+        self.audio_lane_dials.clear();
+        self.audio_receive_windows.clear();
+        self.audio_lane_next_dial_at.clear();
+        self.audio_lane_onion_hosts.clear();
+        self.audio_lane_setup_status.clear();
+        self.audio_lane_frame_ids.clear();
+        self.audio_lane_selections.clear();
+        self.visual_lane_selections.clear();
         self.connection_tokens.clear();
         self.send_queues.clear();
         self.authenticated_connections.write().clear();
@@ -1295,7 +1871,6 @@ impl IrohWorker {
         } else {
             remote.clone()
         };
-
 
         if !self.connections.contains_key(&alias)
             && self.active_connection_count() >= MAX_P2P_CONNECTIONS
@@ -1337,7 +1912,7 @@ impl IrohWorker {
             if generation_guard.load(Ordering::Acquire) != identity_generation {
                 break;
             }
-            
+
             match conn
                 .recv_frame(|| {
                     let authenticated =
@@ -1346,56 +1921,70 @@ impl IrohWorker {
                 })
                 .await
             {
-                Ok((buf, authenticated_at_frame_start)) => match if authenticated_at_frame_start {
-                    parse_authenticated_frame(&buf)
-                } else {
-                    parse_preauthentication_frame(&buf)
-                } {
-                    Some(data) => {
-                        let authenticated_now =
-                            authenticated_connections.read().contains(&connection_token);
-                        if authenticated_now != authenticated_at_frame_start {
-                            release_inbound_bytes(buf.len());
-                            continue;
-                        }
-                        if !authenticated_now {
-                            preauth_frames = preauth_frames.saturating_add(1);
-                            preauth_bytes = preauth_bytes.saturating_add(buf.len());
-                            if buf.len() > MAX_PREAUTH_FRAME_BYTES
-                                || preauth_frames > MAX_PREAUTH_FRAMES_PER_CONNECTION
-                                || preauth_bytes > MAX_PREAUTH_BYTES_PER_CONNECTION
-                            {
+                Ok((buf, authenticated_at_frame_start)) => {
+                    if authenticated_at_frame_start
+                        && let Some(token) = parse_audio_lane_offer(&buf)
+                    {
+                        release_inbound_bytes(buf.len());
+                        let _ = command_tx.send(WorkerCommand::AudioLaneOffer {
+                            identity_generation,
+                            connection_id: connection_id.clone(),
+                            connection_token,
+                            token,
+                        });
+                        continue;
+                    }
+                    match if authenticated_at_frame_start {
+                        parse_authenticated_frame(&buf)
+                    } else {
+                        parse_preauthentication_frame(&buf)
+                    } {
+                        Some(data) => {
+                            let authenticated_now =
+                                authenticated_connections.read().contains(&connection_token);
+                            if authenticated_now != authenticated_at_frame_start {
                                 release_inbound_bytes(buf.len());
-                                warn!(
-                                    "[P2P-RECV] Closing peer after invalid pre-authentication traffic"
-                                );
+                                continue;
+                            }
+                            if !authenticated_now {
+                                preauth_frames = preauth_frames.saturating_add(1);
+                                preauth_bytes = preauth_bytes.saturating_add(buf.len());
+                                if buf.len() > MAX_PREAUTH_FRAME_BYTES
+                                    || preauth_frames > MAX_PREAUTH_FRAMES_PER_CONNECTION
+                                    || preauth_bytes > MAX_PREAUTH_BYTES_PER_CONNECTION
+                                {
+                                    release_inbound_bytes(buf.len());
+                                    warn!(
+                                        "[P2P-RECV] Closing peer after invalid pre-authentication traffic"
+                                    );
+                                    break;
+                                }
+                            }
+                            protocol_errors = 0;
+                            let byte_len = buf.len();
+                            if event_tx
+                                .send(WorkerEvent::Message {
+                                    connection_id: connection_id.clone(),
+                                    connection_token,
+                                    data,
+                                    byte_len,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                release_inbound_bytes(byte_len);
                                 break;
                             }
                         }
-                        protocol_errors = 0;
-                        let byte_len = buf.len();
-                        if event_tx
-                            .send(WorkerEvent::Message {
-                                connection_id: connection_id.clone(),
-                                connection_token,
-                                data,
-                                byte_len,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            release_inbound_bytes(byte_len);
-                            break;
+                        None => {
+                            release_inbound_bytes(buf.len());
+                            protocol_errors = protocol_errors.saturating_add(1);
+                            if protocol_errors >= MAX_PROTOCOL_ERRORS {
+                                break;
+                            }
                         }
                     }
-                    None => {
-                        release_inbound_bytes(buf.len());
-                        protocol_errors = protocol_errors.saturating_add(1);
-                        if protocol_errors >= MAX_PROTOCOL_ERRORS {
-                            break;
-                        }
-                    }
-                },
+                }
 
                 Err(FrameReadError::InboundPressure) => {
                     if !inbound_pressure_warned {
@@ -1433,6 +2022,534 @@ impl IrohWorker {
         let _ = frame.resp.send(P2PSendResult {
             success: false,
             error: Some(error.to_string()),
+            audio_lanes: frame.audio_lanes,
+        });
+    }
+
+    fn schedule_audio_lane_retry(&mut self, connection_token: u64, failed_batch: bool) {
+        let status = self
+            .audio_lane_setup_status
+            .entry(connection_token)
+            .or_default();
+        if failed_batch {
+            status.consecutive_failed_batches = status.consecutive_failed_batches.saturating_add(1);
+        } else {
+            status.consecutive_failed_batches = 0;
+        }
+        let exponent = status.consecutive_failed_batches.saturating_sub(1).min(4);
+        let delay_secs = if failed_batch {
+            AUDIO_LANE_RETRY_BASE_SECS
+                .saturating_mul(1u64 << exponent)
+                .min(AUDIO_LANE_RETRY_MAX_SECS)
+        } else {
+            AUDIO_LANE_RETRY_BASE_SECS
+        };
+        self.audio_lane_next_dial_at.insert(
+            connection_token,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(delay_secs),
+        );
+    }
+
+    fn ensure_audio_lanes(&mut self, connection_token: u64) {
+        if !self
+            .authenticated_connections
+            .read()
+            .contains(&connection_token)
+        {
+            return;
+        }
+        let Some(onion_host) = self.audio_lane_onion_hosts.get(&connection_token).cloned() else {
+            return;
+        };
+        if self
+            .audio_lane_next_dial_at
+            .get(&connection_token)
+            .is_some_and(|next| tokio::time::Instant::now() < *next)
+        {
+            return;
+        }
+        let ready = self
+            .outbound_audio_lanes
+            .get(&connection_token)
+            .map_or(0, Vec::len);
+        let dialing = self
+            .audio_lane_dials
+            .get(&connection_token)
+            .map_or(0, HashSet::len);
+        if dialing > 0 {
+            return;
+        }
+        let missing = AUDIO_LANE_TARGET_COUNT.saturating_sub(ready);
+        if missing == 0 {
+            return;
+        }
+        let Some(primary) = self.connection_tokens.iter().find_map(|(id, token)| {
+            (*token == connection_token)
+                .then(|| self.connections.get(id).cloned())
+                .flatten()
+        }) else {
+            return;
+        };
+        let identity_generation = self.identity_generation.load(Ordering::Acquire);
+        let status = self
+            .audio_lane_setup_status
+            .entry(connection_token)
+            .or_default();
+        status.attempts = status.attempts.saturating_add(missing as u64);
+        for _ in 0..missing {
+            let token: [u8; AUDIO_LANE_TOKEN_BYTES] = loop {
+                let candidate = rand::random();
+                let in_use = self
+                    .audio_lane_dials
+                    .get(&connection_token)
+                    .is_some_and(|tokens| tokens.contains(&candidate))
+                    || self
+                        .outbound_audio_lanes
+                        .get(&connection_token)
+                        .is_some_and(|lanes| lanes.iter().any(|lane| lane.token == candidate));
+                if !in_use {
+                    break candidate;
+                }
+            };
+            self.audio_lane_dials
+                .entry(connection_token)
+                .or_default()
+                .insert(token);
+            let command_tx = self.self_command_tx.clone();
+            let primary = primary.clone();
+            let onion_host = onion_host.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    let connection = connect_onion_audio_peer(tor_socks_port(), &onion_host)
+                        .await
+                        .map_err(|error| {
+                            if error.contains("timeout") {
+                                "dial-timeout".to_string()
+                            } else {
+                                "dial-failed".to_string()
+                            }
+                        })?;
+                    let mut preamble = Vec::with_capacity(
+                        AUDIO_LANE_PREAMBLE_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES,
+                    );
+                    preamble.extend_from_slice(AUDIO_LANE_PREAMBLE_PREFIX);
+                    preamble.extend_from_slice(&token);
+                    connection
+                        .send_preamble(&preamble)
+                        .await
+                        .map_err(|_| "preamble-send".to_string())?;
+                    let mut offer =
+                        Vec::with_capacity(AUDIO_LANE_OFFER_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES);
+                    offer.extend_from_slice(AUDIO_LANE_OFFER_PREFIX);
+                    offer.extend_from_slice(&token);
+                    primary
+                        .send_frame(&offer)
+                        .await
+                        .map_err(|_| "offer-send".to_string())?;
+                    let ready = tokio::time::timeout(
+                        std::time::Duration::from_secs(AUDIO_LANE_BIND_TIMEOUT_SECS),
+                        connection.recv_frame(|| (AUDIO_LANE_FRAME_HEADER_BYTES, true)),
+                    )
+                    .await
+                    .map_err(|_| "binding-timeout".to_string())?;
+                    let (frame, _) = match ready {
+                        Ok(frame) => frame,
+                        Err(FrameReadError::Closed) => {
+                            return Err("binding-closed".to_string());
+                        }
+                        Err(FrameReadError::InboundPressure) => {
+                            return Err("binding-pressure".to_string());
+                        }
+                        Err(FrameReadError::Invalid(_)) => {
+                            return Err("binding-read-invalid".to_string());
+                        }
+                    };
+                    let frame_len = frame.len();
+                    let valid =
+                        matches!(parse_audio_lane_frame(&frame), Some(AudioLaneFrame::Ready));
+                    release_inbound_bytes(frame_len);
+                    if !valid {
+                        return Err("binding-frame-invalid".to_string());
+                    }
+                    Ok(connection)
+                }
+                .await;
+                let _ = command_tx.send(WorkerCommand::AudioLaneDialCompleted {
+                    identity_generation,
+                    connection_token,
+                    token,
+                    result,
+                });
+            });
+        }
+    }
+
+    fn spawn_outbound_audio_lane_tasks(
+        &self,
+        identity_generation: u64,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        connection: Arc<PeerConnection>,
+    ) {
+        let pending_probes = Arc::new(Mutex::new(HashMap::<u64, tokio::time::Instant>::new()));
+        let missed_probes = Arc::new(AtomicUsize::new(0));
+        let monitor_connection = connection.clone();
+        let monitor_pending = pending_probes.clone();
+        let monitor_missed = missed_probes.clone();
+        let monitor_tx = self.self_command_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let received = monitor_connection
+                    .recv_frame(|| (AUDIO_LANE_FRAME_HEADER_BYTES, true))
+                    .await;
+                let Ok((frame, _)) = received else {
+                    break;
+                };
+                let frame_len = frame.len();
+                let Some(AudioLaneFrame::Pong(probe_id)) = parse_audio_lane_frame(&frame) else {
+                    release_inbound_bytes(frame_len);
+                    break;
+                };
+                let started = monitor_pending.lock().await.remove(&probe_id);
+                release_inbound_bytes(frame_len);
+                if let Some(started) = started {
+                    monitor_missed.store(0, Ordering::Release);
+                    let rtt_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let _ = monitor_tx.send(WorkerCommand::AudioLaneRtt {
+                        identity_generation,
+                        connection_token,
+                        token,
+                        rtt_ms,
+                    });
+                }
+            }
+            let _ = monitor_tx.send(WorkerCommand::AudioLaneFailed {
+                identity_generation,
+                connection_token,
+                token,
+            });
+        });
+
+        let probe_connection = connection;
+        let probe_tx = self.self_command_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                AUDIO_LANE_PROBE_INTERVAL_SECS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let now = tokio::time::Instant::now();
+                let expired = {
+                    let mut pending = pending_probes.lock().await;
+                    let before = pending.len();
+                    pending.retain(|_, started| {
+                        now.duration_since(*started)
+                            < std::time::Duration::from_secs(AUDIO_LANE_PROBE_TIMEOUT_SECS)
+                    });
+                    before.saturating_sub(pending.len())
+                };
+                if expired > 0 && missed_probes.fetch_add(expired, Ordering::AcqRel) + expired >= 3
+                {
+                    break;
+                }
+                let probe_id = loop {
+                    let candidate: u64 = rand::random();
+                    if candidate != 0 {
+                        break candidate;
+                    }
+                };
+                pending_probes.lock().await.insert(probe_id, now);
+                let ping = encode_audio_lane_frame(AUDIO_LANE_FRAME_PING, probe_id, &[]);
+                let sent = tokio::time::timeout(
+                    std::time::Duration::from_secs(AUDIO_LANE_PROBE_INTERVAL_SECS),
+                    probe_connection.send_frame(&ping),
+                )
+                .await
+                .is_ok_and(|result| result.is_ok());
+                if !sent {
+                    break;
+                }
+            }
+            probe_connection.close(0u32, b"audio lane probe failed");
+            let _ = probe_tx.send(WorkerCommand::AudioLaneFailed {
+                identity_generation,
+                connection_token,
+                token,
+            });
+        });
+    }
+
+    fn lane_id(token: &[u8; AUDIO_LANE_TOKEN_BYTES]) -> String {
+        token[..4]
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect()
+    }
+
+    fn ranked_audio_lanes(&self, connection_token: u64) -> Vec<OutboundAudioLane> {
+        let mut lanes = self
+            .outbound_audio_lanes
+            .get(&connection_token)
+            .cloned()
+            .unwrap_or_default();
+        lanes.sort_by_key(OutboundAudioLane::score);
+        lanes
+    }
+
+    fn audio_lane_candidates(
+        &mut self,
+        connection_token: u64,
+        ceiling_ms: u64,
+    ) -> Vec<OutboundAudioLane> {
+        let mut lanes: Vec<OutboundAudioLane> = self
+            .ranked_audio_lanes(connection_token)
+            .into_iter()
+            .filter(|lane| audio_lane_rtt_is_eligible(lane.rtt_ms, ceiling_ms))
+            .filter(|lane| {
+                self.visual_lane_selections
+                    .get(&connection_token)
+                    .is_none_or(|visual| lane.token != *visual)
+            })
+            .collect();
+        if lanes.is_empty() {
+            return lanes;
+        }
+        let selection = self
+            .audio_lane_selections
+            .entry(connection_token)
+            .or_default();
+        let selected_index = selection
+            .selected
+            .and_then(|token| lanes.iter().position(|lane| lane.token == token))
+            .unwrap_or_else(|| {
+                selection.select(lanes[0].token);
+                0
+            });
+        if selected_index > 0 {
+            let selected = lanes.remove(selected_index);
+            lanes.insert(0, selected);
+        }
+        lanes
+    }
+
+    fn visual_lane_candidate(&mut self, connection_token: u64) -> Option<OutboundAudioLane> {
+        let audio_lane = self
+            .audio_lane_selections
+            .get(&connection_token)
+            .and_then(|selection| selection.selected);
+        let lanes = self.ranked_audio_lanes(connection_token);
+        let existing = self.visual_lane_selections.get(&connection_token).copied();
+        let selected = existing
+            .and_then(|token| {
+                lanes
+                    .iter()
+                    .find(|lane| lane.token == token && Some(token) != audio_lane)
+            })
+            .or_else(|| lanes.iter().find(|lane| Some(lane.token) != audio_lane))
+            .cloned()?;
+        self.visual_lane_selections
+            .insert(connection_token, selected.token);
+        Some(selected)
+    }
+
+    fn audio_lane_telemetry(
+        &self,
+        connection_token: u64,
+        selected: Option<[u8; AUDIO_LANE_TOKEN_BYTES]>,
+    ) -> AudioLaneTelemetry {
+        let lanes = self.ranked_audio_lanes(connection_token);
+        let secondary = lanes
+            .iter()
+            .find(|lane| Some(lane.token) != selected)
+            .map(|lane| lane.token);
+        let entries = lanes
+            .iter()
+            .map(|lane| AudioLaneTelemetryEntry {
+                id: Self::lane_id(&lane.token),
+                rtt_ms: lane.rtt_ms,
+                degraded_samples: lane.degraded_samples,
+                role: if Some(lane.token) == selected {
+                    "active"
+                } else if Some(lane.token) == secondary {
+                    "secondary"
+                } else {
+                    "standby"
+                }
+                .to_string(),
+            })
+            .collect();
+        let status = self.audio_lane_setup_status.get(&connection_token);
+        let now = tokio::time::Instant::now();
+        let retry_in_ms = self
+            .audio_lane_next_dial_at
+            .get(&connection_token)
+            .and_then(|retry_at| retry_at.checked_duration_since(now))
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        AudioLaneTelemetry {
+            ready: lanes.len(),
+            target: AUDIO_LANE_TARGET_COUNT,
+            active: usize::from(
+                selected.is_some_and(|token| lanes.iter().any(|lane| lane.token == token)),
+            ),
+            endpoint_available: self.audio_lane_onion_hosts.contains_key(&connection_token),
+            dialing: self
+                .audio_lane_dials
+                .get(&connection_token)
+                .map_or(0, HashSet::len),
+            attempts: status.map_or(0, |value| value.attempts),
+            failures: status.map_or(0, |value| value.failures),
+            retry_in_ms,
+            last_failure: status.and_then(|value| value.last_failure.map(str::to_string)),
+            selected_lane: selected.map(|token| Self::lane_id(&token)),
+            visual_lane: self
+                .visual_lane_selections
+                .get(&connection_token)
+                .map(Self::lane_id),
+            lanes: entries,
+        }
+    }
+
+    fn remove_outbound_audio_lane(
+        &mut self,
+        connection_token: u64,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        reason: &[u8],
+    ) -> bool {
+        let Some(lanes) = self.outbound_audio_lanes.get_mut(&connection_token) else {
+            return false;
+        };
+        let Some(index) = lanes.iter().position(|lane| lane.token == token) else {
+            return false;
+        };
+        let lane = lanes.remove(index);
+        lane.connection.close(0u32, reason);
+        if lanes.is_empty() {
+            self.outbound_audio_lanes.remove(&connection_token);
+        }
+        if let Some(selection) = self.audio_lane_selections.get_mut(&connection_token) {
+            selection.remove(token);
+        }
+        if self.visual_lane_selections.get(&connection_token) == Some(&token) {
+            self.visual_lane_selections.remove(&connection_token);
+        }
+        true
+    }
+
+    fn attach_inbound_audio_lane(
+        &mut self,
+        connection_token: u64,
+        connection_id: String,
+        token: [u8; AUDIO_LANE_TOKEN_BYTES],
+        connection: PeerConnection,
+        event_tx: &mpsc::Sender<WorkerEvent>,
+    ) {
+        if self.connection_tokens.get(&connection_id).copied() != Some(connection_token)
+            || !self
+                .authenticated_connections
+                .read()
+                .contains(&connection_token)
+        {
+            connection.close(1008u32, b"invalid audio lane binding");
+            return;
+        }
+        let lanes = self
+            .inbound_audio_lanes
+            .entry(connection_token)
+            .or_default();
+        if lanes.iter().any(|lane| lane.token == token) || lanes.len() >= AUDIO_LANE_TARGET_COUNT {
+            connection.close(1008u32, b"audio lane capacity");
+            return;
+        }
+        let connection = Arc::new(connection);
+        lanes.push(InboundAudioLane {
+            token,
+            connection: connection.clone(),
+        });
+        let receive_window = self
+            .audio_receive_windows
+            .entry(connection_token)
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(AudioReceiveWindow::default())))
+            .clone();
+        let identity_generation = self.identity_generation.load(Ordering::Acquire);
+        let generation_guard = self.identity_generation.clone();
+        let authenticated_connections = self.authenticated_connections.clone();
+        let event_tx = event_tx.clone();
+        let command_tx = self.self_command_tx.clone();
+        tokio::spawn(async move {
+            let ready = encode_audio_lane_frame(AUDIO_LANE_FRAME_READY, 1, &[]);
+            if connection.send_frame(&ready).await.is_err() {
+                connection.close(0u32, b"audio lane binding failed");
+                let _ = command_tx.send(WorkerCommand::InboundAudioLaneClosed {
+                    identity_generation,
+                    connection_token,
+                    token,
+                });
+                return;
+            }
+            loop {
+                if generation_guard.load(Ordering::Acquire) != identity_generation
+                    || !authenticated_connections.read().contains(&connection_token)
+                {
+                    break;
+                }
+                match connection
+                    .recv_frame(|| (MAX_FRAME_BYTES + AUDIO_LANE_FRAME_HEADER_BYTES, true))
+                    .await
+                {
+                    Ok((frame, true)) => {
+                        let byte_len = frame.len();
+                        match parse_audio_lane_frame(&frame) {
+                            Some(AudioLaneFrame::Data { frame_id, data })
+                                if is_realtime_audio_frame(data)
+                                    || is_realtime_visual_frame(data) =>
+                            {
+                                if !receive_window.lock().accept(frame_id) {
+                                    release_inbound_bytes(byte_len);
+                                    continue;
+                                }
+                                let data = data.to_vec();
+                                if event_tx
+                                    .send(WorkerEvent::Message {
+                                        connection_id: connection_id.clone(),
+                                        connection_token,
+                                        data,
+                                        byte_len,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    release_inbound_bytes(byte_len);
+                                    break;
+                                }
+                            }
+                            Some(AudioLaneFrame::Ping(probe_id)) => {
+                                let pong =
+                                    encode_audio_lane_frame(AUDIO_LANE_FRAME_PONG, probe_id, &[]);
+                                release_inbound_bytes(byte_len);
+                                if connection.send_frame(&pong).await.is_err() {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                release_inbound_bytes(byte_len);
+                                break;
+                            }
+                        }
+                    }
+                    Ok((frame, _)) => {
+                        release_inbound_bytes(frame.len());
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            connection.close(0u32, b"audio lane closed");
+            let _ = command_tx.send(WorkerCommand::InboundAudioLaneClosed {
+                identity_generation,
+                connection_token,
+                token,
+            });
         });
     }
 
@@ -1443,11 +2560,18 @@ impl IrohWorker {
         connection_token: u64,
         identity_generation: u64,
         generation_guard: Arc<AtomicU64>,
-        mut send_rx: mpsc::Receiver<QueuedSend>,
+        mut normal_send_rx: mpsc::Receiver<QueuedSend>,
+        mut realtime_send_rx: mpsc::Receiver<QueuedSend>,
         command_tx: mpsc::UnboundedSender<WorkerCommand>,
         connection_lost_notified: Arc<AtomicBool>,
     ) {
-        while let Some(frame) = send_rx.recv().await {
+        loop {
+            let frame = tokio::select! {
+                biased;
+                frame = realtime_send_rx.recv() => frame,
+                frame = normal_send_rx.recv() => frame,
+            };
+            let Some(frame) = frame else { break };
             if generation_guard.load(Ordering::Acquire) != identity_generation {
                 Self::fail_queued_send(frame, "P2P identity changed");
                 break;
@@ -1464,10 +2588,11 @@ impl IrohWorker {
             let QueuedSend {
                 data,
                 deadline,
+                audio_lanes,
                 resp,
                 _permit,
             } = frame;
-            
+
             let send_result =
                 tokio::time::timeout_at(deadline, async { conn.send_frame(&data).await }).await;
 
@@ -1478,12 +2603,14 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: true,
                         error: None,
+                        audio_lanes,
                     });
                 }
                 Ok(Ok(())) => {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("P2P identity changed".to_string()),
+                        audio_lanes,
                     });
                     break;
                 }
@@ -1491,6 +2618,7 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("P2P send failed".to_string()),
+                        audio_lanes,
                     });
                     break;
                 }
@@ -1498,6 +2626,7 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("P2P send timed out".to_string()),
+                        audio_lanes,
                     });
                     break;
                 }
@@ -1505,8 +2634,12 @@ impl IrohWorker {
         }
 
         conn.close(0u32.into(), b"writer stopped");
-        send_rx.close();
-        while let Ok(frame) = send_rx.try_recv() {
+        normal_send_rx.close();
+        realtime_send_rx.close();
+        while let Ok(frame) = realtime_send_rx.try_recv() {
+            Self::fail_queued_send(frame, "P2P connection closed");
+        }
+        while let Ok(frame) = normal_send_rx.try_recv() {
             Self::fail_queued_send(frame, "P2P connection closed");
         }
         if !connection_lost_notified.swap(true, Ordering::AcqRel) {
@@ -1710,7 +2843,7 @@ impl IrohWorker {
                     if let Ok(connection) = result {
                         connection.close(0u32.into(), b"stale dial");
                     }
-                    
+
                     let error = if !identity_is_current {
                         "P2P identity changed during connection"
                     } else if !within_deadline {
@@ -1787,6 +2920,8 @@ impl IrohWorker {
                 connection_id,
                 connection_token: expected_connection_token,
                 data,
+                audio_onion_host,
+                audio_lane_rtt_ceiling_ms,
                 deadline,
                 resp,
                 _permit,
@@ -1795,6 +2930,7 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("Connection not found".to_string()),
+                        audio_lanes: None,
                     });
                     return;
                 };
@@ -1803,6 +2939,7 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("Connection not found".to_string()),
+                        audio_lanes: None,
                     });
                     return;
                 };
@@ -1810,6 +2947,7 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("P2P connection generation changed".to_string()),
+                        audio_lanes: None,
                     });
                     return;
                 }
@@ -1826,22 +2964,197 @@ impl IrohWorker {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("P2P frame is invalid for the connection state".to_string()),
+                        audio_lanes: None,
                     });
                     return;
                 }
 
-                let Some(send_tx) = self.send_queues.get(&connection_token) else {
+                let realtime_audio = is_realtime_audio_frame(&data);
+                let realtime_visual = is_realtime_visual_frame(&data);
+                if realtime_audio || realtime_visual {
+                    if let Some(onion_host) = audio_onion_host {
+                        let endpoint_changed = self
+                            .audio_lane_onion_hosts
+                            .get(&connection_token)
+                            .is_some_and(|current| current != &onion_host);
+                        if endpoint_changed {
+                            self.clear_audio_lanes_for_token(
+                                connection_token,
+                                b"peer audio endpoint changed",
+                            );
+                        }
+                        self.audio_lane_onion_hosts
+                            .insert(connection_token, onion_host);
+                    }
+                    self.ensure_audio_lanes(connection_token);
+                }
+                if realtime_visual {
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = resp.send(P2PSendResult {
+                            success: false,
+                            error: Some("P2P visual send expired in queue".to_string()),
+                            audio_lanes: Some(
+                                self.audio_lane_telemetry(
+                                    connection_token,
+                                    self.audio_lane_selections
+                                        .get(&connection_token)
+                                        .and_then(|selection| selection.selected),
+                                ),
+                            ),
+                        });
+                        return;
+                    }
+                    let Some(lane) = self.visual_lane_candidate(connection_token) else {
+                        let _ = resp.send(P2PSendResult {
+                            success: false,
+                            error: Some("Dedicated visual lane unavailable".to_string()),
+                            audio_lanes: Some(
+                                self.audio_lane_telemetry(
+                                    connection_token,
+                                    self.audio_lane_selections
+                                        .get(&connection_token)
+                                        .and_then(|selection| selection.selected),
+                                ),
+                            ),
+                        });
+                        return;
+                    };
+                    let frame_id = self
+                        .audio_lane_frame_ids
+                        .entry(connection_token)
+                        .or_insert(0);
+                    *frame_id = frame_id.wrapping_add(1).max(1);
+                    let lane_frame =
+                        encode_audio_lane_frame(AUDIO_LANE_FRAME_DATA, *frame_id, &data);
+                    let identity_generation = self.identity_generation.load(Ordering::Acquire);
+                    let command_tx = self.self_command_tx.clone();
+                    let telemetry = self.audio_lane_telemetry(
+                        connection_token,
+                        self.audio_lane_selections
+                            .get(&connection_token)
+                            .and_then(|selection| selection.selected),
+                    );
+                    tokio::spawn(async move {
+                        let sent = tokio::time::timeout_at(
+                            deadline,
+                            lane.connection.send_frame(&lane_frame),
+                        )
+                        .await
+                        .is_ok_and(|result| result.is_ok());
+                        if !sent {
+                            let _ = command_tx.send(WorkerCommand::AudioLaneFailed {
+                                identity_generation,
+                                connection_token,
+                                token: lane.token,
+                            });
+                        }
+                        let _ = resp.send(P2PSendResult {
+                            success: sent,
+                            error: (!sent)
+                                .then(|| "Visual lane send failed or expired".to_string()),
+                            audio_lanes: Some(telemetry),
+                        });
+                        drop(_permit);
+                    });
+                    return;
+                }
+                if realtime_audio {
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = resp.send(P2PSendResult {
+                            success: false,
+                            error: Some("P2P send expired in queue".to_string()),
+                            audio_lanes: Some(self.audio_lane_telemetry(connection_token, None)),
+                        });
+                        return;
+                    }
+                    let candidates = audio_lane_rtt_ceiling_ms.map_or_else(Vec::new, |ceiling| {
+                        self.audio_lane_candidates(connection_token, ceiling)
+                    });
+                    if !candidates.is_empty() {
+                        let frame_id = self
+                            .audio_lane_frame_ids
+                            .entry(connection_token)
+                            .or_insert(0);
+                        *frame_id = frame_id.wrapping_add(1).max(1);
+                        let lane_frame =
+                            encode_audio_lane_frame(AUDIO_LANE_FRAME_DATA, *frame_id, &data);
+                        let mut selected = None;
+                        let mut removed_any = false;
+                        for (attempt, lane) in candidates.into_iter().enumerate() {
+                            if tokio::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            let attempt_deadline = if attempt == 0 {
+                                deadline.min(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_millis(40),
+                                )
+                            } else {
+                                deadline
+                            };
+                            let sent = tokio::time::timeout_at(
+                                attempt_deadline,
+                                lane.connection.send_frame(&lane_frame),
+                            )
+                            .await
+                            .is_ok_and(|result| result.is_ok());
+                            if sent {
+                                selected = Some(lane.token);
+                                break;
+                            }
+                            removed_any |= self.remove_outbound_audio_lane(
+                                connection_token,
+                                lane.token,
+                                b"audio lane send failed",
+                            );
+                        }
+                        if removed_any {
+                            let no_ready_lanes = self
+                                .outbound_audio_lanes
+                                .get(&connection_token)
+                                .map_or(true, Vec::is_empty);
+                            self.schedule_audio_lane_retry(connection_token, no_ready_lanes);
+                        }
+                        if let Some(selected) = selected {
+                            let selection = self
+                                .audio_lane_selections
+                                .entry(connection_token)
+                                .or_default();
+                            if selection.selected != Some(selected) {
+                                selection.select(selected);
+                            }
+                            let _ = resp.send(P2PSendResult {
+                                success: true,
+                                error: None,
+                                audio_lanes: Some(
+                                    self.audio_lane_telemetry(connection_token, Some(selected)),
+                                ),
+                            });
+                            return;
+                        }
+                    }
+                }
+
+                let Some(send_queues) = self.send_queues.get(&connection_token) else {
                     let _ = resp.send(P2PSendResult {
                         success: false,
                         error: Some("Connection writer unavailable".to_string()),
+                        audio_lanes: None,
                     });
                     return;
                 };
                 let frame = QueuedSend {
                     data,
                     deadline,
+                    audio_lanes: realtime_audio
+                        .then(|| self.audio_lane_telemetry(connection_token, None)),
                     resp,
                     _permit,
+                };
+                let send_tx = if realtime_audio {
+                    &send_queues.realtime
+                } else {
+                    &send_queues.normal
                 };
                 match send_tx.try_send(frame) {
                     Ok(()) => {}
@@ -1892,11 +3205,16 @@ impl IrohWorker {
                     return;
                 }
                 let endpoint_url = build_private_endpoint_url(endpoint.onion_host());
+                self.endpoint_accept_task = Some(spawn_onion_endpoint_acceptor(
+                    endpoint.clone(),
+                    self.self_command_tx.clone(),
+                    identity_generation,
+                ));
                 self.endpoint = Some(endpoint);
                 *self.local_node_id.write() = Some(endpoint_url);
             }
             WorkerCommand::RotateIdentity { resp, _permit } => {
-                let _identity_generation = self
+                let identity_generation = self
                     .identity_generation
                     .fetch_add(1, Ordering::AcqRel)
                     .wrapping_add(1);
@@ -1911,6 +3229,12 @@ impl IrohWorker {
                 self.connections.clear();
                 self.connection_tokens.clear();
                 self.send_queues.clear();
+                for connection in self.pending_audio_connections.values() {
+                    connection.close(0u32, b"identity rotated");
+                }
+                self.pending_audio_connections.clear();
+                self.pending_audio_offers.clear();
+                self.audio_lane_dials.clear();
                 self.authenticated_connections.write().clear();
                 for (_, task) in self.authentication_timeout_tasks.drain() {
                     task.abort();
@@ -1925,9 +3249,18 @@ impl IrohWorker {
                         return;
                     }
                 };
+                let replacement = Arc::new(replacement);
                 let endpoint_url = build_private_endpoint_url(replacement.onion_host());
-                let previous_endpoint = self.endpoint.replace(Arc::new(replacement));
+                if let Some(task) = self.endpoint_accept_task.take() {
+                    task.abort();
+                }
+                let previous_endpoint = self.endpoint.replace(replacement.clone());
                 drop(previous_endpoint);
+                self.endpoint_accept_task = Some(spawn_onion_endpoint_acceptor(
+                    replacement,
+                    self.self_command_tx.clone(),
+                    identity_generation,
+                ));
                 *self.local_node_id.write() = Some(endpoint_url.clone());
                 let _ = resp.send(Ok(endpoint_url));
             }
@@ -1971,6 +3304,294 @@ impl IrohWorker {
                         self.handle_incoming_connection(connection, event_tx).await;
                     }
                     Err(_) => warn!("[P2P] Incoming handshake failed or timed out"),
+                }
+            }
+            WorkerCommand::IncomingAudioLane {
+                identity_generation,
+                token,
+                connection,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) != identity_generation {
+                    connection.close(0u32, b"stale identity");
+                    return;
+                }
+                if let Some((connection_token, connection_id, offer_generation)) =
+                    self.pending_audio_offers.remove(&token)
+                {
+                    if offer_generation == identity_generation {
+                        self.attach_inbound_audio_lane(
+                            connection_token,
+                            connection_id,
+                            token,
+                            connection,
+                            event_tx,
+                        );
+                    } else {
+                        connection.close(1008u32, b"stale audio lane");
+                    }
+                } else if self.pending_audio_connections.len() < MAX_PENDING_AUDIO_LANES {
+                    self.pending_audio_connections.insert(token, connection);
+                    let command_tx = self.self_command_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        let _ = command_tx.send(WorkerCommand::ExpirePendingAudioLane {
+                            identity_generation,
+                            token,
+                        });
+                    });
+                } else {
+                    connection.close(1013u32, b"audio lane capacity");
+                }
+            }
+            WorkerCommand::AudioLaneOffer {
+                identity_generation,
+                connection_id,
+                connection_token,
+                token,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) != identity_generation
+                    || self.connection_tokens.get(&connection_id).copied() != Some(connection_token)
+                    || !self
+                        .authenticated_connections
+                        .read()
+                        .contains(&connection_token)
+                {
+                    return;
+                }
+                if let Some(connection) = self.pending_audio_connections.remove(&token) {
+                    self.attach_inbound_audio_lane(
+                        connection_token,
+                        connection_id,
+                        token,
+                        connection,
+                        event_tx,
+                    );
+                } else if self.pending_audio_offers.len() < MAX_PENDING_AUDIO_LANES {
+                    self.pending_audio_offers.insert(
+                        token,
+                        (connection_token, connection_id, identity_generation),
+                    );
+                    let command_tx = self.self_command_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        let _ = command_tx.send(WorkerCommand::ExpirePendingAudioLane {
+                            identity_generation,
+                            token,
+                        });
+                    });
+                }
+            }
+            WorkerCommand::AudioLaneDialCompleted {
+                identity_generation,
+                connection_token,
+                token,
+                result,
+            } => {
+                if let Some(tokens) = self.audio_lane_dials.get_mut(&connection_token) {
+                    tokens.remove(&token);
+                    if tokens.is_empty() {
+                        self.audio_lane_dials.remove(&connection_token);
+                    }
+                }
+                let batch_complete = !self.audio_lane_dials.contains_key(&connection_token);
+                let connection_current = self.identity_generation.load(Ordering::Acquire)
+                    == identity_generation
+                    && self
+                        .authenticated_connections
+                        .read()
+                        .contains(&connection_token);
+                match result {
+                    Ok(connection) if connection_current => {
+                        let lanes = self
+                            .outbound_audio_lanes
+                            .entry(connection_token)
+                            .or_default();
+                        if lanes.len() >= AUDIO_LANE_TARGET_COUNT
+                            || lanes.iter().any(|lane| lane.token == token)
+                        {
+                            connection.close(1008u32, b"audio lane capacity");
+                        } else {
+                            let connection = Arc::new(connection);
+                            lanes.push(OutboundAudioLane {
+                                token,
+                                connection: connection.clone(),
+                                rtt_ms: None,
+                                degraded_samples: 0,
+                            });
+                            if let Some(status) =
+                                self.audio_lane_setup_status.get_mut(&connection_token)
+                            {
+                                status.consecutive_failed_batches = 0;
+                            }
+                            if lanes.len() == AUDIO_LANE_TARGET_COUNT {
+                                self.audio_lane_next_dial_at.remove(&connection_token);
+                                if let Some(status) =
+                                    self.audio_lane_setup_status.get_mut(&connection_token)
+                                {
+                                    status.last_failure = None;
+                                }
+                            }
+                            self.spawn_outbound_audio_lane_tasks(
+                                identity_generation,
+                                connection_token,
+                                token,
+                                connection,
+                            );
+                        }
+                    }
+                    Ok(connection) => connection.close(1008u32, b"stale audio lane"),
+                    Err(error) => {
+                        let status = self
+                            .audio_lane_setup_status
+                            .entry(connection_token)
+                            .or_default();
+                        status.failures = status.failures.saturating_add(1);
+                        status.last_failure = Some(match error.as_str() {
+                            "offer-send" => "offer-send",
+                            "dial-timeout" => "dial-timeout",
+                            "preamble-send" => "preamble-send",
+                            "binding-timeout" => "binding-timeout",
+                            "binding-closed" => "binding-closed",
+                            "binding-pressure" => "binding-pressure",
+                            "binding-read-invalid" => "binding-read-invalid",
+                            "binding-frame-invalid" => "binding-frame-invalid",
+                            _ => "dial-failed",
+                        });
+                    }
+                }
+                if batch_complete && connection_current {
+                    let ready = self
+                        .outbound_audio_lanes
+                        .get(&connection_token)
+                        .map_or(0, Vec::len);
+                    if ready < AUDIO_LANE_TARGET_COUNT {
+                        self.schedule_audio_lane_retry(connection_token, ready == 0);
+                    }
+                }
+            }
+            WorkerCommand::AudioLaneRtt {
+                identity_generation,
+                connection_token,
+                token,
+                rtt_ms,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) != identity_generation {
+                    return;
+                }
+                let mut remove_degraded = false;
+                if let Some(lanes) = self.outbound_audio_lanes.get_mut(&connection_token) {
+                    let fastest_other = lanes
+                        .iter()
+                        .filter(|lane| lane.token != token)
+                        .filter_map(|lane| lane.rtt_ms)
+                        .min();
+                    if let Some(lane) = lanes.iter_mut().find(|lane| lane.token == token) {
+                        lane.rtt_ms = Some(match lane.rtt_ms {
+                            Some(previous) => previous.saturating_mul(7).saturating_add(rtt_ms) / 8,
+                            None => rtt_ms,
+                        });
+                        let degraded = fastest_other.is_some_and(|fastest| {
+                            rtt_ms > fastest.saturating_mul(2)
+                                && rtt_ms > fastest.saturating_add(750)
+                        });
+                        lane.degraded_samples = if degraded {
+                            lane.degraded_samples.saturating_add(1)
+                        } else {
+                            0
+                        };
+                        remove_degraded =
+                            lane.degraded_samples >= 3 && lanes.len() > AUDIO_LANE_ACTIVE_COUNT;
+                    }
+                }
+                let mut ranked: Vec<([u8; AUDIO_LANE_TOKEN_BYTES], u64)> = self
+                    .outbound_audio_lanes
+                    .get(&connection_token)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|lane| lane.rtt_ms.map(|rtt| (lane.token, rtt)))
+                    .collect();
+                ranked.sort_by_key(|(_, rtt)| *rtt);
+                self.audio_lane_selections
+                    .entry(connection_token)
+                    .or_default()
+                    .observe(
+                        &ranked
+                            .into_iter()
+                            .filter(|(candidate, _)| {
+                                self.visual_lane_selections
+                                    .get(&connection_token)
+                                    .is_none_or(|visual| candidate != visual)
+                            })
+                            .collect::<Vec<_>>(),
+                        token,
+                    );
+                if remove_degraded
+                    && self.remove_outbound_audio_lane(
+                        connection_token,
+                        token,
+                        b"audio lane degraded",
+                    )
+                {
+                    let status = self
+                        .audio_lane_setup_status
+                        .entry(connection_token)
+                        .or_default();
+                    status.failures = status.failures.saturating_add(1);
+                    status.last_failure = Some("rtt-degraded");
+                    self.schedule_audio_lane_retry(connection_token, false);
+                }
+            }
+            WorkerCommand::AudioLaneFailed {
+                identity_generation,
+                connection_token,
+                token,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) == identity_generation
+                    && self.remove_outbound_audio_lane(
+                        connection_token,
+                        token,
+                        b"audio lane failed",
+                    )
+                {
+                    let status = self
+                        .audio_lane_setup_status
+                        .entry(connection_token)
+                        .or_default();
+                    status.failures = status.failures.saturating_add(1);
+                    status.last_failure = Some("lane-closed");
+                    let no_ready_lanes = self
+                        .outbound_audio_lanes
+                        .get(&connection_token)
+                        .map_or(true, Vec::is_empty);
+                    self.schedule_audio_lane_retry(connection_token, no_ready_lanes);
+                }
+            }
+            WorkerCommand::InboundAudioLaneClosed {
+                identity_generation,
+                connection_token,
+                token,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) != identity_generation {
+                    return;
+                }
+                if let Some(lanes) = self.inbound_audio_lanes.get_mut(&connection_token) {
+                    lanes.retain(|lane| lane.token != token);
+                    if lanes.is_empty() {
+                        self.inbound_audio_lanes.remove(&connection_token);
+                        self.audio_receive_windows.remove(&connection_token);
+                    }
+                }
+            }
+            WorkerCommand::ExpirePendingAudioLane {
+                identity_generation,
+                token,
+            } => {
+                if self.identity_generation.load(Ordering::Acquire) != identity_generation {
+                    return;
+                }
+                self.pending_audio_offers.remove(&token);
+                if let Some(connection) = self.pending_audio_connections.remove(&token) {
+                    connection.close(1008u32, b"audio lane binding timeout");
                 }
             }
             WorkerCommand::AuthenticationExpired {
@@ -2112,7 +3733,10 @@ impl P2PTransportHandler {
         &self,
         connection_id: &str,
         connection_token: u64,
-        message_json: String,
+        data: Vec<u8>,
+        deadline_ms: Option<u64>,
+        audio_endpoint: Option<String>,
+        audio_lane_rtt_ceiling_ms: Option<u64>,
     ) -> QorResult<P2PSendResult> {
         validate_connection_id(connection_id)?;
         if connection_token == 0 {
@@ -2120,44 +3744,41 @@ impl P2PTransportHandler {
                 "Invalid P2P connection token".to_string(),
             ));
         }
-        if message_json.len() > MAX_FRAME_BYTES {
+        if data.is_empty() || data.len() > MAX_FRAME_BYTES {
             return Ok(P2PSendResult {
                 success: false,
                 error: Some(format!(
                     "Frame too large: {} bytes (max {})",
-                    message_json.len(),
+                    data.len(),
                     MAX_FRAME_BYTES
                 )),
+                audio_lanes: None,
             });
         }
-        enforce_bounded_json_structure(message_json.as_bytes(), 8, 64, MAX_FRAME_BYTES)
-            .map_err(|_| QorError::InvalidArgument("Invalid P2P JSON frame".to_string()))?;
-        if !message_json
-            .bytes()
-            .find(|byte| !byte.is_ascii_whitespace())
-            .is_some_and(|byte| matches!(byte, b'{' | b'"'))
-        {
-            return Err(QorError::InvalidArgument(
-                "Invalid P2P JSON frame".to_string(),
-            ));
-        }
-        let mut deserializer = serde_json::Deserializer::from_str(&message_json);
-        serde::de::IgnoredAny::deserialize(&mut deserializer)
-            .map_err(|_| QorError::InvalidArgument("Invalid P2P JSON frame".to_string()))?;
-        deserializer
-            .end()
-            .map_err(|_| QorError::InvalidArgument("Invalid P2P JSON frame".to_string()))?;
-        let data = message_json.into_bytes();
 
         let Some(permit) = try_reserve_outbound_bytes(data.len()) else {
             return Ok(P2PSendResult {
                 success: false,
                 error: Some("Outbound P2P queue full".to_string()),
+                audio_lanes: None,
             });
         };
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(SEND_TIMEOUT_SECS);
+        let audio_onion_host = match audio_endpoint {
+            Some(endpoint) => Some(parse_private_endpoint_url(&endpoint)?),
+            None => None,
+        };
+
+        let now = tokio::time::Instant::now();
+        let max_duration = std::time::Duration::from_secs(SEND_TIMEOUT_SECS);
+        let requested_duration = deadline_ms.map(|deadline| {
+            let current = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            std::time::Duration::from_millis(deadline.saturating_sub(current))
+        });
+        let deadline = now + requested_duration.unwrap_or(max_duration).min(max_duration);
         let (tx, rx) = oneshot::channel();
         if self
             .command_tx
@@ -2165,6 +3786,8 @@ impl P2PTransportHandler {
                 connection_id: connection_id.to_string(),
                 connection_token,
                 data,
+                audio_onion_host,
+                audio_lane_rtt_ceiling_ms,
                 deadline,
                 resp: tx,
                 _permit: permit,
@@ -2184,6 +3807,7 @@ impl P2PTransportHandler {
             Ok(Err(_)) | Err(_) => Ok(P2PSendResult {
                 success: false,
                 error: Some("P2P worker did not respond".to_string()),
+                audio_lanes: None,
             }),
         }
     }
@@ -2407,4 +4031,175 @@ pub async fn init() -> QorResult<Arc<P2PTransportHandler>> {
     });
 
     Ok(handler)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AUDIO_LANE_ACTIVE_COUNT, AUDIO_LANE_FRAME_DATA, AUDIO_LANE_FRAME_PING,
+        AUDIO_LANE_FRAME_PONG, AUDIO_LANE_FRAME_READY, AUDIO_LANE_SWITCH_CONFIRMATIONS,
+        AUDIO_LANE_TARGET_COUNT, AudioLaneFrame, AudioLaneSelection, AudioLaneTelemetry,
+        AudioLaneTelemetryEntry, AudioReceiveWindow, P2PEvent, P2PSendResult,
+        audio_lane_has_meaningful_gain, audio_lane_rtt_is_eligible, encode_audio_lane_frame,
+        is_realtime_audio_frame, is_realtime_visual_frame, is_valid_authenticated_frame,
+        parse_audio_lane_frame,
+    };
+
+    fn stream_frame(id: &str, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(2 + id.len() + payload.len());
+        frame.extend_from_slice(&(id.len() as u16).to_be_bytes());
+        frame.extend_from_slice(id.as_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn authenticated_binary_audio_frames_are_realtime() {
+        let audio = stream_frame("call-audio:0123456789abcdef", &[1, 2, 3]);
+        let screen = stream_frame("call-screen:0123456789abcdef", &[1, 2, 3]);
+        assert!(is_valid_authenticated_frame(&audio));
+        assert!(is_realtime_audio_frame(&audio));
+        assert!(is_valid_authenticated_frame(&screen));
+        assert!(!is_realtime_audio_frame(&screen));
+        assert!(is_realtime_visual_frame(&screen));
+        assert!(!is_realtime_visual_frame(&audio));
+        assert!(!is_valid_authenticated_frame(b"not-a-frame"));
+    }
+
+    #[test]
+    fn bridge_message_preserves_raw_payload() {
+        let payload = vec![0, 1, 2, 3, 255];
+        let bytes = P2PEvent::Message {
+            connection_id: "inbound:1".to_string(),
+            connection_token: 7,
+            data: payload.clone(),
+            byte_len: payload.len(),
+        }
+        .into_bridge_bytes()
+        .unwrap();
+        assert_eq!(&bytes[..4], b"QPB1");
+        assert_eq!(bytes[4], 3);
+        assert_eq!(&bytes[15 + "inbound:1".len()..], payload.as_slice());
+    }
+
+    #[test]
+    fn audio_lane_frames_are_typed_and_bounded() {
+        let payload = [4, 5, 6];
+        let data = encode_audio_lane_frame(AUDIO_LANE_FRAME_DATA, 41, &payload);
+        match parse_audio_lane_frame(&data) {
+            Some(AudioLaneFrame::Data { frame_id, data }) => {
+                assert_eq!(frame_id, 41);
+                assert_eq!(data, payload);
+            }
+            _ => panic!("expected audio data frame"),
+        }
+        let ping = encode_audio_lane_frame(AUDIO_LANE_FRAME_PING, 42, &[]);
+        assert!(matches!(
+            parse_audio_lane_frame(&ping),
+            Some(AudioLaneFrame::Ping(42))
+        ));
+        let pong = encode_audio_lane_frame(AUDIO_LANE_FRAME_PONG, 42, &[]);
+        assert!(matches!(
+            parse_audio_lane_frame(&pong),
+            Some(AudioLaneFrame::Pong(42))
+        ));
+        let ready = encode_audio_lane_frame(AUDIO_LANE_FRAME_READY, 1, &[]);
+        assert!(matches!(
+            parse_audio_lane_frame(&ready),
+            Some(AudioLaneFrame::Ready)
+        ));
+        assert!(
+            parse_audio_lane_frame(&encode_audio_lane_frame(AUDIO_LANE_FRAME_PING, 0, &[]))
+                .is_none()
+        );
+        assert!(
+            parse_audio_lane_frame(&encode_audio_lane_frame(AUDIO_LANE_FRAME_PONG, 1, &[1]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn audio_receive_window_accepts_reordering_once() {
+        let mut window = AudioReceiveWindow::default();
+        assert!(window.accept(10));
+        assert!(window.accept(12));
+        assert!(window.accept(11));
+        assert!(!window.accept(11));
+        assert!(window.accept(200));
+        assert!(!window.accept(12));
+    }
+
+    #[test]
+    fn donor_lane_requires_a_measured_rtt_below_the_primary_ceiling() {
+        assert!(audio_lane_rtt_is_eligible(Some(540), 575));
+        assert!(audio_lane_rtt_is_eligible(Some(575), 575));
+        assert!(!audio_lane_rtt_is_eligible(Some(576), 575));
+        assert!(!audio_lane_rtt_is_eligible(None, 575));
+    }
+
+    #[test]
+    fn donor_lane_switch_requires_sustained_meaningful_gain() {
+        let current = [1u8; 32];
+        let challenger = [2u8; 32];
+        let mut selection = AudioLaneSelection::default();
+        selection.observe(&[(current, 700)], current);
+        assert_eq!(selection.selected, Some(current));
+        assert!(audio_lane_has_meaningful_gain(700, 600));
+        assert!(!audio_lane_has_meaningful_gain(700, 640));
+        for sample in 1..AUDIO_LANE_SWITCH_CONFIRMATIONS {
+            selection.observe(&[(challenger, 600), (current, 700)], challenger);
+            assert_eq!(selection.selected, Some(current), "sample {sample}");
+        }
+        selection.observe(&[(challenger, 600), (current, 700)], challenger);
+        assert_eq!(selection.selected, Some(challenger));
+        assert_eq!(selection.challenger, None);
+        assert_eq!(selection.challenger_samples, 0);
+    }
+
+    #[test]
+    fn donor_lane_selection_fails_over_when_selected_lane_disappears() {
+        let current = [3u8; 32];
+        let fallback = [4u8; 32];
+        let mut selection = AudioLaneSelection::default();
+        selection.select(current);
+        selection.remove(current);
+        selection.observe(&[(fallback, 650)], fallback);
+        assert_eq!(selection.selected, Some(fallback));
+    }
+
+    #[test]
+    fn audio_lane_telemetry_uses_the_bridge_schema() {
+        assert_eq!(AUDIO_LANE_TARGET_COUNT, 4);
+        assert_eq!(AUDIO_LANE_ACTIVE_COUNT, 1);
+        let value = serde_json::to_value(P2PSendResult {
+            success: true,
+            error: None,
+            audio_lanes: Some(AudioLaneTelemetry {
+                ready: 4,
+                target: 4,
+                active: 2,
+                endpoint_available: true,
+                dialing: 0,
+                attempts: 4,
+                failures: 0,
+                retry_in_ms: None,
+                last_failure: None,
+                selected_lane: Some("00112233".to_string()),
+                visual_lane: Some("8899aabb".to_string()),
+                lanes: vec![AudioLaneTelemetryEntry {
+                    id: "00112233".to_string(),
+                    rtt_ms: Some(900),
+                    degraded_samples: 0,
+                    role: "active".to_string(),
+                }],
+            }),
+        })
+        .unwrap();
+        assert_eq!(value["audioLanes"]["selectedLane"], "00112233");
+        assert_eq!(value["audioLanes"]["visualLane"], "8899aabb");
+        assert_eq!(value["audioLanes"]["endpointAvailable"], true);
+        assert_eq!(value["audioLanes"]["attempts"], 4);
+        assert_eq!(value["audioLanes"]["lanes"][0]["rttMs"], 900);
+        assert_eq!(value["audioLanes"]["lanes"][0]["degradedSamples"], 0);
+    }
 }

@@ -45,17 +45,8 @@ export function SignUpForm({
     [isUsernameValid, isPasswordValid, doPasswordsMatch, isPassphraseValid, doPassphrasesMatch, secretsAreDistinct]
   );
 
-  useEffect(() => {
-    console.log('[SIGNUP-DIAG] button gate', {
-      disabled, isSubmitting, isFormValid,
-      isUsernameValid, isPasswordValid, doPasswordsMatch,
-      isPassphraseValid, doPassphrasesMatch, secretsAreDistinct
-    });
-  }, [disabled, isSubmitting, isFormValid, isUsernameValid, isPasswordValid, doPasswordsMatch, isPassphraseValid, doPassphrasesMatch, secretsAreDistinct]);
-
   const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    console.log('[SIGNUP-DIAG] submit attempt', { disabled, isSubmitting, isFormValid });
     if (disabled || isSubmitting || !isFormValid) return;
 
     const sanitizedUsername = username.trim();

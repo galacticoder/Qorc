@@ -19,11 +19,6 @@ pub async fn get_sources() -> QorResult<Vec<ScreenSource>> {
         get_sources_linux().await
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        get_sources_macos().await
-    }
-
     #[cfg(target_os = "windows")]
     {
         get_sources_windows().await
@@ -75,7 +70,7 @@ fn append_displays(sources: &mut Vec<ScreenSource>) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 async fn run_bounded_command(path: &str, args: &[&str]) -> Option<Vec<u8>> {
     use std::process::Stdio;
     use std::time::Duration;
@@ -160,60 +155,6 @@ async fn get_sources_linux() -> QorResult<Vec<ScreenSource>> {
             sources.push(ScreenSource {
                 id: format!("window:{window_id}"),
                 name,
-                source_type: "window".to_string(),
-            });
-        }
-    }
-
-    Ok(sources)
-}
-
-#[cfg(target_os = "macos")]
-async fn get_sources_macos() -> QorResult<Vec<ScreenSource>> {
-    let mut sources = Vec::new();
-    append_displays(&mut sources);
-
-    const SCRIPT: &str = r#"
-        set maxItems to 128
-        set windowList to {}
-        tell application "System Events"
-            repeat with proc in (every process whose background only is false)
-                if (count windowList) < maxItems then
-                    repeat with w in (every window of proc)
-                        if (count windowList) >= maxItems then exit repeat
-                        try
-                            set recordText to ((id of w) as text) & (character id 31) & (name of proc) & " - " & (name of w)
-                            set end of windowList to recordText
-                        end try
-                    end repeat
-                end if
-            end repeat
-        end tell
-        set oldDelimiters to AppleScript's text item delimiters
-        set AppleScript's text item delimiters to character id 30
-        set outputText to windowList as text
-        set AppleScript's text item delimiters to oldDelimiters
-        return outputText
-    "#;
-
-    if let Some(output) = run_bounded_command("/usr/bin/osascript", &["-e", SCRIPT]).await {
-        let stdout = String::from_utf8_lossy(&output);
-        for record in stdout.trim().split('\u{1e}') {
-            if sources.len() >= MAX_SCREEN_SOURCES {
-                break;
-            }
-            let Some((window_id, title)) = record.split_once('\u{1f}') else {
-                continue;
-            };
-            if window_id.is_empty()
-                || window_id.len() > 20
-                || !window_id.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                continue;
-            }
-            sources.push(ScreenSource {
-                id: format!("window:{window_id}"),
-                name: clean_source_name(title, "Window"),
                 source_type: "window".to_string(),
             });
         }

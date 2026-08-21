@@ -22,6 +22,10 @@ function hostTriple() {
 }
 
 function main() {
+  if (process.platform !== 'linux' && process.platform !== 'win32') {
+    throw new Error('Qor PIR sidecars support only Linux and Windows');
+  }
+
   if (!fs.existsSync(path.join(cargoDir, 'Cargo.toml'))) {
     throw new Error(`Vendored YPIR tree is missing at ${cargoDir}`);
   }

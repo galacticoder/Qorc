@@ -1,3 +1,4 @@
+import './lib/runtime/client-log-forwarding';
 import './trusted-types.ts';
 import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from './contexts/ThemeContext';

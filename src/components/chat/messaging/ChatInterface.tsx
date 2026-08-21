@@ -171,7 +171,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       clearTimeout(t2);
       clearTimeout(t3);
     };
-  }, [selectedConversation, messages.length, scrollToBottom]);
+  }, [selectedConversation, scrollToBottom]);
 
   useEffect(() => {
     if (!selectedConversation) return;
@@ -250,6 +250,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       setIsLoadingMore(true);
 
       try {
+        const previousScrollHeight = scrollContainer.scrollHeight;
+        const previousScrollTop = scrollContainer.scrollTop;
         const currentCount = loadedMessagesCountRef.current.get(selectedConversation) ?? 0;
         const moreMessages = await loadMoreMessages(
           selectedConversation,
@@ -263,6 +265,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
         if (moreMessages.length > 0) {
           loadedMessagesCountRef.current.set(selectedConversation, currentCount + moreMessages.length);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              const addedHeight = scrollContainer.scrollHeight - previousScrollHeight;
+              scrollContainer.scrollTop = previousScrollTop + Math.max(0, addedHeight);
+            });
+          });
         }
       } catch {
       } finally {

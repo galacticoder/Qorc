@@ -8,16 +8,17 @@ import {
 } from '../../lib/transport/unified-signal-transport';
 import { keyTransparencyClient } from '../../lib/key-transparency/client';
 import {
-  getKeyTransparencyAuthorizedPeerState,
   isKeyTransparencyAuthorizedPeerKeySet,
   isKeyTransparencyPeerRevoked,
 } from '../../lib/key-transparency/verified-material';
 import { awaitPeerIdentityRevocation } from '../../lib/key-transparency/revocation';
-import { User } from '../../components/chat/messaging/UserList';
 import { account, signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 import { extractX25519FromSignalBundle } from '../../lib/utils/peer-certificate-utils';
-import { resolveTrustedPeerHybridPublicKeys } from '../../lib/utils/signal-bundle-utils';
+import {
+  loadTrustedPersistedDiscoveryMaterial,
+  resolveTrustedPeerHybridPublicKeys,
+} from '../../lib/utils/signal-bundle-utils';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
 import {
   isValidDilithiumPublicKeyBase64,
@@ -29,16 +30,11 @@ import {
   MAX_SIGNAL_PAYLOAD_JSON_BYTES,
 } from '../../lib/constants';
 import { hasPrototypePollutionKeys, isPlainObject, sanitizeMessageId } from '../../lib/sanitizers';
-import { persistPeerDetectionKey, rememberPeerDetectionKey } from '../../lib/spool/detection-key';
-import {
-  clearPersistedDiscoveryMaterial,
-  loadPersistedDiscoveryMaterial,
-  savePersistedDiscoveryMaterial,
-} from '../../lib/discovery/persisted-discovery-material';
+import { rememberPeerDetectionKey } from '../../lib/spool/detection-key';
+import { clearPersistedDiscoveryMaterial } from '../../lib/discovery/persisted-discovery-material';
 import { createBoundedMapSetter } from '../../lib/utils/message-state-limits';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 
-const DISCOVERY_REFRESH_SUCCESS_TTL_MS = 30 * 60 * 1000;
 const DISCOVERY_REFRESH_FAILURE_TTL_MS = 30 * 1000;
 const DISCOVERY_LOOKUP_SEND_TIMEOUT_MS = 4 * 60 * 1000;
 const DEFERRABLE_SIGNAL_TYPES: ReadonlySet<string> = new Set([
@@ -73,20 +69,16 @@ interface EncryptionProviderProps {
   isLoggedIn: boolean;
   loginUsernameRef: React.RefObject<string | null>;
   getPeerHybridKeys: (peer: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string } | null>;
-  users: User[];
   getKeysOnDemand: () => Promise<any>;
   findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
-  ensureDiscoveryPublished?: (force?: boolean) => Promise<boolean>;
 }
 
 export function useEncryptionProvider({
   isLoggedIn,
   loginUsernameRef,
   getPeerHybridKeys,
-  users,
   getKeysOnDemand,
   findUser,
-  ensureDiscoveryPublished,
 }: EncryptionProviderProps) {
   const sessionEnsureRef = useRef(new Map<string, Promise<boolean>>());
   const discoveryCacheRef = useRef(new Map<string, any>());
@@ -95,31 +87,15 @@ export function useEncryptionProvider({
   const discoveryInFlightRef = useRef(new Map<string, Promise<any>>());
   const discoveryAttemptRef = useRef(new Map<string, number>());
   const discoveryResultMemoRef = useRef(new Map<string, { value: any | null; expiresAt: number }>());
-  const discoveryFreshUntilRef = useRef(new Map<string, number>());
-  const discoveryPublishWarnAtRef = useRef(new Map<string, number>());
   const peerBundleInstalledRef = useRef(new Map<string, true>());
   const mlKemInstallInFlightRef = useRef(new Map<string, Promise<void>>());
   const discoveryGenerationRef = useRef(0);
   const encryptionGenerationRef = useRef(0);
   const activeAccountRef = useRef<string | null>(null);
 
-  // Caches discovery material in memory and on disk together
   const rememberDiscoveryMaterial = (peer: string, material: any): void => {
     setBoundedPeerEntry(discoveryCacheRef.current, peer, material);
-    const account = activeAccountRef.current;
-    if (!account || !material) return;
-    const normalizedPeer = String(peer).trim().toLowerCase();
-    
-    void persistPeerDetectionKey(account, normalizedPeer, material.spoolDetectionKey)
-      .catch(() => { });
     rememberPeerDetectionKey(String(peer), material.spoolDetectionKey);
-    
-    void savePersistedDiscoveryMaterial(
-      account,
-      normalizedPeer,
-      material,
-      getKeyTransparencyAuthorizedPeerState(account, normalizedPeer)
-    ).catch(() => { });
   };
 
   useEffect(() => {
@@ -136,8 +112,6 @@ export function useEncryptionProvider({
     discoveryInFlightRef.current.clear();
     discoveryAttemptRef.current.clear();
     discoveryResultMemoRef.current.clear();
-    discoveryFreshUntilRef.current.clear();
-    discoveryPublishWarnAtRef.current.clear();
     peerBundleInstalledRef.current.clear();
     mlKemInstallInFlightRef.current.clear();
     sessionEnsureRef.current.clear();
@@ -204,16 +178,15 @@ export function useEncryptionProvider({
   useEffect(() => {
     const resetDiscoveryState = () => {
       discoveryGenerationRef.current += 1;
-      discoveryCacheRef.current.clear();
       discoveryInFlightRef.current.clear();
       discoveryAttemptRef.current.clear();
-      discoveryResultMemoRef.current.clear();
-      discoveryFreshUntilRef.current.clear();
+      for (const [peer, entry] of discoveryResultMemoRef.current.entries()) {
+        if (entry.value === null) discoveryResultMemoRef.current.delete(peer);
+      }
     };
 
-    const resetEncryptionAndDiscoveryState = () => {
+    const resetEncryptionState = () => {
       encryptionGenerationRef.current += 1;
-      resetDiscoveryState();
       sessionEnsureRef.current.clear();
       preKeyPendingRef.current.clear();
       for (const waiter of sessionReadyWaitersRef.current.values()) {
@@ -231,17 +204,16 @@ export function useEncryptionProvider({
         }
       }
       discoveryAttemptRef.current.clear();
-      unifiedSignalTransport.clearRefreshCooldowns();
     };
 
     window.addEventListener(EventType.WS_RECONNECTED, resetDiscoveryState as EventListener);
-    window.addEventListener(EventType.HYBRID_KEYS_UPDATED, resetEncryptionAndDiscoveryState as EventListener);
+    window.addEventListener(EventType.HYBRID_KEYS_UPDATED, resetEncryptionState as EventListener);
     window.addEventListener(EventType.SERVER_ENTRY_GRANTED, clearNegativeDiscoveryResults as EventListener);
     window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, clearNegativeDiscoveryResults as EventListener);
 
     return () => {
       window.removeEventListener(EventType.WS_RECONNECTED, resetDiscoveryState as EventListener);
-      window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, resetEncryptionAndDiscoveryState as EventListener);
+      window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, resetEncryptionState as EventListener);
       window.removeEventListener(EventType.SERVER_ENTRY_GRANTED, clearNegativeDiscoveryResults as EventListener);
       window.removeEventListener(EventType.PQ_SESSION_ESTABLISHED, clearNegativeDiscoveryResults as EventListener);
     };
@@ -304,24 +276,6 @@ export function useEncryptionProvider({
       }
       setBoundedPeerEntry(discoveryAttemptRef.current, normalizedPeer, now);
 
-      if (ensureDiscoveryPublished) {
-        const warnPublishFailed = () => {
-          if (!isCurrentGeneration()) return;
-          const lastWarn = discoveryPublishWarnAtRef.current.get(normalizedPeer) || 0;
-          if (Date.now() - lastWarn > 30000) {
-            setBoundedPeerEntry(discoveryPublishWarnAtRef.current, normalizedPeer, Date.now());
-            console.warn('[UnifiedTransport] Discovery self-publish failed before lookup');
-          }
-        };
-        try {
-          ensureDiscoveryPublished(force)
-            .then((published) => { if (!published) warnPublishFailed(); })
-            .catch(warnPublishFailed);
-        } catch {
-          warnPublishFailed();
-        }
-      }
-
       let promise: Promise<any | null>;
       promise = findUser(peer, { forceRefresh: !!options?.force })
         .then((material) => {
@@ -338,7 +292,7 @@ export function useEncryptionProvider({
             value: null,
             expiresAt: Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS
           });
-          console.warn('[UnifiedTransport] On-demand discovery failed');
+          console.warn('[UnifiedTransport] Discovery failed');
           return null;
         })
         .finally(() => {
@@ -425,7 +379,7 @@ export function useEncryptionProvider({
       };
     };
 
-    unifiedSignalTransport.setEncryptionProvider(async (to, payload, type, transportHints) => {
+    unifiedSignalTransport.setEncryptionProvider(async (to, payload, type) => {
       const generation = encryptionGenerationRef.current;
       const currentUser = loginUsernameRef.current;
       const isCurrentOperation = () => (
@@ -459,12 +413,13 @@ export function useEncryptionProvider({
         if (!isCurrentOperation() || to === 'SERVER') {
           return to === 'SERVER' ? null : deny('stale-operation:entry');
         }
-        let forceDiscoveryRefresh = !!transportHints?.forceDiscoveryRefresh;
+        await keyTransparencyClient.restorePersistedAuthorizations(currentUser).catch(() => 0);
+        if (!isCurrentOperation()) return deny('stale-operation:authorization-restore');
+        let forceDiscoveryRefresh = false;
         const peerWasRevoked = isKeyTransparencyPeerRevoked(currentUser, to);
         if (peerWasRevoked) {
           if (!await awaitPeerIdentityRevocation(currentUser, to) || !isCurrentOperation()) return deny('peer-revoked:revocation-wait-failed');
           forceDiscoveryRefresh = true;
-          discoveryFreshUntilRef.current.delete(to);
           discoveryResultMemoRef.current.delete(to);
           discoveryCacheRef.current.delete(to);
           
@@ -487,10 +442,10 @@ export function useEncryptionProvider({
             || discoveryCacheRef.current.get(normalizedTo);
 
           if (!cachedMaterial && activeAccountRef.current) {
-            cachedMaterial = (await loadPersistedDiscoveryMaterial(
+            cachedMaterial = await loadTrustedPersistedDiscoveryMaterial(
               activeAccountRef.current,
               normalizedTo
-            ).catch(() => null))?.material ?? null;
+            ).catch(() => null);
             if (!isCurrentOperation()) return deny('stale-operation');
             if (cachedMaterial) {
               rememberDiscoveryMaterial(resolvedUsername, cachedMaterial);
@@ -518,12 +473,10 @@ export function useEncryptionProvider({
           }
         }
 
-        // Refresh discovery material periodically
         const refreshPeer = resolvedUsername || to;
         const normalizedRefreshPeer = refreshPeer.trim().toLowerCase();
         const hasCachedKyber = !!peerKeys?.kyberPublicBase64;
         const hasCachedX25519 = !!peerKeys?.x25519PublicBase64;
-        const refreshUntil = discoveryFreshUntilRef.current.get(refreshPeer) || 0;
         const now = Date.now();
         const memoizedDiscovery = discoveryResultMemoRef.current.get(normalizedRefreshPeer);
         const hasFreshNegativeMemo =
@@ -536,11 +489,10 @@ export function useEncryptionProvider({
         
         const mustRefreshDiscoveryNow = forceDiscoveryRefresh || (
           !hasFreshNegativeMemo &&
-          (!haveAllCachedRouting || (now >= refreshUntil && !isDeferrable))
+          !haveAllCachedRouting
         );
 
         if (forceDiscoveryRefresh) {
-          discoveryFreshUntilRef.current.delete(refreshPeer);
           discoveryResultMemoRef.current.delete(normalizedRefreshPeer);
         }
 
@@ -582,9 +534,9 @@ export function useEncryptionProvider({
           }
           if (discoveryTimedOut) {
             setBoundedPeerEntry(
-              discoveryFreshUntilRef.current,
-              refreshPeer,
-              Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS
+              discoveryResultMemoRef.current,
+              normalizedRefreshPeer,
+              { value: null, expiresAt: Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS }
             );
             return deny('discovery-lookup-timed-out', { timeoutMs: DISCOVERY_LOOKUP_SEND_TIMEOUT_MS });
           }
@@ -592,17 +544,14 @@ export function useEncryptionProvider({
             const trustedDiscovery = await resolveTrustedDiscoveryKeys(refreshPeer, refreshedMaterial);
             if (!isCurrentOperation()) return deny('stale-operation');
             if (!trustedDiscovery) {
-              setBoundedPeerEntry(discoveryFreshUntilRef.current,
-                refreshPeer,
-                Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS
+              setBoundedPeerEntry(
+                discoveryResultMemoRef.current,
+                normalizedRefreshPeer,
+                { value: null, expiresAt: Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS }
               );
               return deny('discovery-material-untrusted', { peer: refreshPeer, forced: forceDiscoveryRefresh });
             }
             rememberDiscoveryMaterial(refreshPeer, refreshedMaterial);
-            setBoundedPeerEntry(discoveryFreshUntilRef.current,
-              refreshPeer,
-              Date.now() + DISCOVERY_REFRESH_SUCCESS_TTL_MS
-            );
 
             const refreshedKyber = trustedDiscovery.hybridKeys.kyberPublicBase64;
 
@@ -622,9 +571,10 @@ export function useEncryptionProvider({
                 const rebuilt = await processPeerBundle(refreshPeer, refreshedMaterial.fullBundle, 'key-rotation');
                 if (!isCurrentOperation()) return deny('stale-operation');
                 if (!rebuilt) {
-                  setBoundedPeerEntry(discoveryFreshUntilRef.current,
-                    refreshPeer,
-                    Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS
+                  setBoundedPeerEntry(
+                    discoveryResultMemoRef.current,
+                    normalizedRefreshPeer,
+                    { value: null, expiresAt: Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS }
                   );
                   return deny('session-rebuild-failed-after-key-rotation', { peer: refreshPeer });
                 }
@@ -647,11 +597,6 @@ export function useEncryptionProvider({
                 }
               }));
             } catch { }
-          } else {
-            setBoundedPeerEntry(discoveryFreshUntilRef.current,
-              refreshPeer,
-              Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS
-            );
           }
         }
 
@@ -674,7 +619,7 @@ export function useEncryptionProvider({
           } else {
             const material = await resolveDiscoveryMaterial(
               resolvedUsername,
-              'Attempting on-demand discovery for',
+              'Attempting discovery for',
               { force: forceDiscoveryRefresh }
             );
             if (!isCurrentOperation()) return deny('stale-operation');
@@ -703,7 +648,7 @@ export function useEncryptionProvider({
         }
 
         if (!peerKeys?.kyberPublicBase64) {
-          console.warn('[UnifiedTransport] Auto-encryption failed: no peer keys', {
+          console.warn('No peer keys', {
             hasAlias: resolvedUsername !== to
           });
           return deny('no-peer-routing-keys', { hasAlias: resolvedUsername !== to });
@@ -1021,5 +966,5 @@ export function useEncryptionProvider({
     return () => {
       unifiedSignalTransport.setEncryptionProvider(null);
     };
-  }, [isLoggedIn, getPeerHybridKeys, users, getKeysOnDemand, findUser, ensureDiscoveryPublished]);
+  }, [isLoggedIn, getPeerHybridKeys, getKeysOnDemand, findUser]);
 }

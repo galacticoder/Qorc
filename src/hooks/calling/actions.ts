@@ -1,18 +1,19 @@
 import React from 'react';
-import { unstable_batchedUpdates } from 'react-dom';
+import { flushSync, unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { clearCallMediaState, isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
 import { isTauri } from '../../lib/tauri-bindings';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
+import { loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
 import { toast } from 'sonner';
-import type { SecureDB } from '../../lib/database/secureDB';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 
 async function ensurePeerMaterial(
   refs: ActionRefs,
   peer: string,
-  expectedService: SecureCallingService
+  expectedService: SecureCallingService,
+  ownerUsername: string
 ): Promise<void> {
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling service not initialized');
@@ -28,6 +29,20 @@ async function ensurePeerMaterial(
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling account changed while registering peer identity');
   }
+  if (!p2pTransport.hasAuthenticatedEndpoint(peer)) {
+    const persistedEndpoint = await loadPersistedPeerEndpoint(ownerUsername, peer);
+    if (refs.serviceRef.current !== expectedService) {
+      throw new Error('Calling account changed while restoring the peer endpoint');
+    }
+    if (persistedEndpoint) {
+      p2pTransport.updateAuthenticatedEndpoint(
+        peer,
+        persistedEndpoint.endpointUrl,
+        persistedEndpoint.signerPublicKeyBase64,
+        persistedEndpoint.announcedAt
+      );
+    }
+  }
   if (refs.ensurePeerSession) {
     await refs.ensurePeerSession(peer);
     if (refs.serviceRef.current !== expectedService) {
@@ -39,18 +54,19 @@ async function ensurePeerMaterial(
 export interface ActionRefs {
   serviceRef: React.RefObject<SecureCallingService | null>;
   localStreamRef: React.RefObject<MediaStream | null>;
-  remoteStreamRef: React.RefObject<MediaStream | null>;
-  remoteScreenStreamRef: React.RefObject<MediaStream | null>;
+  localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
   ensurePeerSession?: (username: string) => Promise<void>;
-  secureDBRef?: React.RefObject<SecureDB | null>;
 }
 
 export interface ActionSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<any>>;
   setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
-  setRemoteStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
-  setRemoteScreenStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
+  setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setRemoteScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
 }
 
 // Callback for starting a call
@@ -89,14 +105,7 @@ export const createStartCall = (
     }
 
     try {
-      const db = refs.secureDBRef?.current;
-      if (!db) throw new Error('Secure database is not ready for calling');
-      await db.recordDeliberateContact(peer);
-      if (refs.serviceRef.current !== service || refs.secureDBRef?.current !== db) {
-        throw new Error('Calling account changed while recording deliberate contact');
-      }
-
-      await ensurePeerMaterial(refs, peer, service);
+      await ensurePeerMaterial(refs, peer, service, currentUsername);
 
       const callId = await service.startCall(peer, callType);
       return callId;
@@ -124,7 +133,7 @@ export const createStartCall = (
 };
 
 // Callback for answering a call
-export const createAnswerCall = (refs: ActionRefs) => {
+export const createAnswerCall = (refs: ActionRefs, currentUsername: string) => {
   return async (callId: string, peer?: string) => {
     const service = refs.serviceRef.current;
     if (!service) {
@@ -152,7 +161,7 @@ export const createAnswerCall = (refs: ActionRefs) => {
       if (peer !== undefined && peer.trim() !== peerUsername) {
         throw new Error('Call answer peer does not match the active call');
       }
-      await ensurePeerMaterial(refs, peerUsername, service);
+      await ensurePeerMaterial(refs, peerUsername, service, currentUsername);
 
       await service.answerCall(callId);
     } catch (_error: any) {
@@ -188,14 +197,19 @@ export const createDeclineCall = (refs: ActionRefs) => {
 };
 
 // Callback for ending the current call
-export const createEndCall = (refs: ActionRefs) => {
+export const createEndCall = (refs: ActionRefs, setters: ActionSetters) => {
   return async () => {
-    if (!refs.serviceRef.current) {
+    const service = refs.serviceRef.current;
+    if (!service) {
       throw new Error('Calling service not initialized');
     }
 
+    flushSync(() => {
+      setters.setCurrentCall(null);
+    });
+
     try {
-      await refs.serviceRef.current.endCall();
+      await service.endCall();
     } catch (_error) {
       console.error('Failed to end call:', _error);
       throw _error;
@@ -233,12 +247,7 @@ export const createSwitchCamera = (refs: ActionRefs) => {
     if (!refs.serviceRef.current) {
       return;
     }
-
-    try {
-      await refs.serviceRef.current.switchCamera(deviceId);
-    } catch (_error) {
-      console.error('Failed to switch camera:', _error);
-    }
+    await refs.serviceRef.current.switchCamera(deviceId);
   };
 };
 

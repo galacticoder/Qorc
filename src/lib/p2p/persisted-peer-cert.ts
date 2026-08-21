@@ -104,11 +104,15 @@ async function readRecord(key: string): Promise<PersistedPeerRecord> {
   }
 }
 
-export async function loadPersistedPeerCert(owner: string, peer: string): Promise<PeerCertificateBundle | null> {
+export async function loadPersistedPeerCert(
+  owner: string,
+  peer: string,
+  allowExpired = false,
+): Promise<PeerCertificateBundle | null> {
   try {
     const record = await readRecord(await persistedKey(owner, peer));
     if (!record.cert) return null;
-    return await validatePeerCertificateBundle(record.cert, peer);
+    return await validatePeerCertificateBundle(record.cert, peer, Date.now(), allowExpired);
   } catch {
     return null;
   }

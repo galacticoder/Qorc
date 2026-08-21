@@ -1,5 +1,3 @@
-import { PQNoiseSession } from "../transport/pq-noise-session";
-
 export interface CallState {
     id: string;
     type: 'audio' | 'video';
@@ -41,24 +39,3 @@ export type CallSignal =
         type: 'screen-share-stop';
         data: { streamId: string };
     });
-
-export interface PreviousMediaReceiveKeys {
-    epoch: number;
-    audio: Uint8Array;
-    video: Uint8Array;
-    screen: Uint8Array;
-}
-
-export interface MediaEncryptionContext {
-    session: PQNoiseSession;
-    sendAudioKey: Uint8Array;
-    sendVideoKey: Uint8Array;
-    sendScreenKey: Uint8Array;
-    recvAudioKey: Uint8Array;
-    recvVideoKey: Uint8Array;
-    recvScreenKey: Uint8Array;
-    sendEpoch: number;
-    recvEpoch: number;
-    previousRecvKeys: PreviousMediaReceiveKeys | null;
-    frameCounter: bigint;
-}

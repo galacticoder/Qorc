@@ -50,6 +50,7 @@ export const STORAGE_PREFIXES = {
     PRIVACY_PASS_TOKEN: 'pp_tokens_',
     PRIVATE_AUTH_SLOT: 'private_auth_slot_',
     REGISTRATION_ATTEMPT: 'registration_attempt_v1_',
+    SPOOL_CONSUMED_PROBES: 'spoolconsumed:v1:',
     SPOOL_DETECTION: 'spooldet:v1:',
     SPOOL_PEER_DETECTION: 'spoolpeerdet:v1:',
 } as const;
@@ -69,6 +70,7 @@ export const STORAGE_KEY_DOMAINS = {
     LOCAL_SERVER_SCOPE: 'qor-local-server-scope-v1',
     PEER_CERTIFICATE: 'qor-peer-certificate-cache-v6',
     PRIVATE_AUTH_SLOT: 'qor-private-auth-slot-v4',
+    SPOOL_CONSUMED_PROBES: 'qor-spool-consumed-probes-v1',
     SPOOL_DETECTION: 'qor-spool-detection-key-v1',
     SPOOL_PEER_DETECTION: 'qor-spool-peer-detection-v1',
 } as const;

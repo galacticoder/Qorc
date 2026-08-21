@@ -18,26 +18,28 @@ The calling stack is divided into five responsibilities:
 1. `useCalling` owns one `SecureCallingService` for the currently authenticated
    local account. It connects service callbacks to React state and destroys the
    service across logout, account replacement, or unmount.
-2. Calling actions validate UI requests, record deliberate-contact state, obtain
-   certified peer material, and ensure a Signal session exists.
+2. Calling actions validate UI requests, resolve current certified peer
+   material, restore a saved authenticated endpoint when needed, and ensure
+   a Signal session exists.
 3. `SecureCallingService` owns the single active call, capture devices, media
-   streams, timers, call signaling, media key state, and cleanup.
+   streams, timers, call signaling, bounded media queues, and cleanup.
 4. `unifiedSignalTransport` encrypts and sends call-control payloads over an
    existing P2P message route when available or through a sealed live-only
    server route otherwise.
 5. `p2pTransport` carries the media streams through the peer's ephemeral Tor v3
    onion service after its authenticated hybrid session has completed.
 
-The UI receives snapshots of call state and browser `MediaStream` objects. It
-does not own cryptographic call state or transport streams. The calling service
-remains the authority for whether a signal belongs to the active account, peer,
-call ID, direction, and state.
+The UI receives snapshots of call state, the local capture `MediaStream`, and
+the canvases into which authenticated remote camera and screen frames are
+rendered. It does not own cryptographic call state or transport streams. The
+calling service remains the authority for whether a signal belongs to the
+active account, peer, call ID, direction, and state.
 
 The service exists only while the account is fully authenticated.
 Initialization loads the account's preferred camera and installs call, block,
 unload, and key-transparency listeners. A transient initialization failure
 receives one initial attempt plus three bounded exponential-backoff retries with
-random jitter; a final failure destroys the partial service instead of leaving
+random jitter, a final failure destroys the partial service instead of leaving
 a half-initialized calling surface.
 
 Code references:
@@ -50,15 +52,34 @@ Code references:
 ## Identity And Transport Prerequisites
 
 Calling does not trust a username, onion address, or call ID by itself. Before
-outbound call setup can proceed, the application obtains the peer's certified
+outbound call setup can proceed, the application resolves the peer's certified
 discovery material, verifies its account-root and key bindings through key
 transparency, registers the peer with the P2P transport, and ensures that native
 Signal has a session for that peer.
 
+Resolution is cache-first. An in-memory certificate may be reused for up to five
+minutes, and an account-bound saved certificate or onion endpoint may be
+restored after restart when its signed identity, complete key set, and
+fingerprints still match the locally retained key-transparency authorization.
+Certificate expiry is a refresh deadline for an already-authorized identity,
+not a reason to discard that identity or close an active P2P session. A newly
+discovered identity must still carry a currently valid certificate. A network
+discovery lookup runs in the background when no acceptable cached or saved
+certificate exists. Call initiation never waits for that lookup and never
+places a delayed call after it completes. The current click either uses trusted
+local material immediately or fails immediately while the background refresh
+continues. Known-peer transparency state is refreshed after 18 hours without a
+successful check, certificates refresh during their final six hours, and each
+client publishes its replacement certificate eight hours before expiry. A
+failed refresh does not interrupt the retained identity; an observed root
+change, explicit revocation, or security incident does. If no Signal session
+exists, session prefetch establishes one before call signaling, the calling
+service itself waits at most ten seconds for that session to become available.
+
 The P2P connection then completes
 `hybrid-mlkem1024-mldsa87-session-v5`. ML-KEM-1024 and X25519 contribute to
-directional session keys; ML-DSA-87 authenticates the transcript against the
-peer's certified keys; key confirmation completes before application streams
+directional session keys, ML-DSA-87 authenticates the transcript against the
+peer's certified keys, key confirmation completes before application streams
 are accepted. The direct route is a Tor onion connection, so neither endpoint
 needs a public address or port forwarding and the peers do not learn each
 other's IP address from this transport.
@@ -72,12 +93,10 @@ transparency and messaging machinery.
 These controls serve different purposes:
 
 - key transparency authorizes the cryptographic identity currently bound to a
-  Qor handle;
-- Signal authenticates and ratchets the call-control conversation;
+  Qor handle,
+- Signal authenticates and ratchets the call-control conversation,
 - the P2P handshake authenticates the direct onion session and derives media
-  transport keys;
-- the local deliberate-contact marker decides whether an otherwise valid
-  incoming offer is allowed to ring;
+  transport keys,
 - blocking is a local deny policy applied at every relevant boundary.
 
 See `docs/app/KEY_TRANSPARENCY.md`, `docs/app/MESSAGING.md`, and
@@ -90,25 +109,59 @@ Code references:
 - `src/lib/transport/p2p-transport.ts`
 - `src/lib/transport/pq-noise-session.ts`
 
+## Runtime And Device Permissions
+
+Calling runs only in the packaged Tauri desktop client. The distributed client
+supports x86_64 Linux and x86_64 Windows, a browser-only session cannot start
+the required native Opus codec or native P2P transport. The renderer must also
+be a secure context before the start or answer action can request media.
+
+An incoming offer can ring without activating any capture device. The client
+asks for media access only after the local user starts or answers a call, or
+explicitly switches a device or begins screen sharing. The native media-access
+gate runs before microphone capture and native camera startup. On Linux, the
+browser microphone request consumes the action-scoped permission lease within
+ten seconds; camera frames do not traverse WebKit or its PipeWire portal. Windows
+uses the operating-system microphone and Media Foundation camera permission
+paths. Denial, cancellation, a stale call generation, a missing microphone
+track, or a failed native camera session stops setup and releases any resource
+already acquired.
+
+Listing media devices from settings and enumerating screen/window sources are
+separately confirmed actions. The in-call device picker enumerates devices only
+after an authorized local capture stream exists. Source enumeration exposes
+names and identifiers to the renderer for selection but does not begin capture.
+Screen capture begins only after the peer has authenticated the announced
+screen stream and returned the matching ready signal.
+
+Code references:
+
+- `src/main.tsx`
+- `src/lib/tauri-bindings.ts`
+- `src-tauri/src/commands/system.rs`
+- `src/lib/transport/secure-calling-service.ts`
+
 ## Call State Model
 
 Only one call may be active in a `SecureCallingService`. A call has a random
 128-bit ID encoded as exactly 32 lowercase hexadecimal characters, a peer, an
 audio or video type, incoming or outgoing direction, and one of these states:
 
-- `connecting`: secure signaling, capture, or direct media setup is in progress;
+- `connecting`: secure signaling, capture, or direct media setup is in progress,
 - `ringing`: an outbound offer was sent or an admitted inbound offer is waiting
-  for the local user;
-- `connected`: both sides accepted and media processing started;
+  for the local user,
+- `connected`: both sides accepted and media processing started,
 - `ended`: the user, peer, timeout, block, failure, shutdown, or security event
-  ended the operation;
-- `declined`: either side rejected the ringing call;
+  ended the operation,
+- `declined`: either side rejected the ringing call,
 - `missed`: an admitted incoming call rang for 60 seconds without an answer.
 
 The connected duration begins when the state changes to `connected`, not when
-device capture or dialing begins. Both outgoing and incoming ringing windows are
-60 seconds. All control signals must be within five minutes of the receiver's
-clock.
+device capture or dialing begins. Each endpoint records that transition from its
+own clock, there is no duration-synchronization message or peer-clock adjustment,
+so the two displayed durations can differ slightly. Both outgoing and incoming
+ringing windows are 60 seconds. All control signals must be within five minutes
+of the receiver's clock.
 
 Lifecycle, media, screen-share, camera-switch, and microphone-switch generations
 invalidate asynchronous completions from an old operation. A permission prompt,
@@ -126,12 +179,12 @@ Code references:
 
 The exact inner call-signal variants are:
 
-- `offer`, with `{ callType: "audio" | "video" }`;
-- `answer`;
-- `decline-call`;
-- `end-call`;
-- `screen-share-start`, with an authenticated stream ID;
-- `screen-share-ready`, with the same stream ID;
+- `offer`, with `{ callType: "audio" | "video" }`,
+- `answer`,
+- `decline-call`,
+- `end-call`,
+- `screen-share-start`, with an authenticated stream ID,
+- `screen-share-ready`, with the same stream ID,
 - `screen-share-stop`, with the same stream ID.
 
 Every variant also carries the call ID, lowercase `from` and `to` usernames, and
@@ -149,14 +202,15 @@ control traffic.
 
 On receive, the encrypted-message handler finishes Hybrid and Signal
 authentication before parsing the call object. The authenticated outer Signal
-sender must equal the inner `from`; the inner `to` must equal the current local
+sender must equal the inner `from`, the inner `to` must equal the current local
 account. After that binding, the handler freezes and dispatches the exact signal
 to the calling service. A guessed call ID is insufficient: non-offer signals
 must match both the current call ID and the authenticated current peer.
 
 Signaling and media therefore use related identity material but different keys
-and lifecycles. Signal protects call intent and control. It does not encrypt
-every audio or video frame. Live frames use the call-media construction below.
+and lifecycles. Signal protects call intent and control. Live audio, video,
+screen, and telemetry payloads use stream-specific keys derived from the
+authenticated P2P session.
 
 Code references:
 
@@ -171,112 +225,75 @@ Starting a call performs these operations in order:
 
 1. Validate the secure browser context, active account, canonical peer, call
    type, self-call rule, and blocking state.
-2. Persist the local deliberate-contact marker. Pressing the call button counts
-   even if later certificate, permission, network, or remote-answer work fails.
-3. Obtain the current certified peer bundle, register it with P2P, and ensure the
-   native Signal session.
-4. Create the call ID and enter `connecting`.
-5. Confirm Signal signaling is available before activating privacy-sensitive
+2. Reuse or resolve the current certified peer bundle, register it with P2P,
+   restore its authenticated saved endpoint when the runtime has none, and
+   ensure the native Signal session.
+3. Create the call ID and enter `connecting`.
+4. Confirm Signal signaling is available before activating privacy-sensitive
    microphone or camera capture or opening a media route.
-6. Capture audio and, for a requested video call, the preferred or default
-   camera. A missing or overconstrained camera can downgrade the call to audio;
-   permission denial and audio failure remain terminal.
-7. Reuse or establish the authenticated P2P onion connection, with a 90-second
-   connection timeout. Open deterministic lossy audio and optional video
-   streams and derive call-specific media keys.
-8. Enter local `ringing` before sending the offer. This ordering prevents an
+5. Capture audio and, for a requested video call, the preferred or default
+   camera. Audio calls require a live audio track; video calls require that track
+   plus a native camera session. Permission denial or a missing required source
+   fails setup instead of silently changing the call type.
+6. Reuse or attempt to establish the authenticated P2P onion connection, with a
+   90-second connection timeout. A connected route opens deterministic lossy
+   audio and optional video streams, each with a distinct derived key. A missing
+   endpoint or recoverable onion-dial failure does not prevent the live offer,
+   either endpoint can establish the media route after the answer.
+7. Enter local `ringing` before sending the offer. This ordering prevents an
    immediate answer from racing ahead of the caller's state transition.
-9. Send the encrypted live-only offer and arm the 60-second outgoing timeout.
+8. Send the encrypted live-only offer and arm the 60-second outgoing timeout.
+   Camera and screen media use the fixed raw VP8 WebCodecs stream format.
 
-The caller establishes its direct media route before sending the offer, but it
-does not start sending media frames until an authenticated answer arrives. If
-any setup step fails, the call becomes `ended` with a failure reason and all
-call-owned resources are released.
+When the pre-offer route attempt succeeds, the caller prepares its media streams
+before signaling. When it fails for a recoverable reachability reason, the
+answerer sends the answer first and retries the direct connection, allowing the
+caller to accept the resulting authenticated inbound route. Neither side starts
+media processing until an authenticated answer exists and a direct connection
+with the required streams is ready. If setup ultimately fails, the call becomes
+`ended` with a failure reason and all call-owned resources are released.
 
 ## Incoming Authentication And Ringing Admission
 
-An incoming `offer` passes through more gates than an ordinary call-control
-signal because merely receiving valid encrypted traffic must not let a stranger
-ring the device.
+An incoming `offer` is admitted only after the complete messaging identity path
+has authenticated it. A syntactically valid object, known username, onion
+endpoint, or guessed call ID is not enough to ring the device.
 
-The encrypted-message handler first requires current key-transparency
-authorization for the exact sender and peer keys that authenticated the offer.
-Without it, the offer is consumed and discarded without a response. It cannot
-remain in native pending-message recovery and become a future ring after trust
-state changes.
+The encrypted-message handler requires current key-transparency authorization
+for the exact sender and peer keys that authenticated the offer. Without it, the
+offer is consumed and discarded without a response. It cannot remain in native
+pending-message recovery and become a future ring after trust state changes.
+An authenticated and transparency-authorized peer may ring even when no local
+conversation row exists.
 
-The handler then opens the current account's secure database and checks for an
-encrypted deliberate-contact marker. If the database is unavailable, replaced,
-or fails integrity checks, admission fails closed and the offer is terminal.
-An incoming offer never creates its own permission to ring.
-
-If key transparency is current but deliberate contact is absent, the client:
-
-- records a declined entry only in encrypted call history;
-- does not open calling UI;
-- does not activate microphone, camera, audio playback, or a notification;
-- does not create a call-system row in the conversation;
-- sends one best-effort, live-only decline so the caller can stop immediately.
-
-After those gates, the calling service again validates the exact schema,
-recipient, timestamp, blocking state, and current call state. It accepts at most
-four offers from one peer and sixteen offers globally per rolling minute, with a
+The calling service then independently validates the exact schema, recipient,
+timestamp, blocking state, and current call state. It accepts at most four
+offers from one peer and sixteen offers globally per rolling minute, with a
 bounded 128-peer rate map. Only then does it create an incoming `ringing` call,
-notify the UI, and arm the 60-second missed-call timeout.
+notify the UI, and arm the 60-second missed-call timeout. Microphone and camera
+capture still do not begin until the local user answers.
 
 Code references:
 
 - `src/hooks/message-handling/useEncryptedMessageHandler.ts`
-- `src/lib/database/secureDB.ts`
 - `src/lib/transport/secure-calling-service.ts`
 - `src/hooks/calling/callbacks.ts`
-
-## Deliberate-Contact Policy
-
-The following local user actions grant future incoming ringing permission for
-that peer:
-
-- submitting a new text message, including a reply;
-- selecting and sending a file;
-- sending a voice note, which uses the file pipeline;
-- adding or removing a reaction;
-- starting an outbound audio or video call.
-
-The local action is authoritative; server acceptance, recipient delivery, and a
-remote answer are not required. Texts, replies, files, and voice notes carry an
-`isDeliberateUserAction` provenance bit and atomically write the marker with the
-local conversation update. A reaction writes the marker in the same transaction
-as its local reaction change. An outbound call has no conversation row, so its
-action writes the marker directly before certificate, session, media, or network
-work.
-
-Typing indicators, delivery receipts, discovery and session setup, retry replay,
-incoming messages, incoming files, incoming calls, call-history records, and
-other background traffic do not grant permission. Edits and deletes do not
-create a new grant; a locally authored message already granted it when first
-submitted.
-
-The marker is encrypted, account-scoped local state. It is not sent to the peer
-or server. Deleting or trimming visible conversation history does not revoke it.
-If the marker is missing but a retained outgoing text/file row has valid local
-provenance, the database can reconstruct it. Incoming rows and malformed sender
-or type combinations cannot manufacture that provenance.
-
-This is an anti-harassment policy, not identity proof. It never substitutes for
-current key-transparency authorization.
 
 ## Answering, Declining, And Call Collision
 
 Answering is allowed only for the exact active incoming ringing call. The client
 rechecks quarantine and blocking, enters `connecting`, waits for a Signal
 session, and then captures local media. It reuses the caller-established P2P
-connection when available or establishes it itself, opens the deterministic call
-streams, sends the encrypted answer, starts media processing, and enters
-`connected`.
+connection when available or establishes it itself and opens the deterministic
+call streams. If the first route attempt fails for a recoverable reachability
+reason, it sends the encrypted answer before retrying so the caller can provide
+the authenticated inbound connection. Once signaling and direct media are both
+ready, it starts media processing and enters `connected`.
 
 The outgoing peer accepts an answer only from the current peer for the current
-outgoing ringing call. It then starts send and receive processing on the streams
-it prepared before the offer and enters `connected`.
+outgoing ringing call. It uses streams prepared before the offer when available
+or establishes them after the answer, then starts send and receive processing
+and enters `connected`.
 
 Decline and end operations update local state and release privacy-sensitive
 resources before waiting on the network. Their final control signal is best
@@ -306,23 +323,23 @@ invalid encrypted envelope are terminal instead of retryable.
 
 Call signals never enter:
 
-- the WebSocket reconnect queue;
-- the durable outbound message retry queue;
-- the delivery-ACK journal or ACK-timeout spool fallback;
-- P2P reconnect/recovery redelivery;
-- the server Redis delayed-mix recovery pool;
+- the WebSocket reconnect queue,
+- the durable outbound message retry queue,
+- the delivery-ACK journal or ACK-timeout spool fallback,
+- P2P reconnect/recovery redelivery,
+- the server Redis delayed-mix recovery pool,
 - the global offline spool.
 
 When the direct signaling write is unavailable, the existing encrypted payload
 may use the server path. Its outer blind-route request carries
-`deliveryPolicy: "live-only"`; the WebSocket send uses `queueOnFailure: false`.
+`deliveryPolicy: "live-only"`, the WebSocket send uses `queueOnFailure: false`.
 The server publishes the sealed envelope only to currently authorized delivery
 sockets and excludes it from delayed recovery and storage. Server acceptance is
 not proof that the intended peer was online or decrypted it.
 
 Live-only does not mean that every function call is literally bufferless. The
 server uses bounded in-memory local-delivery and cross-node publication handoff
-queues; a cross-node publication expires after 30 seconds. Those queues exist
+queues, a cross-node publication expires after 30 seconds. Those queues exist
 only to finish current live fanout and are not a reconnect queue, recipient
 mailbox, Redis delay-pool entry, or tagged PIR spool entry.
 
@@ -337,28 +354,87 @@ Code references:
 
 Media is not WebRTC and is not routed through a media server. It uses the
 authenticated application P2P connection carried through Tor. A connected P2P
-session is reused; otherwise the caller dials the peer's current ephemeral onion
-endpoint. The same underlying P2P connection can also carry messaging and stays
-open after call cleanup.
+session is reused, otherwise the caller dials the peer's current ephemeral onion
+endpoint. The authenticated session remains available for messaging after call
+cleanup. There is no ICE candidate exchange, STUN/TURN service, DTLS-SRTP, or
+UDP media path.
 
 Each call opens these logical streams as needed:
 
-- `call-audio:<callId>` for bidirectional audio;
-- `call-video:<callId>` for bidirectional camera frames;
+- `call-audio:<callId>` for bidirectional audio,
+- `call-video:<callId>` for bidirectional camera frames,
+- `call-telemetry:<callId>` for bidirectional RTT probes,
 - a random `call-screen:<randomHex>` for each screen-share operation.
 
-Audio and video use deterministic IDs so both endpoints open the same logical
-stream. Screen streams are random and require a separate authenticated
-announcement. Call frames are bounded to 2 MiB including their transport
-overhead.
+Audio, video, and telemetry IDs are deterministic so both endpoints select the
+same logical stream. Screen IDs are random and become valid only after the
+authenticated screen-share authorization exchange. Every complete stream ID is
+validated as a lowercase hexadecimal suffix between 16 and 64 characters and
+is used both for routing and cryptographic domain separation. A call frame is
+bounded to 2 MiB including authenticated transport overhead.
 
-Tor supplies an ordered TCP byte stream. Calling's `lossy` option does not turn
-that path into UDP and cannot remove TCP head-of-line blocking. It changes local
-backpressure behavior: bounded real-time queues may drop frames when consumers
-fall behind instead of treating queue pressure as a fatal reliable-stream error.
-At the application stream layer, receive queues are capped at 256 frames and
-4 MiB; audio and image renderers add smaller media-specific queues described
-below.
+The onion service exposes a primary TCP port and a dedicated realtime-media TCP
+port. The primary connection carries the P2P handshake, messages, telemetry,
+and audio while dedicated media paths are unavailable or not yet preferable.
+Realtime traffic causes each sender to establish up to four media TCP lanes,
+each with unique Tor SOCKS isolation credentials. Every lane has its own 32-byte
+random capability, offered over the authenticated primary connection and
+presented as the media-lane preamble, which binds it to the same connection
+generation. The payload remains protected by the authenticated P2P session,
+the capability does not replace media encryption. Pending lane offers and
+connections are capped at 64 and expire after ten seconds.
+
+The DONAR-lite scheduler measures same-lane RTT with a two-second ping, smooths
+the result, and ranks the four lanes. It changes the selected media lane only
+after a candidate is at least 75 ms and 10 percent faster for three samples.
+The renderer also requires three samples and at least a 50 ms and 10 percent
+advantage before moving audio between the primary connection and the media-lane
+set. This hysteresis prevents small RTT changes from moving consecutive audio
+batches back and forth. The remaining lanes stay warm for immediate send
+failure. A distinct ready lane is reserved for camera and screen traffic, so a
+large visual write cannot occupy the selected audio circuit.
+
+Three missed six-second probe deadlines remove a lane. A lane whose RTT is both
+more than twice and more than 750 ms above the fastest alternative for three
+samples is also replaced. Lane setup retry starts at five seconds, backs off to
+at most 60 seconds after complete setup failures, and returns to the five-second
+repair interval when at least one lane remains usable.
+
+Audio capture has an RTT-aware absolute deadline between 160 and 320 ms. Under
+send pressure, up to four consecutive 20 ms Opus packets share one encrypted
+native write, reducing encryption, IPC, framing, and socket-flush operations
+without retaining more than the existing five captured packets. A selected lane
+receives 40 ms to accept a batch before the same batch is attempted on the next
+ranked lane. A native 64-bit audio frame ID removes an ambiguous duplicate before
+it reaches the encrypted logical stream and permits bounded cross-lane
+reordering. While the media lanes are opening, the primary writer selects a
+five-entry realtime queue before its normal 64-entry queue. Full or expired
+realtime writes fail instead of waiting behind stale media. Visual batches
+require their reserved lane, run in independent native send tasks, and receive
+an RTT-aware freshness deadline between 400 and 1,500 ms instead of falling back
+to the primary or audio lane.
+
+Logical stream framing is binary. The renderer prefixes each authenticated frame
+with a big-endian 16-bit stream-ID length and the UTF-8 stream ID. Native TCP
+framing adds a little-endian 32-bit body length. The native side validates the
+stream ID and size before forwarding the frame. The native P2P worker never
+parses media plaintext.
+
+Native ingress owns one bounded event receiver with global limits of 1,024
+frames and 16 MiB. The renderer issues one long-lived `p2p_receive`
+request at a time and asks for the next item only after processing the previous
+response. Unsubscribe wakes the outstanding pull immediately. No Tauri channel
+push or ordered renderer-side IPC cache sits between the native bound and the
+application queues.
+
+Audio encrypted and decrypted stream queues are each limited to five frames and
+64 KiB. The SecureStream camera and screen queues retain at most six encrypted or
+decrypted visual batches and 4 MiB at each stage. Each batch contains at most
+two consecutive VP8 stream chunks. Telemetry queues retain at most 16 frames and
+64 KiB, and message streams retain at most 256 frames and 4 MiB. These transport
+bounds are separate from the four-entry compressed visual sender queue. Lossy
+streams discard the oldest backlog under receive pressure, reliable
+message-stream overflow closes the connection.
 
 Code references:
 
@@ -367,48 +443,65 @@ Code references:
 - `src/lib/transport/secure-calling-service.ts`
 - `src-tauri/src/network/p2p.rs`
 
-## Media Key Schedule And Frame Protection
+## Call Stream Key Schedule And Frame Protection
 
-After the authenticated P2P handshake, the calling service exports copies of its
-directional session key material. It derives separate send and receive families
-using the call ID and explicit `i2r` or `r2i` flow direction. Each family is then
-domain-separated again into audio, video, and screen keys. This prevents two
-peers, two calls, two directions, or two media kinds from accidentally sharing
-the same media key and nonce space.
-
-Every media plaintext receives an additional call-media encryption layer before
-the P2P stream's own authenticated encryption. Its frame is:
+The P2P handshake produces independent 32-byte base keys for each direction.
+For every `call-audio`, `call-video`, `call-telemetry`, or `call-screen` stream,
+the transport derives another 32-byte directional key as:
 
 ```text
-12-byte authenticated header || nonce || ciphertext || authentication tag
+HKDF-BLAKE3(
+  inputKey = directionalSessionKey,
+  salt = UTF8("qor-call-stream-key-salt-v1"),
+  info = UTF8("qor-call-stream-key-v1:" + completeStreamId),
+  length = 32
+)
 ```
 
-The header contains an unsigned 64-bit global outbound frame counter followed by
-a 32-bit key epoch. It is authenticated as additional data. The media layer uses
-the project's `PostQuantumAEAD` composition: AES-256-GCM, then
-XChaCha20-Poly1305, plus a keyed BLAKE3 MAC. Its post-quantum key-establishment
-property comes from the hybrid ML-KEM/X25519 P2P session that supplied the key
-material; the symmetric ciphers themselves are not public-key KEMs.
+The direction, call ID, media kind, and random screen-stream ID therefore select
+different keys. The complete stream ID is also authenticated as additional
+data. Subkeys are cached only while their streams can still have pending
+encryption or decryption work. Closing or aborting a stream retires and wipes
+both directional subkeys, destroying the P2P session wipes every remaining
+subkey. A session accepts at most 128 cached call-stream contexts per direction.
 
-Send key families rotate every 10 seconds through a one-way labeled derivation
-and increment the send epoch. A receiver may authenticate the current epoch, the
-immediately previous epoch, or derive forward by at most 64 epochs. A proposed
-future epoch becomes current only after a frame authenticates successfully, so
-forged epoch numbers cannot commit receiver key state.
+The P2P transport applies one authenticated frame construction to the bounded
+audio batch, VP8 visual stream chunk, or telemetry probe. Its
+32-byte stream key is expanded with SHA3-512 into independent AES and XChaCha
+keys, and a domain-separated keyed BLAKE3 key authenticates the final
+ciphertext, stream-ID additional data, and nonce. Encryption runs in this order:
 
-Replay tracking is separate by epoch and media kind, uses exact 64-bit frame
-numbers, and retains a 4,096-frame window. Freshness is checked before expensive
-decryption and committed only after authentication. Old, duplicate, malformed,
-oversized, or excessively future frames are discarded.
+1. AES-256-GCM with the first 12 nonce bytes,
+2. XChaCha20-Poly1305 with the remaining 24 nonce bytes,
+3. a 32-byte keyed BLAKE3 tag over the resulting ciphertext, additional data,
+   and complete 36-byte nonce.
 
-Short-lived derived keys, copied directional material, plaintext byte arrays,
-and encrypted frame scratch buffers are wiped on normal and failure paths where
-JavaScript permits. That is defense in depth, not a guarantee that a browser
-engine, operating system, driver, or compromised process retained no copy.
+The on-wire authenticated frame is:
+
+```text
+u32be frameLength | u64be sessionSequence | composedCiphertext | blake3Tag[32]
+```
+
+The two AEAD tags add 32 bytes inside `composedCiphertext`, the header and
+BLAKE3 tag add another 44 bytes, for 76 bytes of transport overhead. The nonce
+is deterministically constructed from the 64-bit sequence and is not sent. A
+single sequence space and 32,768-slot replay window cover the authenticated P2P
+session, including frames arriving over the primary and media TCP lanes. A
+sequence is committed only after the MAC and both AEAD layers authenticate, so
+corrupt input cannot consume a valid replay slot. The session expires after 24
+hours or when its 64-bit send sequence is exhausted.
+
+The calling service gives codec payloads directly to this transport frame.
+Audio carries a compact codec sequence and capture timestamp for playout,
+camera and screen streams carry an exact binary metadata header and one bounded
+raw VP8 frame. Plaintext, codec packets, frame copies, keys, and queue
+entries are wiped on normal and failure paths where their memory is directly
+controllable.
 
 Code references:
 
 - `src/lib/transport/pq-noise-session.ts`
+- `src/lib/transport/p2p-transport.ts`
 - `src/lib/transport/secure-calling-service.ts`
 - `src/lib/cryptography/aead.ts`
 - `src/lib/cryptography/hash.ts`
@@ -416,66 +509,248 @@ Code references:
 ## Audio Pipeline
 
 The microphone enters a shared 48 kHz `AudioContext`. An audio worklet collects
-2,048 mono `Float32` samples per frame. Only one encrypted stream write may be in
-flight; if the transport is still writing, the newer worklet frame is dropped
-and zeroed instead of building an unbounded latency queue.
+960 mono `Float32` samples per 20 ms frame. The worklet transfers each completed
+buffer instead of serializing it as JSON or base64. The native codec command
+also accepts and returns raw byte bodies.
 
-Each audio byte frame is padded to a 128-byte boundary, bounded to 64 KiB,
-encrypted with the audio media key, and written to the call-audio stream. On
-receive, the client authenticates and decrypts it, validates finite samples,
-clamps values to the `[-1, 1]` range, and transfers the sample buffer to a
-playback worklet.
+Each call owns a native Opus encoder/decoder session configured for:
 
-The playback worklet retains at most twelve decoded frames. It drops and wipes
-the oldest frame under pressure and emits silence on underrun. Played, dropped,
-and destroyed sample buffers are wiped on a best-effort basis. The capture and
-playback audio contexts are reused across calls to avoid repeated device setup;
-they are suspended on call cleanup and closed when the account's calling service
-is destroyed.
+- 48 kHz mono speech and 20 ms frames,
+- VoIP application mode,
+- 24 kbit/s target bitrate, variable bitrate, and complexity 8,
+- discontinuous transmission,
+- in-band forward error correction with an expected 10 percent packet-loss
+  rate,
+- a maximum encoded packet size of 1,276 bytes.
+
+The sender keeps at most five captured PCM frames. When capture outruns encoding,
+it wipes and drops the oldest frame. Capture has an RTT-aware deadline between
+160 and 320 ms and expired speech is discarded before or after encoding. The
+drain takes up to four pending 20 ms frames, encodes them in sequence, and sends
+their packets together in one encrypted write. This preserves codec sequencing
+while amortizing Tauri IPC, Noise framing, native scheduling, and TCP flushing
+across as much as 80 ms of speech. The realtime encryption queue also permits at
+most five pending writes and services realtime work before normal traffic. A
+one-byte Opus DTX result is marked as silence, one such packet is sent every 20
+silent frames, approximately every 400 ms, while intermediate silence is
+suppressed.
+
+The plaintext audio packet has a fixed 14-byte header:
+
+```text
+u8 version | u8 flags | u32be codecSequence | u64be captureTimestampMs | opus
+```
+
+The current version is 1. Flag bit 0 marks a one-byte DTX packet and flag bit 1
+marks a discontinuity caused by a dropped capture, suppressed DTX frame, failed
+send, or audio-route change. A received discontinuity lets playout skip an
+already obsolete sequence gap instead of synthesizing audio for it. The codec
+sequence advances per captured frame and the timestamp records capture time in
+milliseconds. One to four packets are enclosed in this audio batch:
+
+```text
+u8 batchVersion = 2
+u8 packetCount = 1..4
+u16 reserved = 0
+repeat packetCount times:
+  u16 packetLength
+  audioPacket[packetLength]
+```
+
+The entire batch is authenticated and encrypted under the
+`call-audio:<callId>` stream key. The receiver restores packet arrival times at
+20 ms spacing before jitter estimation so intentional batching is not treated
+as network jitter.
+
+The receiver estimates arrival variation with a 1/16 smoothing factor and
+selects a target of three to five 20 ms packets, giving a nominal 60–100 ms
+jitter buffer. It starts when the target is available or the oldest packet has
+waited 100 ms. For one missing packet it first asks Opus to recover FEC from the
+following packet. It otherwise invokes Opus packet-loss concealment for up to
+five consecutive gaps, then emits silence until a later sequence lets playout
+resynchronize. Duplicate, late, oversized, and excess buffered packets are
+dropped. The playback worklet holds at most five decoded frames.
+
+Capture, realtime encryption, native sending, encrypted receive, jitter,
+decode, and playback queues are therefore bounded to current audio rather than
+seconds of accumulated speech. Played, dropped, and destroyed sample buffers
+are wiped on a best-effort basis. Capture and playback audio contexts are reused
+across calls, suspended on cleanup, and closed when the calling service is
+destroyed.
 
 Code references:
 
 - `public/audio-worklet-processor.js`
+- `src-tauri/src/audio_codec.rs`
+- `src/lib/tauri-bindings.ts`
 - `src/lib/transport/secure-calling-service.ts`
 
 ## Camera Video Pipeline
 
-A video call requests microphone plus the account's preferred camera when one
-is stored, then tries the default camera. Only missing-device and constraint
-errors permit an audio-only fallback. Denied permissions or an unusable audio
-device fail the call.
+A video call requests the microphone through the browser and opens the account's
+preferred camera through the native process, with the default camera selected
+when no preference is stored. Linux uses Video4Linux and Windows uses Media
+Foundation. Video calls require live audio and a working native camera session;
+denied permission or an unusable capture device fails media setup instead of
+changing the call type. Camera selection, ownership, frame pacing, and release
+do not depend on WebKit's camera or PipeWire capture path. The local preview and
+outgoing encoder share the same persistent canvas, so the camera has one native
+consumer and the preview cannot freeze a separate capture surface. Selecting the
+active camera does not reopen it. Disabling video closes the hardware stream and
+transmits black frames until the camera is enabled. No bundled or synthetic
+sample video is used.
 
-Camera frames are drawn to a private canvas and encoded as JPEG. Resolution,
-frame-rate, and quality settings are validated against fixed presets. Capture is
-bounded to 3,840 by 2,160 and 8,294,400 pixels. If a JPEG exceeds the media-frame
-budget, the encoder makes at most four attempts while reducing scale and
-quality; a frame that still does not fit is dropped.
+Each visual stream owns one persistent WebCodecs `VideoEncoder` and one
+`VideoDecoder`. The fixed format is a raw VP8 elementary stream. The encoder
+draws the newest native camera image or live screen frame into one reused canvas,
+wraps that canvas in a short-lived `VideoFrame`, and submits it directly to VP8.
+The output callback copies only the compressed `EncodedVideoChunk`; it closes the
+input frame immediately. Raw RGBA pixels never cross the Tauri boundary. The
+decoder accepts the authenticated raw VP8 chunk directly and returns a bounded
+`VideoFrame` to the latest-frame renderer. Camera and screen streams use the same
+implementation but own separate codecs, queues, canvases, and stream keys.
 
-The receiver authenticates and decrypts each frame, validates the complete JPEG
-container and declared dimensions before invoking the browser decoder, and
-checks that the decoder returned those same dimensions. At most two decoded
-`ImageBitmap` frames wait for rendering. Older frames are closed and dropped
-under pressure. The rendered canvas exposes a capture-stream track to the call
-UI.
+Visual calls require WebCodecs `VideoEncoder`, `VideoDecoder`, `VideoFrame`, and
+`EncodedVideoChunk` support for VP8, native JPEG image decoding for camera input,
+and media-frame callbacks for screen capture. They do not use canvas media
+streams, browser media recording, a container format, object URLs, hidden
+playback elements, or media-source buffers. Unsupported visual codec APIs fail
+that media operation; the transport does not substitute another codec or an
+audio-only call.
 
-Muting changes the microphone track's enabled state. Video toggling changes the
-camera track's enabled state; if no live camera track exists, it obtains a new
-one and starts its stream only if the same call is still active. Camera and
-microphone switches acquire and install a replacement first, verify their
-generation and call ownership, and only then remove and stop the previous
-track. Camera releases have an 800 ms settle period before reacquisition to
-reduce device-driver races.
+The user selects one quality ceiling for camera and screen media. Low is 640x360
+at 900 kbit/s, medium is 960x540 at 1.5 Mbit/s, and high is 1280x720 at 2.5
+Mbit/s. Every profile targets 60 FPS. Four adaptation levels apply dimension
+scales of 1.0, 0.85, 0.70, and 0.55 and bitrate scales of 1.0, 0.90, 0.80, and
+0.70, with a 500 kbit/s floor. They reduce dimensions and bitrate when
+codec output or send pressure remains high across two
+consecutive two-second measurement windows. A stressed window has more than 12
+percent send failures, average `encodeMs` above 40 ms, or average write time
+above 140 ms. Here `encodeMs` measures elapsed time from submitting a `VideoFrame`
+until its compressed VP8 output callback.
+
+The first ten seconds are an adaptation warmup and do not lower the selected
+quality while the dedicated media lanes open. Ten healthy seconds with send
+failures below three percent, average `encodeMs` below 35 ms, and average write
+time below 90 ms raises quality one level until the selected ceiling returns.
+Superseded capture opportunities remain visible in telemetry but do not by
+themselves reduce resolution. The encoder preserves the source aspect ratio and
+never enlarges it beyond its native dimensions.
+
+The camera worker requests the selected quality dimensions and 60 FPS, then uses
+the closest format exposed by the hardware. It retains exactly one compressed
+JPEG frame: a newer capture overwrites and wipes an unconsumed one. The renderer
+long-pulls only the newest sequence, validates a fixed binary header, decodes one
+image, draws it into the reused canvas, closes the image, and wipes the JPEG
+bytes before pulling again. A slow renderer therefore drops old camera frames at
+the native boundary instead of building a queue. Screen capture is paced from
+media-frame callbacks against the same monotonic 60 FPS clock. There is no
+per-frame raw-pixel IPC, JSON/base64 frame conversion, browser capture stream, or
+media-recorder callback.
+
+The VP8 encoder admits at most three queued input frames and retains at most
+twelve timestamp-only metadata records awaiting codec output. A submitted canvas
+`VideoFrame` is closed synchronously. Raw VP8 output is limited to 1 MiB, and the
+encoded sender retains at most four frames around the active write. Encoder or
+transport pressure drops stale work, wipes owned byte arrays, and forces the next
+accepted input to be a keyframe. Codec reconfiguration is reserved for an actual
+quality or adaptation change.
+
+The sender waits up to 18 ms for a second consecutive encoded frame and sends at
+most two frames in one authenticated visual batch. Each output frame has its own
+sequence, capture time, monotonic codec timestamp, dimensions, and keyframe bit,
+so visual transmit and receive FPS count encoded frames rather than container
+chunks. The encoder produces a keyframe at least every two seconds and
+immediately after a receiver request, loss event, queue reset, or codec
+reconfiguration.
+
+The receiver validates framing and freshness before copying compressed bytes. At
+most eight frames may be queued or awaiting codec output, and the native decoder
+itself is kept below three queued inputs. A duplicate or backward sequence is
+discarded. A forward gap, malformed frame, codec failure, or queue overflow wipes
+dependent compressed data, replaces the decoder, and accepts nothing until a
+fresh keyframe arrives. Decoded `VideoFrame` objects do not enter a playback
+timeline: the renderer retains only the newest frame until the next animation
+callback and closes any superseded frame immediately. This removes media-buffer
+retention, playback-rate catch-up, append serialization, object-URL lifetime, and
+hidden-video state from call memory.
+
+The receiver rejects a frame whose authenticated dimensions disagree with the
+decoded VP8 frame or whose clock-corrected age exceeds the RTT-aware 1.2-to-2
+second playout limit. Telemetry reports compressed queue depth as buffered time,
+latest decoded-frame age as playback lag, a fixed playback rate of 1, decoder
+recovery count, decoder instance count, and codec-pressure or codec-error count.
+Camera capture uses a native latest-only slot and one sequential binary pull, so
+there can be no second in-flight decoded camera image and no unbounded producer
+queue. Screen capture uses `requestVideoFrameCallback()` to synchronize canvas
+reads to newly presented media frames. Its source element remains attached to a
+two-pixel, noninteractive compositor surface while required and is removed during
+teardown.
+
+Each visual transport payload starts with this batch framing:
+
+```text
+u8  batchVersion = 1
+u8  frameCount = 1..2
+u16 reserved = 0
+repeat frameCount times:
+  u32 frameLength
+  visualFrame[frameLength]
+```
+
+Each `visualFrame` has this exact 32-byte big-endian header followed by one
+raw VP8 encoded frame:
+
+```text
+u8  version = 4
+u8  codec = 3
+u8  keyFrame
+u8  reserved = 0
+u32 sequence
+u64 capturedAtMs
+u64 codecTimestampUs
+u16 width
+u16 height
+u32 payloadLength
+```
+
+`keyFrame` is exactly 0 or 1 and must agree with the VP8 frame-type bit. A
+keyframe must also contain the canonical VP8 keyframe start code. The receiver
+rejects malformed headers, unsafe dimensions, inconsistent lengths, oversized
+frames, codec-marker mismatches, duplicate or backward sequences, and decoded
+dimensions that disagree with the authenticated header.
+
+A forward sequence gap, queue overflow, malformed frame, decoder error, or stale
+frame wipes dependent compressed data, creates a fresh bounded decoder, and
+requests an authenticated keyframe. Delta frames are rejected until that
+keyframe arrives. The sender marks its next input as a keyframe without creating
+a media container or restarting a playback timeline. Once clock-offset telemetry
+is available, the playout limit follows measured RTT between 1.2 and 2 seconds.
+The calling service renders only the newest decoded frame on an animation
+callback and closes every displayed, dropped, or superseded `VideoFrame`.
+Muting changes the microphone track's enabled state. Video toggling updates the
+native camera session and is available only for an active video call with a live
+video stream. A disabled native session releases the hardware capture stream.
+Camera switches replace the native capture session and restore the previous
+device if the selected device cannot start. Microphone switches acquire and
+install a replacement track before stopping the prior one. Every switch verifies
+its generation and call ownership. After full call cleanup releases local media,
+the next call waits up to the remainder of an 800 ms settle interval before
+reacquiring devices to reduce driver races.
 
 Code references:
 
+- `src/lib/transport/call-video-codec.ts`
 - `src/lib/transport/secure-calling-service.ts`
+- `src-tauri/src/camera_capture.rs`
+- `src-tauri/src/commands/camera.rs`
 - `src/lib/database/screen-sharing-settings.ts`
 - `src/components/chat/calls/CallModal.tsx`
 
 ## Screen Sharing
 
-Screen sharing is allowed only in a connected call with an active media
-encryption context. Native source enumeration accepts at most 128 exact screen
+Screen sharing is allowed only in a connected authenticated P2P call. Native
+source enumeration accepts at most 128 exact screen
 or window entries, validates source IDs and names, removes duplicates, and never
 accepts an arbitrary source string from the UI.
 
@@ -487,21 +762,22 @@ Starting a share performs an authorization handshake before screen capture:
 3. The recipient accepts only an exact signal for the connected call and peer,
    records the announced stream ID, and sends `screen-share-ready`.
 4. Unannounced or mismatched incoming screen streams are aborted.
-5. Only after the exact ready response arrives does the sender request native or
-   browser screen capture and begin transmitting. The ready wait expires after
-   10 seconds.
+5. Only after the exact ready response arrives does the sender request native
+   screen capture and begin transmitting. The ready wait expires after 10
+   seconds.
 
 The recipient remembers at most 128 remote screen stream IDs per call, rejects
 duplicates, and replaces prior remote-share state in a bounded way. Stopping a
 share, ending the source track, or failing setup stops capture and closes the
 logical stream before sending a best-effort `screen-share-stop`.
 
-Screen frames use the same bounded JPEG encoder, decoder validation, two-frame
-render queue, and dimension limits as camera video, but use a distinct screen
-key. Screen settings allow native, 720p, 1080p, 1440p, or 4K resolution and 15,
-30, or 60 frames per second. Persistent non-Tor settings are exact-schema,
-encrypted, authenticated, account-bound, rate-limited, and expire after 24
-hours; Tor-mode settings remain transient.
+Screen frames use the persistent raw VP8 WebCodecs stream, adaptive 60 FPS
+encoder, freshness bounds, decoder validation, and latest-frame renderer used
+by camera video, with the announced random stream ID selecting its screen key.
+The shared visual-media preference is the low, medium, or high quality ceiling,
+there is no user-selectable frame-rate setting. The preference record is
+exact-schema, encrypted, authenticated, account-bound, rate-limited, and expires
+after 24 hours.
 
 Code references:
 
@@ -510,19 +786,70 @@ Code references:
 - `src/lib/types/screen-sharing-types.ts`
 - `src/components/chat/calls/ScreenSourceSelector.tsx`
 
+## Runtime Call Telemetry
+
+A connected call starts one optional lossy `call-telemetry:<callId>` stream. Its
+17-byte request and 33-byte response frames carry a random 64-bit probe ID and
+integer millisecond timestamps. A two-byte control frame requests a fresh VP8
+keyframe for the camera or screen decoder and is limited to one request per
+media kind every two seconds. One probe is outstanding at a time, probes are
+sent every two seconds, and an unanswered probe fails after eight seconds. The
+reported RTT subtracts the peer's measured response-processing interval. The
+displayed one-way estimate is RTT divided by two and is a diagnostic estimate,
+not a measurement of asymmetric path delay.
+
+Every five seconds the client emits one single-line JSON `CALL-TELEMETRY` sample,
+and cleanup emits a final sample. It contains:
+
+- latest, average, p95, maximum, lifetime-minimum, and lifetime-maximum RTT,
+- the RTT/2 one-way estimate, probe failures, protocol errors, connection age,
+  transport state, and time since transport activity,
+- ready, active, selected, secondary, and standby audio lanes with per-lane RTT,
+- the distinct visual lane and current visual adaptation level, dimensions,
+  bitrate, and 60 FPS target,
+- audio, video, and screen transmit and validated-arrival rates and byte rates,
+- decoder-admitted, decoded, and visibly rendered visual FPS,
+- encode, write, decode, capture-to-send, and clock-corrected
+  capture-to-render duration, arrival gap, and smoothed arrival jitter,
+- capture drops, send errors, receive errors, render drops, sequence
+  discontinuities, key-frame requests, received key-frame requests, and lifetime
+  totals,
+- camera and screen compressed queue duration, latest decoded-frame age, fixed
+  playback rate, decoder recovery count, decoder instance count, and codec
+  pressure or error count.
+
+The byte counters measure plaintext codec frames at the calling-service
+boundary. For audio, frame rates count individual Opus packets even when several
+share one transport write. For video and screen, transmit and receive rates count
+individual raw VP8 frames, `admittedFps`, `decodedFps`, and `renderedFps` describe
+receiver pipeline and displayed-frame progress. Write duration covers the stream
+write, including encryption and the native send. Probe timestamps estimate the
+peer clock offset so visual render age can represent capture-to-display latency.
+Telemetry stream setup is best effort and its absence does not prevent a call.
+
+Code references:
+
+- `src/lib/transport/call-telemetry.ts`
+- `src/lib/transport/secure-calling-service.ts`
+
 ## Termination And Cleanup
 
 Cleanup first invalidates outstanding media and device generations. It then:
 
-- cancels pending Signal-session and screen-ready waits;
-- removes stream listeners and detaches capture/render media elements;
-- stops local microphone, camera, screen, remote video, and remote screen tracks;
-- destroys call audio worklet nodes and suspends shared audio contexts;
-- closes or aborts audio, video, and screen logical streams;
-- wipes media key families, previous receive keys, replay state, and scratch
-  ownership;
-- cancels key-rotation and ring timers;
+- cancels pending Signal-session and screen-ready waits,
+- removes stream listeners and detaches capture/render media elements,
+- stops the local microphone and screen tracks, the native camera session, and
+  releases local and remote render surfaces,
+- destroys call audio worklet nodes and suspends shared audio contexts,
+- stops the native Opus session and closes every visual encoder and decoder,
+- closes or aborts audio, video, telemetry, and screen logical streams,
+- wipes call-owned media scratch buffers,
+- cancels ring, telemetry-probe, telemetry-log, and screen-ready timers,
 - clears the active call and per-call screen identifiers.
+
+The end-call UI clears its active React call state synchronously before invoking
+this cleanup, so local dismissal does not wait for transport work. The service
+then sends the authenticated end signal on a fire-and-forget best-effort path.
 
 The shared authenticated P2P connection is deliberately not closed because
 messaging may own or reuse it. A later block event is broader: shared P2P policy
@@ -534,28 +861,32 @@ Blocking the active peer marks the call ended and releases media before any
 network wait. A global key-transparency incident also ends and cleans the call,
 but sends no end signal through the transport whose authorization was just
 revoked. Window unload, logout, and authenticated-account replacement follow the
-same local-first privacy rule.
+same local-first privacy rule. A bound P2P connection entering `disconnected` or
+`failed` immediately marks the active call ended with a failure reason, notifies
+the UI, and runs the same cleanup path.
 
 ## UI, Notifications, And Local History
 
 An admitted incoming call updates React state immediately. A native notification
 and tray unread increment occur only when the document is hidden or unfocused.
-Call status events are exact-schema, account-bound, timestamp-bounded, and
-locally limited to 120 accepted events per 10-second window before they can
-affect conversation UI or call history. The app asks the operating system to
-inhibit sleep while a call is connecting or connected and releases that
-inhibitor at every terminal state or service teardown.
+Local call-log events are exact-schema, account-bound, timestamp-bounded, and
+limited to 120 accepted events per 10-second window before they can affect
+conversation rows or call history. Conversation-list status updates use a
+separate account-bound, sanitized 500-event limit per 10 seconds. The app asks
+the operating system to inhibit sleep while a call is connecting or connected
+and releases that inhibitor at every terminal state or service teardown.
 
 Terminal calls produce an encrypted, account-scoped history row with peer,
-audio/video type, direction, completed/missed/declined status, start time, and
-optional connected duration. History is capped at 500 entries and reloads or
-clears when encrypted storage binds to a different account.
+audio/video type, direction, completed/missed/declined status, recorded event
+time, and optional connected duration. History is capped at 500 entries and
+reloads or clears when encrypted storage binds to a different account.
 
 Normal call lifecycle events can also create local system rows in the relevant
-conversation. A stranger offer rejected by deliberate-contact admission uses
-`historyOnly`; it creates the declined history entry but intentionally creates
-no system row and no visible ringing UI. Call-history rows never grant
-deliberate-contact admission.
+conversation. These rows are local UI history, not call-control messages and not
+evidence that a remote signaling action was delivered. The remote camera canvas
+also draws a rolling `RX n.n FPS` diagnostic in its upper-right corner, it
+measures locally rendered remote camera frames and is not transmitted back to
+the peer.
 
 Code references:
 
@@ -567,12 +898,15 @@ Code references:
 ## Memory And Security Boundaries
 
 Readable live media necessarily exists while a call is active. Microphone audio
-appears as `Float32Array` samples; camera and screen frames pass through canvas,
-JPEG `Blob`, `ImageBitmap`, and `MediaStream` objects; decrypted output reaches
-browser audio/video APIs. Scratch arrays are bounded and wiped where possible,
-but canvas backing stores, decoder allocations, transferred buffers, operating-
-system capture buffers, and driver memory are not under JavaScript's complete
-control.
+appears as `Float32Array` samples. Camera images cross Tauri as bounded JPEG
+bytes, are decoded one at a time, and share a reused canvas with the WebCodecs
+VP8 encoder. Screen frames enter the same VP8 path from their capture element.
+Received media uses bounded compressed frames, one `VideoDecoder`, short-lived
+decoded `VideoFrame` objects, and visible render canvases. Raw visual pixels do
+not cross Tauri IPC.
+Scratch arrays are bounded and wiped where possible, but canvas backing stores,
+decoded image allocations, transferred buffers, operating-system capture
+buffers, and driver memory are not under JavaScript's complete control.
 
 This means call media has strong cryptographic protection in transit and bounded
 application queues, but calling is not an isolation boundary against malware in
@@ -591,10 +925,10 @@ peer was online or received it.
 
 Call media bypasses the application server, but a peer observes the timing,
 duration, and volume of its own direct encrypted media connection. Tor relays
-observe their local network edges. Fixed audio padding, encrypted framing,
-ephemeral onion services, and Tor reduce metadata exposure; variable JPEG sizes
-and real-time traffic patterns still leak coarse activity to a capable traffic
-observer.
+observe their local network edges. Encrypted framing, ephemeral onion services,
+and Tor reduce metadata exposure, variable Opus packet and VP8 stream-chunk
+sizes and realtime traffic patterns still leak coarse activity to a capable
+traffic observer.
 
 Calling prioritizes freshness over delivery. Tor latency, TCP head-of-line
 blocking, peer availability, capture permissions, decoder behavior, and local

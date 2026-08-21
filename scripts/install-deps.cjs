@@ -100,8 +100,8 @@ async function redisHasTlsSupport(bin) {
 
 async function installRedisTlsLocal() {
   const plat = process.platform;
-  if (plat !== 'linux' && plat !== 'darwin') {
-    console.log('[INFO] TLS Redis auto-build is currently supported on Linux and macOS only.');
+  if (plat !== 'linux') {
+    console.log('[INFO] TLS Redis auto-build is supported only on Linux.');
     return false;
   }
 
@@ -121,11 +121,7 @@ async function installRedisTlsLocal() {
     return false;
   }
 
-  if (plat === 'linux') {
-    await installLinux('libssl-dev') || await installLinux('openssl-devel') || await installLinux('openssl-dev');
-  } else if (plat === 'darwin' && pmHas('brew')) {
-    await tryExec('brew', ['install', 'openssl']);
-  }
+  await installLinux('libssl-dev') || await installLinux('openssl-devel') || await installLinux('openssl-dev');
 
   let downloader = findInPath('curl') ? 'curl' : null;
   if (!downloader && findInPath('wget')) downloader = 'wget';
@@ -231,13 +227,11 @@ async function installComponent(name) {
     case 'haproxy': {
       if (findInPath('haproxy')) return true;
       if (plat === 'linux') return await installLinux('haproxy');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'haproxy']);
       return false;
     }
     case 'jq': {
       if (findInPath('jq')) return true;
       if (plat === 'linux') return await installLinux('jq');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'jq']);
       return false;
     }
     case 'redis': {
@@ -250,8 +244,6 @@ async function installComponent(name) {
       let installed = false;
       if (plat === 'linux') {
         installed = await installLinux('redis-server') || await installLinux('redis');
-      } else if (plat === 'darwin' && pmHas('brew')) {
-        installed = await tryExec('brew', ['install', 'redis']);
       }
 
       if (installed) {
@@ -273,45 +265,36 @@ async function installComponent(name) {
       if (plat === 'linux') {
         return await installLinux('postgresql') || await installLinux('postgresql-client');
       }
-      if (plat === 'darwin' && pmHas('brew')) {
-        return await tryExec('brew', ['install', 'postgresql']);
-      }
       return false;
     }
     case 'nodejs': {
       if (findInPath('node')) return true;
       if (plat === 'linux') return await installLinux('nodejs');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'node']);
       return false;
     }
     case 'git': {
       if (findInPath('git')) return true;
       if (plat === 'linux') return await installLinux('git');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'git']);
       return false;
     }
     case 'curl': {
       if (findInPath('curl')) return true;
       if (plat === 'linux') return await installLinux('curl');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'curl']);
       return false;
     }
     case 'wget': {
       if (findInPath('wget')) return true;
       if (plat === 'linux') return await installLinux('wget');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'wget']);
       return false;
     }
     case 'python3': {
       if (findInPath('python3')) return true;
       if (plat === 'linux') return await installLinux('python3');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'python@3']);
       return false;
     }
     case 'openssl': {
       if (findInPath('openssl')) return true;
       if (plat === 'linux') return await installLinux('openssl');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'openssl']);
       return false;
     }
     case 'build-tools': {
@@ -326,15 +309,12 @@ async function installComponent(name) {
         if (pmHas('apk')) return await trySudo(['apk', 'add', '--no-cache', 'build-base', 'python3-dev']);
         return false;
       }
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'gcc', 'make', 'python@3']);
       return false;
     }
     case 'liboqs': {
       const forceRebuild = process.env.FORCE_REBUILD === '1';
       if (!forceRebuild) {
-        const libPaths = plat === 'darwin'
-          ? ['/usr/local/lib/liboqs.dylib', '/opt/homebrew/lib/liboqs.dylib']
-          : ['/usr/local/lib/liboqs.so', '/usr/lib/liboqs.so', '/usr/lib64/liboqs.so', '/usr/lib/x86_64-linux-gnu/liboqs.so'];
+        const libPaths = ['/usr/local/lib/liboqs.so', '/usr/lib/liboqs.so', '/usr/lib64/liboqs.so', '/usr/lib/x86_64-linux-gnu/liboqs.so'];
 
         for (const p of libPaths) {
           if (fs.existsSync(p)) return true;
@@ -379,19 +359,14 @@ async function installComponent(name) {
           return false;
         }
       }
-      if (plat === 'darwin' && pmHas('brew')) {
-        return await tryExec('brew', ['install', 'liboqs']);
-      }
       console.log('[INFO] Install liboqs from: https://github.com/open-quantum-safe/liboqs');
       return false;
     }
     case 'oqs-provider': {
       const forceRebuild = process.env.FORCE_REBUILD === '1';
       if (!forceRebuild) {
-        const modPaths = plat === 'darwin'
-          ? ['/usr/local/lib/ossl-modules/oqsprovider.dylib', '/opt/homebrew/lib/ossl-modules/oqsprovider.dylib']
-          : ['/usr/local/lib/ossl-modules/oqsprovider.so', '/usr/local/lib64/ossl-modules/oqsprovider.so',
-            '/usr/lib/ossl-modules/oqsprovider.so', '/usr/lib64/ossl-modules/oqsprovider.so'];
+        const modPaths = ['/usr/local/lib/ossl-modules/oqsprovider.so', '/usr/local/lib64/ossl-modules/oqsprovider.so',
+          '/usr/lib/ossl-modules/oqsprovider.so', '/usr/lib64/ossl-modules/oqsprovider.so'];
 
         for (const p of modPaths) {
           if (fs.existsSync(p)) {
@@ -436,22 +411,17 @@ async function installComponent(name) {
           return false;
         }
       }
-      if (plat === 'darwin' && pmHas('brew')) {
-        return await tryExec('brew', ['install', 'oqs-provider']);
-      }
       console.log('[INFO] Install oqs-provider from: https://github.com/open-quantum-safe/oqs-provider');
       return false;
     }
     case 'cmake': {
       if (findInPath('cmake')) return true;
       if (plat === 'linux') return await installLinux('cmake');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'cmake']);
       return false;
     }
     case 'ninja': {
       if (findInPath('ninja')) return true;
       if (plat === 'linux') return await installLinux('ninja-build') || await installLinux('ninja');
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'ninja']);
       return false;
     }
     case 'pnpm': {
@@ -505,15 +475,6 @@ async function installComponent(name) {
           }
         }
         return await installLinux('libevent');
-      }
-
-      if (plat === 'darwin' && pmHas('brew')) {
-        try {
-          await execFileAsync('brew', ['list', 'libevent'], { stdio: 'ignore' });
-          return true;
-        } catch {
-          return await tryExec('brew', ['install', 'libevent']);
-        }
       }
 
       return false;
@@ -579,9 +540,6 @@ async function installComponent(name) {
         // Generic fallback
         return await installLinux('docker.io') || await installLinux('docker-ce') || await installLinux('docker');
       }
-      if (plat === 'darwin' && pmHas('brew')) {
-        return await tryExec('brew', ['install', '--cask', 'docker']);
-      }
       console.log('[INFO] Install Docker from https://docs.docker.com/get-docker/');
       return false;
     }
@@ -617,9 +575,9 @@ async function installComponent(name) {
 (async () => {
   const args = process.argv.slice(2);
 
-  if (process.platform === 'win32') {
-    console.log('[ERROR] This script does not support Windows.');
-    console.log('[INFO] Please use the provided Docker setup for running the server on Windows.');
+  if (process.platform !== 'linux') {
+    console.log('[ERROR] Native dependency installation supports only Linux.');
+    console.log('[INFO] Use the provided Docker setup for running the server on other platforms.');
     console.log('[INFO] Run: node scripts/start-docker.cjs');
     process.exit(1);
   }

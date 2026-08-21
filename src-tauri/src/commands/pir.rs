@@ -19,11 +19,14 @@ mod embedded {
 const OP_QUERY: u8 = 1;
 const OP_DECODE: u8 = 2;
 const OP_DISCARD: u8 = 3;
+const OP_QUERY_BATCH: u8 = 4;
+const OP_DECODE_BATCH: u8 = 5;
 const STATUS_OK: u8 = 0;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORDS: u32 = 1 << 20;
 const MAX_ENTRY_BYTES: u32 = 1 << 20;
+const MAX_BATCH_QUERIES: usize = 16;
 
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -218,7 +221,6 @@ fn call(op: u8, payload: &[u8]) -> QorResult<Vec<u8>> {
     Ok(frame[1..].to_vec())
 }
 
-
 #[tauri::command]
 pub async fn pir_generate_query(
     app: tauri::AppHandle,
@@ -239,7 +241,10 @@ pub async fn pir_generate_query(
     payload.extend_from_slice(&entry_bytes.to_le_bytes());
     payload.extend_from_slice(&target_row.to_le_bytes());
 
-    let response = call(OP_QUERY, &payload)?;
+    parse_query_response(call(OP_QUERY, &payload)?)
+}
+
+fn parse_query_response(response: Vec<u8>) -> QorResult<PirQuery> {
     if response.len() < 12 {
         return Err(QorError::Internal(
             "PIR sidecar returned a short query".to_string(),
@@ -261,7 +266,41 @@ pub async fn pir_generate_query(
 }
 
 #[tauri::command]
-pub async fn pir_decode_response(response: String, session_id: u32) -> QorResult<String> {
+pub async fn pir_generate_batch_query(
+    app: tauri::AppHandle,
+    count: u32,
+    entry_bytes: u32,
+    target_rows: Vec<u32>,
+) -> QorResult<PirQuery> {
+    if count == 0
+        || count > MAX_RECORDS
+        || entry_bytes == 0
+        || entry_bytes > MAX_ENTRY_BYTES
+        || target_rows.is_empty()
+        || target_rows.len() > MAX_BATCH_QUERIES
+    {
+        return Err(QorError::Internal("Invalid PIR database shape".to_string()));
+    }
+    let padded_count = count.next_power_of_two().max(2048);
+    if target_rows
+        .iter()
+        .any(|target_row| *target_row >= padded_count)
+    {
+        return Err(QorError::Internal("Invalid PIR row".to_string()));
+    }
+    ensure_started(&app)?;
+
+    let mut payload = Vec::with_capacity(12 + target_rows.len() * 4);
+    payload.extend_from_slice(&count.to_le_bytes());
+    payload.extend_from_slice(&entry_bytes.to_le_bytes());
+    payload.extend_from_slice(&(target_rows.len() as u32).to_le_bytes());
+    for target_row in target_rows {
+        payload.extend_from_slice(&target_row.to_le_bytes());
+    }
+    parse_query_response(call(OP_QUERY_BATCH, &payload)?)
+}
+
+fn decode_response(op: u8, response: String, session_id: u32) -> QorResult<String> {
     if session_id == 0 {
         return Err(QorError::Internal("Invalid PIR session".to_string()));
     }
@@ -274,7 +313,17 @@ pub async fn pir_decode_response(response: String, session_id: u32) -> QorResult
     let mut payload = Vec::with_capacity(4 + bytes.len());
     payload.extend_from_slice(&session_id.to_le_bytes());
     payload.extend_from_slice(&bytes);
-    Ok(BASE64.encode(call(OP_DECODE, &payload)?))
+    Ok(BASE64.encode(call(op, &payload)?))
+}
+
+#[tauri::command]
+pub async fn pir_decode_response(response: String, session_id: u32) -> QorResult<String> {
+    decode_response(OP_DECODE, response, session_id)
+}
+
+#[tauri::command]
+pub async fn pir_decode_batch_response(response: String, session_id: u32) -> QorResult<String> {
+    decode_response(OP_DECODE_BATCH, response, session_id)
 }
 
 #[tauri::command]

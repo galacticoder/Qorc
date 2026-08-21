@@ -1053,7 +1053,7 @@ impl SignalHandler {
                 )?;
                 Ok(true)
             }
-            
+
             Err(e) => Err(QorError::SignalProtocol(e.to_string())),
         }
     }

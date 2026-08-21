@@ -1,7 +1,7 @@
 //! Isolated binary transport for discovery, OPRF, and key transparency
 
-use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
     State,
@@ -19,10 +19,12 @@ struct WarmEntry {
     isolation_user: String,
     warmed_at: Instant,
     target: String,
+    socks_port: u16,
 }
 
 static WARM_POOL: Mutex<VecDeque<WarmEntry>> = Mutex::new(VecDeque::new());
-static WARM_REFILL_RUNNING: Mutex<bool> = Mutex::new(false);
+static WARM_REFILL_RUNNING: LazyLock<Mutex<HashSet<(u16, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn new_isolation_user() -> String {
     format!(
@@ -32,11 +34,13 @@ fn new_isolation_user() -> String {
     )
 }
 
-fn take_warm_isolation_user(target: &str) -> Option<String> {
+fn take_warm_isolation_user(socks_port: u16, target: &str) -> Option<String> {
     let mut pool = WARM_POOL.lock().ok()?;
     let now = Instant::now();
     pool.retain(|entry| now.duration_since(entry.warmed_at) < WARM_ENTRY_MAX_AGE);
-    let index = pool.iter().position(|entry| entry.target == target)?;
+    let index = pool
+        .iter()
+        .position(|entry| entry.socks_port == socks_port && entry.target == target)?;
     pool.remove(index).map(|entry| entry.isolation_user)
 }
 
@@ -60,14 +64,14 @@ async fn warm_one_circuit(socks_port: u16, host: &str, port: u16) -> Option<Stri
 }
 
 fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
+    let refill_key = (socks_port, host.clone());
     {
         let Ok(mut running) = WARM_REFILL_RUNNING.lock() else {
             return;
         };
-        if *running {
+        if !running.insert(refill_key.clone()) {
             return;
         }
-        *running = true;
     }
 
     tauri::async_runtime::spawn(async move {
@@ -79,7 +83,10 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
                         pool.retain(|entry| {
                             now.duration_since(entry.warmed_at) < WARM_ENTRY_MAX_AGE
                         });
-                        let matching = pool.iter().filter(|entry| entry.target == host).count();
+                        let matching = pool
+                            .iter()
+                            .filter(|entry| entry.socks_port == socks_port && entry.target == host)
+                            .count();
                         WARM_POOL_TARGET.saturating_sub(matching)
                     }
                     Err(_) => 0,
@@ -97,6 +104,7 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
                                 isolation_user,
                                 warmed_at: Instant::now(),
                                 target: host.clone(),
+                                socks_port,
                             });
                         }
                     }
@@ -106,7 +114,7 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
         }
 
         if let Ok(mut running) = WARM_REFILL_RUNNING.lock() {
-            *running = false;
+            running.remove(&refill_key);
         }
     });
 }
@@ -117,9 +125,31 @@ const REQUEST_LARGE_BYTES: usize = 512 * 1024;
 const REQUEST_PIR_BYTES: usize = 2 * 1024 * 1024;
 const RESPONSE_SMALL_BYTES: usize = 64 * 1024;
 const RESPONSE_KEY_TRANSPARENCY_BYTES: usize = 512 * 1024;
+const RESPONSE_PIR_BYTES: usize = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES: usize = 8912896;
 const MAX_RESPONSE_BYTES: usize = RESPONSE_DISCOVERY_BYTES;
+const ANONYMOUS_TRANSPORT_LANE_HEADER: &str = "x-qor-anonymous-transport-lane";
+const PIR_TRANSPORT_LANE: &str = "pir";
+
+async fn wait_for_bootstrap(tor: &Arc<crate::tor::TorManager>) -> bool {
+    if tor.is_ready().await {
+        return true;
+    }
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if tor.is_ready().await {
+                return true;
+            }
+            if !tor.is_running() {
+                return false;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
 
 fn valid_request_size(size: usize) -> bool {
     matches!(
@@ -133,6 +163,7 @@ fn valid_response_size(size: usize) -> bool {
         size,
         RESPONSE_SMALL_BYTES
             | RESPONSE_KEY_TRANSPARENCY_BYTES
+            | RESPONSE_PIR_BYTES
             | RESPONSE_AVATAR_BYTES
             | RESPONSE_DISCOVERY_BYTES
     )
@@ -217,9 +248,18 @@ pub async fn prewarm_anonymous_transport(state: State<'_, AppState>) -> Result<b
     }
     spawn_warm_refill(
         tor.get_socks_port(),
-        host,
+        host.clone(),
         api_url.port_or_known_default().unwrap_or(443),
     );
+    if let Some(pir_tor) = state.inner().pir_tor_manager()
+        && pir_tor.is_ready().await
+    {
+        spawn_warm_refill(
+            pir_tor.get_socks_port(),
+            host,
+            api_url.port_or_known_default().unwrap_or(443),
+        );
+    }
     Ok(true)
 }
 
@@ -239,6 +279,11 @@ pub async fn anonymous_api_fetch(
         .filter(|value| !value.is_empty() && value.len() <= 2048)
         .ok_or_else(|| "invalid expected server URL".to_string())?
         .to_string();
+    let use_pir_tor = request
+        .headers()
+        .get(ANONYMOUS_TRANSPORT_LANE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == PIR_TRANSPORT_LANE);
 
     let storage = state
         .inner()
@@ -258,19 +303,49 @@ pub async fn anonymous_api_fetch(
         .host_str()
         .map(|host| host.to_ascii_lowercase().ends_with(".onion"))
         .unwrap_or(false);
-    let tor = state
-        .inner()
-        .tor_manager()
-        .ok_or_else(|| "Tor manager not initialized".to_string())?;
-    if !tor.is_ready().await {
-        return Err("Tor transport unavailable".to_string());
-    }
+    let tor = if use_pir_tor {
+        let primary = state
+            .inner()
+            .tor_manager()
+            .ok_or_else(|| "Tor manager not initialized".to_string())?;
+        let pir_tor = state
+            .inner()
+            .pir_tor_manager()
+            .ok_or_else(|| "PIR Tor manager not initialized".to_string())?;
+        if !pir_tor.is_running() {
+            pir_tor
+                .mirror_configuration_from(&primary)
+                .await
+                .map_err(|_| "PIR Tor configuration unavailable".to_string())?;
+            let started = pir_tor
+                .start()
+                .await
+                .map_err(|_| "PIR Tor transport failed to start".to_string())?;
+            if !started.success {
+                return Err("PIR Tor transport failed to start".to_string());
+            }
+        }
+        if !wait_for_bootstrap(&pir_tor).await {
+            return Err("PIR Tor transport unavailable".to_string());
+        }
+        pir_tor
+    } else {
+        let primary = state
+            .inner()
+            .tor_manager()
+            .ok_or_else(|| "Tor manager not initialized".to_string())?;
+        if !primary.is_ready().await {
+            return Err("Tor transport unavailable".to_string());
+        }
+        primary
+    };
 
     let socks_port = tor.get_socks_port();
     let proxy_url = format!("socks5h://127.0.0.1:{}", socks_port);
     let request_host = api_url.host_str().unwrap_or_default().to_string();
     let request_port = api_url.port_or_known_default().unwrap_or(443);
-    let isolation_user = take_warm_isolation_user(&request_host).unwrap_or_else(new_isolation_user);
+    let isolation_user =
+        take_warm_isolation_user(socks_port, &request_host).unwrap_or_else(new_isolation_user);
     if !request_host.is_empty() {
         spawn_warm_refill(socks_port, request_host.clone(), request_port);
     }
@@ -351,6 +426,7 @@ mod tests {
         assert!(valid_request_size(512 * 1024));
         assert!(!valid_request_size(64 * 1024 - 1));
         assert!(valid_response_size(512 * 1024));
+        assert!(valid_response_size(1024 * 1024));
         assert!(valid_response_size(8912896));
         assert!(!valid_response_size(8912896 - 1));
     }

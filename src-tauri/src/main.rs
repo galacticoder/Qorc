@@ -1,5 +1,8 @@
 //! Qor-Chat Tauri Application main entry point
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+compile_error!("Qor desktop supports only Linux and Windows");
+
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
@@ -9,6 +12,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 // Module declarations
 mod account_vault;
+mod audio_codec;
+mod camera_capture;
 mod commands;
 mod crypto;
 mod database;
@@ -134,7 +139,7 @@ pub fn run() {
         )
         .setup(|app| {
             info!("Application setup starting");
-            
+
             let app_handle = app.handle().clone();
 
             #[cfg(target_os = "linux")]
@@ -195,7 +200,9 @@ pub fn run() {
         // Register all commands
         .invoke_handler(tauri::generate_handler![
             commands::pir::pir_generate_query,
+            commands::pir::pir_generate_batch_query,
             commands::pir::pir_decode_response,
+            commands::pir::pir_decode_batch_response,
             commands::pir::pir_discard_query,
             commands::account::account_open,
             commands::account::account_public_keys,
@@ -217,6 +224,15 @@ pub fn run() {
             commands::message_content::message_content_copy,
             commands::message_content::message_content_revoke_send,
             commands::message_content::message_content_delete,
+            commands::audio::audio_opus_start,
+            commands::audio::audio_opus_stop,
+            commands::audio::audio_opus_encode,
+            commands::audio::audio_opus_decode,
+            commands::camera::camera_devices,
+            commands::camera::camera_capture_start,
+            commands::camera::camera_capture_set_enabled,
+            commands::camera::camera_capture_pull,
+            commands::camera::camera_capture_stop,
             commands::storage::secure_get,
             commands::storage::secure_set,
             commands::storage::secure_remove,
@@ -255,6 +271,9 @@ pub fn run() {
             commands::p2p::p2p_disconnect,
             commands::p2p::p2p_rotate_identity,
             commands::p2p::p2p_send,
+            commands::p2p::p2p_subscribe,
+            commands::p2p::p2p_receive,
+            commands::p2p::p2p_unsubscribe,
             commands::p2p::p2p_authenticate_connection,
             commands::p2p::p2p_local_endpoint,
             commands::discovery::anonymous_api_fetch,
@@ -262,6 +281,7 @@ pub fn run() {
             commands::notification::notification_show,
             commands::notification::notification_set_enabled,
             commands::system::get_instance_id,
+            commands::system::forward_client_logs,
             commands::system::open_external,
             commands::system::request_media_access,
             commands::system::get_screen_sources,
@@ -314,9 +334,12 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     data_dir.set_file_name(format!("{}{}", data_name, suffix));
 
     // Initialize Tor manager
+    let pir_tor_data_dir = data_dir.join("pir-transport");
     let tor_manager = tor::init(data_dir).await?;
+    let pir_tor_manager = tor::init(pir_tor_data_dir).await?;
     *state.tor_manager.write() = Some(tor_manager);
-    info!("Embedded Tor runtime initialized");
+    *state.pir_tor_manager.write() = Some(pir_tor_manager);
+    info!("Embedded Tor runtimes initialized");
 
     // Initialize secure storage
     storage::init(&state, config_dir).await?;
@@ -365,7 +388,7 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
                             "data": data,
                         }),
                     );
-                    
+
                     crate::network::websocket::release_ws_inbound_bytes(byte_len);
                     if emitted.is_err()
                         && let Some(handler) = ws_handler_for_bridge.upgrade()
@@ -386,48 +409,11 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
 
     // Initialize P2P transport handler
     let p2p_handler = network::p2p::init().await?;
-    let (p2p_tx, mut p2p_rx) = mpsc::channel(network::p2p::P2P_EVENT_CHANNEL_CAPACITY);
+    let (p2p_tx, p2p_rx) = mpsc::channel(network::p2p::P2P_EVENT_CHANNEL_CAPACITY);
     p2p_handler.set_event_handler(p2p_tx);
-    let p2p_handler_for_bridge = Arc::downgrade(&p2p_handler);
     *state.p2p_handler.write() = Some(p2p_handler);
+    *state.p2p_event_receiver.lock().await = Some(p2p_rx);
     info!("P2P transport handler initialized");
-
-    // Start P2P event bridge
-    let app_handle_p2p = app_handle.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = p2p_rx.recv().await {
-            let release_bytes = match &event {
-                network::p2p::P2PEvent::Message { byte_len, .. } => *byte_len,
-                _ => 0,
-            };
-            let connection = match &event {
-                network::p2p::P2PEvent::Connected {
-                    connection_id,
-                    connection_token,
-                }
-                | network::p2p::P2PEvent::Closed {
-                    connection_id,
-                    connection_token,
-                    ..
-                }
-                | network::p2p::P2PEvent::Message {
-                    connection_id,
-                    connection_token,
-                    ..
-                } => Some((connection_id.clone(), *connection_token)),
-            };
-            let emitted = app_handle_p2p.emit("p2p-message", event);
-            network::p2p::release_inbound_bytes(release_bytes);
-            if emitted.is_err()
-                && let (Some(handler), Some((connection_id, connection_token))) =
-                    (p2p_handler_for_bridge.upgrade(), connection)
-            {
-                let _ = handler
-                    .disconnect(&connection_id, Some(connection_token))
-                    .await;
-            }
-        }
-    });
 
     // Initialize notification handler
     system::notification::init(&state).await?;

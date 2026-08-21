@@ -24,13 +24,13 @@ import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys'
 const MAX_STORED_AUTHORIZATIONS = 2048;
 const AUTHORIZED_KEYS = [
   'dilithiumPublicBase64',
-  'expiresAt',
   'identityBundleFingerprint',
   'identityRootFingerprint',
   'kyberPublicBase64',
   'peer',
   'peerCertificateFingerprint',
   'rootCommitment',
+  'verifiedAt',
   'version',
   'x25519PublicBase64',
 ];
@@ -40,7 +40,7 @@ const enqueue = createStoreLock();
 
 export interface StoredPeerAuthorization {
   peer: string;
-  expiresAt: number;
+  verifiedAt: number;
   rootCommitment: string;
   version: number;
   kyberPublicBase64: string;
@@ -96,8 +96,9 @@ function parseAuthorized(value: unknown): StoredPeerAuthorization | null {
   if (
     !exactPlainObject(entry, AUTHORIZED_KEYS) ||
     peer !== entry.peer ||
-    !Number.isSafeInteger(entry.expiresAt) ||
-    entry.expiresAt <= 0 ||
+    !Number.isSafeInteger(entry.verifiedAt) ||
+    entry.verifiedAt <= 0 ||
+    entry.verifiedAt > Date.now() ||
     !isContactState(entry.rootCommitment, entry.version) ||
     !isValidKyberPublicKeyBase64(entry.kyberPublicBase64) ||
     !isValidDilithiumPublicKeyBase64(entry.dilithiumPublicBase64) ||
@@ -175,9 +176,8 @@ export async function readKeyTransparencyAuthorizations(
     const snapshot = parseStore(await storage.get(authorizationStorageKey(accountScope)));
     await assertCurrentServerContext(context);
     
-    const now = Date.now();
     return {
-      authorized: snapshot.authorized.filter((entry) => entry.expiresAt > now),
+      authorized: snapshot.authorized,
       revoked: snapshot.revoked,
     };
   });
@@ -191,9 +191,7 @@ export async function writeKeyTransparencyAuthorizations(
   return enqueue(async () => {
     const accountScope = deriveLocalAccountScope(context, normalizePeer(ownerUsername));
     const key = authorizationStorageKey(accountScope);
-    const now = Date.now();
     const authorized = snapshot.authorized
-      .filter((entry) => entry.expiresAt > now)
       .slice(0, MAX_STORED_AUTHORIZATIONS)
       .sort((left, right) => left.peer.localeCompare(right.peer));
     const revoked = snapshot.revoked

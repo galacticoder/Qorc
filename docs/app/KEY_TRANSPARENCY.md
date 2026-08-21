@@ -147,6 +147,14 @@ After a contact is accepted, the encrypted account-bound monitor store retains
 the label, discovery key, accepted root commitment, version, and last check. The
 client periodically re-syncs and re-scans the oldest monitored contact.
 
+The accepted identity authorization does not expire on a wall-clock deadline.
+Its `verifiedAt` timestamp schedules a silent background freshness check after
+18 hours, while the last verified identity remains available to messaging and
+calling if that check is delayed or temporarily fails. A successful check
+updates freshness without changing the authorization generation when the root,
+keys, and fingerprints are identical. A verified root change, explicit
+revocation, or server-scoped security incident removes the authorization.
+
 Every real encrypted Signal plaintext may carry the latest signed head. The peer
 validates that head **against the log it already holds**; no witness request is
 made, so nothing on the wire reveals that this client just spoke to someone.
@@ -172,8 +180,9 @@ material, stops monitoring, and quarantines identity-dependent messaging until
 user review. Corrupt local checkpoint, record, monitor, or warning state also
 fails closed.
 
-Incoming ringing additionally requires the separate local deliberate-contact
-policy documented in `docs/app/CALLING.md`.
+Incoming call offers require a currently transparency-authorized sender before
+the calling service can admit them. The remaining call schema, blocking, rate,
+and active-call checks are documented in `docs/app/CALLING.md`.
 
 ## Remaining Boundaries
 

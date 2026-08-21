@@ -18,6 +18,7 @@ pub const PRIVACY_PASS_TOKEN_PREFIX: &str = "pp_tokens_";
 pub const PRIVATE_AUTH_SLOT_PREFIX: &str = "private_auth_slot_";
 pub const REGISTRATION_ATTEMPT_PREFIX: &str = "registration_attempt_v1_";
 pub const SERVER_PQ_PIN: &str = "server_pq_pin_v4";
+pub const SPOOL_CONSUMED_PROBES_PREFIX: &str = "spoolconsumed:v1:";
 pub const SPOOL_DETECTION_PREFIX: &str = "spooldet:v1:";
 pub const SPOOL_PEER_DETECTION_PREFIX: &str = "spoolpeerdet:v1:";
 pub const TOR_AUTO_CONNECT: &str = "qor_tor_auto_connect_v1";
@@ -51,6 +52,7 @@ pub const RENDERER_SCOPED_PREFIXES: &[&str] = &[
     KEY_TRANSPARENCY_MONITOR_PREFIX,
     KEY_TRANSPARENCY_AUTHORIZATION_PREFIX,
     KEY_TRANSPARENCY_RECORD_PREFIX,
+    SPOOL_CONSUMED_PROBES_PREFIX,
     SPOOL_DETECTION_PREFIX,
     SPOOL_PEER_DETECTION_PREFIX,
     DISCOVERY_MATERIAL_PREFIX,

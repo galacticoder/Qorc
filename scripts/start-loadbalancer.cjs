@@ -10,6 +10,11 @@ const { pathToFileURL } = require('url');
 const repoRoot = path.resolve(__dirname, '..');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
 
+if (process.platform !== 'linux') {
+  console.error('[LB] Native load-balancer deployment supports only Linux.');
+  process.exit(1);
+}
+
 function loadDotEnv(filePath) {
   try {
     if (!fs.existsSync(filePath)) return;

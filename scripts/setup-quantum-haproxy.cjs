@@ -32,6 +32,11 @@ async function hasOqsProvider(env) {
 
 (async () => {
   try {
+    if (process.platform !== 'linux') {
+      console.error('[SETUP] Native HAProxy setup supports only Linux.');
+      process.exit(1);
+    }
+
     if (!findInPath('openssl')) {
       console.error('[SETUP] openssl not found. Install openssl and oqs provider first.');
       console.error('[SETUP] You can configure OPENSSL_CONF to point to a local config that loads oqsprovider.so');
@@ -48,9 +53,7 @@ async function hasOqsProvider(env) {
       '/usr/local/lib64/ossl-modules/oqsprovider.so',
       '/usr/lib/ossl-modules/oqsprovider.so',
       '/usr/lib64/ossl-modules/oqsprovider.so',
-      '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so',
-      '/opt/homebrew/lib/ossl-modules/oqsprovider.dylib',
-      '/usr/local/lib/ossl-modules/oqsprovider.dylib'
+      '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so'
     ];
 
     let modulePath = null;
@@ -101,19 +104,11 @@ async function hasOqsProvider(env) {
     env.OQS_PROVIDER_MODULE = modulePath;
     try { env.OPENSSL_MODULES = path.dirname(modulePath); } catch { }
 
-    if (process.platform === 'darwin') {
-      env.DYLD_LIBRARY_PATH = [
-        '/usr/local/lib',
-        '/opt/homebrew/lib',
-        process.env.DYLD_LIBRARY_PATH || ''
-      ].filter(Boolean).join(':');
-    } else {
-      env.LD_LIBRARY_PATH = [
-        '/usr/local/lib',
-        '/usr/lib/x86_64-linux-gnu',
-        process.env.LD_LIBRARY_PATH || ''
-      ].filter(Boolean).join(':');
-    }
+    env.LD_LIBRARY_PATH = [
+      '/usr/local/lib',
+      '/usr/lib/x86_64-linux-gnu',
+      process.env.LD_LIBRARY_PATH || ''
+    ].filter(Boolean).join(':');
 
     const ok = await hasOqsProvider(env);
     if (!ok) {

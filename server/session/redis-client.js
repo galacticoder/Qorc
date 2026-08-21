@@ -12,6 +12,8 @@ const USING_CLUSTER = REDIS_CLUSTER_NODES.length > 0;
 
 const REDIS_QUIET_ERRORS = (process.env.REDIS_QUIET_ERRORS || '').toLowerCase() === 'true';
 const REDIS_ERROR_THROTTLE_MS = envInt('REDIS_ERROR_THROTTLE_MS', 5000, 1000, 60000);
+const REDIS_CLIENT_HEALTHY = Symbol('redisClientHealthy');
+const REDIS_CLIENT_INTENTIONAL_CLOSE = Symbol('redisClientIntentionalClose');
 let lastRedisErrorMessage = null;
 let lastRedisErrorTime = 0;
 
@@ -82,13 +84,50 @@ function getRedisOptions() {
         reconnectOnError: (err) => /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/.test(err.message),
         connectTimeout: envInt('REDIS_CONNECT_TIMEOUT', 15_000, 1000, 60_000),
         commandTimeout: envInt('REDIS_COMMAND_TIMEOUT', 10_000, 1000, 30_000),
-        socket: {
-            keepAlive: envInt('REDIS_KEEPALIVE', 30_000, 0, 300_000),
-            noDelay: true,
-            timeout: envInt('REDIS_SOCKET_TIMEOUT', 120_000, 30_000, 600_000)
-        },
+        keepAlive: envInt('REDIS_KEEPALIVE', 30_000, 0, 300_000),
+        noDelay: true,
+        socketTimeout: envInt('REDIS_SOCKET_TIMEOUT', 120_000, 30_000, 600_000),
         tls: getTlsOptions()
     };
+}
+
+function attachRedisClientLifecycle(client, label) {
+    client[REDIS_CLIENT_HEALTHY] = true;
+    client[REDIS_CLIENT_INTENTIONAL_CLOSE] = false;
+    client.on('ready', () => {
+        if (!client[REDIS_CLIENT_INTENTIONAL_CLOSE]) {
+            client[REDIS_CLIENT_HEALTHY] = true;
+        }
+    });
+    client.on('error', (error) => {
+        client[REDIS_CLIENT_HEALTHY] = false;
+        logRedisError(`${label} error`, error);
+    });
+    client.on('close', () => {
+        client[REDIS_CLIENT_HEALTHY] = false;
+        if (!client[REDIS_CLIENT_INTENTIONAL_CLOSE]) {
+            console.warn(`${label} connection closed; reconnecting`);
+        }
+    });
+    client.on('reconnecting', () => {
+        client[REDIS_CLIENT_HEALTHY] = false;
+    });
+}
+
+function isRedisClientReusable(client) {
+    return Boolean(
+        client &&
+        client[REDIS_CLIENT_HEALTHY] === true &&
+        client[REDIS_CLIENT_INTENTIONAL_CLOSE] !== true &&
+        client.status === 'ready'
+    );
+}
+
+function disconnectRedisClient(client) {
+    if (!client) return;
+    client[REDIS_CLIENT_INTENTIONAL_CLOSE] = true;
+    client[REDIS_CLIENT_HEALTHY] = false;
+    client.disconnect(false);
 }
 
 function parseRedisClusterNodes(redisClusterNodes) {
@@ -130,9 +169,7 @@ const factory = {
             password: process.env.REDIS_PASSWORD
         });
 
-        client.on('error', (error) => logRedisError('Redis client error', error));
-        client.on('close', () => console.warn('Redis client closed'));
-        client.on('reconnecting', () => console.warn('Redis client reconnecting'));
+        attachRedisClientLifecycle(client, 'Redis client');
 
         try {
             await new Promise((resolve, reject) => {
@@ -170,19 +207,27 @@ const factory = {
                 client.once('error', errorHandler);
             });
         } catch (error) {
-            client.disconnect(false);
+            disconnectRedisClient(client);
             throw error;
         }
 
         return client;
     },
+    validate: async (client) => isRedisClientReusable(client),
     destroy: async (client) => {
+        const graceful = isRedisClientReusable(client);
+        client[REDIS_CLIENT_INTENTIONAL_CLOSE] = true;
+        client[REDIS_CLIENT_HEALTHY] = false;
         try {
-            await client.quit();
+            if (graceful) {
+                await client.quit();
+            } else {
+                client.disconnect(false);
+            }
         } catch (error) {
             console.error('Error destroying Redis client', error);
             try {
-                client.disconnect();
+                client.disconnect(false);
             } catch (disconnectError) {
                 console.error('Error disconnecting Redis client', disconnectError);
             }
@@ -190,7 +235,10 @@ const factory = {
     }
 };
 
-const redisPool = USING_CLUSTER ? null : createPool(factory, POOL_CONFIG);
+const redisPool = USING_CLUSTER ? null : createPool(factory, {
+    ...POOL_CONFIG,
+    testOnBorrow: true
+});
 
 export async function withRedisClient(operation) {
     if (USING_CLUSTER && clusterClient) {
@@ -206,7 +254,11 @@ export async function withRedisClient(operation) {
         try {
             return await operation(client);
         } finally {
-            await redisPool.release(client);
+            if (isRedisClientReusable(client)) {
+                await redisPool.release(client);
+            } else {
+                await redisPool.destroy(client);
+            }
         }
     } catch (error) {
         if (error.message && error.message.includes('draining')) {
@@ -227,8 +279,7 @@ export async function createSubscriber() {
         password: process.env.REDIS_PASSWORD
     });
 
-    sub.on('error', (error) => logRedisError('Redis subscriber error', error));
-    sub.on('close', () => console.warn('Redis subscriber closed'));
+    attachRedisClientLifecycle(sub, 'Redis subscriber');
 
     try {
         await new Promise((resolve, reject) => {
@@ -266,7 +317,7 @@ export async function createSubscriber() {
             sub.once('error', errorHandler);
         });
     } catch (error) {
-        sub.disconnect(false);
+        disconnectRedisClient(sub);
         throw error;
     }
 
@@ -275,6 +326,8 @@ export async function createSubscriber() {
 
 export async function closeSubscriber(subscriber) {
     if (subscriber) {
+        subscriber[REDIS_CLIENT_INTENTIONAL_CLOSE] = true;
+        subscriber[REDIS_CLIENT_HEALTHY] = false;
         try {
             if (subscriber.status !== 'end' && subscriber.status !== 'close') {
                 await subscriber.quit();

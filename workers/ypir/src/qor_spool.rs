@@ -1,8 +1,7 @@
 //! Spool record packing for Qor.
 //!
 //! A YPIR SimplePIR row is `db_cols` plaintext words of `pt_bits` each, and a
-//! retrieval returns exactly one row. Qor maps one spool entry to one row, so a
-//! detected tag index position is directly the PIR record index.
+//! retrieval returns exactly one row.
 
 use crate::bits::{read_bits, write_bits};
 
@@ -231,6 +230,49 @@ pub mod wire {
     use spiral_rs::poly::{PolyMatrix, PolyMatrixNTT};
 
     const MAGIC: u32 = 0x5150_4952; // "QPIR"
+    const BATCH_MAGIC: u32 = 0x5142_5432;
+
+    pub fn encode_batch(items: &[Vec<u8>]) -> Vec<u8> {
+        let size = 8 + items.iter().map(|item| 4 + item.len()).sum::<usize>();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(&BATCH_MAGIC.to_le_bytes());
+        out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        for item in items {
+            out.extend_from_slice(&(item.len() as u32).to_le_bytes());
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    pub fn decode_batch<'a>(
+        bytes: &'a [u8],
+        max_items: usize,
+        max_item_bytes: usize,
+    ) -> Option<Vec<&'a [u8]>> {
+        if bytes.len() < 8 || u32::from_le_bytes(bytes[0..4].try_into().ok()?) != BATCH_MAGIC {
+            return None;
+        }
+        let count = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
+        if count == 0 || count > max_items {
+            return None;
+        }
+        let mut offset = 8usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = u32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?) as usize;
+            offset += 4;
+            if len == 0 || len > max_item_bytes {
+                return None;
+            }
+            let item = bytes.get(offset..offset + len)?;
+            offset += len;
+            out.push(item);
+        }
+        if offset != bytes.len() {
+            return None;
+        }
+        Some(out)
+    }
 
     pub fn encode_u64s(values: &[u64]) -> Vec<u8> {
         let mut out = Vec::with_capacity(8 + values.len() * 8);
@@ -342,6 +384,17 @@ mod wire_tests {
         let mut bad_len = encoded.clone();
         bad_len[4] = bad_len[4].wrapping_add(1);
         assert!(decode_u64s(&bad_len).is_none());
+    }
+
+    #[test]
+    fn batch_frames_round_trip_and_reject_corruption() {
+        let items = vec![vec![1, 2, 3], vec![4; 100], vec![5; 7]];
+        let encoded = encode_batch(&items);
+        let decoded = decode_batch(&encoded, 3, 100).unwrap();
+        assert_eq!(decoded, items.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert!(decode_batch(&encoded, 2, 100).is_none());
+        assert!(decode_batch(&encoded, 3, 99).is_none());
+        assert!(decode_batch(&encoded[..encoded.len() - 1], 3, 100).is_none());
     }
 
     #[test]

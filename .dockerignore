@@ -35,3 +35,4 @@ tenk.json
 **/node_modules
 workers/*/target
 src-tauri/vendor/tor
+src-tauri/target

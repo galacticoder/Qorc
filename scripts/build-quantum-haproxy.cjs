@@ -23,9 +23,7 @@ const MODULE_CANDIDATES = [
   '/usr/local/lib64/ossl-modules/oqsprovider.so',
   '/usr/lib/ossl-modules/oqsprovider.so',
   '/usr/lib64/ossl-modules/oqsprovider.so',
-  '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so',
-  '/opt/homebrew/lib/ossl-modules/oqsprovider.dylib',
-  '/usr/local/lib/ossl-modules/oqsprovider.dylib'
+  '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so'
 ];
 
 const OPENSSL_CONF_PATH = path.join('server', 'config', 'openssl-oqs.cnf');
@@ -158,18 +156,10 @@ function buildLocalEnv(oqsModule) {
     try { localEnv.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
   }
 
-  if (process.platform === 'darwin') {
-    localEnv.DYLD_LIBRARY_PATH = [
-      '/usr/local/lib',
-      '/opt/homebrew/lib',
-      process.env.DYLD_LIBRARY_PATH || ''
-    ].filter(Boolean).join(':');
-  } else {
-    localEnv.LD_LIBRARY_PATH = [
-      '/usr/local/lib',
-      process.env.LD_LIBRARY_PATH || ''
-    ].filter(Boolean).join(':');
-  }
+  localEnv.LD_LIBRARY_PATH = [
+    '/usr/local/lib',
+    process.env.LD_LIBRARY_PATH || ''
+  ].filter(Boolean).join(':');
 
   return localEnv;
 }
@@ -200,12 +190,7 @@ function detectOpenSslPaths(execSync) {
 
   if (sslInc && sslLib) return { sslInc, sslLib };
 
-  const fallbackCandidates = process.platform === 'darwin' ? [
-    { inc: '/opt/homebrew/opt/openssl@3/include', lib: '/opt/homebrew/opt/openssl@3/lib' },
-    { inc: '/usr/local/opt/openssl@3/include', lib: '/usr/local/opt/openssl@3/lib' },
-    { inc: '/opt/homebrew/opt/openssl/include', lib: '/opt/homebrew/opt/openssl/lib' },
-    { inc: '/usr/local/opt/openssl/include', lib: '/usr/local/opt/openssl/lib' },
-  ] : [
+  const fallbackCandidates = [
     { inc: '/usr/local/include', lib: '/usr/local/lib' },
     { inc: '/usr/include', lib: '/usr/lib/x86_64-linux-gnu' },
     { inc: '/usr/include', lib: '/usr/lib' },
@@ -297,8 +282,8 @@ async function writeBuildMetadata(srcDir, haproxyVersion) {
 }
 
 async function buildHaproxy() {
-  if (process.platform === 'win32') {
-    console.error('[BUILD] This script is not supported on Windows. You need to use this command to start the server on windows: ');
+  if (process.platform !== 'linux') {
+    console.error('[BUILD] Native HAProxy builds support only Linux. Use Docker instead:');
     console.error('  node scripts/start-docker.cjs server');
     process.exit(1);
   }
@@ -316,7 +301,7 @@ async function buildHaproxy() {
   await writeOqsModuleInfo(oqsModule);
 
   const localEnv = buildLocalEnv(oqsModule);
-  const target = process.platform === 'darwin' ? 'osx' : 'linux-glibc';
+  const target = 'linux-glibc';
   const haproxyVersion = HAPROXY_VERSION;
   const mm = haproxyVersion.split('.').slice(0, 2).join('.');
   const url = `https://www.haproxy.org/download/${mm}/src/haproxy-${haproxyVersion}.tar.gz`;

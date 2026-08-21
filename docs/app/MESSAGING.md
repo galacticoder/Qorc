@@ -67,25 +67,34 @@ Transport properties:
 - Identity rotation replaces the onion service and removes the superseded
   service, so its address stops resolving.
 - Neither peer learns the other's IP address.
-- Tor carries TCP, and frames are multiplexed over one stream per connection.
-  A framing error desynchronises the stream and closes the connection, a frame
-  that parses badly does not.
+- Tor carries TCP. Logical application streams are multiplexed over a primary
+  connection, and active call media uses four capability-bound, circuit-isolated
+  TCP lanes on the same onion service. Audio and visual traffic reserve distinct
+  selected lanes. Length framing is exact; a framing error
+  that loses byte synchronization closes its TCP connection.
 - Tor reveals nothing about who connected, so an inbound connection has no
   transport-level identity. It is keyed synthetically until the handshake below
   binds the peer's alias. Inbound remains fail-closed until the peer's discovery
   certificate verifies.
+- After account and database readiness, persisted transparency-authorized
+  certificates and authenticated onion endpoints for known peers are restored
+  into the P2P transport without dialing them. This lets a known peer's first
+  inbound handshake authenticate immediately after startup.
 
-Latency is that of a Tor rendezvous, roughly six hops. This is a reachability
-transport, not a low-latency one. Real-time media has Tor rendezvous latency.
-Calls reuse this authenticated onion transport for dedicated media streams; see
-`docs/app/CALLING.md`.
+Latency is that of a Tor rendezvous, roughly six hops. Calls use bounded lossy
+media streams and four ranked media lanes to prevent video or screen writes from
+blocking audio and to route around a delayed circuit, but media still has
+Tor rendezvous latency. See `docs/app/CALLING.md`.
 
 Before application data is accepted, peers complete
 `hybrid-mlkem1024-mldsa87-session-v5`:
 
 - ML-KEM-1024 and X25519 both contribute to directional session keys.
 - ML-DSA-87 authenticates the transcript against certified peer keys.
-- The certified peer account root must have live key-transparency authorization.
+- The certified peer account root must match the locally retained
+  key-transparency authorization. That authorization remains usable across
+  freshness-check failures and is removed on a verified root change, explicit
+  revocation, or a server-scoped transparency incident.
 - Both peers exchange key-confirmation frames.
 - Session IDs, counters, replay windows, frame sizes, queue sizes, streams, and
   handshake timing are bounded.
@@ -93,6 +102,23 @@ Before application data is accepted, peers complete
 The enclosing transport is a Tor TCP stream. The authenticated hybrid
 application session above is the peer-identity and transport-key boundary. Tor
 supplies reachability and network-address hiding.
+
+Every call stream derives its own directional 32-byte key from the established
+P2P directional key and complete stream ID. The same ID is authenticated as
+additional data, separating audio, video, telemetry, calls, and screen shares.
+Call audio uses 20 ms Opus packets, batches up to four packets per encrypted
+write under pressure, retains at most five captures, applies an RTT-aware
+160–320 ms deadline, and uses an adaptive 60–100 ms receiver jitter buffer.
+Camera and screen media use persistent raw VP8 WebCodecs streams, target 60 FPS,
+adapt bitrate and resolution below the selected quality ceiling, and batch at
+most two consecutive encoded frames per write. A visual write receives an
+RTT-aware 400–1,500 ms freshness deadline on a Tor lane separate from audio.
+Sequence discontinuities trigger an authenticated keyframe request. The sender
+forces its next accepted codec input to be a keyframe, and the receiver replaces
+its bounded decoder without creating a playback buffer or container timeline.
+These lanes carry the same authenticated application frames as the primary
+connection.
+`docs/app/CALLING.md` defines the complete call frame and queue behavior.
 
 Each direct application message is also signed with the certified ML-DSA key and
 contains a monotonically increasing, session-bound route proof. The P2P outer
@@ -178,7 +204,7 @@ Code references:
 An authorized unlinked socket explicitly activates global delivery. Live clients
 receive broadcast sealed-envelope candidates. Offline clients retrieve through
 the tagged lane: they fetch the whole tag index, test each entry's probe against
-their own detection key, and issue one PIR query per match. Both requests carry
+their own detection key, and issue one batched PIR request per match. Both requests carry
 no recipient selector and travel as the encrypted `spool/tag-index` and
 `spool/pir` operations inside the fixed `/api/anonymous` hybrid-PQ tunnel. The
 index is byte-identical for every caller and the PIR query hides which entry was

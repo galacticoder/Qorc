@@ -331,8 +331,7 @@ export class SecureP2PService {
             identity.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
             identity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
             identity.x25519PublicKey?.length !== 32 ||
-            !Number.isSafeInteger(identity.certificateExpiresAt) ||
-            identity.certificateExpiresAt <= Date.now() - CERT_CLOCK_SKEW_MS
+            !Number.isSafeInteger(identity.certificateExpiresAt)
         ) return null;
         return session;
     }
@@ -554,8 +553,7 @@ export class SecureP2PService {
                     certifiedIdentity.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
                     certifiedIdentity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
                     certifiedIdentity.x25519PublicKey?.length !== 32 ||
-                    !Number.isSafeInteger(certifiedIdentity.certificateExpiresAt) ||
-                    certifiedIdentity.certificateExpiresAt <= Date.now() - CERT_CLOCK_SKEW_MS
+                    !Number.isSafeInteger(certifiedIdentity.certificateExpiresAt)
                 ) {
                     this.transport.requestPeerCertificate(appPeerId);
                     return;

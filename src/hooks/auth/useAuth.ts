@@ -454,7 +454,6 @@ export const useAuth = () => {
     }
     authLifecycle.assertCurrent(operation);
     if (websocketClient.isUnlinkedMode()) {
-      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] server-entry resume: SKIP — already unlinked`);
       return;
     }
 
@@ -493,21 +492,16 @@ export const useAuth = () => {
 
   useEffect(() => {
     const onServerEntryGranted = async () => {
-      const inFlight = accountSubmitInFlightRef.current;
-      const unlinked = websocketClient.isUnlinkedMode();
-      console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted fired`, { accountSubmitInFlight: inFlight, isUnlinkedMode: unlinked });
-      if (inFlight) {
-        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: SKIP — manual login in flight`);
+      if (
+        websocketClient.isUnlinkedMode() ||
+        accountSubmitInFlightRef.current ||
+        showPasswordPromptRef.current
+      ) {
         return;
       }
-      
-      if (showPasswordPromptRef.current) {
-        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: SKIP — server password prompt active (awaiting user)`);
-        return;
-      }
+
       const operation = authLifecycle.capture();
       try {
-        console.log(`[AUTHFLOW-DIAG ${new Date().toISOString()}] onServerEntryGranted: proceeding to auto-resume (switch to unlinked)`);
         await resumeSavedAccountAfterServerEntry(operation);
       } catch (err) {
         if (isStaleAuthOperation(err) || !authLifecycle.isCurrent(operation)) return;

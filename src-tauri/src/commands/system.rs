@@ -6,6 +6,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use url::Url;
 
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
@@ -14,6 +15,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const MAX_EXTERNAL_URL_BYTES: usize = 8 * 1024;
+const MAX_FRONTEND_LOG_BATCH: usize = 32;
+const MAX_FRONTEND_LOG_LINE_BYTES: usize = 128 * 1024;
+const MAX_FRONTEND_LOG_BATCH_BYTES: usize = 4 * 1024 * 1024;
 static EXTERNAL_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MEDIA_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -106,6 +110,34 @@ pub fn get_instance_id() -> Result<String, String> {
     crate::system::get_instance_id().map_err(|error| error.safe_message())
 }
 
+#[tauri::command]
+pub fn forward_client_logs(entries: Vec<String>) -> Result<bool, String> {
+    if entries.is_empty() || entries.len() > MAX_FRONTEND_LOG_BATCH {
+        return Err("Invalid client log batch".to_string());
+    }
+    let mut total_bytes = 0usize;
+    for entry in &entries {
+        if entry.is_empty() || entry.len() > MAX_FRONTEND_LOG_LINE_BYTES {
+            return Err("Invalid client log entry".to_string());
+        }
+        total_bytes = total_bytes
+            .checked_add(entry.len())
+            .ok_or_else(|| "Invalid client log batch".to_string())?;
+    }
+    if total_bytes > MAX_FRONTEND_LOG_BATCH_BYTES {
+        return Err("Invalid client log batch".to_string());
+    }
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    for entry in entries {
+        writeln!(output, "{entry}").map_err(|_| "Failed to forward client logs".to_string())?;
+    }
+    output
+        .flush()
+        .map_err(|_| "Failed to forward client logs".to_string())?;
+    Ok(true)
+}
+
 /// Open URL in default browser
 #[tauri::command]
 pub async fn open_external(url: String, app: AppHandle) -> Result<bool, String> {
@@ -156,6 +188,7 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         "audio" => (true, false, "microphone", false),
         "video" => (false, true, "camera or screen/window capture", false),
         "audio-video" => (true, true, "microphone and camera", false),
+        "camera" => (false, false, "camera", false),
         "enumerate" => (false, false, "media device names and identifiers", true),
         _ => return Err("Invalid media access type".to_string()),
     };
@@ -203,7 +236,7 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         let mut slot = MEDIA_PERMISSION_LEASE
             .lock()
             .map_err(|_| "Media permission state unavailable".to_string())?;
-        *slot = if confirmed && !enumeration_only {
+        *slot = if confirmed && !enumeration_only && (audio || video) {
             Some(MediaPermissionLease {
                 audio,
                 video,
