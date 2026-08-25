@@ -115,23 +115,27 @@ export function useCallEventHandlers({
         });
       }
       if (historyOnly) return;
+      if (!['incoming', 'started', 'missed', 'declined'].includes(eventType)) return;
 
-      const label = eventType === 'incoming' ? `Incoming call from ${displayPeerName}`
-        : eventType === 'connected' ? `Call connected with ${displayPeerName}`
-          : eventType === 'started' ? `Calling ${displayPeerName}...`
-            : eventType === 'ended' ? `Call with ${displayPeerName} ended`
-              : eventType === 'declined' ? (isOutgoing ? `${displayPeerName} missed your call` : `You missed ${displayPeerName}'s call`)
-                : eventType === 'missed' ? (isOutgoing ? `${displayPeerName} missed your call` : `You missed ${displayPeerName}'s call`)
-                  : `Call event: ${eventType}`;
+      const isMissed = eventType === 'missed' || eventType === 'declined';
+      const label = eventType === 'incoming' ? `Incoming ${isVideo ? 'video' : 'audio'} call`
+        : eventType === 'started' ? `Outgoing ${isVideo ? 'video' : 'audio'} call`
+          : isOutgoing ? `${displayPeerName} missed your call`
+            : `You missed ${displayPeerName}'s call`;
 
-      const shouldHaveActions = ['missed', 'ended', 'declined'].includes(eventType);
-      const actions = shouldHaveActions
+      const actions = isMissed
         ? [{ label: 'Call back', onClick: () => startCall(peer, 'audio').catch(() => { }) }]
         : undefined;
 
       const newMessage: Message = {
         id: `call-log-${callId}-${eventType}-${at}`,
-        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined, isError: eventType === 'missed' }),
+        content: JSON.stringify({
+          label,
+          actionsType: actions ? 'callback' : undefined,
+          isError: isMissed,
+          callType: isVideo ? 'video' : 'audio',
+          showCallIcon: eventType === 'started' || eventType === 'incoming',
+        }),
         sender: peer,
         recipient: currentUsername,
         timestamp: new Date(at),

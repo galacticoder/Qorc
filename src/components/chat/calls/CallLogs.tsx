@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Phone, Video, Search, Clock, Trash2, MoreVertical, ShieldOff } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { Input } from '../../ui/input';
@@ -9,6 +9,7 @@ import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistory
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { useBlockStatus } from '../../../hooks/useBlockStatus';
 import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/utils/date-utils';
+import { NEAR_BOTTOM_THRESHOLD, SCROLL_THRESHOLD } from '../../../lib/constants';
 
 interface CallLogItemProps {
     readonly log: CallLogEntry;
@@ -106,9 +107,52 @@ interface CallLogsProps {
 }
 
 export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
-    const { logs, clearLogs, deleteLog } = useCallHistory();
+    const {
+        logs,
+        hasMoreLogs,
+        loadMoreLogs,
+        scheduleLogRelease,
+        cancelLogRelease,
+        getAllLogs,
+        clearLogs,
+        deleteLog,
+    } = useCallHistory();
     const [searchQuery, setSearchQuery] = useState('');
     const [usernameMap, setUsernameMap] = useState<Record<string, string>>({});
+    const scrollAreaRef = useRef<HTMLDivElement>(null);
+    const isSearching = searchQuery.length > 0;
+    const hasMoreLogsRef = useRef(hasMoreLogs);
+    hasMoreLogsRef.current = hasMoreLogs;
+    const isSearchingRef = useRef(isSearching);
+    isSearchingRef.current = isSearching;
+
+    const searchScopeLogs = useMemo(
+        () => (isSearching ? getAllLogs() : logs),
+        [isSearching, logs, getAllLogs],
+    );
+
+    useEffect(() => {
+        cancelLogRelease();
+        return () => { scheduleLogRelease(); };
+    }, [cancelLogRelease, scheduleLogRelease]);
+
+    const handleScroll = useCallback((viewport: Element) => {
+        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+        if (!isSearchingRef.current && hasMoreLogsRef.current && distanceToBottom < SCROLL_THRESHOLD) {
+            loadMoreLogs();
+            return;
+        }
+        if (viewport.scrollTop < NEAR_BOTTOM_THRESHOLD) scheduleLogRelease();
+        else cancelLogRelease();
+    }, [loadMoreLogs, scheduleLogRelease, cancelLogRelease]);
+
+    useEffect(() => {
+        const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+        if (!viewport) return;
+        const onScroll = () => handleScroll(viewport);
+        viewport.addEventListener('scroll', onScroll);
+        return () => viewport.removeEventListener('scroll', onScroll);
+    }, [handleScroll]);
 
     // Resolve display names for all usernames
     useEffect(() => {
@@ -116,7 +160,7 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
 
         const resolveUsernames = async () => {
             const newMap: Record<string, string> = {};
-            const uniqueUsernames = Array.from(new Set(logs.map(log => log.peerUsername)));
+            const uniqueUsernames = Array.from(new Set(searchScopeLogs.map(log => log.peerUsername)));
 
             await Promise.all(
                 uniqueUsernames.map(async (username) => {
@@ -133,17 +177,17 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
         };
 
         resolveUsernames();
-    }, [logs, getDisplayUsername]);
+    }, [searchScopeLogs, getDisplayUsername]);
 
     const filteredLogs = useMemo(() => {
-        if (!searchQuery) return logs;
+        if (!searchQuery) return searchScopeLogs;
 
         const query = searchQuery.toLowerCase();
-        return logs.filter(log => {
+        return searchScopeLogs.filter(log => {
             const displayName = usernameMap[log.peerUsername] || log.peerUsername;
             return displayName.toLowerCase().includes(query);
         });
-    }, [logs, searchQuery, usernameMap]);
+    }, [searchScopeLogs, searchQuery, usernameMap]);
 
     return (
         <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--qor-chat-bg)' }}>
@@ -191,7 +235,7 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
                 </div>
             </div>
 
-            <ScrollArea className="absolute inset-0 z-0 h-full w-full">
+            <ScrollArea ref={scrollAreaRef} className="absolute inset-0 z-0 h-full w-full">
                 <div className="space-y-2 px-6 pb-4 pt-24">
                     {filteredLogs.length === 0 ? (
                         <div className="text-center py-12 text-muted-foreground select-none">

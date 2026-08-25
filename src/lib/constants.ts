@@ -57,6 +57,7 @@ export const FILE_SIZE_BASE = 1024;
 export const SCROLL_THRESHOLD = 200;
 export const NEAR_BOTTOM_THRESHOLD = 100;
 export const CONVERSATION_SEGMENT_SIZE = 50;
+export const CALL_LOG_SEGMENT_SIZE = 50;
 export const MAX_BACKGROUND_MESSAGES = CONVERSATION_SEGMENT_SIZE;
 export const SEGMENT_UNLOAD_IDLE_MS = 3 * 60 * 1000;
 export const INITIAL_LOAD_DELAY_MS = 500;
@@ -65,18 +66,9 @@ export const MAX_UI_MESSAGES_TOTAL = 2_048;
 export const MAX_CONVERSATION_STORED_MESSAGES = 10_000;
 export const MAX_KNOWN_PEERS = 2_048;
 export const MAX_PEER_AVATAR_CACHE_ENTRIES = 128;
-export const QUALITY_OPTIONS = ['low', 'medium', 'high'] as const;
-export const DEFAULT_QUALITY: QualityOption = 'medium';
 export const TARGET_FPS = 60;
 export const VISUAL_FRAME_SEND_DEADLINE_MS = 400;
 export const VISUAL_FRAME_SEND_DEADLINE_MAX_MS = 1_500;
-export type QualityOption = (typeof QUALITY_OPTIONS)[number];
-export const QUALITY_LABELS: Record<QualityOption, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High'
-};
-
 export const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'ico', 'tiff'] as const;
 export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv'] as const;
 export const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
@@ -264,9 +256,6 @@ export const SECURE_DB_BLOCKED_MIME_TYPES = [
     'application/x-executable',
     'application/vnd.microsoft.portable-executable',
   ];
-export const SCREEN_SHARING_RATE_LIMIT_WINDOW_MS = 100;
-export const SCREEN_SHARING_MAX_REQUESTS_PER_WINDOW = 5;
-export const SCREEN_SHARING_SETTINGS_TTL_MS = 24 * 60 * 60 * 1000;
 export const TOR_DEFAULT_MONITOR_INTERVAL_MS = 30_000;
 export const TOR_MAX_BACKOFF_MS = 30_000;
 export const TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS = 5_000;

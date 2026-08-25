@@ -8,19 +8,6 @@ import type { AvatarSystemState } from '../types/avatar-types';
 import { MAX_PEER_AVATAR_CACHE_ENTRIES } from '../constants';
 import { isCanonicalAuthUsername, isPlainObject } from '../sanitizers';
 
-function isValidProfileSettings(value: unknown): value is AvatarSystemState['settings'] {
-    if (
-        !value || typeof value !== 'object' || Array.isArray(value) ||
-        Object.getPrototypeOf(value) !== Object.prototype ||
-        Object.keys(value).sort().join(',') !== 'lastUpdated,shareWithOthers'
-    ) return false;
-    const settings = value as Record<string, unknown>;
-    return typeof settings.shareWithOthers === 'boolean' &&
-        Number.isSafeInteger(settings.lastUpdated) &&
-        (settings.lastUpdated as number) >= 0 &&
-        (settings.lastUpdated as number) <= Date.now() + 60_000;
-}
-
 // Set database
 export function setSecureDB(state: AvatarSystemState, db: SecureDB | null): void {
     state.secureDB = db;
@@ -29,7 +16,6 @@ export function setSecureDB(state: AvatarSystemState, db: SecureDB | null): void
     state.avatarCache.clear();
     state.cacheSaveInFlight = null;
     state.cacheSavePending = false;
-    state.settings = { shareWithOthers: false, lastUpdated: 0 };
 }
 
 // Initialize avatar system
@@ -43,7 +29,6 @@ export async function initialize(
     const secureDB = state.secureDB;
     const username = websocketClient?.getUsername() || '';
     let ownAvatar: AvatarSystemState['ownAvatar'] = null;
-    let settings: AvatarSystemState['settings'] = { shareWithOthers: false, lastUpdated: 0 };
     const avatarCache = new Map<string, CachedAvatar>();
     let generatedOwnAvatar = false;
 
@@ -79,21 +64,6 @@ export async function initialize(
             generatedOwnAvatar = true;
         }
 
-        // Load settings
-        try {
-            const storedSettings = await secureDB.retrieve(STORAGE_KEYS.PROFILE_SETTINGS, STORAGE_KEYS.PROFILE_SETTINGS_RECORD);
-            if (!isCurrent()) return;
-            if (isValidProfileSettings(storedSettings)) {
-                settings = { ...storedSettings };
-            }
-        } catch (settingsError: any) {
-            if (!isCurrent()) return;
-            if (/decrypt|BLAKE3|MAC/i.test(settingsError?.message)) {
-                await secureDB.clearStore(STORAGE_KEYS.PROFILE_SETTINGS).catch(() => { });
-                if (!isCurrent()) return;
-            }
-        }
-
         // Load cached avatars
         try {
             const cachedAvatars = await secureDB.retrieve(STORAGE_KEYS.PROFILE_AVATARS, STORAGE_KEYS.AVATAR_CACHE);
@@ -118,7 +88,6 @@ export async function initialize(
 
         if (!isCurrent()) return;
         state.ownAvatar = ownAvatar;
-        state.settings = settings;
         state.avatarCache = avatarCache;
         state.initialized = true;
         if (generatedOwnAvatar) {

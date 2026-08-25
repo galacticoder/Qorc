@@ -5,7 +5,8 @@
   "identifier": "com.qor.chat",
   "build": {
     "frontendDist": "../dist",
-    "beforeBuildCommand": "pnpm run build"
+    "beforeBuildCommand": "node scripts/stage-webkitgtk-runtime.cjs && pnpm run build",
+    "beforeBundleCommand": "node scripts/prepare-linux-webkitgtk-bundle.cjs"
   },
   "app": {
     "withGlobalTauri": false,
@@ -97,6 +98,10 @@
       "rpm": {
         "files": {
           "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
+        },
+        "compression": {
+          "type": "zstd",
+          "level": 3
         },
         "depends": [
           "webkit2gtk4.1",

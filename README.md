@@ -57,11 +57,15 @@ cover-traffic protocol artifacts.
 
 - Rust/Cargo for the Tauri desktop build.
 - Docker for Docker deployment.
-- On Linux, WebKitGTK/Tauri system packages are also required by Tauri.
+- On a Linux build host, the Tauri/GTK development stack, `dpkg-deb`,
+  `patchelf`, and a complete GStreamer 1.0 installation are required. The
+  client build stages its private WebKitGTK and screen-capture runtimes from
+  these inputs.
 
 Desktop builds are supported only on x86_64 Linux and x86_64 Windows. Native
 server deployment is supported only on Linux, use Docker for the server on
-Windows.
+Windows. These are source-build requirements: an installed Qor bundle does not
+require this repository, Node.js, pnpm, Rust, Cargo, or the build cache.
 
 ### Install dependencies
 
@@ -95,14 +99,27 @@ Start the desktop client:
 ```bash
 node scripts/start-client.cjs
 ```
-This builds and runs the client app, to only bundle it:
+
+This stages the platform runtimes and PIR sidecar, builds the release app and
+installer bundles, and then launches the result. To build the same bundles
+without launching the app:
+
 ```bash
 node scripts/start-client.cjs --bundle-only
 ```
-To only run the app without bundling:
+
+Both modes write installers beneath `src-tauri/target/release/bundle`. To launch
+an already-built AppDir or release executable without rebuilding or restaging
+anything:
+
 ```bash
 node scripts/start-client.cjs --run-only
 ```
+
+`--run-only` is a repository development helper, not a packaging step. It uses
+whatever existing output is present, so source changes are not included until a
+normal or `--bundle-only` build completes. An installed `.deb`, `.rpm`,
+`.AppImage`, `.msi`, or `.exe` runs independently of the repository.
 
 ---
 ### Deployment
@@ -304,18 +321,34 @@ plus the calling service's schema, recipient, timestamp, blocking, rate, and
 active-call checks. The complete signaling, admission, direct-media,
 cryptography, retry, and cleanup architecture is in [Calling](docs/app/CALLING.md).
 
-## Bundled Tor and PIR client
+## Bundled desktop runtimes, Tor, and PIR client
 
-Linux and Windows desktop releases are self-contained: the target-matched Tor
-Expert Bundle and PIR client are authenticated and embedded into `qor` or
-`qor.exe`. The build script refuses to compile unless the vendored Tor archive
-matches its release-pinned SHA-256, and hashes the PIR client with BLAKE3 into
-the binary. Both digests are re-checked at runtime before either artifact is
-materialized on disk, so a tampered on-disk copy cannot be launched. Tor is
-unpacked into the private app-data directory during native startup, so end users
-do not install Tor separately and the app never downloads Tor executable code at
-runtime. Vendored Tor provenance and update instructions are in
+Linux and Windows desktop releases embed the target-matched Tor Expert Bundle
+and PIR client into `qor` or `qor.exe`. The build refuses to compile unless the
+vendored Tor archive matches its release-pinned SHA-256, and hashes the PIR
+client with BLAKE3 into the binary. Both digests are re-checked at runtime before
+either artifact is materialized on disk, so a tampered on-disk copy cannot be
+launched. Tor is unpacked into the private app-data directory during native
+startup, so end users do not install Tor separately and the app never downloads
+Tor executable code at runtime. Vendored Tor provenance and update instructions
+are in
 [src-tauri/vendor/tor/README.md](src-tauri/vendor/tor/README.md).
+
+Linux bundles also carry an app-private WebKitGTK 2.52.6 runtime and helper
+processes obtained from release-pinned, SHA-256-verified packages. Native Linux
+screen capture carries a curated GStreamer/PipeWire runtime, launcher, plugin
+scanner, SPA support, PipeWire audio/video conversion adapters, and an artifact
+manifest containing every staged file's SHA-256. Package validation rejects a
+runtime missing either adapter. At runtime Qor selects only a complete private
+SPA root and disables GStreamer's system plugin search for the capture process,
+so a user's installed GStreamer or SPA plugin set does not replace the packaged
+capture implementation.
+
+These bundled files remove any dependency on repository staging directories or
+build caches. They do not replace operating-system facilities: Linux still
+needs a working desktop portal and PipeWire session for screen selection and
+capture, permission to access selected devices, and the base GTK/system
+libraries declared by its package format.
 
 Server package commands are in [server/package.json](server/package.json), and
 Docker orchestration lives in [docker/docker-compose.yml](docker/docker-compose.yml).

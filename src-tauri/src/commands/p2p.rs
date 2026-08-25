@@ -78,24 +78,30 @@ pub async fn p2p_send(
     state: State<'_, AppState>,
     request: Request<'_>,
 ) -> Result<P2PSendResult, String> {
-    let header = |name: &str| {
-        request
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-    };
-    let connection_id = header("x-qor-p2p-connection")
+    let headers = request.headers();
+    let connection_id = headers
+        .get("x-qor-p2p-connection")
+        .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "Invalid P2P connection identifier".to_string())?;
-    let connection_token = header("x-qor-p2p-token")
+    let connection_token = headers
+        .get("x-qor-p2p-token")
+        .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| "Invalid P2P connection token".to_string())?;
-    let deadline_ms = header("x-qor-p2p-deadline")
+    let deadline_ms = headers
+        .get("x-qor-p2p-deadline")
+        .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
-    let audio_endpoint = header("x-qor-p2p-audio-endpoint").filter(|value| !value.is_empty());
-    let audio_lane_rtt_ceiling_ms = header("x-qor-p2p-audio-rtt-ceiling")
+    let audio_endpoint = headers
+        .get("x-qor-p2p-audio-endpoint")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let audio_lane_rtt_ceiling_ms = headers
+        .get("x-qor-p2p-audio-rtt-ceiling")
+        .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=60_000).contains(value));
     let data = match request.body() {
@@ -108,7 +114,7 @@ pub async fn p2p_send(
         .ok_or_else(|| "P2P handler not initialized".to_string())?;
 
     p2p.send(
-        &connection_id,
+        connection_id,
         connection_token,
         data,
         deadline_ms,

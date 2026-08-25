@@ -54,6 +54,7 @@ export interface StreamOptions {
 export interface StreamWriteOptions {
     readonly deadline?: number;
     readonly priority?: 'normal' | 'realtime' | 'visual';
+    readonly transferOwnership?: boolean;
 }
 
 export interface AudioLaneTelemetryEntry {

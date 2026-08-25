@@ -2,12 +2,15 @@ import React from 'react';
 import { flushSync, unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { clearCallMediaState, isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
-import { isTauri } from '../../lib/tauri-bindings';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
 import { loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
 import { toast } from 'sonner';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
+
+function callDiagnostic(phase: string, details: Record<string, unknown> = {}): void {
+  console.info('[CALL-DIAG]', { phase, ...details });
+}
 
 async function ensurePeerMaterial(
   refs: ActionRefs,
@@ -15,22 +18,31 @@ async function ensurePeerMaterial(
   expectedService: SecureCallingService,
   ownerUsername: string
 ): Promise<void> {
+  callDiagnostic('action.peer-material-enter');
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling service not initialized');
   }
 
   if (!refs.getPeerCertificate) throw new Error('Peer certificate resolver unavailable');
+  callDiagnostic('action.peer-certificate-before');
   const trustedCert = await refs.getPeerCertificate(peer);
+  callDiagnostic('action.peer-certificate-after', { found: trustedCert !== null });
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling account changed while resolving peer identity');
   }
   if (!trustedCert) throw new Error('Trusted peer certificate unavailable');
+  callDiagnostic('action.peer-register-before');
   await p2pTransport.registerPeerCertificate(peer, trustedCert);
+  callDiagnostic('action.peer-register-after');
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling account changed while registering peer identity');
   }
-  if (!p2pTransport.hasAuthenticatedEndpoint(peer)) {
+  const hasAuthenticatedEndpoint = p2pTransport.hasAuthenticatedEndpoint(peer);
+  callDiagnostic('action.peer-endpoint-check', { found: hasAuthenticatedEndpoint });
+  if (!hasAuthenticatedEndpoint) {
+    callDiagnostic('action.peer-endpoint-load-before');
     const persistedEndpoint = await loadPersistedPeerEndpoint(ownerUsername, peer);
+    callDiagnostic('action.peer-endpoint-load-after', { found: persistedEndpoint !== null });
     if (refs.serviceRef.current !== expectedService) {
       throw new Error('Calling account changed while restoring the peer endpoint');
     }
@@ -44,17 +56,21 @@ async function ensurePeerMaterial(
     }
   }
   if (refs.ensurePeerSession) {
+    callDiagnostic('action.peer-session-before');
     await refs.ensurePeerSession(peer);
+    callDiagnostic('action.peer-session-after');
     if (refs.serviceRef.current !== expectedService) {
       throw new Error('Calling account changed while establishing the signaling session');
     }
   }
+  callDiagnostic('action.peer-material-complete');
 }
 
 export interface ActionRefs {
   serviceRef: React.RefObject<SecureCallingService | null>;
   localStreamRef: React.RefObject<MediaStream | null>;
   localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  localScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
@@ -65,6 +81,7 @@ export interface ActionSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<any>>;
   setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
   setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setLocalScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
 }
@@ -76,6 +93,8 @@ export const createStartCall = (
   currentUsername: string
 ) => {
   return async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
+    const startedAt = performance.now();
+    callDiagnostic('action.start-enter', { callType });
     const service = refs.serviceRef.current;
     if (!service) {
       throw new Error('Calling service not initialized');
@@ -103,13 +122,32 @@ export const createStartCall = (
     if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peer)) {
       throw new Error('recipient-blocked');
     }
+    callDiagnostic('action.start-validated', {
+      callType,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    });
 
     try {
       await ensurePeerMaterial(refs, peer, service, currentUsername);
+      callDiagnostic('action.service-start-before', {
+        callType,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
 
       const callId = await service.startCall(peer, callType);
+      callDiagnostic('action.service-start-after', {
+        callType,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      });
       return callId;
     } catch (_error: any) {
+      console.error('[CALL-DIAG]', {
+        phase: 'action.start-failed',
+        callType,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        errorName: _error instanceof Error ? _error.name : 'UnknownError',
+        errorMessage: _error instanceof Error ? _error.message : String(_error),
+      });
       if (_error.message === 'arbitration-loss') {
         return '';
       }
@@ -219,12 +257,12 @@ export const createEndCall = (refs: ActionRefs, setters: ActionSetters) => {
 
 // Callback for toggling mute
 export const createToggleMute = (refs: ActionRefs) => {
-  return () => {
+  return async () => {
     if (!refs.serviceRef.current) {
       return false;
     }
 
-    const isMuted = refs.serviceRef.current.toggleMute();
+    const isMuted = await refs.serviceRef.current.toggleMute();
     return isMuted;
   };
 };
@@ -266,21 +304,34 @@ export const createSwitchMicrophone = (refs: ActionRefs) => {
   };
 };
 
+export const createSwitchSpeaker = (refs: ActionRefs) => {
+  return async (deviceId: string) => {
+    if (!refs.serviceRef.current) {
+      return;
+    }
+    await refs.serviceRef.current.switchSpeaker(deviceId);
+  };
+};
+
 // Callback for starting screen share
 export const createStartScreenShare = (refs: ActionRefs) => {
-  return async (selectedSource?: { id: string; name: string; type: 'screen' | 'window' }) => {
+  return async () => {
     if (!refs.serviceRef.current) {
       throw new Error('Calling service not initialized');
     }
 
     try {
-      await refs.serviceRef.current.startScreenShare(selectedSource);
+      await refs.serviceRef.current.startScreenShare();
     } catch (_error: any) {
       console.error('Failed to start screen sharing:', _error);
 
       if (_error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
           description: "Access to screen recording was denied or canceled. Please check your browser and system privacy settings."
+        });
+      } else {
+        toast.error("Screen Share Failed", {
+          description: _error instanceof Error ? _error.message : "Screen capture could not be started."
         });
       }
 
@@ -300,24 +351,6 @@ export const createStopScreenShare = (refs: ActionRefs) => {
       await refs.serviceRef.current.stopScreenShare();
     } catch (_error) {
       console.error('Failed to stop screen sharing:', _error);
-    }
-  };
-};
-
-// Callback for exposing screen sources on desktop
-export const createGetAvailableScreenSources = (refs: ActionRefs) => {
-  if (!isTauri()) return undefined;
-
-  return async () => {
-    if (!refs.serviceRef.current) {
-      throw new Error('Calling service not initialized');
-    }
-
-    try {
-      return await refs.serviceRef.current.getAvailableScreenSources();
-    } catch (_error) {
-      console.error('Failed to get screen sources:', _error);
-      throw _error;
     }
   };
 };

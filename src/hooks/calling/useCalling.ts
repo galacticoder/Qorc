@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
@@ -21,9 +21,9 @@ import {
   createToggleVideo,
   createSwitchCamera,
   createSwitchMicrophone,
+  createSwitchSpeaker,
   createStartScreenShare,
   createStopScreenShare,
-  createGetAvailableScreenSources,
   type ActionRefs,
   type ActionSetters
 } from './actions';
@@ -43,6 +43,7 @@ export const useCalling = (
   const eventDebouncer = useRef(debounceEventDispatcher());
   const localStreamRef = useRef<MediaStream | null>(null);
   const localVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const localScreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const remoteVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const remoteScreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -52,8 +53,10 @@ export const useCalling = (
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoCanvas, setLocalVideoCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [localScreenCanvas, setLocalScreenCanvas] = useState<HTMLCanvasElement | null>(null);
   const [remoteVideoCanvas, setRemoteVideoCanvas] = useState<HTMLCanvasElement | null>(null);
   const [remoteScreenCanvas, setRemoteScreenCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
 
   const serviceRef = useRef<SecureCallingService | null>(null);
@@ -66,6 +69,7 @@ export const useCalling = (
   const callbackRefs: CallbackRefs = {
     localStreamRef,
     localVideoCanvasRef,
+    localScreenCanvasRef,
     remoteVideoCanvasRef,
     remoteScreenCanvasRef,
     everConnectedRef,
@@ -77,6 +81,7 @@ export const useCalling = (
     setCurrentCall,
     setLocalStream,
     setLocalVideoCanvas,
+    setLocalScreenCanvas,
     setRemoteVideoCanvas,
     setRemoteScreenCanvas
   };
@@ -85,6 +90,7 @@ export const useCalling = (
     serviceRef,
     localStreamRef,
     localVideoCanvasRef,
+    localScreenCanvasRef,
     remoteVideoCanvasRef,
     remoteScreenCanvasRef,
     getPeerCertificate: options?.getPeerCertificate,
@@ -95,6 +101,7 @@ export const useCalling = (
     setCurrentCall,
     setLocalStream,
     setLocalVideoCanvas,
+    setLocalScreenCanvas,
     setRemoteVideoCanvas,
     setRemoteScreenCanvas
   };
@@ -104,6 +111,7 @@ export const useCalling = (
       eventDebouncer.current.cancel();
       stopMediaStream(localStreamRef.current);
       localVideoCanvasRef.current = null;
+      localScreenCanvasRef.current = null;
       releaseVisualCanvas(remoteVideoCanvasRef.current);
       releaseVisualCanvas(remoteScreenCanvasRef.current);
       everConnectedRef.current.clear();
@@ -124,6 +132,7 @@ export const useCalling = (
     setupIncomingCallCallback(service, callbackRefs, callbackSetters, currentUsername);
     setupCallStateChangeCallback(service, callbackRefs, callbackSetters, currentUsername);
     setupStreamCallbacks(service, callbackRefs, callbackSetters);
+    service.onScreenSharingChange(setIsScreenSharing);
 
     const initializeService = async (attempt = 0): Promise<void> => {
       try {
@@ -152,8 +161,10 @@ export const useCalling = (
         setCurrentCall(null);
         setLocalStream(null);
         setLocalVideoCanvas(null);
+        setLocalScreenCanvas(null);
         setRemoteVideoCanvas(null);
         setRemoteScreenCanvas(null);
+        setIsScreenSharing(false);
         setIsInitialized(false);
       }
     };
@@ -170,6 +181,7 @@ export const useCalling = (
       }
       setCallingService(null);
       setCurrentCall(null);
+      setIsScreenSharing(false);
       clearCallMediaState(callbackRefs, callbackSetters);
       everConnectedRef.current.clear();
       lastCallTypeRef.current.clear();
@@ -202,21 +214,17 @@ export const useCalling = (
 
   const switchMicrophone = useCallback(createSwitchMicrophone(actionRefs), []);
 
+  const switchSpeaker = useCallback(createSwitchSpeaker(actionRefs), []);
+
   const startScreenShare = useCallback(createStartScreenShare(actionRefs), []);
 
   const stopScreenShare = useCallback(createStopScreenShare(actionRefs), []);
-
-  const getAvailableScreenSources = useMemo(
-    () => createGetAvailableScreenSources(actionRefs),
-    []
-  );
-
-  const isScreenSharing = callingService?.getScreenSharingStatus() || false;
 
   return {
     currentCall,
     localStream,
     localVideoCanvas,
+    localScreenCanvas,
     remoteVideoCanvas,
     remoteScreenCanvas,
     isInitialized,
@@ -231,9 +239,9 @@ export const useCalling = (
 
     switchCamera,
     switchMicrophone,
+    switchSpeaker,
     startScreenShare,
     stopScreenShare,
-    getAvailableScreenSources,
     callingService
   };
 };

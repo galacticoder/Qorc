@@ -396,9 +396,8 @@ export function EmojiPicker({
         </div>
 
         {!catalog && !loadFailed && (
-          <div className="emoji-picker__state" role="status">
+          <div className="emoji-picker__state" role="status" aria-label="Loading emoji">
             <LoaderCircle size={22} className="emoji-picker__spinner" aria-hidden="true" />
-            <span>Loading emoji</span>
           </div>
         )}
 

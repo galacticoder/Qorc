@@ -7,11 +7,6 @@ export interface AvatarData {
     isDefault: boolean;
 }
 
-export interface ProfileSettings {
-    shareWithOthers: boolean;
-    lastUpdated: number;
-}
-
 export interface CachedAvatar {
     data: string;
     hash: string;
@@ -23,7 +18,6 @@ export interface CachedAvatar {
 export interface AvatarSystemState {
     secureDB: SecureDB | null;
     ownAvatar: AvatarData | null;
-    settings: ProfileSettings;
     avatarCache: Map<string, CachedAvatar>;
     cacheSaveInFlight: Promise<void> | null;
     cacheSavePending: boolean;

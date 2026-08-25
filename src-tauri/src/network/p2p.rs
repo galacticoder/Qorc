@@ -1206,6 +1206,7 @@ enum WorkerCommand {
         audio_onion_host: Option<String>,
         audio_lane_rtt_ceiling_ms: Option<u64>,
         deadline: tokio::time::Instant,
+        write_deadline: tokio::time::Instant,
         resp: oneshot::Sender<P2PSendResult>,
         _permit: OutboundReservation,
     },
@@ -1288,6 +1289,7 @@ enum WorkerCommand {
 struct QueuedSend {
     data: Vec<u8>,
     deadline: tokio::time::Instant,
+    write_deadline: tokio::time::Instant,
     audio_lanes: Option<AudioLaneTelemetry>,
     resp: oneshot::Sender<P2PSendResult>,
     _permit: OutboundReservation,
@@ -2058,9 +2060,6 @@ impl IrohWorker {
         {
             return;
         }
-        let Some(onion_host) = self.audio_lane_onion_hosts.get(&connection_token).cloned() else {
-            return;
-        };
         if self
             .audio_lane_next_dial_at
             .get(&connection_token)
@@ -2083,6 +2082,9 @@ impl IrohWorker {
         if missing == 0 {
             return;
         }
+        let Some(onion_host) = self.audio_lane_onion_hosts.get(&connection_token).cloned() else {
+            return;
+        };
         let Some(primary) = self.connection_tokens.iter().find_map(|(id, token)| {
             (*token == connection_token)
                 .then(|| self.connections.get(id).cloned())
@@ -2281,10 +2283,10 @@ impl IrohWorker {
     }
 
     fn lane_id(token: &[u8; AUDIO_LANE_TOKEN_BYTES]) -> String {
-        token[..4]
-            .iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect()
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            token[0], token[1], token[2], token[3]
+        )
     }
 
     fn ranked_audio_lanes(&self, connection_token: u64) -> Vec<OutboundAudioLane> {
@@ -2333,21 +2335,40 @@ impl IrohWorker {
         lanes
     }
 
-    fn visual_lane_candidate(&mut self, connection_token: u64) -> Option<OutboundAudioLane> {
+    fn visual_lane_candidate(
+        &mut self,
+        connection_token: u64,
+        ceiling_ms: Option<u64>,
+    ) -> Option<OutboundAudioLane> {
+        let Some(ceiling_ms) = ceiling_ms else {
+            self.visual_lane_selections.remove(&connection_token);
+            return None;
+        };
         let audio_lane = self
             .audio_lane_selections
             .get(&connection_token)
             .and_then(|selection| selection.selected);
         let lanes = self.ranked_audio_lanes(connection_token);
+        let reserved_audio_lane = audio_lane.or_else(|| lanes.first().map(|lane| lane.token));
         let existing = self.visual_lane_selections.get(&connection_token).copied();
-        let selected = existing
-            .and_then(|token| {
-                lanes
-                    .iter()
-                    .find(|lane| lane.token == token && Some(token) != audio_lane)
+        let eligible = lanes
+            .iter()
+            .filter(|lane| Some(lane.token) != reserved_audio_lane)
+            .filter(|lane| audio_lane_rtt_is_eligible(lane.rtt_ms, ceiling_ms))
+            .collect::<Vec<_>>();
+        let Some(fastest) = eligible.first().copied() else {
+            self.visual_lane_selections.remove(&connection_token);
+            return None;
+        };
+        let current =
+            existing.and_then(|token| eligible.iter().find(|lane| lane.token == token).copied());
+        let selected = current
+            .filter(|lane| {
+                lane.token == fastest.token
+                    || !audio_lane_has_meaningful_gain(lane.score(), fastest.score())
             })
-            .or_else(|| lanes.iter().find(|lane| Some(lane.token) != audio_lane))
-            .cloned()?;
+            .unwrap_or(fastest)
+            .clone();
         self.visual_lane_selections
             .insert(connection_token, selected.token);
         Some(selected)
@@ -2587,14 +2608,16 @@ impl IrohWorker {
 
             let QueuedSend {
                 data,
-                deadline,
+                deadline: _,
+                write_deadline,
                 audio_lanes,
                 resp,
                 _permit,
             } = frame;
 
             let send_result =
-                tokio::time::timeout_at(deadline, async { conn.send_frame(&data).await }).await;
+                tokio::time::timeout_at(write_deadline, async { conn.send_frame(&data).await })
+                    .await;
 
             let generation_is_current =
                 generation_guard.load(Ordering::Acquire) == identity_generation;
@@ -2923,6 +2946,7 @@ impl IrohWorker {
                 audio_onion_host,
                 audio_lane_rtt_ceiling_ms,
                 deadline,
+                write_deadline,
                 resp,
                 _permit,
             } => {
@@ -2993,70 +3017,46 @@ impl IrohWorker {
                         let _ = resp.send(P2PSendResult {
                             success: false,
                             error: Some("P2P visual send expired in queue".to_string()),
-                            audio_lanes: Some(
-                                self.audio_lane_telemetry(
-                                    connection_token,
-                                    self.audio_lane_selections
-                                        .get(&connection_token)
-                                        .and_then(|selection| selection.selected),
-                                ),
-                            ),
+                            audio_lanes: None,
                         });
                         return;
                     }
-                    let Some(lane) = self.visual_lane_candidate(connection_token) else {
-                        let _ = resp.send(P2PSendResult {
-                            success: false,
-                            error: Some("Dedicated visual lane unavailable".to_string()),
-                            audio_lanes: Some(
-                                self.audio_lane_telemetry(
+                    if let Some(lane) =
+                        self.visual_lane_candidate(connection_token, audio_lane_rtt_ceiling_ms)
+                    {
+                        let frame_id = self
+                            .audio_lane_frame_ids
+                            .entry(connection_token)
+                            .or_insert(0);
+                        *frame_id = frame_id.wrapping_add(1).max(1);
+                        let lane_frame =
+                            encode_audio_lane_frame(AUDIO_LANE_FRAME_DATA, *frame_id, &data);
+                        let identity_generation = self.identity_generation.load(Ordering::Acquire);
+                        let command_tx = self.self_command_tx.clone();
+                        tokio::spawn(async move {
+                            let sent = tokio::time::timeout_at(
+                                deadline,
+                                lane.connection.send_frame(&lane_frame),
+                            )
+                            .await
+                            .is_ok_and(|result| result.is_ok());
+                            if !sent {
+                                let _ = command_tx.send(WorkerCommand::AudioLaneFailed {
+                                    identity_generation,
                                     connection_token,
-                                    self.audio_lane_selections
-                                        .get(&connection_token)
-                                        .and_then(|selection| selection.selected),
-                                ),
-                            ),
+                                    token: lane.token,
+                                });
+                            }
+                            let _ = resp.send(P2PSendResult {
+                                success: sent,
+                                error: (!sent)
+                                    .then(|| "Visual lane send failed or expired".to_string()),
+                                audio_lanes: None,
+                            });
+                            drop(_permit);
                         });
                         return;
-                    };
-                    let frame_id = self
-                        .audio_lane_frame_ids
-                        .entry(connection_token)
-                        .or_insert(0);
-                    *frame_id = frame_id.wrapping_add(1).max(1);
-                    let lane_frame =
-                        encode_audio_lane_frame(AUDIO_LANE_FRAME_DATA, *frame_id, &data);
-                    let identity_generation = self.identity_generation.load(Ordering::Acquire);
-                    let command_tx = self.self_command_tx.clone();
-                    let telemetry = self.audio_lane_telemetry(
-                        connection_token,
-                        self.audio_lane_selections
-                            .get(&connection_token)
-                            .and_then(|selection| selection.selected),
-                    );
-                    tokio::spawn(async move {
-                        let sent = tokio::time::timeout_at(
-                            deadline,
-                            lane.connection.send_frame(&lane_frame),
-                        )
-                        .await
-                        .is_ok_and(|result| result.is_ok());
-                        if !sent {
-                            let _ = command_tx.send(WorkerCommand::AudioLaneFailed {
-                                identity_generation,
-                                connection_token,
-                                token: lane.token,
-                            });
-                        }
-                        let _ = resp.send(P2PSendResult {
-                            success: sent,
-                            error: (!sent)
-                                .then(|| "Visual lane send failed or expired".to_string()),
-                            audio_lanes: Some(telemetry),
-                        });
-                        drop(_permit);
-                    });
-                    return;
+                    }
                 }
                 if realtime_audio {
                     if tokio::time::Instant::now() >= deadline {
@@ -3146,6 +3146,7 @@ impl IrohWorker {
                 let frame = QueuedSend {
                     data,
                     deadline,
+                    write_deadline,
                     audio_lanes: realtime_audio
                         .then(|| self.audio_lane_telemetry(connection_token, None)),
                     resp,
@@ -3771,6 +3772,8 @@ impl P2PTransportHandler {
 
         let now = tokio::time::Instant::now();
         let max_duration = std::time::Duration::from_secs(SEND_TIMEOUT_SECS);
+        let realtime_audio = is_realtime_audio_frame(&data);
+        let realtime_visual = is_realtime_visual_frame(&data);
         let requested_duration = deadline_ms.map(|deadline| {
             let current = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3779,6 +3782,11 @@ impl P2PTransportHandler {
             std::time::Duration::from_millis(deadline.saturating_sub(current))
         });
         let deadline = now + requested_duration.unwrap_or(max_duration).min(max_duration);
+        let write_deadline = if realtime_audio || realtime_visual {
+            now + max_duration
+        } else {
+            deadline
+        };
         let (tx, rx) = oneshot::channel();
         if self
             .command_tx
@@ -3789,6 +3797,7 @@ impl P2PTransportHandler {
                 audio_onion_host,
                 audio_lane_rtt_ceiling_ms,
                 deadline,
+                write_deadline,
                 resp: tx,
                 _permit: permit,
             })
@@ -3798,7 +3807,7 @@ impl P2PTransportHandler {
         }
 
         match tokio::time::timeout_at(
-            deadline + std::time::Duration::from_secs(COMMAND_RESPONSE_GRACE_SECS),
+            write_deadline + std::time::Duration::from_secs(COMMAND_RESPONSE_GRACE_SECS),
             rx,
         )
         .await

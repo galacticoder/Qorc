@@ -27,7 +27,8 @@ import websocketClient from "../lib/websocket/websocket";
 import { EventType } from "../lib/types/event-types";
 import { blockingSystem } from "../lib/blocking/blocking-system";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
-import { ConnectSetup } from "../components/setup/ConnectSetup";
+import { WelcomeSetup } from "../components/setup/WelcomeSetup";
+import { ConnectionIssueSheet } from "../components/setup/ConnectionIssueSheet";
 import { SignalType } from "../lib/types/signal-types";
 import { isExplicitlyLoggedOut } from "../lib/auth/logout-marker";
 import { loadLastAuthenticatedAccount } from "../lib/security/local-account-scope";
@@ -47,6 +48,7 @@ import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessa
 import { useEventHandlers } from "../hooks/useEventHandlers";
 import { Toaster, toast } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
+import { FullscreenSpinner } from "../components/ui/FullscreenSpinner";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/calling/useCalling";
@@ -57,6 +59,9 @@ import { useTokenValidation } from "../hooks/app/useTokenValidation";
 import { useEncryptionProvider } from "../hooks/app/useEncryptionProvider";
 import { useOfflineMessages } from "../hooks/app/useOfflineMessages";
 import { useConnectionSetup } from "../hooks/app/useConnectionSetup";
+import { usePrefetchedComponent } from "../hooks/app/usePrefetchedComponent";
+import { useStartupConnection } from "../hooks/app/useStartupConnection";
+import { startupConnection } from "../lib/transport/startup-connection";
 import { useBackgroundResume } from "../hooks/app/useBackgroundResume";
 import { useDiscovery } from "../hooks/discovery/useDiscovery";
 import { keyTransparencyClient } from "../lib/key-transparency/client";
@@ -66,13 +71,9 @@ import { hasResumeToken } from "../lib/signals/resume-tokens";
 
 const COLD_SEND_P2P_DIAL_BUDGET_MS = 3000;
 
-const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
-const AppSettingsLazy = React.lazy(() =>
-  import("../components/settings/AppSettings").then(({ AppSettings }) => ({ default: AppSettings }))
-);
-const CallLogsLazy = React.lazy(() =>
-  import("../components/chat/calls/CallLogs").then(({ CallLogs }) => ({ default: CallLogs }))
-);
+const loadCallModal = () => import("../components/chat/calls/CallModal").then((module) => module.default);
+const loadAppSettings = () => import("../components/settings/AppSettings").then((module) => module.AppSettings);
+const loadCallLogs = () => import("../components/chat/calls/CallLogs").then((module) => module.CallLogs);
 
 const ChatApp: React.FC = () => {
   const { allowEvent } = useRateLimiter(LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS);
@@ -98,8 +99,10 @@ const ChatApp: React.FC = () => {
   const { theme } = useTheme();
   const [sidebarActiveTab, setSidebarActiveTab] = useState<'chats' | 'calls' | 'settings'>('chats');
   const [setupComplete, setSetupComplete] = useState(false);
+  const [serverUrlResolved, setServerUrlResolved] = useState(false);
   const [showServerSetup, setShowServerSetup] = useState(false);
   const [selectedServerUrl, setSelectedServerUrl] = useState<string>('');
+  const startup = useStartupConnection();
   const [showSettings, setShowSettings] = useState(false);
   const [showNewChatInput, setShowNewChatInput] = useState(false);
   const [conversationPanelWidth, setConversationPanelWidth] = useState(344);
@@ -128,6 +131,7 @@ const ChatApp: React.FC = () => {
   // Background resume
   const {
     isResumingFromBackground,
+    backgroundCheckComplete,
     serverUrl: resumeServerUrl,
     setupComplete: resumeSetupComplete,
   } = useBackgroundResume(Authentication);
@@ -213,18 +217,57 @@ const ChatApp: React.FC = () => {
     }
   }, [findUser, Database.users, Database.setUsers]);
 
+  const startupBeganRef = useRef(false);
   useEffect(() => {
+    if (!backgroundCheckComplete || startupBeganRef.current) return;
+    startupBeganRef.current = true;
+    let cancelled = false;
+
     (async () => {
+      let savedUrl = '';
       try {
-        const savedUrl = await websocket.getServerUrl();
-        if (savedUrl) {
-          setSelectedServerUrl(savedUrl);
+        savedUrl = await startupConnection.loadConfiguredServerUrl();
+      } catch (err) {
+        console.error('[Index] Failed to load configured server URL:', err);
+      }
+      if (cancelled) return;
+
+      setServerUrlResolved(true);
+      if (!savedUrl) return;
+
+      setSelectedServerUrl(savedUrl);
+      setSetupComplete(true);
+
+      try {
+        const explicitLogout = await isExplicitlyLoggedOut();
+        const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
+        const canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
+        if (cancelled) return;
+        if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated) {
+          if (canResume) {
+            Authentication.setTokenValidationInProgress(true);
+          } else if (!storedUsername) {
+            Authentication.setIsRegistrationMode(true);
+          }
         }
       } catch (err) {
-        console.error('[Index] Failed to load initial server URL:', err);
+        console.error('[Index] Failed to resolve stored session state:', err);
       }
+
+      void startupConnection.ensureConnected().catch(() => { });
     })();
-  }, []);
+
+    return () => { cancelled = true; };
+  }, [backgroundCheckComplete]);
+
+  useEffect(() => {
+    if (startup.phase !== 'ready') return;
+    if (Authentication.isLoggedIn || Authentication.accountAuthenticated) return;
+    if (!websocketClient.isServerPasswordRequired() || websocketClient.isServerAuthGranted()) return;
+    Authentication.setTokenValidationInProgress(false);
+    Authentication.setAuthStatus('');
+    Authentication.setShowPasswordPrompt(true);
+  }, [startup.phase, Authentication.isLoggedIn, Authentication.accountAuthenticated]);
 
   useEffect(() => {
     let cancelled = false;
@@ -412,6 +455,16 @@ const ChatApp: React.FC = () => {
     getPeerCertificate: p2pMessaging.getPeerCertificateForCall,
     ensurePeerSession: messageSender.prefetchSessionForPeer,
   });
+  const answerCurrentCall = useCallback(() => {
+    const call = callingHook.currentCall;
+    if (!call) return;
+    return callingHook.answerCall(call.id, call.peer);
+  }, [callingHook.currentCall?.id, callingHook.currentCall?.peer, callingHook.answerCall]);
+  const declineCurrentCall = useCallback(() => {
+    const call = callingHook.currentCall;
+    if (!call) return;
+    callingHook.declineCall(call.id);
+  }, [callingHook.currentCall?.id, callingHook.declineCall]);
 
   // Update P2P sender whenever service becomes ready
   useEffect(() => {
@@ -531,7 +584,7 @@ const ChatApp: React.FC = () => {
   // Token validation
   useTokenValidation({
     Authentication,
-    setupComplete,
+    setupComplete: setupComplete && startup.phase === 'ready',
     selectedServerUrl,
   });
 
@@ -548,22 +601,15 @@ const ChatApp: React.FC = () => {
     return p2pMessaging.isPeerConnected(selectedConversation);
   }, [selectedConversation, p2pConnectedPeers.includes(selectedConversation)]);
 
-  const handleConnectSetupComplete = async (serverUrl: string) => {
-    const wasConnected = websocketClient.isConnectedToServer();
+  const handleServerSelected = useCallback(async (serverUrl: string) => {
+    setSelectedServerUrl(serverUrl);
+    setSetupComplete(true);
+    setShowServerSetup(false);
+
     try {
-      setSelectedServerUrl(serverUrl);
-      if (!(wasConnected && selectedServerUrl === serverUrl)) {
-        await websocketClient.connect({ autoReconnectOnFailure: false });
-      }
-
-      const storedUsername = (await loadLastAuthenticatedAccount()).username;
-
-      let canResume = false;
-      try {
-        canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
-      } catch { canResume = false; }
       const explicitLogout = await isExplicitlyLoggedOut();
-      const hasExistingSession = !explicitLogout && !!storedUsername && canResume;
+      const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
+      const canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
       const serverEntryRequired = (
         websocketClient.isServerPasswordRequired()
         && !websocketClient.isServerAuthGranted()
@@ -573,31 +619,23 @@ const ChatApp: React.FC = () => {
         Authentication.setTokenValidationInProgress(false);
         Authentication.setAuthStatus('');
         Authentication.setShowPasswordPrompt(true);
-      } else if (hasExistingSession) {
+      } else if (canResume) {
         Authentication.setTokenValidationInProgress(true);
       } else {
         Authentication.setIsRegistrationMode(true);
       }
-      setSetupComplete(true);
-      setShowServerSetup(false);
-    } catch (error) {
-      Authentication.setTokenValidationInProgress(false);
-      if (!wasConnected) {
-        setSetupComplete(false);
-        try {
-          await websocketClient.close();
-        } catch { }
-        try {
-          if (isTauri()) {
-            await websocket.disconnect();
-          }
-        } catch { }
-      }
-      throw (error instanceof Error ? error : new Error('Failed to connect after setup'));
+    } catch (err) {
+      console.error('[Index] Failed to resolve session state after server selection:', err);
+      Authentication.setIsRegistrationMode(true);
     }
-  };
+  }, [Authentication]);
 
-  const handleSetupDisconnect = async () => {
+  const handleChangeServer = useCallback(async () => {
+    setShowServerSetup(true);
+    startupConnection.reset();
+    Authentication.setTokenValidationInProgress(false);
+    Authentication.setShowPasswordPrompt(false);
+    Authentication.setAuthStatus('');
     try {
       await websocketClient.close();
     } catch { }
@@ -606,11 +644,56 @@ const ChatApp: React.FC = () => {
         await websocket.disconnect();
       }
     } catch { }
-    Authentication.setTokenValidationInProgress(false);
-    setSelectedServerUrl('');
-    setSetupComplete(false);
-    setShowServerSetup(true);
-  };
+  }, [Authentication]);
+
+  const handleRetryConnection = useCallback(async () => {
+    try {
+      await startupConnection.retry();
+    } catch { }
+  }, []);
+
+  const handleKeepCurrentServer = useCallback(() => {
+    setShowServerSetup(false);
+    void startupConnection.ensureConnected().catch(() => { });
+  }, []);
+
+  const connectedForAuth = useCallback(async (): Promise<boolean> => {
+    if (websocketClient.isConnectedToServer()) return true;
+    Authentication.setAuthStatus('Connecting to server...');
+    try {
+      await startupConnection.ensureConnected();
+      return true;
+    } catch {
+      Authentication.setAuthStatus('');
+      try {
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { type: 'CONNECTION_UNAVAILABLE' } }));
+      } catch { }
+      return false;
+    }
+  }, [Authentication]);
+
+  const handleAccountSubmitWhenConnected = useCallback(async (
+    mode: "login" | "register",
+    username: string,
+    password: string,
+    passphrase: string,
+  ) => {
+    if (!await connectedForAuth()) return;
+    await Authentication.handleAccountSubmit(mode, username, password, passphrase);
+  }, [connectedForAuth, Authentication]);
+
+  const handleServerPasswordSubmitWhenConnected = useCallback(async (password: string) => {
+    if (!await connectedForAuth()) return;
+    await Authentication.handleServerPasswordSubmit(password);
+  }, [connectedForAuth, Authentication]);
+
+  const mainAppReady = Authentication.isLoggedIn
+    && Authentication.accountAuthenticated
+    && Authentication.vaultReady
+    && Database.dbInitialized;
+  const CallLogsPanel = usePrefetchedComponent(loadCallLogs, mainAppReady);
+  const AppSettingsPanel = usePrefetchedComponent(loadAppSettings, mainAppReady);
+  const CallModalPanel = usePrefetchedComponent(loadCallModal, mainAppReady);
 
   // Connection setup
   useConnectionSetup({
@@ -633,6 +716,7 @@ const ChatApp: React.FC = () => {
         const to = (event as any).detail?.to as 'server' | undefined;
         if (to === 'server') {
           setShowServerSetup(true);
+          startupConnection.reset();
         }
       } catch (_e) {
         console.error('[Index] Failed to handle auth-ui-back (server):', _e);
@@ -643,28 +727,33 @@ const ChatApp: React.FC = () => {
   }, []);
 
   if (isResumingFromBackground) {
-    return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-background select-none">
-        <div className="text-center text-sm text-muted-foreground">
-          Resuming...
-        </div>
-      </div>
-    );
+    return <FullscreenSpinner />;
   }
 
-  if (showServerSetup || !setupComplete || !selectedServerUrl) {
+  if (!serverUrlResolved && !selectedServerUrl) {
+    return <FullscreenSpinner />;
+  }
+
+  if (showServerSetup || !selectedServerUrl) {
     return (
       <div className="min-h-screen bg-white dark:bg-[hsl(var(--background))]">
-        <ConnectSetup
-          onComplete={handleConnectSetupComplete}
-          onDisconnect={handleSetupDisconnect}
+        <WelcomeSetup
+          onConnected={handleServerSelected}
+          onCancel={selectedServerUrl ? handleKeepCurrentServer : undefined}
           initialServerUrl={selectedServerUrl}
-          isConnected={setupComplete && !!selectedServerUrl}
         />
         <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       </div>
     );
   }
+
+  const connectionIssue = startup.phase === 'failed' ? (
+    <ConnectionIssueSheet
+      error={startup.error}
+      onRetry={handleRetryConnection}
+      onChangeServer={handleChangeServer}
+    />
+  ) : null;
 
   const isFullyAuthenticated = Authentication.isLoggedIn
     && Authentication.accountAuthenticated
@@ -682,11 +771,11 @@ const ChatApp: React.FC = () => {
 
   if (showValidationScreen) {
     return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
-        <div className="text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-          Validating session...
-        </div>
-      </div>
+      <>
+        <FullscreenSpinner />
+        {connectionIssue}
+        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
+      </>
     );
   }
 
@@ -698,59 +787,22 @@ const ChatApp: React.FC = () => {
           isGeneratingKeys={Authentication.isGeneratingKeys}
           authStatus={Authentication.authStatus}
           error={Authentication.loginError}
-          onAccountSubmit={Authentication.handleAccountSubmit}
+          onAccountSubmit={handleAccountSubmitWhenConnected}
           accountAuthenticated={Authentication.accountAuthenticated}
           isRegistrationMode={registrationMode}
           setIsRegistrationMode={Authentication.setIsRegistrationMode}
           showPasswordPrompt={Authentication.showPasswordPrompt}
-          handleServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
+          handleServerPasswordSubmit={handleServerPasswordSubmitWhenConnected}
           initialUsername={Authentication.loginUsernameRef.current || ''}
         />
+        {connectionIssue}
         <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       </div>
     );
   }
 
-  // Wait for DB init before showing the main app
   if (!Database.dbInitialized || !Authentication.vaultReady) {
-    if (Database.dbInitError) {
-      return (
-        <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
-          <div className="w-full max-w-sm text-center space-y-4">
-            <div className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>
-              Secure storage could not start
-            </div>
-            <div className="text-xs break-words" style={{ color: 'var(--color-text-secondary)' }}>
-              {Database.dbInitError}
-            </div>
-            <div className="flex items-center justify-center gap-2">
-              <button
-                type="button"
-                className="px-3 py-2 rounded border border-border text-sm hover:bg-accent"
-                onClick={Database.retryInitializeDB}
-              >
-                Retry
-              </button>
-              <button
-                type="button"
-                className="px-3 py-2 rounded border border-border text-sm hover:bg-accent"
-                onClick={() => Authentication.logout(Database.secureDBRef)}
-              >
-                Sign out
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
-        <div className="text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-          Initializing secure storage...
-        </div>
-      </div>
-    );
+    return <FullscreenSpinner />;
   }
 
   return (
@@ -875,50 +927,46 @@ const ChatApp: React.FC = () => {
           </div>
 
           <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'calls' && (
-              <React.Suspense fallback={null}>
-                <CallLogsLazy getDisplayUsername={stableGetDisplayUsername} />
-              </React.Suspense>
+            {sidebarActiveTab === 'calls' && CallLogsPanel && (
+              <CallLogsPanel getDisplayUsername={stableGetDisplayUsername} />
             )}
           </div>
 
           <div className={sidebarActiveTab === 'settings' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'settings' && (
-              <React.Suspense fallback={null}>
-                <AppSettingsLazy
-                  currentUsername={Authentication.loginUsernameRef.current || ''}
-                  currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
-                  onLogout={async () => await Authentication.logout(Database.secureDBRef)}
-                  findUser={findUser}
-                />
-              </React.Suspense>
+            {sidebarActiveTab === 'settings' && AppSettingsPanel && (
+              <AppSettingsPanel
+                currentUsername={Authentication.loginUsernameRef.current || ''}
+                currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
+                onLogout={async () => await Authentication.logout(Database.secureDBRef)}
+                findUser={findUser}
+              />
             )}
           </div>
         </div>
       </Layout>
       <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       {
-        callingHook.currentCall && createPortal(
-          <React.Suspense fallback={null}>
-            <CallModalLazy
-              call={callingHook.currentCall}
-              localStream={callingHook.localStream}
-              localVideoCanvas={callingHook.localVideoCanvas}
-              remoteVideoCanvas={callingHook.remoteVideoCanvas}
-              remoteScreenCanvas={callingHook.remoteScreenCanvas}
-              onAnswer={() => callingHook.currentCall && callingHook.answerCall(callingHook.currentCall.id, callingHook.currentCall.peer)}
-              onDecline={() => callingHook.currentCall && callingHook.declineCall(callingHook.currentCall.id)}
-              onEndCall={callingHook.endCall}
-              onToggleMute={callingHook.toggleMute}
-              onToggleVideo={callingHook.toggleVideo}
-              onStartScreenShare={callingHook.startScreenShare}
-              onStopScreenShare={callingHook.stopScreenShare}
-              onGetAvailableScreenSources={callingHook.getAvailableScreenSources}
-              isScreenSharing={callingHook.isScreenSharing}
-              onSwitchCamera={callingHook.switchCamera}
-              onSwitchMicrophone={callingHook.switchMicrophone}
-            />
-          </React.Suspense>,
+        callingHook.currentCall && CallModalPanel && createPortal(
+          <CallModalPanel
+            call={callingHook.currentCall}
+            localStream={callingHook.localStream}
+            localVideoCanvas={callingHook.localVideoCanvas}
+            localScreenCanvas={callingHook.localScreenCanvas}
+            remoteVideoCanvas={callingHook.remoteVideoCanvas}
+            remoteScreenCanvas={callingHook.remoteScreenCanvas}
+            onAnswer={answerCurrentCall}
+            onDecline={declineCurrentCall}
+            onEndCall={callingHook.endCall}
+            onToggleMute={callingHook.toggleMute}
+            onToggleVideo={callingHook.toggleVideo}
+            onStartScreenShare={callingHook.startScreenShare}
+            onStopScreenShare={callingHook.stopScreenShare}
+            isScreenSharing={callingHook.isScreenSharing}
+            onSwitchCamera={callingHook.switchCamera}
+            onSwitchMicrophone={callingHook.switchMicrophone}
+            onSwitchSpeaker={callingHook.switchSpeaker}
+            isAttached={sidebarActiveTab === 'chats' && selectedConversation === callingHook.currentCall.peer}
+          />,
           document.body
         )
       }

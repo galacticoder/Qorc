@@ -291,6 +291,21 @@ the password does not appear in command arguments. It is not an operator setting
 | `QOR_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
 | `QOR_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
 | `QOR_STRAWBERRY_PERL_URL` | Pinned Strawberry Perl download URL | same | Windows native-build dependency URL. |
+| `QOR_CHAT_SOFTWARE_RENDERING` | Unset | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | When present on Linux, defaults `LIBGL_ALWAYS_SOFTWARE` to `1`. This is a diagnostic compatibility fallback, not the normal rendering path. |
+| `WEBKIT_DMABUF_RENDERER_FORCE_SHM` | `1` on Linux | same | WebKitGTK rendering compatibility setting. An explicit inherited value is preserved. |
+| `GSTREAMER_PLUGINS_DIR` | `.cache/gstreamer-plugins-<arch>` during client builds | `scripts/start-client.cjs`, Linux bundle scripts | Build-time location of the staged curated GStreamer tree. It is not required by an installed package. |
+| `QOR_GSTREAMER_SYSTEM_PLUGINS_DIR` | `pkg-config` result or a standard system directory | `scripts/stage-gstreamer-plugins.cjs` | Advanced build-time override for the GStreamer plugin directory copied into the private staged runtime. |
+| `QOR_GSTREAMER_LAUNCH_SOURCE` | `/usr/bin/gst-launch-1.0` or `/bin/gst-launch-1.0` | same | Advanced build-time override for the `gst-launch-1.0` executable copied into the private capture runtime. |
+| `QOR_GSTREAMER_PLUGIN_SCANNER_SOURCE` | Auto-detected system scanner | same | Advanced build-time override for the GStreamer plugin scanner copied into the private capture runtime. |
+| `QOR_GSTREAMER_REQUIRE_BUNDLED` | `1` for packaged Linux launches and staged development launches | native Linux startup and screen capture | Exact `1` disables automatic fallback to system capture libraries, plugins, launcher, or scanner. Normal launch paths also supply the private runtime locations automatically. |
+| `QOR_GSTREAMER_LAUNCH` | Packaged or staged private launcher | native Linux screen capture | Advanced runtime override for the private GStreamer capture launcher. Normal builds set it automatically. |
+| `QOR_GSTREAMER_CAPTURE_PLUGINS` | Packaged or staged capture-plugin directory | same | Advanced runtime override for the curated capture-only plugin directory. |
+| `QOR_GSTREAMER_RUNTIME_LIB` | Packaged or staged private library directory | same | Advanced runtime override for the capture process dynamic-library directory. |
+| `QOR_GSTREAMER_SPA_PLUGINS` | Packaged or staged `spa-0.2` directory | same | Advanced runtime override for the private PipeWire SPA root. It must contain support modules plus the video adapter used by screen capture; this replaces rather than extends the host SPA path. |
+| `QOR_GSTREAMER_PLUGIN_SCANNER` | Packaged or staged private scanner | same | Advanced runtime override for the GStreamer plugin scanner. |
+| `QOR_GSTREAMER_REGISTRY` | `$XDG_RUNTIME_DIR/qor-chat/gstreamer-registry-1.0.bin` | same | Advanced override for the per-session GStreamer registry file used by native screen capture. |
+| `PIPEWIRE_DEBUG` | `1` for the capture child unless inherited | PipeWire library inherited by the capture child | Advanced Linux screen-capture diagnostics. Level `1` retains errors; level `4` traces SPA factory loading and stream state. Do not enable verbose levels for normal releases. |
+| `GST_DEBUG` | Unset | GStreamer inherited by the capture child | Advanced GStreamer category/level diagnostics, for example `pipewiresrc:7,pipewirestream:7`. Verbose output can be large and may expose device metadata. |
 
 ## Docker interpolation
 

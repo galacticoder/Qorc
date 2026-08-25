@@ -37,7 +37,7 @@ const isValidJson = (str: string): boolean => {
 };
 
 // Parse system message content
-const parseSystemMessage = (content: string, message: any, currentUsername?: string): { label: string; actions?: SystemAction[]; isError?: boolean } => {
+const parseSystemMessage = (content: string, message: any, currentUsername?: string): { label: string; actions?: SystemAction[]; isError?: boolean; callType?: 'audio' | 'video'; showCallIcon?: boolean } => {
   if (!isValidJson(content)) {
     return { label: content };
   }
@@ -49,6 +49,8 @@ const parseSystemMessage = (content: string, message: any, currentUsername?: str
     }
 
     const label = typeof parsed.label === 'string' ? parsed.label : content;
+    const callType = parsed.callType === 'video' || parsed.callType === 'audio' ? parsed.callType : undefined;
+    const showCallIcon = parsed.showCallIcon === true;
     let actions: SystemAction[] | undefined;
 
     if (parsed.actionsType === 'callback' && message) {
@@ -64,11 +66,11 @@ const parseSystemMessage = (content: string, message: any, currentUsername?: str
             } catch { }
           }
         }];
-        return { label, actions, isError: parsed.isError };
+        return { label, actions, isError: parsed.isError, callType, showCallIcon };
       }
     }
 
-    return { label, actions, isError: parsed.isError };
+    return { label, actions, isError: parsed.isError, callType, showCallIcon };
   } catch {
     return { label: content };
   }
@@ -112,10 +114,10 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     return () => { downloadGenerationRef.current += 1; };
   }, [message.id, secureDB]);
 
-  const { systemLabel, systemActions, systemIsError } = useMemo(() => {
-    if (!isSystemMessage) return { systemLabel: '', systemActions: undefined, systemIsError: undefined };
-    const { label, actions, isError } = parseSystemMessage(content, message, currentUsername);
-    return { systemLabel: label, systemActions: actions, systemIsError: isError };
+  const { systemLabel, systemActions, systemIsError, systemCallType, systemShowCallIcon } = useMemo(() => {
+    if (!isSystemMessage) return { systemLabel: '', systemActions: undefined, systemIsError: undefined, systemCallType: undefined, systemShowCallIcon: undefined };
+    const { label, actions, isError, callType, showCallIcon } = parseSystemMessage(content, message, currentUsername);
+    return { systemLabel: label, systemActions: actions, systemIsError: isError, systemCallType: callType, systemShowCallIcon: showCallIcon };
   }, [isSystemMessage, content, message, currentUsername]);
 
   const isFileMessageType =
@@ -222,7 +224,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   }, [isFileMessageType, message.id, secureDB]);
 
   if (isSystemMessage) {
-    return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} />;
+    return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} callType={systemCallType} showCallIcon={systemShowCallIcon} timestamp={systemCallType ? timestampDisplay : undefined} />;
   }
 
   if (isDeleted) {

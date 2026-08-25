@@ -34,6 +34,7 @@ import {
 import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-limits";
 import type { HybridKeys } from "../../../lib/types/auth-types";
 import type { HybridPublicKeys } from '../../../lib/types/message-sending-types';
+import { toast } from 'sonner';
 
 interface ChatInterfaceProps {
   readonly onSendMessage: (
@@ -103,6 +104,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const isUserBlocked = useBlockStatus(selectedConversation, { eventRateMax: DEFAULT_UI_EVENT_RATE_MAX });
+  const hasAttachedCall = Boolean(currentCall && selectedConversation === currentCall.peer);
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
@@ -510,20 +512,38 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Handle audio call initiation
   const handleAudioCall = useCallback(async () => {
     if (!selectedConversation) return;
+    console.info('[CALL-DIAG]', { phase: 'ui.audio-click' });
     try {
       await startCall(selectedConversation, 'audio');
+      console.info('[CALL-DIAG]', { phase: 'ui.audio-start-resolved' });
     } catch (_error) {
-      alert('Failed to start call: ' + (_error as Error).message);
+      console.error('[CALL-DIAG]', {
+        phase: 'ui.audio-start-failed',
+        errorName: _error instanceof Error ? _error.name : 'UnknownError',
+        errorMessage: _error instanceof Error ? _error.message : String(_error),
+      });
+      toast.error('Failed to start call', {
+        description: (_error as Error).message,
+      });
     }
   }, [selectedConversation, startCall]);
 
   // Handle video call initiation
   const handleVideoCall = useCallback(async () => {
     if (!selectedConversation) return;
+    console.info('[CALL-DIAG]', { phase: 'ui.video-click' });
     try {
       await startCall(selectedConversation, 'video');
+      console.info('[CALL-DIAG]', { phase: 'ui.video-start-resolved' });
     } catch (_error) {
-      alert('Failed to start video call: ' + (_error as Error).message);
+      console.error('[CALL-DIAG]', {
+        phase: 'ui.video-start-failed',
+        errorName: _error instanceof Error ? _error.name : 'UnknownError',
+        errorMessage: _error instanceof Error ? _error.message : String(_error),
+      });
+      toast.error('Failed to start video call', {
+        description: (_error as Error).message,
+      });
     }
   }, [selectedConversation, startCall]);
 
@@ -595,7 +615,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, []);
 
   return (
-    <div className="qor-chat-interface">
+    <div className={`qor-chat-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
       <div
         className="qor-chat-toolbar"
       >
@@ -611,63 +631,66 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             </div>
           )}
 
-          {selectedConversation && !keyChangePending && (
-            <div className="qor-call-pill" role="group" aria-label="Call actions">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleAudioCall}
-                disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="qor-call-pill-btn"
-                title="Audio call"
-              >
-                <CallIcon className="w-4 h-4" />
-              </Button>
-              <span className="qor-call-pill-divider" aria-hidden="true" />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleVideoCall}
-                disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="qor-call-pill-btn"
-                title="Video call"
-              >
-                <Video className="w-4 h-4" />
-              </Button>
-            </div>
-          )}
-
-          {/* 3-dot menu */}
           {selectedConversation && (
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="qor-chat-action-btn qor-chat-more-btn"
-                >
-                  <MoreVertical className="w-4 h-4" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-48 p-2 select-none" align="end">
-                <div className="space-y-1">
-                  <div className="px-2 py-1 text-sm font-medium text-muted-foreground">
-                    Conversation Options
+            <div className="qor-call-pill" role="group" aria-label="Conversation actions">
+              {!keyChangePending && !hasAttachedCall && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleAudioCall}
+                    disabled={!!currentCall || isUserBlocked || isBlockedByUser}
+                    className="qor-call-pill-btn"
+                    title="Audio call"
+                  >
+                    <CallIcon className="w-4 h-4" />
+                  </Button>
+                  <span className="qor-call-pill-divider" aria-hidden="true" />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleVideoCall}
+                    disabled={!!currentCall || isUserBlocked || isBlockedByUser}
+                    className="qor-call-pill-btn"
+                    title="Video call"
+                  >
+                    <Video className="w-4 h-4" />
+                  </Button>
+                  <span className="qor-call-pill-divider" aria-hidden="true" />
+                </>
+              )}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="qor-call-pill-btn qor-chat-more-btn"
+                    title="Conversation options"
+                    aria-label="Conversation options"
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-48 p-2 select-none" align="end">
+                  <div className="space-y-1">
+                    <div className="px-2 py-1 text-sm font-medium text-muted-foreground">
+                      Conversation Options
+                    </div>
+                    <div className="w-full">
+                      <BlockUserButton
+                        username={selectedConversation}
+                        getDisplayUsername={getDisplayUsername}
+                        initialBlocked={isUserBlocked}
+                        variant="ghost"
+                        size="sm"
+                        className="w-full cursor-pointer justify-start"
+                        showText={true}
+                      />
+                    </div>
                   </div>
-                  <div className="w-full">
-                    <BlockUserButton
-                      username={selectedConversation}
-                      getDisplayUsername={getDisplayUsername}
-                      initialBlocked={isUserBlocked}
-                      variant="ghost"
-                      size="sm"
-                      className="w-full justify-start"
-                      showText={true}
-                    />
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
+                </PopoverContent>
+              </Popover>
+            </div>
           )}
 
         </div>
@@ -695,9 +718,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         <div className="qor-message-stack">
           {}
           {isLoadingMore && (
-            <div className="qor-thread-loading" role="status" aria-live="polite">
+            <div className="qor-thread-loading" role="status" aria-label="Loading earlier messages">
               <span className="qor-thread-loading-spinner" aria-hidden="true" />
-              <span>Loading earlier messages…</span>
             </div>
           )}
           {messages.length === 0 && !isLoadingMore ? (

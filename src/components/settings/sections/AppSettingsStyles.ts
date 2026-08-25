@@ -1,6 +1,4 @@
-
-export const AppSettingsStyles = () => (
-  <style>{`
+const APP_SETTINGS_CSS = `
     .qor-settings-host {
       --bg: #040405;
       --nav: #08080a;
@@ -68,120 +66,49 @@ export const AppSettingsStyles = () => (
       position: relative;
       height: 100%;
       min-height: 0;
-      display: grid;
-      grid-template-columns: 286px minmax(0, 1fr);
+      display: block;
       background: var(--content);
       isolation: isolate;
     }
 
-    .settings-nav {
-      height: 100%;
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--line);
-      background: var(--nav);
-      padding: 28px 16px 18px;
-      overflow-y: auto;
-    }
-
-    .settings-nav::-webkit-scrollbar,
     .settings-content::-webkit-scrollbar { width: 8px; }
-    .settings-nav::-webkit-scrollbar-thumb,
     .settings-content::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 22%, transparent); border-radius: 999px; }
 
     .settings-brand {
-      padding: 0 6px 22px;
-      margin: 0 0 14px;
+      width: min(100%, 930px);
+      margin: 0 auto 44px;
+      padding: 0 0 24px;
       border-bottom: 1px solid var(--line);
-    }
-
-    .settings-brand span {
-      display: block;
-      margin-bottom: 7px;
-      color: var(--purple-2);
-      font-size: 10px;
-      font-weight: 950;
-      letter-spacing: .18em;
-      text-transform: uppercase;
     }
 
     .settings-brand strong {
       display: block;
       color: var(--text);
-      font-size: 28px;
+      font-size: clamp(34px, 4.4vw, 52px);
       line-height: 1;
       font-weight: 950;
       letter-spacing: 0;
-    }
-
-    .nav-block {
-      margin-top: 18px;
-    }
-
-    .nav-label {
-      margin: 0 0 8px;
-      padding: 0 8px;
-      color: var(--quiet);
-      font-size: 10px;
-      font-weight: 950;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-    }
-
-    .settings-tab {
-      width: 100%;
-      min-height: 42px;
-      display: flex;
-      align-items: center;
-      gap: 11px;
-      border: 0;
-      border-radius: 8px;
-      padding: 0 10px;
-      background: transparent;
-      color: var(--muted);
-      text-align: left;
-      font-size: 13px;
-      font-weight: 850;
-      transition: background .14s ease, color .14s ease;
-    }
-
-    .settings-tab svg {
-      width: 17px;
-      height: 17px;
-      flex: 0 0 17px;
-    }
-
-    .settings-tab:hover {
-      background: var(--surface);
-      color: var(--text);
-    }
-
-    .settings-tab.active {
-      background: var(--purple);
-      color: #ffffff;
-    }
-
-    .settings-tab.active:hover {
-      background: var(--purple);
-      color: #ffffff;
     }
 
     .settings-content {
       min-width: 0;
       height: 100%;
       overflow-y: auto;
-      padding: 78px clamp(32px, 7vw, 96px) 84px;
+      padding: 54px clamp(32px, 7vw, 96px) 84px;
       background: var(--content);
     }
 
     .pane {
-      display: none;
+      display: block;
       width: min(100%, 930px);
       margin-inline: auto;
     }
 
-    .pane.active { display: block; }
+    .pane + .pane {
+      margin-top: 52px;
+      padding-top: 46px;
+      border-top: 1px solid var(--line);
+    }
 
     .pane-head {
       display: flex;
@@ -193,21 +120,11 @@ export const AppSettingsStyles = () => (
       border-bottom: 0;
     }
 
-    .pane-kicker {
-      display: block;
-      margin-bottom: 10px;
-      color: var(--purple-2);
-      font-size: 10px;
-      font-weight: 950;
-      letter-spacing: .17em;
-      text-transform: uppercase;
-    }
-
     .pane-title {
       margin: 0;
       color: var(--text);
-      font-size: clamp(28px, 3.6vw, 42px);
-      line-height: 1;
+      font-size: clamp(23px, 2.5vw, 30px);
+      line-height: 1.1;
       font-weight: 950;
       letter-spacing: 0;
     }
@@ -223,17 +140,6 @@ export const AppSettingsStyles = () => (
     .settings-section {
       display: block;
       margin-bottom: 26px;
-    }
-
-    .section-title {
-      margin: 0 0 9px;
-      padding: 0;
-      border-bottom: 0;
-      color: var(--muted);
-      font-size: 9px;
-      font-weight: 950;
-      letter-spacing: .15em;
-      text-transform: uppercase;
     }
 
     .settings-list {
@@ -295,8 +201,7 @@ export const AppSettingsStyles = () => (
       margin-bottom: 18px;
     }
 
-    .account-pane .pane-subtitle,
-    .account-pane .section-title {
+    .account-pane .pane-subtitle {
       display: none;
     }
 
@@ -623,49 +528,13 @@ export const AppSettingsStyles = () => (
       gap: 10px;
     }
 
-    .segmented {
-      justify-self: end;
-      display: inline-flex;
-      width: min(100%, 408px);
-      min-width: 224px;
-      overflow: hidden;
-      gap: 3px;
-      padding: 3px;
-      border-radius: 12px;
-      background: color-mix(in srgb, var(--bg) 68%, transparent);
-      border: 1px solid var(--line-soft);
-    }
-
-    .segmented button {
-      flex: 1;
-      min-width: 0;
-      height: 32px;
-      border: 0;
-      border-radius: 9px;
-      padding: 0 6px;
-      background: transparent;
+    .blocked-spinner {
+      animation: qor-blocked-spin 0.7s linear infinite;
       color: var(--muted);
-      font-size: 11.5px;
-      font-weight: 880;
-      white-space: nowrap;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
     }
 
-    .segmented button:last-child {
-      border-right: 0;
-    }
-
-    .segmented button:hover:not(.active) {
-      background: var(--surface-2);
-      color: var(--text);
-    }
-
-    .segmented button.active {
-      background: var(--purple);
-      color: white;
+    @keyframes qor-blocked-spin {
+      to { transform: rotate(360deg); }
     }
 
     .blocked-empty {
@@ -717,20 +586,9 @@ export const AppSettingsStyles = () => (
     .blocked-head {
       display: flex;
       align-items: flex-start;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 18px;
-    }
-
-    .blocked-head .section-title {
-      margin: 0 0 5px;
-    }
-
-    .blocked-subtitle {
-      max-width: 520px;
-      margin: 0;
-      color: var(--muted);
-      font-size: 12.5px;
-      line-height: 1.5;
+      margin-bottom: 12px;
     }
 
     .blocked-head .action {
@@ -879,35 +737,9 @@ export const AppSettingsStyles = () => (
         display: block;
       }
 
-      .settings-nav {
-        height: auto;
-        border-right: 0;
-        border-bottom: 1px solid var(--line);
-        padding: 28px 14px 12px;
-      }
-
       .settings-brand {
-        margin-bottom: 12px;
-      }
-
-      .nav-block {
-        display: contents;
-      }
-
-      .nav-label {
-        display: none;
-      }
-
-      .settings-nav {
-        flex-direction: row;
-        gap: 6px;
-        overflow-x: auto;
-      }
-
-      .settings-tab {
-        width: auto;
-        flex: 0 0 auto;
-        white-space: nowrap;
+        margin-bottom: 28px;
+        padding-bottom: 18px;
       }
 
       .settings-content {
@@ -917,10 +749,6 @@ export const AppSettingsStyles = () => (
 
       .settings-section {
         display: block;
-      }
-
-      .section-title {
-        margin: 0 0 8px;
       }
 
       .pane-head,
@@ -942,23 +770,25 @@ export const AppSettingsStyles = () => (
         right: 0;
       }
 
-      .segmented,
-      .input-line {
-        justify-self: start;
-        width: 100%;
-      }
-
-      .segmented {
-        min-width: 0;
-      }
-
       .switch {
         justify-self: start;
       }
 
       .input-line {
+        justify-self: start;
+        width: 100%;
         grid-template-columns: 1fr;
       }
     }
-  `}</style>
-);
+`;
+
+let installed = false;
+
+export function installAppSettingsStyles(): void {
+  if (installed || typeof document === 'undefined') return;
+  installed = true;
+  const style = document.createElement('style');
+  style.setAttribute('data-qor-app-settings', '');
+  style.textContent = APP_SETTINGS_CSS;
+  document.head.appendChild(style);
+}

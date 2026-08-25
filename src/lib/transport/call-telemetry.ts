@@ -1,7 +1,12 @@
 import { PostQuantumRandom } from '../cryptography/random';
 import type { CallState } from '../types/calling-types';
 import type { SecureConnection, SecureStream } from './secure-transport';
-import type { VisualAdaptationState, VisualDecoderState } from './call-video-codec';
+import type {
+    VisualAdaptationState,
+    VisualDecoderState,
+    VisualEncoderState,
+    VisualPipelineEvent,
+} from './call-video-codec';
 
 export type CallTelemetryMediaKind = 'audio' | 'video' | 'screen';
 
@@ -14,6 +19,7 @@ const PROBE_RESPONSE_BYTES = 33;
 const PROBE_INTERVAL_MS = 2_000;
 const PROBE_TIMEOUT_MS = 8_000;
 const LOG_INTERVAL_MS = 5_000;
+const EVENT_LOOP_SAMPLE_INTERVAL_MS = 250;
 
 type ProbeRequest = {
     type: 'request';
@@ -44,6 +50,8 @@ type SampleSummary = {
 };
 
 type MediaInterval = {
+    sourceFrames: number;
+    sourceDrops: number;
     txFrames: number;
     txBytes: number;
     rxFrames: number;
@@ -65,9 +73,15 @@ type MediaInterval = {
     decodeMs: number[];
     arrivalGapMs: number[];
     arrivalJitterMs: number[];
+    capturePullMs: number[];
+    captureSourceAgeMs: number[];
+    captureDecodeMs: number[];
+    capturePrepareMs: number[];
 };
 
 type MediaTotals = {
+    sourceFrames: number;
+    sourceDrops: number;
     txFrames: number;
     txBytes: number;
     rxFrames: number;
@@ -89,6 +103,20 @@ type PendingProbe = {
     sentAt: number;
     startedAt: number;
     timeoutId: ReturnType<typeof setTimeout>;
+};
+
+type VisualRendererState = {
+    animationFramePending: boolean;
+    framePending: boolean;
+    queuedFrames: number;
+    buffering: boolean;
+    sourceIntervalMs: number;
+    scheduledDelayMs: number;
+    lastFrameQueuedAt: number;
+    lastAnimationCallbackAt: number;
+    replacedFrames: number;
+    canvasWidth: number;
+    canvasHeight: number;
 };
 
 const mediaKinds: CallTelemetryMediaKind[] = ['audio', 'video', 'screen'];
@@ -118,6 +146,8 @@ function summarize(samples: number[]): SampleSummary {
 
 function createMediaInterval(): MediaInterval {
     return {
+        sourceFrames: 0,
+        sourceDrops: 0,
         txFrames: 0,
         txBytes: 0,
         rxFrames: 0,
@@ -138,12 +168,18 @@ function createMediaInterval(): MediaInterval {
         renderAgeMs: [],
         decodeMs: [],
         arrivalGapMs: [],
-        arrivalJitterMs: []
+        arrivalJitterMs: [],
+        capturePullMs: [],
+        captureSourceAgeMs: [],
+        captureDecodeMs: [],
+        capturePrepareMs: []
     };
 }
 
 function createMediaTotals(): MediaTotals {
     return {
+        sourceFrames: 0,
+        sourceDrops: 0,
         txFrames: 0,
         txBytes: 0,
         rxFrames: 0,
@@ -244,9 +280,12 @@ export class CallTelemetry {
     private readonly lastArrivalGap = new Map<CallTelemetryMediaKind, number>();
     private readonly arrivalJitter = new Map<CallTelemetryMediaKind, number>();
     private readonly visualState = new Map<'video' | 'screen', VisualAdaptationState>();
+    private readonly visualEncoderState = new Map<'video' | 'screen', VisualEncoderState>();
     private readonly visualDecoderState = new Map<'video' | 'screen', VisualDecoderState>();
+    private readonly visualRendererState = new Map<'video' | 'screen', VisualRendererState>();
     private readonly lastKeyFrameRequestAt = new Map<'video' | 'screen', number>();
     private readonly rttSamples: number[] = [];
+    private readonly eventLoopLagSamples: number[] = [];
     private latestRttMs: number | null = null;
     private remoteClockOffsetMs: number | null = null;
     private lifetimeRttMinMs: number | null = null;
@@ -257,6 +296,8 @@ export class CallTelemetry {
     private pendingProbe: PendingProbe | null = null;
     private probeTimer: ReturnType<typeof setInterval> | null = null;
     private logTimer: ReturnType<typeof setInterval> | null = null;
+    private eventLoopTimer: ReturnType<typeof setInterval> | null = null;
+    private nextEventLoopSampleAt = 0;
     private reporting = false;
     private stopped = false;
 
@@ -282,6 +323,12 @@ export class CallTelemetry {
         if (this.stream) {
             this.probeTimer = setInterval(() => { void this.sendProbe(); }, PROBE_INTERVAL_MS);
         }
+        this.nextEventLoopSampleAt = monotonicNow() + EVENT_LOOP_SAMPLE_INTERVAL_MS;
+        this.eventLoopTimer = setInterval(() => {
+            const now = monotonicNow();
+            this.eventLoopLagSamples.push(Math.max(0, now - this.nextEventLoopSampleAt));
+            this.nextEventLoopSampleAt = now + EVENT_LOOP_SAMPLE_INTERVAL_MS;
+        }, EVENT_LOOP_SAMPLE_INTERVAL_MS);
         this.logTimer = setInterval(() => this.emit(false), LOG_INTERVAL_MS);
     }
 
@@ -290,8 +337,10 @@ export class CallTelemetry {
         this.stopped = true;
         if (this.probeTimer) clearInterval(this.probeTimer);
         if (this.logTimer) clearInterval(this.logTimer);
+        if (this.eventLoopTimer) clearInterval(this.eventLoopTimer);
         this.probeTimer = null;
         this.logTimer = null;
+        this.eventLoopTimer = null;
         this.clearPendingProbe(false);
         if (this.reporting) this.emit(true);
     }
@@ -309,6 +358,30 @@ export class CallTelemetry {
     noteCaptureDrop(kind: CallTelemetryMediaKind): void {
         this.interval.get(kind)!.captureDrops += 1;
         this.totals.get(kind)!.captureDrops += 1;
+    }
+
+    noteSourceFrame(kind: 'video' | 'screen'): void {
+        this.interval.get(kind)!.sourceFrames += 1;
+        this.totals.get(kind)!.sourceFrames += 1;
+    }
+
+    noteSourceDrop(kind: 'video' | 'screen', count: number): void {
+        if (!Number.isSafeInteger(count) || count <= 0) return;
+        this.interval.get(kind)!.sourceDrops += count;
+        this.totals.get(kind)!.sourceDrops += count;
+    }
+
+    noteCaptureTiming(
+        kind: 'video' | 'screen',
+        stage: 'pull' | 'sourceAge' | 'decode' | 'prepare',
+        milliseconds: number,
+    ): void {
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) return;
+        const interval = this.interval.get(kind)!;
+        if (stage === 'pull') interval.capturePullMs.push(milliseconds);
+        else if (stage === 'sourceAge') interval.captureSourceAgeMs.push(milliseconds);
+        else if (stage === 'decode') interval.captureDecodeMs.push(milliseconds);
+        else interval.capturePrepareMs.push(milliseconds);
     }
 
     noteEncode(kind: 'video' | 'screen', encodeMs: number): void {
@@ -337,8 +410,31 @@ export class CallTelemetry {
         this.visualState.set(kind, { ...state });
     }
 
+    noteVisualEncoderState(kind: 'video' | 'screen', state: VisualEncoderState): void {
+        this.visualEncoderState.set(kind, { ...state });
+    }
+
     noteVisualDecoderState(kind: 'video' | 'screen', state: VisualDecoderState): void {
         this.visualDecoderState.set(kind, { ...state });
+    }
+
+    noteVisualRendererState(kind: 'video' | 'screen', state: VisualRendererState): void {
+        this.visualRendererState.set(kind, { ...state });
+    }
+
+    noteVisualPipelineEvent(
+        kind: 'video' | 'screen',
+        side: 'sender' | 'receiver',
+        event: VisualPipelineEvent,
+    ): void {
+        console.warn(`[CALL-PIPELINE] ${JSON.stringify({
+            callId: this.callId.slice(0, 12),
+            elapsedMs: Math.round(monotonicNow() - this.startedAt),
+            kind,
+            side,
+            ...event,
+            visualLanes: this.connection.getAudioLaneTelemetry?.() ?? null,
+        })}`);
     }
 
     noteSendError(kind: CallTelemetryMediaKind): void {
@@ -433,7 +529,9 @@ export class CallTelemetry {
         for (const kind of mediaKinds) {
             const current = this.interval.get(kind)!;
             const total = this.totals.get(kind)!;
+            const renderer = kind === 'audio' ? null : this.visualRendererState.get(kind);
             media[kind] = {
+                sourceFps: round(current.sourceFrames / windowSeconds),
                 txFps: round(current.txFrames / windowSeconds),
                 txKbps: round((current.txBytes * 8) / 1_000 / windowSeconds),
                 rxFps: round(current.rxFrames / windowSeconds),
@@ -448,6 +546,11 @@ export class CallTelemetry {
                 decodeMs: summarize(current.decodeMs),
                 arrivalGapMs: summarize(current.arrivalGapMs),
                 arrivalJitterMs: summarize(current.arrivalJitterMs),
+                capturePullMs: summarize(current.capturePullMs),
+                captureSourceAgeMs: summarize(current.captureSourceAgeMs),
+                captureDecodeMs: summarize(current.captureDecodeMs),
+                capturePrepareMs: summarize(current.capturePrepareMs),
+                sourceDrops: current.sourceDrops,
                 captureDrops: current.captureDrops,
                 sendErrors: current.sendErrors,
                 receiveErrors: current.receiveErrors,
@@ -458,9 +561,31 @@ export class CallTelemetry {
                 visualState: kind === 'audio'
                     ? null
                     : this.visualState.get(kind) ?? null,
+                encoderState: kind === 'audio'
+                    ? null
+                    : this.visualEncoderState.get(kind) ?? null,
                 decoderState: kind === 'audio'
                     ? null
                     : this.visualDecoderState.get(kind) ?? null,
+                rendererState: !renderer
+                    ? null
+                    : {
+                        animationFramePending: renderer.animationFramePending,
+                        framePending: renderer.framePending,
+                        queuedFrames: renderer.queuedFrames,
+                        buffering: renderer.buffering,
+                        sourceIntervalMs: round(renderer.sourceIntervalMs),
+                        scheduledDelayMs: round(renderer.scheduledDelayMs),
+                        lastFrameQueuedAgoMs: renderer.lastFrameQueuedAt > 0
+                            ? Math.max(0, Math.round(now - renderer.lastFrameQueuedAt))
+                            : null,
+                        lastAnimationCallbackAgoMs: renderer.lastAnimationCallbackAt > 0
+                            ? Math.max(0, Math.round(now - renderer.lastAnimationCallbackAt))
+                            : null,
+                        replacedFrames: renderer.replacedFrames,
+                        canvasWidth: renderer.canvasWidth,
+                        canvasHeight: renderer.canvasHeight,
+                    },
                 totals: { ...total }
             };
         }
@@ -474,6 +599,10 @@ export class CallTelemetry {
             callType: this.callType,
             elapsedMs: Math.round(now - this.startedAt),
             sampleWindowMs: Math.round(windowMs),
+            runtime: {
+                eventLoopLagMs: summarize(this.eventLoopLagSamples),
+                visibilityState: typeof document === 'undefined' ? null : document.visibilityState,
+            },
             transport: {
                 state: this.connection.state,
                 telemetryStreamAvailable: Boolean(this.stream),
@@ -513,6 +642,7 @@ export class CallTelemetry {
         this.intervalStartedAt = now;
         for (const kind of mediaKinds) this.interval.set(kind, createMediaInterval());
         this.rttSamples.length = 0;
+        this.eventLoopLagSamples.length = 0;
         this.probeFailures = 0;
     }
 

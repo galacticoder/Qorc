@@ -114,6 +114,12 @@ export function installClientLogForwarding(): void {
         const original = console[method].bind(console);
         console[method] = (...args: unknown[]) => {
             original(...args);
+            if (args[0] === '[CALL-DIAG]') {
+                const entry = makeLine(level, args);
+                void invoke<boolean>('forward_client_logs', { entries: [entry] })
+                    .catch(() => enqueue(level, args));
+                return;
+            }
             enqueue(level, args);
         };
     }

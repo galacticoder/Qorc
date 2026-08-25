@@ -108,11 +108,14 @@ scrap = "0.5"
 x11rb = "0.13"
 webkit2gtk = "=2.0.2"
 v4l = "0.14.0"
+pulseaudio = "0.3.1"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 scrap = "0.5"
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-msmf"] }
+cpal = "0.18.2"
 
 # Unix signals
 [target.'cfg(unix)'.dependencies]
@@ -136,7 +139,7 @@ glib = { path = "../vendor/glib-0.18.5" }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 panic = "abort"
 strip = true

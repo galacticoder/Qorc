@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { syncEncryptedStorage } from '../lib/database/encrypted-storage';
 import { STORAGE_KEYS } from '../lib/database/storage-keys';
 import { isValidCallingUsername } from '../lib/utils/calling-utils';
+import { CALL_LOG_SEGMENT_SIZE, SEGMENT_UNLOAD_IDLE_MS } from '../lib/constants';
 
 export interface CallLogEntry {
     id: string;
@@ -15,6 +16,11 @@ export interface CallLogEntry {
 
 interface CallHistoryContextType {
     logs: CallLogEntry[];
+    hasMoreLogs: boolean;
+    loadMoreLogs: () => void;
+    scheduleLogRelease: () => void;
+    cancelLogRelease: () => void;
+    getAllLogs: () => CallLogEntry[];
     addCallLog: (entry: Omit<CallLogEntry, 'id'>) => void;
     deleteLog: (id: string) => void;
     clearLogs: () => void;
@@ -62,6 +68,14 @@ function parseCallHistory(raw: string | null): CallLogEntry[] {
     return value;
 }
 
+function readStoredLogs(): CallLogEntry[] {
+    try {
+        return parseCallHistory(syncEncryptedStorage.getItem(STORAGE_KEYS.CALL_HISTORY));
+    } catch {
+        return [];
+    }
+}
+
 export const useCallHistory = () => {
     const context = useContext(CallHistoryContext);
     if (!context) {
@@ -72,25 +86,63 @@ export const useCallHistory = () => {
 
 export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [logs, setLogs] = useState<CallLogEntry[]>([]);
+    const [totalLogCount, setTotalLogCount] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
+    const loadedCountRef = useRef(0);
+    const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const applyPage = useCallback((all: CallLogEntry[], requestedCount: number) => {
+        const size = Math.min(Math.max(requestedCount, CALL_LOG_SEGMENT_SIZE), all.length);
+        loadedCountRef.current = size;
+        setLogs(all.slice(0, size));
+        setTotalLogCount(all.length);
+    }, []);
+
+    const cancelLogRelease = useCallback(() => {
+        if (releaseTimerRef.current === null) return;
+        clearTimeout(releaseTimerRef.current);
+        releaseTimerRef.current = null;
+    }, []);
+
+    const releaseExtraLogs = useCallback(() => {
+        if (loadedCountRef.current <= CALL_LOG_SEGMENT_SIZE) return;
+        loadedCountRef.current = CALL_LOG_SEGMENT_SIZE;
+        setLogs(prev => (prev.length <= CALL_LOG_SEGMENT_SIZE ? prev : prev.slice(0, CALL_LOG_SEGMENT_SIZE)));
+    }, []);
+
+    const scheduleLogRelease = useCallback(() => {
+        if (releaseTimerRef.current !== null) return;
+        if (loadedCountRef.current <= CALL_LOG_SEGMENT_SIZE) return;
+        releaseTimerRef.current = setTimeout(() => {
+            releaseTimerRef.current = null;
+            releaseExtraLogs();
+        }, SEGMENT_UNLOAD_IDLE_MS);
+    }, [releaseExtraLogs]);
+
+    const loadMoreLogs = useCallback(() => {
+        cancelLogRelease();
+        const all = readStoredLogs();
+        if (loadedCountRef.current >= all.length) {
+            setTotalLogCount(all.length);
+            return;
+        }
+        applyPage(all, loadedCountRef.current + CALL_LOG_SEGMENT_SIZE);
+    }, [applyPage, cancelLogRelease]);
+
+    const getAllLogs = useCallback(() => readStoredLogs(), []);
 
     useEffect(() => {
         let mounted = true;
 
-        const loadForCurrentAccount = () => {
-            try {
-                const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.CALL_HISTORY);
-                setLogs(parseCallHistory(stored));
-            } catch {
-                setLogs([]);
-            }
+        const syncFromStorage = () => {
+            applyPage(readStoredLogs(), loadedCountRef.current || CALL_LOG_SEGMENT_SIZE);
         };
 
         const init = async () => {
             try {
                 await syncEncryptedStorage.waitForInitialization();
                 if (!mounted) return;
-                loadForCurrentAccount();
+                syncFromStorage();
             } catch {
             } finally {
                 if (mounted) {
@@ -101,9 +153,14 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
         void init();
         const unsubscribe = syncEncryptedStorage.subscribe(() => {
-            if (mounted) loadForCurrentAccount();
+            if (mounted) syncFromStorage();
         });
         return () => { mounted = false; unsubscribe(); };
+    }, [applyPage]);
+
+    useEffect(() => () => {
+        if (releaseTimerRef.current !== null) clearTimeout(releaseTimerRef.current);
+        releaseTimerRef.current = null;
     }, []);
 
     const saveLogs = useCallback((newLogs: CallLogEntry[]) => {
@@ -122,29 +179,41 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
             id: crypto.randomUUID(),
         };
         if (!isValidCallLogEntry(newEntry)) return;
-        setLogs(prev => {
-            const updated = [newEntry, ...prev].slice(0, MAX_CALL_HISTORY_ENTRIES);
-            saveLogs(updated);
-            return updated;
-        });
-    }, [saveLogs]);
+        const updated = [newEntry, ...readStoredLogs()].slice(0, MAX_CALL_HISTORY_ENTRIES);
+        saveLogs(updated);
+        applyPage(updated, loadedCountRef.current + 1);
+    }, [saveLogs, applyPage]);
 
     const deleteLog = useCallback((id: string) => {
         if (!UUID_RE.test(id)) return;
-        setLogs(prev => {
-            const updated = prev.filter(log => log.id !== id);
-            saveLogs(updated);
-            return updated;
-        });
-    }, [saveLogs]);
+        const updated = readStoredLogs().filter(log => log.id !== id);
+        saveLogs(updated);
+        applyPage(updated, loadedCountRef.current);
+    }, [saveLogs, applyPage]);
 
     const clearLogs = useCallback(() => {
+        cancelLogRelease();
+        loadedCountRef.current = 0;
         setLogs([]);
+        setTotalLogCount(0);
         saveLogs([]);
-    }, [saveLogs]);
+    }, [saveLogs, cancelLogRelease]);
 
     return (
-        <CallHistoryContext.Provider value={{ logs, addCallLog, deleteLog, clearLogs, isLoading }}>
+        <CallHistoryContext.Provider
+            value={{
+                logs,
+                hasMoreLogs: logs.length < totalLogCount,
+                loadMoreLogs,
+                scheduleLogRelease,
+                cancelLogRelease,
+                getAllLogs,
+                addCallLog,
+                deleteLog,
+                clearLogs,
+                isLoading,
+            }}
+        >
             {children}
         </CallHistoryContext.Provider>
     );

@@ -29,11 +29,11 @@ The calling stack is divided into five responsibilities:
 5. `p2pTransport` carries the media streams through the peer's ephemeral Tor v3
    onion service after its authenticated hybrid session has completed.
 
-The UI receives snapshots of call state, the local capture `MediaStream`, and
-the canvases into which authenticated remote camera and screen frames are
-rendered. It does not own cryptographic call state or transport streams. The
-calling service remains the authority for whether a signal belongs to the
-active account, peer, call ID, direction, and state.
+The UI receives snapshots of call state, a local-media lifecycle sentinel, and
+the canvases used for local previews and authenticated remote camera and screen
+frames. It does not own capture sessions, cryptographic call state, or transport
+streams. The calling service remains the authority for whether a signal belongs
+to the active account, peer, call ID, direction, and state.
 
 The service exists only while the account is fully authenticated.
 Initialization loads the account's preferred camera and installs call, block,
@@ -71,7 +71,7 @@ local material immediately or fails immediately while the background refresh
 continues. Known-peer transparency state is refreshed after 18 hours without a
 successful check, certificates refresh during their final six hours, and each
 client publishes its replacement certificate eight hours before expiry. A
-failed refresh does not interrupt the retained identity; an observed root
+failed refresh does not interrupt the retained identity, an observed root
 change, explicit revocation, or security incident does. If no Signal session
 exists, session prefetch establishes one before call signaling, the calling
 service itself waits at most ten seconds for that session to become available.
@@ -117,22 +117,28 @@ the required native Opus codec or native P2P transport. The renderer must also
 be a secure context before the start or answer action can request media.
 
 An incoming offer can ring without activating any capture device. The client
-asks for media access only after the local user starts or answers a call, or
-explicitly switches a device or begins screen sharing. The native media-access
-gate runs before microphone capture and native camera startup. On Linux, the
-browser microphone request consumes the action-scoped permission lease within
-ten seconds; camera frames do not traverse WebKit or its PipeWire portal. Windows
-uses the operating-system microphone and Media Foundation camera permission
-paths. Denial, cancellation, a stale call generation, a missing microphone
-track, or a failed native camera session stops setup and releases any resource
-already acquired.
+asks for media access only after the local user starts or answers a call,
+explicitly switches a device, or begins screen sharing. The native media-access
+gate runs before microphone and camera startup. Linux captures microphones and
+plays speakers through PulseAudio, and captures cameras through Video4Linux.
+Windows uses CPAL for microphone and speaker I/O and Media Foundation for camera
+capture. Microphone and camera frames therefore do not traverse WebKit.
 
-Listing media devices from settings and enumerating screen/window sources are
-separately confirmed actions. The in-call device picker enumerates devices only
-after an authorized local capture stream exists. Source enumeration exposes
-names and identifiers to the renderer for selection but does not begin capture.
-Screen capture begins only after the peer has authenticated the announced
-screen stream and returned the matching ready signal.
+Linux screen sharing is a separate native path. The xdg-desktop-portal chooser
+authorizes one monitor or window and returns a restricted PipeWire connection,
+the app-private GStreamer runtime consumes that PipeWire stream and requests up
+to 60 frames per second. A lower-rate desktop source remains at its actual rate, the capture pipeline does not synthesize duplicate frames. Other supported
+runtimes use `getDisplayMedia()` as the fallback. Denial, cancellation, stale
+call ownership, a failed native session, or a capture source that does not
+produce its first frame within eight seconds of starting the capture child
+aborts setup and releases resources already acquired. Time spent choosing a
+source in the portal is outside that first-frame deadline.
+
+Listing microphone, speaker, and camera devices from settings is a separately
+confirmed action. In-call pickers enumerate only after the corresponding native
+capture or playback session exists. On Linux the portal chooser, rather than a
+renderer-provided source identifier, is authoritative for the screen or window
+that is captured.
 
 Code references:
 
@@ -232,7 +238,7 @@ Starting a call performs these operations in order:
 4. Confirm Signal signaling is available before activating privacy-sensitive
    microphone or camera capture or opening a media route.
 5. Capture audio and, for a requested video call, the preferred or default
-   camera. Audio calls require a live audio track; video calls require that track
+   camera. Audio calls require a live audio track, video calls require that track
    plus a native camera session. Permission denial or a missing required source
    fails setup instead of silently changing the call type.
 6. Reuse or attempt to establish the authenticated P2P onion connection, with a
@@ -375,7 +381,7 @@ bounded to 2 MiB including authenticated transport overhead.
 
 The onion service exposes a primary TCP port and a dedicated realtime-media TCP
 port. The primary connection carries the P2P handshake, messages, telemetry,
-and audio while dedicated media paths are unavailable or not yet preferable.
+and media while dedicated paths are unavailable or not yet preferable.
 Realtime traffic causes each sender to establish up to four media TCP lanes,
 each with unique Tor SOCKS isolation credentials. Every lane has its own 32-byte
 random capability, offered over the authenticated primary connection and
@@ -410,9 +416,17 @@ it reaches the encrypted logical stream and permits bounded cross-lane
 reordering. While the media lanes are opening, the primary writer selects a
 five-entry realtime queue before its normal 64-entry queue. Full or expired
 realtime writes fail instead of waiting behind stale media. Visual batches
-require their reserved lane, run in independent native send tasks, and receive
-an RTT-aware freshness deadline between 400 and 1,500 ms instead of falling back
-to the primary or audio lane.
+prefer a separately reserved lane whose measured RTT is meaningfully below the
+primary path. If none is eligible, they use the bounded primary normal queue,
+they never occupy the selected audio lane. Visual sends use an RTT-aware
+400-to-1,500 ms freshness deadline for queue admission and dedicated-lane
+attempts.
+
+Once a primary TCP write has been admitted, audio and visual frames receive the
+normal ten-second connection-health write deadline. This distinction prevents
+an expired media timestamp from cancelling a partially written authenticated
+TCP frame and corrupting the shared connection. Queue admission still rejects
+media that is already too old.
 
 Logical stream framing is binary. The renderer prefixes each authenticated frame
 with a big-endian 16-bit stream-ID length and the UTF-8 stream ID. Native TCP
@@ -508,10 +522,13 @@ Code references:
 
 ## Audio Pipeline
 
-The microphone enters a shared 48 kHz `AudioContext`. An audio worklet collects
-960 mono `Float32` samples per 20 ms frame. The worklet transfers each completed
-buffer instead of serializing it as JSON or base64. The native codec command
-also accepts and returns raw byte bodies.
+Native microphone capture produces 48 kHz mono `Float32` frames containing 960
+samples, or 20 ms, and retains only the newest unconsumed frame. Linux uses a
+PulseAudio record stream and Windows uses CPAL. The renderer long-pulls the
+latest sequence as a binary Tauri response, so slow encoding overwrites stale
+PCM at the native boundary instead of growing a capture queue. Muting changes
+the native session's enabled state, disabled captures contain silence and do not
+reopen the device.
 
 Each call owns a native Opus encoder/decoder session configured for:
 
@@ -569,84 +586,83 @@ waited 100 ms. For one missing packet it first asks Opus to recover FEC from the
 following packet. It otherwise invokes Opus packet-loss concealment for up to
 five consecutive gaps, then emits silence until a later sequence lets playout
 resynchronize. Duplicate, late, oversized, and excess buffered packets are
-dropped. The playback worklet holds at most five decoded frames.
+dropped.
 
-Capture, realtime encryption, native sending, encrypted receive, jitter,
-decode, and playback queues are therefore bounded to current audio rather than
-seconds of accumulated speech. Played, dropped, and destroyed sample buffers
-are wiped on a best-effort basis. Capture and playback audio contexts are reused
-across calls, suspended on cleanup, and closed when the calling service is
-destroyed.
+Decoded PCM normally goes to a selectable native output: PulseAudio on Linux or
+CPAL on Windows. That playback queue is capped at ten 20 ms frames and discards
+the oldest complete frame when full. If native playback cannot start, the
+renderer falls back to the receiver `AudioWorklet`, whose queue remains capped
+at five frames. Capture, realtime encryption, native sending, encrypted
+receive, jitter, decode, and playback are therefore bounded to current audio
+rather than seconds of accumulated speech. Played, dropped, and destroyed
+sample buffers are wiped on a best-effort basis.
 
 Code references:
 
 - `public/audio-worklet-processor.js`
 - `src-tauri/src/audio_codec.rs`
+- `src-tauri/src/microphone_capture.rs`
+- `src-tauri/src/audio_playback.rs`
 - `src/lib/tauri-bindings.ts`
 - `src/lib/transport/secure-calling-service.ts`
 
 ## Camera Video Pipeline
 
-A video call requests the microphone through the browser and opens the account's
-preferred camera through the native process, with the default camera selected
-when no preference is stored. Linux uses Video4Linux and Windows uses Media
-Foundation. Video calls require live audio and a working native camera session;
-denied permission or an unusable capture device fails media setup instead of
-changing the call type. Camera selection, ownership, frame pacing, and release
-do not depend on WebKit's camera or PipeWire capture path. The local preview and
-outgoing encoder share the same persistent canvas, so the camera has one native
-consumer and the preview cannot freeze a separate capture surface. Selecting the
-active camera does not reopen it. Disabling video closes the hardware stream and
-transmits black frames until the camera is enabled. No bundled or synthetic
-sample video is used.
+A video call opens the preferred microphone and camera through native sessions,
+falling back to each platform's default device when no preference is stored or
+the saved device is unavailable. Linux camera capture uses Video4Linux and
+Windows uses Media Foundation. A video call requires working audio and camera
+sessions, a denied permission or unusable camera fails setup instead of silently
+changing the call type. The local preview and outgoing encoder share the same
+persistent canvas, so the camera has one native consumer. Selecting the active
+camera does not reopen it. Disabling video releases the hardware stream and
+publishes low-rate black JPEG frames until it is enabled again. No bundled or
+synthetic sample video is used.
 
 Each visual stream owns one persistent WebCodecs `VideoEncoder` and one
 `VideoDecoder`. The fixed format is a raw VP8 elementary stream. The encoder
 draws the newest native camera image or live screen frame into one reused canvas,
 wraps that canvas in a short-lived `VideoFrame`, and submits it directly to VP8.
-The output callback copies only the compressed `EncodedVideoChunk`; it closes the
+The output callback copies only the compressed `EncodedVideoChunk`, it closes the
 input frame immediately. Raw RGBA pixels never cross the Tauri boundary. The
 decoder accepts the authenticated raw VP8 chunk directly and returns a bounded
 `VideoFrame` to the latest-frame renderer. Camera and screen streams use the same
 implementation but own separate codecs, queues, canvases, and stream keys.
 
 Visual calls require WebCodecs `VideoEncoder`, `VideoDecoder`, `VideoFrame`, and
-`EncodedVideoChunk` support for VP8, native JPEG image decoding for camera input,
-and media-frame callbacks for screen capture. They do not use canvas media
-streams, browser media recording, a container format, object URLs, hidden
-playback elements, or media-source buffers. Unsupported visual codec APIs fail
-that media operation; the transport does not substitute another codec or an
-audio-only call.
+`EncodedVideoChunk` support for VP8 plus `createImageBitmap()` JPEG decoding for
+native camera and Linux screen frames. They do not use canvas media streams,
+browser media recording, a container format, object URLs, or media-source
+buffers. The non-Linux screen fallback alone uses a hidden live video element.
+Unsupported visual codec APIs fail that media operation, the transport does not
+substitute another codec or downgrade a video call to audio.
 
-The user selects one quality ceiling for camera and screen media. Low is 640x360
-at 900 kbit/s, medium is 960x540 at 1.5 Mbit/s, and high is 1280x720 at 2.5
-Mbit/s. Every profile targets 60 FPS. Four adaptation levels apply dimension
-scales of 1.0, 0.85, 0.70, and 0.55 and bitrate scales of 1.0, 0.90, 0.80, and
-0.70, with a 500 kbit/s floor. They reduce dimensions and bitrate when
-codec output or send pressure remains high across two
-consecutive two-second measurement windows. A stressed window has more than 12
-percent send failures, average `encodeMs` above 40 ms, or average write time
-above 140 ms. Here `encodeMs` measures elapsed time from submitting a `VideoFrame`
-until its compressed VP8 output callback.
+Camera and screen encoding share one fixed ceiling: 1280x720, 2.5 Mbit/s, and a
+60 FPS target. The actual target never exceeds the native source's reported
+frame rate. Six adaptation levels apply dimension scales of 1.0, 0.75, 0.55,
+0.40, 0.30, and 0.23 and bitrate scales of 1.0, 0.72, 0.50, 0.32, 0.20, and
+0.12, with a 180 kbit/s floor. Camera starts at level 3 and screen at level 2 so
+the first frames do not begin at the most expensive setting.
 
-The first ten seconds are an adaptation warmup and do not lower the selected
-quality while the dedicated media lanes open. Ten healthy seconds with send
-failures below three percent, average `encodeMs` below 35 ms, and average write
-time below 90 ms raises quality one level until the selected ceiling returns.
-Superseded capture opportunities remain visible in telemetry but do not by
-themselves reduce resolution. The encoder preserves the source aspect ratio and
-never enlarges it beyond its native dimensions.
+Adaptation uses two-second windows and a 1.5-second warmup after startup or
+reconfiguration. Two stressed windows lower quality. Stress includes more than
+12 percent capture loss or send failures, a remote discontinuity, encode time
+above the smaller of 30 ms and 90 percent of the current frame budget, or write
+time above 140 ms. Recovery requires capture loss below eight percent, send
+failures below three percent, encode time below the smaller of 24 ms and 70
+percent of the frame budget, write time below 90 ms, and no remote
+discontinuity. A healthy level recovers after 15 seconds, a failed upgrade backs
+that interval off as far as 60 seconds. The encoder preserves source aspect
+ratio and never enlarges it beyond native dimensions.
 
-The camera worker requests the selected quality dimensions and 60 FPS, then uses
-the closest format exposed by the hardware. It retains exactly one compressed
-JPEG frame: a newer capture overwrites and wipes an unconsumed one. The renderer
-long-pulls only the newest sequence, validates a fixed binary header, decodes one
-image, draws it into the reused canvas, closes the image, and wipes the JPEG
-bytes before pulling again. A slow renderer therefore drops old camera frames at
-the native boundary instead of building a queue. Screen capture is paced from
-media-frame callbacks against the same monotonic 60 FPS clock. There is no
-per-frame raw-pixel IPC, JSON/base64 frame conversion, browser capture stream, or
-media-recorder callback.
+The camera worker requests 1280x720 at 60 FPS and selects the closest supported
+hardware format, preferring native MJPEG. It retains exactly one compressed JPEG
+frame: a newer capture overwrites and wipes an unconsumed one. The renderer
+long-pulls only the newest sequence and starts the next native read before
+decoding the current JPEG. It validates the binary header, decodes one image,
+draws it into the reused canvas, closes it, and wipes the JPEG bytes. A slow
+renderer therefore drops old native frames instead of building a queue. Raw
+RGBA, JSON/base64 frames, and media-recorder data never cross Tauri IPC.
 
 The VP8 encoder admits at most three queued input frames and retains at most
 twelve timestamp-only metadata records awaiting codec output. A submitted canvas
@@ -669,23 +685,20 @@ most eight frames may be queued or awaiting codec output, and the native decoder
 itself is kept below three queued inputs. A duplicate or backward sequence is
 discarded. A forward gap, malformed frame, codec failure, or queue overflow wipes
 dependent compressed data, replaces the decoder, and accepts nothing until a
-fresh keyframe arrives. Decoded `VideoFrame` objects do not enter a playback
-timeline: the renderer retains only the newest frame until the next animation
-callback and closes any superseded frame immediately. This removes media-buffer
-retention, playback-rate catch-up, append serialization, object-URL lifetime, and
-hidden-video state from call memory.
+fresh keyframe arrives. Decoded `VideoFrame` objects enter only a short
+source-timestamp render queue. The timer-paced renderer selects the newest due
+frame, drops superseded or stale frames, and closes every displayed or discarded
+frame. This removes media-buffer retention, playback-rate catch-up, append
+serialization, object-URL lifetime, and hidden-video state from call memory.
 
 The receiver rejects a frame whose authenticated dimensions disagree with the
-decoded VP8 frame or whose clock-corrected age exceeds the RTT-aware 1.2-to-2
-second playout limit. Telemetry reports compressed queue depth as buffered time,
-latest decoded-frame age as playback lag, a fixed playback rate of 1, decoder
-recovery count, decoder instance count, and codec-pressure or codec-error count.
-Camera capture uses a native latest-only slot and one sequential binary pull, so
-there can be no second in-flight decoded camera image and no unbounded producer
-queue. Screen capture uses `requestVideoFrameCallback()` to synchronize canvas
-reads to newly presented media frames. Its source element remains attached to a
-two-pixel, noninteractive compositor surface while required and is removed during
-teardown.
+decoded VP8 frame or whose clock-corrected age exceeds the RTT-aware 0.9-to-2
+second playout limit. The decoder watchdog resets a stalled codec, dependent
+delta frames remain blocked until a fresh keyframe, and authenticated control
+frames request that keyframe at most once every two seconds. Camera and native
+Linux screen capture both use latest-only slots and one prefetched binary pull,
+so neither source can create an unbounded producer queue. The browser screen
+fallback is timer-paced at its reported source rate.
 
 Each visual transport payload starts with this batch framing:
 
@@ -725,18 +738,14 @@ frame wipes dependent compressed data, creates a fresh bounded decoder, and
 requests an authenticated keyframe. Delta frames are rejected until that
 keyframe arrives. The sender marks its next input as a keyframe without creating
 a media container or restarting a playback timeline. Once clock-offset telemetry
-is available, the playout limit follows measured RTT between 1.2 and 2 seconds.
-The calling service renders only the newest decoded frame on an animation
-callback and closes every displayed, dropped, or superseded `VideoFrame`.
-Muting changes the microphone track's enabled state. Video toggling updates the
-native camera session and is available only for an active video call with a live
-video stream. A disabled native session releases the hardware capture stream.
-Camera switches replace the native capture session and restore the previous
-device if the selected device cannot start. Microphone switches acquire and
-install a replacement track before stopping the prior one. Every switch verifies
-its generation and call ownership. After full call cleanup releases local media,
-the next call waits up to the remainder of an 800 ms settle interval before
-reacquiring devices to reduce driver races.
+is available, the playout limit follows measured RTT between 0.9 and 2 seconds.
+The calling service renders only due, recent decoded frames and closes every
+displayed, dropped, or superseded `VideoFrame`. Camera, microphone, and speaker
+switches replace their native sessions, restore the previous or default device
+when appropriate, and verify call ownership after every asynchronous boundary.
+After full call cleanup releases local media, the next call waits up to the
+remainder of an 800 ms settle interval before reacquiring devices to reduce
+driver races.
 
 Code references:
 
@@ -744,47 +753,111 @@ Code references:
 - `src/lib/transport/secure-calling-service.ts`
 - `src-tauri/src/camera_capture.rs`
 - `src-tauri/src/commands/camera.rs`
-- `src/lib/database/screen-sharing-settings.ts`
 - `src/components/chat/calls/CallModal.tsx`
 
 ## Screen Sharing
 
-Screen sharing is allowed only in a connected authenticated P2P call. Native
-source enumeration accepts at most 128 exact screen
-or window entries, validates source IDs and names, removes duplicates, and never
-accepts an arbitrary source string from the UI.
+Screen sharing is allowed only in a connected authenticated P2P call. On Linux,
+the xdg-desktop-portal chooser is the source-selection boundary: the renderer
+does not supply or override the selected monitor or window. The portal returns
+one restricted PipeWire remote and stream node. The packaged client starts its
+app-private `gst-launch-1.0` and curated plugins with system plugin discovery
+disabled, then runs this bounded capture pipeline:
 
-Starting a share performs an authorization handshake before screen capture:
+```text
+pipewiresrc(portal fd/node)
+  -> latest-only queue
+  -> videorate(max 60 FPS)
+  -> I420 1280x720
+  -> JPEG quality 80
+  -> native latest-frame slot
+  -> binary Tauri pull
+  -> ImageBitmap/canvas
+  -> VP8 visual encoder
+```
 
-1. The sender creates a random lossy `call-screen` stream.
-2. It installs a ready waiter before sending `screen-share-start`, preventing an
+The native worker reports capture started only after its first complete JPEG,
+not after the chooser closes or GStreamer spawns. Other supported
+runtimes use `getDisplayMedia()`, attach its video track to a private capture
+element, and feed that element into the same VP8 pipeline.
+
+Starting a share performs capture and peer authorization in this order:
+
+1. Acquire the native portal session or fallback browser track and require its
+   first usable source frame.
+2. Create a random lossy `call-screen` stream.
+3. Install the ready waiter before sending `screen-share-start`, preventing an
    immediate response from racing past local state.
-3. The recipient accepts only an exact signal for the connected call and peer,
-   records the announced stream ID, and sends `screen-share-ready`.
-4. Unannounced or mismatched incoming screen streams are aborted.
-5. Only after the exact ready response arrives does the sender request native
-   screen capture and begin transmitting. The ready wait expires after 10
+4. The recipient accepts only an exact signal for the connected call and peer,
+   records the announced stream ID, installs the bounded receiver, and sends
+   `screen-share-ready`. Unannounced or mismatched streams are aborted.
+5. Start the local VP8 encoder and require its first prepared frame within ten
    seconds.
+6. Require the exact peer-ready response within ten seconds before marking the
+   share active.
 
 The recipient remembers at most 128 remote screen stream IDs per call, rejects
 duplicates, and replaces prior remote-share state in a bounded way. Stopping a
 share, ending the source track, or failing setup stops capture and closes the
 logical stream before sending a best-effort `screen-share-stop`.
 
-Screen frames use the persistent raw VP8 WebCodecs stream, adaptive 60 FPS
-encoder, freshness bounds, decoder validation, and latest-frame renderer used
-by camera video, with the announced random stream ID selecting its screen key.
-The shared visual-media preference is the low, medium, or high quality ceiling,
-there is no user-selectable frame-rate setting. The preference record is
-exact-schema, encrypted, authenticated, account-bound, rate-limited, and expires
-after 24 hours.
+Screen frames use the persistent raw VP8 WebCodecs stream, source-rate-capped 60
+FPS target, six-level adaptation, freshness bounds, decoder validation, and
+timer-paced renderer used by camera video. The announced random stream ID
+selects its screen key. There is no user-selectable screen quality or frame-rate
+setting.
 
 Code references:
 
 - `src/lib/transport/secure-calling-service.ts`
-- `src/lib/database/screen-sharing-settings.ts`
+- `src/lib/transport/call-video-codec.ts`
+- `src-tauri/src/screen_capture.rs`
 - `src/lib/types/screen-sharing-types.ts`
-- `src/components/chat/calls/ScreenSourceSelector.tsx`
+- `scripts/stage-gstreamer-plugins.cjs`
+
+### Screen-Share Diagnostics
+
+`CALL-DIAG` phases deliberately cross the portal, native worker, encoder,
+transport, and receiver boundaries. Read the first missing transition in this
+order:
+
+```text
+native-screen-portal-create-after
+  -> native-screen-portal-select-after
+  -> native-screen-portal-start-after
+  -> native-screen-pipewire-ready
+  -> native-screen-gstreamer-start-after
+  -> native-screen-first-frame / native-screen-capture-window
+  -> screen.capture-request-after
+  -> screen.transport-created
+  -> screen.announcement-sent
+  -> screen.encoder-started / screen.local-first-frame
+  -> screen.peer-ready / screen.ready
+  -> remote screen first-frame pipeline event
+```
+
+If the portal and PipeWire phases succeed but every five-second native capture
+window reports zero frames, the failure is before WebCodecs, encryption, media
+lanes, and remote rendering. A `Failed to set pipeline to PAUSED` result after
+about 30 seconds is PipeWire's own source-activation timeout. Qor does not wait
+for that timeout: it validates the SPA factories before spawning GStreamer and
+stops a child that produces no first frame within eight seconds. The
+GStreamer/PipeWire state trace then distinguishes a remote/node connection that
+remains in `CONNECTING` from stream-format negotiation that never reaches a
+usable state. Conversely, nonzero native source frames with zero transmit or
+receive counters move the fault boundary into the encoder or transport stages.
+
+The private SPA root must contain both its `support` modules and
+`videoconvert/libspa-videoconvert.so`, PipeWire's `client.conf` resolves
+`video.convert.*` through that adapter when `pipewiresrc` creates `video.adapt`.
+Because Qor overrides `SPA_PLUGIN_DIR` instead of extending the host directory,
+the capture process cannot fall back to a system copy. Staging, both package
+validators, AppImage cache reuse, development launch, and native startup now
+reject an incomplete private root. `PIPEWIRE_DEBUG` defaults to error-level `1`
+for the capture child, level `4` exposes full SPA factory and stream-state
+tracing when needed. The private root also carries
+`audioconvert/libspa-audioconvert.so` so it satisfies the standard client
+configuration rather than representing only its support subset.
 
 ## Runtime Call Telemetry
 
@@ -806,17 +879,24 @@ and cleanup emits a final sample. It contains:
   transport state, and time since transport activity,
 - ready, active, selected, secondary, and standby audio lanes with per-lane RTT,
 - the distinct visual lane and current visual adaptation level, dimensions,
-  bitrate, and 60 FPS target,
-- audio, video, and screen transmit and validated-arrival rates and byte rates,
+  bitrate, actual source-capped FPS target, encoded bitrate, adaptation health,
+  capture-loss and send-failure ratios, and recovery countdown,
+- event-loop lag distribution and document visibility state,
+- audio, video, and screen source, transmit, and validated-arrival rates and byte
+  rates, including source-frame losses,
 - decoder-admitted, decoded, and visibly rendered visual FPS,
-- encode, write, decode, capture-to-send, and clock-corrected
-  capture-to-render duration, arrival gap, and smoothed arrival jitter,
+- native pull, native source age, JPEG decode, frame preparation, VP8 encode,
+  write, VP8 decode, capture-to-send, and clock-corrected capture-to-render
+  duration, arrival gap, and smoothed arrival jitter,
 - capture drops, send errors, receive errors, render drops, sequence
   discontinuities, key-frame requests, received key-frame requests, and lifetime
   totals,
-- camera and screen compressed queue duration, latest decoded-frame age, fixed
-  playback rate, decoder recovery count, decoder instance count, and codec
-  pressure or error count.
+- current encoder queues, pending work, keyframe/restart state, last-progress
+  ages, failures, and delivery invalidations,
+- decoder queues, pending work, watchdog resets, stale-stage drops, pipeline
+  resets, last-progress ages, and waiting-for-keyframe state,
+- renderer queue depth, scheduled delay, replaced frames, buffering state,
+  canvas size, and last callback/render ages.
 
 The byte counters measure plaintext codec frames at the calling-service
 boundary. For audio, frame rates count individual Opus packets even when several
@@ -838,9 +918,10 @@ Cleanup first invalidates outstanding media and device generations. It then:
 
 - cancels pending Signal-session and screen-ready waits,
 - removes stream listeners and detaches capture/render media elements,
-- stops the local microphone and screen tracks, the native camera session, and
-  releases local and remote render surfaces,
-- destroys call audio worklet nodes and suspends shared audio contexts,
+- stops native microphone, camera, speaker, and Linux screen sessions plus any
+  fallback browser screen track, and releases local and remote render surfaces,
+- destroys fallback call-audio worklet nodes and suspends its shared audio
+  context,
 - stops the native Opus session and closes every visual encoder and decoder,
 - closes or aborts audio, video, telemetry, and screen logical streams,
 - wipes call-owned media scratch buffers,
@@ -898,12 +979,13 @@ Code references:
 ## Memory And Security Boundaries
 
 Readable live media necessarily exists while a call is active. Microphone audio
-appears as `Float32Array` samples. Camera images cross Tauri as bounded JPEG
-bytes, are decoded one at a time, and share a reused canvas with the WebCodecs
-VP8 encoder. Screen frames enter the same VP8 path from their capture element.
-Received media uses bounded compressed frames, one `VideoDecoder`, short-lived
-decoded `VideoFrame` objects, and visible render canvases. Raw visual pixels do
-not cross Tauri IPC.
+crosses Tauri as bounded `Float32Array` frames. Camera images and native Linux
+screen images cross Tauri as bounded JPEG bytes, are decoded one at a time, and
+share reused canvases with their WebCodecs VP8 encoders. The non-Linux screen
+fallback instead draws from its capture element. Received media uses bounded
+compressed frames, one `VideoDecoder` per visual stream, short-lived decoded
+`VideoFrame` objects, and visible render canvases. Raw visual pixels do not cross
+Tauri IPC.
 Scratch arrays are bounded and wiped where possible, but canvas backing stores,
 decoded image allocations, transferred buffers, operating-system capture
 buffers, and driver memory are not under JavaScript's complete control.

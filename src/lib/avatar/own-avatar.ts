@@ -105,30 +105,3 @@ export function getOwnAvatarHash(state: AvatarSystemState): string | null {
 export function isOwnAvatarDefault(state: AvatarSystemState): boolean {
     return !!state.ownAvatar?.isDefault;
 }
-
-// Set share with others
-export async function setShareWithOthers(
-    state: AvatarSystemState,
-    share: boolean,
-    isCurrent: () => boolean
-): Promise<void> {
-    const secureDB = state.secureDB;
-    if (!secureDB || !isCurrent()) throw new Error('Not initialized');
-    if (state.settings.shareWithOthers === share) return;
-
-    const nextSettings = { shareWithOthers: share, lastUpdated: Date.now() };
-    await secureDB.store(STORAGE_KEYS.PROFILE_SETTINGS, STORAGE_KEYS.PROFILE_SETTINGS_RECORD, nextSettings);
-    if (!isCurrent() || state.secureDB !== secureDB) {
-        throw new Error('Profile settings account changed during save');
-    }
-    state.settings = nextSettings;
-
-    window.dispatchEvent(new CustomEvent(EventType.PROFILE_SETTINGS_UPDATED, {
-        detail: { shareWithOthers: share }
-    }));
-}
-
-// Get share with others
-export function getShareWithOthers(state: AvatarSystemState): boolean {
-    return state.settings.shareWithOthers;
-}

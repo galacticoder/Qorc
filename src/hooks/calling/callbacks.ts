@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 export interface CallbackRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
   localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
+  localScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   everConnectedRef: React.RefObject<Set<string>>;
@@ -20,6 +21,7 @@ export interface CallbackSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<CallState | null>>;
   setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
   setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
+  setLocalScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
 }
@@ -210,6 +212,13 @@ export const setupStreamCallbacks = (
     unstable_batchedUpdates(() => {
       refs.localVideoCanvasRef.current = canvas;
       setters.setLocalVideoCanvas(canvas);
+    });
+  });
+
+  service.onLocalScreenCanvas((canvas) => {
+    unstable_batchedUpdates(() => {
+      refs.localScreenCanvasRef.current = canvas;
+      setters.setLocalScreenCanvas(canvas);
     });
   });
 

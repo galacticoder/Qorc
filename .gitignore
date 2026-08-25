@@ -105,6 +105,8 @@ logs/
 scripts/generate-tauri-icons.py
 
 src-tauri/binaries/
+src-tauri/resources/webkitgtk/
+src-tauri/resources/webkitgtk-bundle/
 
 server/test/
 workers/ypir/tests/

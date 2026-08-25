@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, memo } from 'react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown, Volume2 } from 'lucide-react';
 import type { CallState } from '../../../lib/transport/secure-calling-service';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../../ui/UserAvatar';
@@ -8,15 +8,14 @@ import { cn } from '../../../lib/utils/shared-utils';
 import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 import { encryptedStorage } from '../../../lib/database/encrypted-storage';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
-import type { ScreenSource } from '../../../lib/types/screen-sharing-types';
-import { nativeCamera } from '../../../lib/tauri-bindings';
-
-const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
+import { nativeCamera, nativeMicrophone } from '../../../lib/tauri-bindings';
+import { getDefaultAvatarColor } from '../../../lib/utils/avatar-utils';
 
 interface CallModalProps {
   readonly call: CallState | null;
   readonly localStream: MediaStream | null;
   readonly localVideoCanvas: HTMLCanvasElement | null;
+  readonly localScreenCanvas: HTMLCanvasElement | null;
   readonly remoteVideoCanvas: HTMLCanvasElement | null;
   readonly remoteScreenCanvas?: HTMLCanvasElement | null;
   readonly onAnswer: () => void | Promise<void>;
@@ -26,10 +25,11 @@ interface CallModalProps {
   readonly onToggleVideo: () => boolean | Promise<boolean>;
   readonly onSwitchCamera: (deviceId: string) => Promise<void>;
   readonly onSwitchMicrophone: (deviceId: string) => Promise<void>;
-  readonly onStartScreenShare?: (selectedSource?: ScreenSource) => Promise<void>;
+  readonly onSwitchSpeaker: (deviceId: string) => Promise<void>;
+  readonly onStartScreenShare?: () => Promise<void>;
   readonly onStopScreenShare?: () => Promise<void>;
-  readonly onGetAvailableScreenSources?: () => Promise<readonly ScreenSource[]>;
   readonly isScreenSharing?: boolean;
+  readonly isAttached?: boolean;
 }
 
 const CanvasDisplay = memo(({
@@ -61,94 +61,231 @@ const CanvasDisplay = memo(({
 });
 CanvasDisplay.displayName = 'CanvasDisplay';
 
-// PIP Component
-const DraggablePip = ({
-  id,
+type PipCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+type StageSource = 'screen' | 'remote-video' | 'local-video';
+type PipSource = 'screen' | 'remote-cam' | 'local';
+
+const PIP_CORNER_CLASSES: Record<PipCorner, string> = {
+  'top-left': 'left-3 top-3',
+  'top-right': 'right-3 top-3',
+  'bottom-left': 'bottom-3 left-3',
+  'bottom-right': 'bottom-3 right-3'
+};
+
+const DockedPip = ({
   children,
-  initialPosition,
-  onPositionChange,
-  onClick
+  corner,
+  label,
+  stageRef,
+  onCornerChange,
+  onActivate,
+  large = false
 }: {
-  id: string;
   children: React.ReactNode;
-  initialPosition: { x: number; y: number };
-  onPositionChange?: (id: string, pos: { x: number; y: number }) => void;
-  onClick?: () => void;
+  corner: PipCorner;
+  label?: string;
+  stageRef: React.RefObject<HTMLDivElement>;
+  onCornerChange: (corner: PipCorner) => void;
+  onActivate: () => void;
+  large?: boolean;
 }) => {
-  const [position, setPosition] = useState(initialPosition);
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStartRef = useRef<{ x: number, y: number } | null>(null);
-  const initialPosRef = useRef<{ x: number, y: number } | null>(null);
-  const hasMovedRef = useRef(false);
+  const pointerStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
 
-  useEffect(() => {
-    setPosition(initialPosition);
-  }, [initialPosition.x, initialPosition.y]);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    setIsDragging(true);
-    hasMovedRef.current = false;
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
-    initialPosRef.current = { x: position.x, y: position.y };
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointerStartRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    event.stopPropagation();
   };
 
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging || !dragStartRef.current || !initialPosRef.current) return;
-
-      const dx = e.clientX - dragStartRef.current.x;
-      const dy = e.clientY - dragStartRef.current.y;
-
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMovedRef.current = true;
-
-      const newPos = {
-        x: initialPosRef.current.x + dx,
-        y: initialPosRef.current.y + dy
-      };
-
-      setPosition(newPos);
-      onPositionChange?.(id, newPos);
-    };
-
-    const handleMouseUp = () => {
-      setIsDragging(false);
-    };
-
-    if (isDragging) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
+  const finishPointerInteraction = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = pointerStartRef.current;
+    pointerStartRef.current = null;
+    if (!start || start.pointerId !== event.pointerId) return;
+    const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4;
+    const stage = stageRef.current;
+    if (!moved) {
+      onActivate();
+      return;
     }
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isDragging, id, onPositionChange]);
+    if (!stage) return;
+    const bounds = stage.getBoundingClientRect();
+    const vertical = event.clientY < bounds.top + bounds.height / 2 ? 'top' : 'bottom';
+    const horizontal = event.clientX < bounds.left + bounds.width / 2 ? 'left' : 'right';
+    onCornerChange(`${vertical}-${horizontal}` as PipCorner);
+  };
+
+  const cancelPointerInteraction = () => {
+    pointerStartRef.current = null;
+  };
 
   return (
     <div
       className={cn(
-        "absolute w-40 aspect-video bg-card rounded-lg overflow-hidden border border-border shadow-lg transition-transform hover:scale-105 z-20 cursor-move",
-        isDragging && "scale-105 shadow-xl ring-2 ring-primary/50"
+        'absolute z-20 aspect-video touch-none cursor-pointer overflow-hidden rounded-xl bg-card',
+        large ? 'w-44 sm:w-52' : 'w-28 sm:w-32',
+        PIP_CORNER_CLASSES[corner]
       )}
-      style={{ left: position.x, top: position.y }}
-      onMouseDown={handleMouseDown}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (!hasMovedRef.current && onClick) onClick();
-      }}
-      title="Drag to move, click to maximize"
+      onPointerDown={handlePointerDown}
+      onPointerUp={finishPointerInteraction}
+      onPointerCancel={cancelPointerInteraction}
+      title="Click to make main or drag to another corner"
     >
       {children}
+      {label && (
+        <span className="pointer-events-none absolute bottom-1.5 left-1.5 rounded-md bg-black/45 px-1.5 py-0.5 text-[10px] font-medium text-white backdrop-blur-md">
+          {label}
+        </span>
+      )}
     </div>
   );
 };
+
+type DeviceOption = { deviceId: string; label: string };
+
+const MediaDeviceControl = ({
+  kind,
+  enabled,
+  devices,
+  selectedDeviceId,
+  open,
+  onOpenChange,
+  onToggle,
+  onSelect
+}: {
+  kind: 'microphone' | 'camera';
+  enabled: boolean;
+  devices: DeviceOption[];
+  selectedDeviceId?: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onToggle: () => void | Promise<void>;
+  onSelect: (deviceId: string) => void | Promise<void>;
+}) => {
+  const isMicrophone = kind === 'microphone';
+  const toggleTitle = isMicrophone
+    ? enabled ? 'Mute' : 'Unmute'
+    : enabled ? 'Turn Off Video' : 'Turn On Video';
+  const pickerTitle = isMicrophone ? 'Choose microphone' : 'Choose camera';
+
+  return (
+    <div className="relative h-10 w-11">
+      <button
+        type="button"
+        onClick={() => void onToggle()}
+        className={cn(
+          'relative flex h-full w-full cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55',
+          !enabled && 'bg-red-600/75 hover:bg-red-500/85'
+        )}
+        title={toggleTitle}
+      >
+        {isMicrophone
+          ? enabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />
+          : enabled ? <Video className="h-4 w-4" /> : <VideoOff className="h-4 w-4" />}
+      </button>
+      <Popover open={open} onOpenChange={onOpenChange}>
+        <PopoverTrigger asChild disabled={devices.length === 0}>
+          <button
+            type="button"
+            className={cn(
+              'absolute bottom-0.5 right-0.5 flex cursor-pointer items-center justify-center rounded-md bg-transparent text-white/70 hover:text-white',
+              'h-4 w-4',
+              devices.length === 0 && 'opacity-40'
+            )}
+            title={pickerTitle}
+          >
+            <ChevronDown className="h-2.5 w-2.5" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent side="top" align="center" className="w-64 select-none p-1 [&_button]:cursor-pointer">
+          <div className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {isMicrophone ? 'Microphone' : 'Camera'}
+          </div>
+          {devices.map(device => (
+            <button
+              type="button"
+              key={device.deviceId}
+              className={cn(
+                'w-full cursor-pointer truncate rounded px-2 py-2 text-left text-sm hover:bg-muted',
+                device.deviceId === selectedDeviceId && 'bg-primary/10 text-primary'
+              )}
+              onClick={() => {
+                void onSelect(device.deviceId);
+                onOpenChange(false);
+              }}
+            >
+              {device.label || `${isMicrophone ? 'Mic' : 'Camera'} ${device.deviceId.slice(0, 5)}`}
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+};
+
+const OutputDeviceControl = ({
+  devices,
+  selectedDeviceId,
+  open,
+  onOpenChange,
+  onSelect
+}: {
+  devices: DeviceOption[];
+  selectedDeviceId?: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (deviceId: string) => void | Promise<void>;
+}) => (
+  <div className="relative h-10 w-11">
+    <button
+      type="button"
+      onClick={() => onOpenChange(true)}
+      className="relative flex h-full w-full cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55"
+      title="Choose speaker"
+    >
+      <Volume2 className="h-4 w-4" />
+    </button>
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild disabled={devices.length === 0}>
+        <button
+          type="button"
+          className={cn(
+            'absolute bottom-0.5 right-0.5 flex h-4 w-4 cursor-pointer items-center justify-center rounded-md bg-transparent text-white/70 hover:text-white',
+            devices.length === 0 && 'opacity-40'
+          )}
+          title="Choose speaker"
+        >
+          <ChevronDown className="h-2.5 w-2.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="top" align="center" className="w-64 select-none p-1 [&_button]:cursor-pointer">
+        <div className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Speaker</div>
+        {devices.map(device => (
+          <button
+            type="button"
+            key={device.deviceId}
+            className={cn(
+              'w-full cursor-pointer truncate rounded px-2 py-2 text-left text-sm hover:bg-muted',
+              device.deviceId === selectedDeviceId && 'bg-primary/10 text-primary'
+            )}
+            onClick={() => {
+              void onSelect(device.deviceId);
+              onOpenChange(false);
+            }}
+          >
+            {device.label || `Speaker ${device.deviceId.slice(0, 5)}`}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  </div>
+);
 
 export const CallModal: React.FC<CallModalProps> = memo(({
   call,
   localStream,
   localVideoCanvas,
+  localScreenCanvas,
   remoteVideoCanvas,
   remoteScreenCanvas,
   onAnswer,
@@ -158,56 +295,41 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   onToggleVideo,
   onSwitchCamera,
   onSwitchMicrophone,
+  onSwitchSpeaker,
   onStartScreenShare,
   onStopScreenShare,
-  onGetAvailableScreenSources,
-  isScreenSharing = false
+  isScreenSharing = false,
+  isAttached = false
 }) => {
-  const [isMinimized, setIsMinimized] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [micLevel, setMicLevel] = useState(0);
   const [callDuration, setCallDuration] = useState(0);
   const [isExpandedScreenShare, setIsExpandedScreenShare] = useState(false);
-  const [focusedView, setFocusedView] = useState<'remote-screen' | 'remote-cam' | 'local' | null>(null);
-
-  const [pipPositions, setPipPositions] = useState<{ [key: number]: { x: number, y: number, isInitialized?: boolean } }>({
-    0: { x: 20, y: 20, isInitialized: false },
-    1: { x: 20, y: 140, isInitialized: false }
+  const [mainStageSource, setMainStageSource] = useState<StageSource>('remote-video');
+  const [pipCorners, setPipCorners] = useState<Record<PipSource, PipCorner>>({
+    local: 'bottom-right',
+    'remote-cam': 'top-right',
+    screen: 'top-left'
   });
-
+  const sharedScreenWasAvailableRef = useRef(false);
   const mainStageRef = useRef<HTMLDivElement>(null);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [isScreenShareStarting, setIsScreenShareStarting] = useState(false);
+  const [devicePicker, setDevicePicker] = useState<'microphone' | 'camera' | 'speaker' | null>(null);
+  const controlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    if (mainStageRef.current && !pipPositions[0].isInitialized) {
-      const { clientWidth, clientHeight } = mainStageRef.current;
-      setPipPositions({
-        0: { x: clientWidth - 180, y: clientHeight - 110, isInitialized: true },
-        1: { x: clientWidth - 180, y: 20, isInitialized: true }
-      });
-    }
-  }, [mainStageRef.current, pipPositions]);
-
-  const updatePipPosition = useCallback((slotIndex: number | string, pos: { x: number, y: number }) => {
-    setPipPositions(prev => ({
-      ...prev,
-      [slotIndex]: { ...pos, isInitialized: true }
-    }));
-  }, []);
-
-  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [micDevices, setMicDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
+  const [speakerDevices, setSpeakerDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [videoDevices, setVideoDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
-  const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
-  const [hasOpenedScreenShare, setHasOpenedScreenShare] = useState(false);
-
-  useEffect(() => {
-    if (showScreenSourceSelector) {
-      setHasOpenedScreenShare(true);
-    }
-  }, [showScreenSourceSelector]);
-
+  const [preferredSpeakerId, setPreferredSpeakerId] = useState<string | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const [attachmentBounds, setAttachmentBounds] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   const [position, setPosition] = useState<{ x: number, bottom: number }>({
     x: 20,
@@ -217,7 +339,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ x: number, y: number } | null>(null);
   const initialPosRef = useRef<{ x: number, bottom: number } | null>(null);
-  const hasDraggedRef = useRef(false);
 
   const displayPeerName = useDisplayUsername({
     username: call?.peer || ''
@@ -227,6 +348,68 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const isIncoming = call?.direction === 'incoming';
   const isRinging = call?.status === 'ringing';
   const isVideoCall = call?.type === 'video';
+  const callStatusText = isIncoming && isRinging
+    ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...`
+    : isConnected
+      ? formatClockDurationSeconds(callDuration)
+      : 'Calling...';
+
+  const revealControls = useCallback(() => {
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    setControlsVisible(true);
+    if (devicePicker === null) {
+      controlsTimerRef.current = setTimeout(() => setControlsVisible(false), 5000);
+    }
+  }, [devicePicker]);
+
+  const holdControls = useCallback(() => {
+    if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    setControlsVisible(true);
+  }, []);
+
+  const handleStageMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest('[data-call-overlay]')) return;
+    revealControls();
+  };
+
+  useEffect(() => {
+    revealControls();
+    return () => {
+      if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
+    };
+  }, [call?.id, revealControls]);
+
+  useEffect(() => {
+    setPipCorners({ local: 'bottom-right', 'remote-cam': 'top-right', screen: 'top-left' });
+    setMainStageSource('remote-video');
+    setIsScreenShareStarting(false);
+    sharedScreenWasAvailableRef.current = false;
+    if (call?.type !== 'video') setIsExpandedScreenShare(false);
+  }, [call?.id, call?.type]);
+
+  useLayoutEffect(() => {
+    if (!isAttached) return;
+    const pane = document.querySelector<HTMLElement>('.qor-chat-pane');
+    if (!pane) return;
+    const updateBounds = () => {
+      const bounds = pane.getBoundingClientRect();
+      setAttachmentBounds({
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: Math.min(640, Math.max(340, bounds.height * 0.62))
+      });
+    };
+    updateBounds();
+    const observer = new ResizeObserver(updateBounds);
+    observer.observe(pane);
+    window.addEventListener('resize', updateBounds);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateBounds);
+    };
+  }, [isAttached]);
+
   const answerCall = useCallback(() => {
     void Promise.resolve(onAnswer()).catch(error => {
       console.error('Failed to answer call:', error);
@@ -234,26 +417,29 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, [onAnswer]);
 
   useEffect(() => {
-    if (isExpandedScreenShare && !remoteScreenCanvas && !isScreenSharing) {
+    if (isExpandedScreenShare && (!isVideoCall || (!remoteScreenCanvas && !isScreenSharing))) {
       setIsExpandedScreenShare(false);
     }
-  }, [isExpandedScreenShare, remoteScreenCanvas, isScreenSharing]);
+  }, [isExpandedScreenShare, isVideoCall, remoteScreenCanvas, isScreenSharing]);
 
   useEffect(() => {
-    if (!localStream || !navigator.mediaDevices?.enumerateDevices) {
+    if (!localStream) {
       setMicDevices([]);
+      setSpeakerDevices([]);
       setVideoDevices([]);
       return;
     }
     let cancelled = false;
     const loadDevices = async () => {
       try {
-        const [devices, cameras] = await Promise.all([
-          navigator.mediaDevices.enumerateDevices(),
+        const [microphones, speakers, cameras] = await Promise.all([
+          nativeMicrophone.devices(),
+          nativeMicrophone.outputDevices(),
           isVideoCall ? nativeCamera.devices() : Promise.resolve([]),
         ]);
         if (cancelled) return;
-        setMicDevices(devices.filter(d => d.kind === 'audioinput'));
+        setMicDevices(microphones.map(microphone => ({ deviceId: microphone.device_id, label: microphone.label })));
+        setSpeakerDevices(speakers.map(speaker => ({ deviceId: speaker.device_id, label: speaker.label })));
         setVideoDevices(cameras.map(camera => ({ deviceId: camera.device_id, label: camera.label })));
 
         // Load preferred camera
@@ -261,16 +447,21 @@ export const CallModal: React.FC<CallModalProps> = memo(({
           const saved = await encryptedStorage.getItem(STORAGE_KEYS.PREFERRED_CAMERA);
           if (saved && typeof saved === 'string') setPreferredCameraId(saved);
         } catch { }
+        try {
+          const storedSettings = await encryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
+          const parsed = storedSettings ? JSON.parse(storedSettings) : null;
+          if (parsed && typeof parsed.preferredSpeakerId === 'string') {
+            setPreferredSpeakerId(parsed.preferredSpeakerId);
+          }
+        } catch { }
       } catch (e) {
         if (cancelled) return;
         console.error("Device enumeration failed", e);
       }
     };
     void loadDevices();
-    navigator.mediaDevices.addEventListener('devicechange', loadDevices);
     return () => {
       cancelled = true;
-      navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
     };
   }, [localStream, isVideoCall]);
 
@@ -281,50 +472,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
     const audioTrack = localStream.getAudioTracks()[0];
     setIsVideoEnabled(isVideoCall);
-    if (audioTrack) setIsMuted(!audioTrack.enabled);
+    setIsMuted(audioTrack ? !audioTrack.enabled : false);
   }, [localStream, isVideoCall, call?.id]);
-
-  useEffect(() => {
-    if (!localStream) { setMicLevel(0); return; }
-    let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-    let audioContext: AudioContext | null = null;
-    let source: MediaStreamAudioSourceNode | null = null;
-    let analyser: AnalyserNode | null = null;
-
-    const analyze = async () => {
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (!AudioCtx) { setMicLevel(0); return; }
-        audioContext = new AudioCtx();
-        if (audioContext.state === 'suspended') await audioContext.resume();
-        if (cancelled) return;
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        source = audioContext.createMediaStreamSource(localStream);
-        source.connect(analyser);
-        const data = new Uint8Array(analyser.frequencyBinCount);
-
-        const sample = () => {
-          if (!analyser) return;
-          analyser.getByteFrequencyData(data);
-          const avg = data.reduce((a, b) => a + b, 0) / data.length;
-          setMicLevel(avg / 128);
-        };
-        sample();
-        intervalId = setInterval(sample, 100);
-      } catch { setMicLevel(0); }
-    };
-    void analyze();
-
-    return () => {
-      cancelled = true;
-      if (intervalId) clearInterval(intervalId);
-      try { source?.disconnect(); } catch { }
-      try { analyser?.disconnect(); } catch { }
-      try { void audioContext?.close().catch(() => { }); } catch { }
-    };
-  }, [localStream]);
 
   useEffect(() => {
     if (isConnected && call?.startTime) {
@@ -338,7 +487,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   const handleDragStart = (e: React.MouseEvent) => {
     setIsDragging(true);
-    hasDraggedRef.current = false;
     dragStartRef.current = { x: e.clientX, y: e.clientY };
     initialPosRef.current = { x: position.x, bottom: position.bottom };
   };
@@ -349,13 +497,12 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       const dx = e.clientX - dragStartRef.current.x;
       const dy = e.clientY - dragStartRef.current.y;
 
-      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-        hasDraggedRef.current = true;
-      }
-
+      const bounds = wrapperRef.current?.getBoundingClientRect();
+      const width = bounds?.width ?? 320;
+      const height = bounds?.height ?? 80;
       setPosition({
-        x: Math.max(0, Math.min(window.innerWidth - 320, initialPosRef.current.x + dx)),
-        bottom: Math.max(0, Math.min(window.innerHeight - 80, initialPosRef.current.bottom - dy))
+        x: Math.max(0, Math.min(window.innerWidth - width, initialPosRef.current.x + dx)),
+        bottom: Math.max(0, Math.min(window.innerHeight - height, initialPosRef.current.bottom - dy))
       });
     };
     const handleMouseUp = () => {
@@ -389,383 +536,352 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
   };
 
+  const handleSpeakerChange = async (deviceId: string) => {
+    try {
+      await onSwitchSpeaker(deviceId);
+      setPreferredSpeakerId(deviceId);
+    } catch (err) {
+      console.error('Failed to switch speaker', err);
+    }
+  };
+
+  const toggleMute = async () => {
+    try {
+      setIsMuted(await onToggleMute());
+    } catch (error) {
+      console.error('Failed to toggle microphone', error);
+    }
+  };
+
+  const toggleVideo = async () => {
+    try {
+      setIsVideoEnabled(await onToggleVideo());
+    } catch (error) {
+      console.error('Failed to toggle camera', error);
+    }
+  };
+
+  const dockPip = (type: PipSource, corner: PipCorner) => {
+    setPipCorners(previous => {
+      const occupiedBy = (Object.keys(previous) as PipSource[])
+        .find(source => source !== type && previous[source] === corner);
+      if (!occupiedBy) return { ...previous, [type]: corner };
+      return { ...previous, [type]: corner, [occupiedBy]: previous[type] };
+    });
+  };
+
   const toggleScreenShare = async () => {
+    if (isScreenShareStarting) return;
+    if (!isScreenSharing) setIsScreenShareStarting(true);
     try {
       if (isScreenSharing) {
         await onStopScreenShare?.();
       } else {
-        if (onGetAvailableScreenSources) {
-          setShowScreenSourceSelector(true);
-        } else {
-          await onStartScreenShare?.();
-        }
+        await onStartScreenShare?.();
       }
     } catch (error: any) {
       console.error('Screen share toggle failed:', error);
-      alert(`Screen share error: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsScreenShareStarting(false);
     }
   };
 
+  const sharedScreenCanvas = remoteScreenCanvas ?? (isScreenSharing ? localScreenCanvas : null);
+  const hasSharedScreen = Boolean(sharedScreenCanvas);
+  const hasRemoteVideo = Boolean(remoteVideoCanvas);
+  const showLocalPreview = isVideoCall && Boolean(localVideoCanvas || localStream);
+  useEffect(() => {
+    const screenBecameAvailable = hasSharedScreen && !sharedScreenWasAvailableRef.current;
+    sharedScreenWasAvailableRef.current = hasSharedScreen;
+    if (screenBecameAvailable) {
+      setMainStageSource('screen');
+      return;
+    }
+    setMainStageSource(previous => {
+      if (previous === 'screen' && !hasSharedScreen) {
+        return hasRemoteVideo ? 'remote-video' : 'local-video';
+      }
+      if (previous === 'local-video' && !showLocalPreview) {
+        return hasSharedScreen ? 'screen' : 'remote-video';
+      }
+      return previous;
+    });
+  }, [hasSharedScreen, hasRemoteVideo, showLocalPreview]);
+
   if (!call) return null;
 
-  if (isMinimized) {
-    return (
-      <div
-        className="fixed z-50 bg-background border border-border rounded-lg shadow-xl p-3 flex items-center gap-3 select-none cursor-move"
-        style={{
-          left: position.x,
-          bottom: position.bottom,
-          width: 320
-        }}
-        onMouseDown={handleDragStart}
-      >
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <UserAvatar username={call.peer || ''} size="xs" />
-            <span className="font-medium truncate text-sm">{displayPeerName}</span>
-          </div>
-          <div className="text-xs text-muted-foreground mt-0.5">
-            {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatClockDurationSeconds(callDuration) : 'Calling...'}
-          </div>
-        </div>
-        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
-          {isIncoming && isRinging ? (
-            <>
-              <button
-                onClick={answerCall}
-                className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors"
-                title="Answer"
-              >
-                <Phone className="w-4 h-4" />
-              </button>
-              <button
-                onClick={onDecline}
-                className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors"
-                title="Decline"
-              >
-                <PhoneOff className="w-4 h-4" />
-              </button>
-            </>
-          ) : !isConnected ? (
-            <button onClick={onEndCall} className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors" title="Cancel">
-              <PhoneOff className="w-4 h-4" />
-            </button>
-          ) : (
-            <>
-              <button
-                onClick={async () => {
-                  const newState = await onToggleMute();
-                  setIsMuted(newState);
-                }}
-                className={cn("p-1.5 hover:bg-secondary rounded-md transition-colors", isMuted && "text-destructive bg-destructive/10")}
-                title={isMuted ? "Unmute" : "Mute"}
-              >
-                {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              </button>
-              {isVideoCall && (
-                <button
-                  onClick={async () => {
-                    const enabled = await onToggleVideo();
-                    setIsVideoEnabled(enabled);
-                  }}
-                  className={cn("p-1.5 hover:bg-secondary rounded-md transition-colors", !isVideoEnabled && "text-destructive bg-destructive/10")}
-                  title={isVideoEnabled ? "Turn Off Video" : "Turn On Video"}
-                >
-                  {!isVideoEnabled ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
-                </button>
+  const glassControl = 'flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55';
+  const peerAvatarColor = getDefaultAvatarColor(call.peer || '');
+  const avatarStageStyle: React.CSSProperties = {
+    backgroundColor: peerAvatarColor,
+    backgroundImage: `radial-gradient(circle at center, color-mix(in srgb, ${peerAvatarColor} 78%, white) 0%, ${peerAvatarColor} 68%)`,
+    backgroundPosition: 'center',
+    backgroundRepeat: 'no-repeat',
+    backgroundSize: '190% 190%'
+  };
 
-              )}
-              {/* Separator */}
-              {isVideoCall && (
-                <div className="h-4 w-[1px] bg-gradient-to-b from-transparent via-black/60 to-transparent dark:via-white/80 mx-1 opacity-90" />
-              )}
-
-              <button onClick={() => setIsMinimized(false)} className="p-1.5 hover:bg-secondary rounded-md transition-colors" title="Maximize">
-                <Maximize2 className="w-4 h-4" />
-              </button>
-              <button onClick={onEndCall} className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors" title="End Call">
-                <PhoneOff className="w-4 h-4" />
-              </button>
-            </>
-          )}
-        </div>
-      </div >
-    );
-  }
+  const activeMainStageSource = mainStageSource === 'screen' && !hasSharedScreen
+    ? hasRemoteVideo ? 'remote-video' : 'local-video'
+    : mainStageSource === 'local-video' && !showLocalPreview
+      ? hasSharedScreen ? 'screen' : 'remote-video'
+      : mainStageSource;
+  const overlayVisibility = controlsVisible
+    ? 'pointer-events-auto opacity-100'
+    : 'pointer-events-none opacity-0';
+  const isDocked = isAttached && attachmentBounds !== null && !isExpandedScreenShare;
+  const modalStyle = isExpandedScreenShare
+    ? undefined
+    : isDocked
+      ? {
+        left: attachmentBounds.left,
+        top: attachmentBounds.top,
+        width: attachmentBounds.width,
+        height: attachmentBounds.height
+      }
+      : { left: position.x, bottom: position.bottom };
 
   return (
-    <>
+    <div
+      ref={wrapperRef}
+      className={cn(
+        'fixed z-50 select-none overflow-hidden bg-background shadow-xl [&_button]:cursor-pointer',
+        isExpandedScreenShare && 'left-[5vw] top-[5vh] h-[90vh] w-[90vw] rounded-2xl border border-border',
+        !isExpandedScreenShare && !isDocked && 'aspect-video w-[min(92vw,520px)] rounded-2xl border border-border',
+        isDocked && 'border-b border-border shadow-none',
+        isAttached && !attachmentBounds && !isExpandedScreenShare && 'pointer-events-none opacity-0'
+      )}
+      style={modalStyle}
+    >
       <div
-        ref={wrapperRef}
-        className={cn(
-          "fixed z-50 flex flex-col bg-background/95 backdrop-blur-lg border border-border shadow-xl rounded-2xl overflow-hidden cubic-bezier(0.4, 0, 0.2, 1)",
-          !isDragging && "transition-all duration-300",
-          isExpandedScreenShare ? "w-[90vw] h-[90vh] left-[5vw] top-[5vh]" : "w-[350px] sm:w-[420px]"
-        )}
-        style={!isExpandedScreenShare ? { left: position.x, bottom: position.bottom } : undefined}
+        ref={mainStageRef}
+        className="relative h-full w-full overflow-hidden bg-background"
+        onMouseEnter={revealControls}
+        onMouseMove={handleStageMouseMove}
+        onMouseLeave={revealControls}
+        onFocusCapture={revealControls}
       >
-        {/* Header */}
-        <div className="h-14 bg-card/80 backdrop-blur-md border-b border-border flex items-center justify-between px-5 select-none relative" onMouseDown={!isExpandedScreenShare ? handleDragStart : undefined}>
-          <div className={cn("flex items-center gap-2", !isExpandedScreenShare && "cursor-move")}>
+        {!isVideoCall ? (
+          <div
+            className="absolute inset-0 flex items-center justify-center overflow-hidden"
+            style={avatarStageStyle}
+          >
+            <UserAvatar username={call.peer || ''} size="xl" className="relative" />
+          </div>
+        ) : activeMainStageSource === 'screen' && hasSharedScreen ? (
+          <CanvasDisplay canvas={sharedScreenCanvas} objectFit="contain" className="h-full w-full" />
+        ) : activeMainStageSource === 'local-video' && showLocalPreview ? (
+          <div className="relative h-full w-full bg-zinc-900">
+            <CanvasDisplay
+              canvas={localVideoCanvas}
+              className={cn('h-full w-full', !isVideoEnabled && 'opacity-0')}
+            />
+            {!isVideoEnabled && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <VideoOff className="h-8 w-8 text-white/60" />
+              </div>
+            )}
+            {isVideoEnabled && !localVideoCanvas && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Video className="h-8 w-8 text-white/60" />
+              </div>
+            )}
+            <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/45 px-2 py-1 text-xs font-medium text-white backdrop-blur-md">
+              You
+            </span>
+          </div>
+        ) : activeMainStageSource === 'remote-video' && hasRemoteVideo ? (
+          <CanvasDisplay canvas={remoteVideoCanvas} className="h-full w-full" />
+        ) : (
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center text-white/75"
+            style={avatarStageStyle}
+          >
+            <UserAvatar username={call.peer || ''} size="xl" className="mb-3 opacity-70" />
+            <p className="text-sm font-medium">
+              {isRinging ? 'Calling' : 'Waiting for video...'}
+            </p>
+          </div>
+        )}
+
+        {isVideoCall && hasRemoteVideo && activeMainStageSource !== 'remote-video' && (
+          <DockedPip
+            corner={pipCorners['remote-cam']}
+            label={displayPeerName}
+            stageRef={mainStageRef}
+            onCornerChange={(corner) => dockPip('remote-cam', corner)}
+            onActivate={() => setMainStageSource('remote-video')}
+            large={isDocked}
+          >
+            <CanvasDisplay canvas={remoteVideoCanvas} className="h-full w-full" />
+          </DockedPip>
+        )}
+
+        {showLocalPreview && activeMainStageSource !== 'local-video' && (
+          <DockedPip
+            corner={pipCorners.local}
+            label="You"
+            stageRef={mainStageRef}
+            onCornerChange={(corner) => dockPip('local', corner)}
+            onActivate={() => setMainStageSource('local-video')}
+            large={isDocked}
+          >
+            <div className="relative h-full w-full bg-zinc-900">
+              <CanvasDisplay
+                canvas={localVideoCanvas}
+                className={cn('h-full w-full', !isVideoEnabled && 'opacity-0')}
+              />
+              {!isVideoEnabled && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <VideoOff className="h-5 w-5 text-white/60" />
+                </div>
+              )}
+              {isVideoEnabled && !localVideoCanvas && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Video className="h-5 w-5 text-white/60" />
+                </div>
+              )}
+            </div>
+          </DockedPip>
+        )}
+
+        {isVideoCall && hasSharedScreen && activeMainStageSource !== 'screen' && (
+          <DockedPip
+            corner={pipCorners.screen}
+            label={remoteScreenCanvas ? `${displayPeerName}'s screen` : 'Your screen'}
+            stageRef={mainStageRef}
+            onCornerChange={(corner) => dockPip('screen', corner)}
+            onActivate={() => setMainStageSource('screen')}
+            large={isDocked}
+          >
+            <CanvasDisplay canvas={sharedScreenCanvas} objectFit="contain" className="h-full w-full bg-zinc-950" />
+          </DockedPip>
+        )}
+
+        <div
+          className={cn(
+            'absolute inset-x-0 top-0 z-30 flex items-start justify-between p-3 text-white transition-opacity duration-200',
+            overlayVisibility
+          )}
+          data-call-overlay
+          onMouseEnter={holdControls}
+          onMouseMove={holdControls}
+          onMouseLeave={revealControls}
+        >
+          <div
+            className={cn(
+              'flex select-none items-center gap-2 drop-shadow-lg',
+              !isExpandedScreenShare && !isDocked && 'cursor-move'
+            )}
+            onMouseDown={!isExpandedScreenShare && !isDocked ? handleDragStart : undefined}
+          >
             <UserAvatar username={call.peer || ''} size="xs" />
-            <div className="flex flex-col">
-              <span className="text-sm font-semibold text-foreground leading-none">{displayPeerName}</span>
-              <span className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatClockDurationSeconds(callDuration) : 'Calling...'}
+            <div className="flex min-w-0 flex-col text-shadow-sm">
+              <span className="max-w-48 truncate text-sm font-semibold leading-none">{displayPeerName}</span>
+              <span className="mt-1 text-[10px] font-medium text-white/80">
+                {callStatusText}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            {(remoteScreenCanvas || isScreenSharing) && (
+          <div className="flex items-center gap-1.5" onMouseDown={(event) => event.stopPropagation()}>
+            {isVideoCall && (hasSharedScreen || isScreenSharing) && (
               <button
-                onClick={() => setIsExpandedScreenShare(prev => !prev)}
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
-                title={isExpandedScreenShare ? "Collapse" : "Expand"}
+                type="button"
+                onClick={() => setIsExpandedScreenShare(previous => !previous)}
+                className={glassControl}
+                title={isExpandedScreenShare ? 'Collapse' : 'Expand'}
               >
-                {isExpandedScreenShare ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-              </button>
-            )}
-            {!isExpandedScreenShare && (
-              <button
-                onClick={() => setIsMinimized(true)}
-                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
-              >
-                <Minimize2 className="w-4 h-4" />
+                {isExpandedScreenShare ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </button>
             )}
           </div>
         </div>
 
-        {/* Main Stage */}
-        <div className="flex-1 bg-black relative overflow-hidden group" ref={mainStageRef}>
-          {(() => {
-            const hasRemoteScreen = remoteScreenCanvas !== null;
-            const hasRemoteVideo = remoteVideoCanvas !== null;
-            const hasLocalVideo = Boolean(localVideoCanvas && isVideoCall);
-
-            type StreamType = 'remote-screen' | 'remote-cam' | 'local';
-            const availableStreams: StreamType[] = [];
-            if (hasRemoteScreen) availableStreams.push('remote-screen');
-            if (hasRemoteVideo) availableStreams.push('remote-cam');
-            if (hasLocalVideo) availableStreams.push('local');
-
-            let mainView: StreamType = 'local';
-
-            if (focusedView && availableStreams.includes(focusedView)) {
-              mainView = focusedView;
-            } else {
-              if (hasRemoteScreen) mainView = 'remote-screen';
-
-              else if (hasRemoteVideo) mainView = 'remote-cam';
-              else if (hasLocalVideo) mainView = 'local';
-              else mainView = 'local';
-            }
-
-            const pipViews = availableStreams.filter(s => s !== mainView);
-
-            const renderStream = (type: StreamType, _isMain: boolean) => {
-              if (type === 'remote-screen') {
-                return <CanvasDisplay canvas={remoteScreenCanvas ?? null} objectFit="contain" className="w-full h-full" />;
-              }
-              if (type === 'remote-cam') {
-                return <CanvasDisplay canvas={remoteVideoCanvas} className="w-full h-full" />;
-              }
-              if (type === 'local') {
-                return <CanvasDisplay canvas={localVideoCanvas} className={cn('w-full h-full', !isVideoEnabled && 'invisible')} />;
-              }
-              return null;
-            };
-
-            let MainComponent = null;
-            if (availableStreams.length === 0) {
-              MainComponent = (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                  <UserAvatar username={call.peer || ''} size="xl" className="mb-4 opacity-50" />
-                  <p className="text-sm font-medium">
-                    {isRinging ? 'Waiting for answer...' : 'Waiting for video...'}
-                  </p>
-                </div>
-              );
-            } else {
-              MainComponent = renderStream(mainView, true);
-            }
-
-            return (
-              <>
-                {/* Main Video */}
-                {MainComponent}
-
-                {/* Draggable Slots */}
-                {pipViews.map((type, index) => {
-                  const pos = pipPositions[index] || { x: 20, y: 20 + (index * 130) };
-
-                  return (
-                    <DraggablePip
-                      key={`slot-${index}`}
-                      id={`slot-${index}`}
-                      initialPosition={pos}
-                      onPositionChange={(_id, newPos) => updatePipPosition(index, newPos)}
-                      onClick={() => setFocusedView(type)}
-                    >
-                      {renderStream(type, false)}
-                    </DraggablePip>
-                  );
-                })}
-              </>
-            );
-          })()}
-        </div>
-
-        {/* Controls Bar */}
-        <div className="bg-card/80 backdrop-blur-md border-t border-border p-5 flex items-center justify-center gap-6">
-
-          {/* Accept/Decline Incoming */}
+        <div
+          className={cn(
+            'absolute bottom-3 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 transition-opacity duration-200',
+            overlayVisibility
+          )}
+          data-call-overlay
+          onMouseEnter={holdControls}
+          onMouseMove={holdControls}
+          onMouseLeave={revealControls}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
           {isIncoming && isRinging ? (
             <>
               <button
+                type="button"
                 onClick={onDecline}
-                className="h-14 w-14 rounded-full bg-destructive hover:bg-destructive/90 flex items-center justify-center text-destructive-foreground transition-all hover:scale-110 shadow-lg shadow-red-900/20"
+                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-red-600/90 text-white backdrop-blur-xl hover:bg-red-500"
+                title="Decline"
               >
-                <PhoneOff className="w-6 h-6" />
+                <PhoneOff className="h-4 w-4" />
               </button>
               <button
-                onClick={() => {
-                  answerCall();
-                  setIsMinimized(true);
-                }}
-                className="h-14 w-14 rounded-full bg-emerald-600 hover:bg-emerald-700 flex items-center justify-center text-white transition-all hover:scale-110 shadow-lg shadow-green-900/20"
+                type="button"
+                onClick={answerCall}
+                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-emerald-600/90 text-white backdrop-blur-xl hover:bg-emerald-500"
+                title="Answer"
               >
-                <Phone className="w-6 h-6" />
+                <Phone className="h-4 w-4" />
               </button>
             </>
           ) : (
-            /* Active Call Controls */
             <>
-              {/* Mic Control */}
-              <div className="flex flex-col items-center gap-1">
-                <div className="flex items-center bg-secondary/50 rounded-full border border-border">
-                  <button
-                    onClick={async () => {
-                      const newState = await onToggleMute();
-                      setIsMuted(newState);
-                    }}
-                    className={cn(
-                      "w-12 h-12 rounded-l-full flex items-center justify-center transition-colors",
-                      isMuted ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground"
-                    )}
-                  >
-                    {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                  </button>
-                  <div className="w-[1px] h-6 bg-border" />
-                  <Popover>
-                    <PopoverTrigger asChild>
-                      <button className="w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent side="top" align="center" className="bg-popover border-border text-popover-foreground w-64 p-1">
-                      <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Microphone</div>
-                      {micDevices.map(d => <button
-                        key={d.deviceId}
-                        className="w-full text-left px-2 py-2 text-sm rounded hover:bg-muted truncate"
-                        onClick={() => handleMicrophoneChange(d.deviceId)}
-                      >
-                        {d.label || `Mic ${d.deviceId.slice(0, 5)}`}
-                      </button>
-                      )}
-                    </PopoverContent>
-                  </Popover>
-                </div>
-                <div className="mt-1 h-1 w-20 bg-muted/40 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-primary"
-                    style={{ width: `${Math.max(0, Math.min(1, micLevel / 2)) * 100}%` }}
-                  />
-                </div>
-              </div>
+              <MediaDeviceControl
+                kind="microphone"
+                enabled={!isMuted}
+                devices={micDevices}
+                open={devicePicker === 'microphone'}
+                onOpenChange={(open) => setDevicePicker(open ? 'microphone' : null)}
+                onToggle={toggleMute}
+                onSelect={handleMicrophoneChange}
+              />
 
-              {/* Video Control */}
+              <OutputDeviceControl
+                devices={speakerDevices}
+                selectedDeviceId={preferredSpeakerId}
+                open={devicePicker === 'speaker'}
+                onOpenChange={(open) => setDevicePicker(open ? 'speaker' : null)}
+                onSelect={handleSpeakerChange}
+              />
+
               {isVideoCall && (
-                <div className="flex items-center bg-secondary/50 rounded-full border border-border transition-opacity">
-                  <button
-                    onClick={async () => {
-                      const enabled = await onToggleVideo();
-                      setIsVideoEnabled(enabled);
-                    }}
-                    className={cn(
-                      "w-12 h-12 rounded-l-full flex items-center justify-center transition-colors",
-                      !isVideoEnabled ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground"
-                    )}
-                  >
-                    {!isVideoEnabled ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
-                  </button>
-                  <div className="w-[1px] h-6 bg-border" />
-                  <Popover>
-                    <PopoverTrigger asChild disabled={videoDevices.length === 0}>
-                      <button className={cn("w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors", videoDevices.length === 0 && "opacity-50")}>
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent side="top" align="center" className="bg-popover border-border text-popover-foreground w-64 p-1">
-                      <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Camera</div>
-                      {videoDevices.map(d => (
-                        <button
-                          key={d.deviceId}
-                          className={cn(
-                            "w-full text-left px-2 py-2 text-sm rounded hover:bg-muted truncate",
-                            d.deviceId === preferredCameraId && "text-primary bg-primary/10"
-                          )}
-                          onClick={() => handleCameraChange(d.deviceId)}
-                        >
-                          {d.label || `Camera ${d.deviceId.slice(0, 5)}`}
-                        </button>
-                      ))}
-                    </PopoverContent>
-                  </Popover>
-                </div>
+                <MediaDeviceControl
+                  kind="camera"
+                  enabled={isVideoEnabled}
+                  devices={videoDevices}
+                  selectedDeviceId={preferredCameraId}
+                  open={devicePicker === 'camera'}
+                  onOpenChange={(open) => setDevicePicker(open ? 'camera' : null)}
+                  onToggle={toggleVideo}
+                  onSelect={handleCameraChange}
+                />
               )}
 
-              {/* Screen Share */}
+              {isVideoCall && (
+                <button
+                  type="button"
+                  onClick={toggleScreenShare}
+                  className={cn(glassControl, (isScreenSharing || isScreenShareStarting) && 'bg-primary/80 hover:bg-primary/90')}
+                  title={isScreenSharing ? 'Stop Sharing' : isScreenShareStarting ? 'Starting Screen Share' : 'Share Screen'}
+                >
+                  {isScreenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
+                </button>
+              )}
               <button
-                onClick={toggleScreenShare}
-                className={cn(
-                  "h-12 w-12 rounded-full border border-border flex items-center justify-center transition-colors",
-                  isScreenSharing ? "bg-primary text-primary-foreground border-primary" : "bg-secondary/50 text-foreground hover:bg-muted"
-                )}
-                title="Share Screen"
-              >
-                {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
-              </button>
-
-              {/* End Call */}
-              <button
+                type="button"
                 onClick={onEndCall}
-                className="h-14 w-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white transition-all hover:scale-105 shadow-lg shadow-red-900/20"
+                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-red-600/90 text-white backdrop-blur-xl hover:bg-red-500"
+                title={isConnected ? 'End Call' : 'Cancel Call'}
               >
-                <PhoneOff className="w-6 h-6" />
+                <PhoneOff className="h-4 w-4" />
               </button>
             </>
           )}
         </div>
       </div>
-
-      {/* Screen Source Selector */}
-      {(showScreenSourceSelector || hasOpenedScreenShare) && onGetAvailableScreenSources && (
-        <React.Suspense fallback={null}>
-          <ScreenSourceSelectorLazy
-            isOpen={showScreenSourceSelector}
-            onSelect={async (source: ScreenSource) => {
-              if (onStartScreenShare) {
-                await onStartScreenShare(source);
-              }
-            }}
-            onClose={() => setShowScreenSourceSelector(false)}
-            onCancel={() => setShowScreenSourceSelector(false)}
-            onGetAvailableScreenSources={onGetAvailableScreenSources}
-          />
-        </React.Suspense>
-      )}
-    </>
+    </div>
   );
 });
 

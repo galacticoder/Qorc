@@ -60,3 +60,50 @@ pub fn audio_opus_decode(
         .decode(&session_id, &raw_body(&request)?, fec)?;
     Ok(Response::new(pcm))
 }
+
+#[tauri::command]
+pub fn audio_opus_decode_playback(
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<bool, String> {
+    let session_id = session_id(&request)?;
+    let fec = request
+        .headers()
+        .get("x-qor-opus-fec")
+        .and_then(|value| value.to_str().ok())
+        == Some("1");
+    let mut pcm = state
+        .audio_codec
+        .decode(&session_id, &raw_body(&request)?, fec)?;
+    let result = state.audio_playback.push(&session_id, &pcm);
+    pcm.fill(0);
+    result?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn audio_playback_start(
+    session_id: String,
+    device_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let audio_playback = state.audio_playback.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        audio_playback.start(&session_id, device_id.as_deref())
+    })
+    .await
+    .map_err(|_| "audio playback failed to start".to_string())??;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn audio_playback_stop(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let audio_playback = state.audio_playback.clone();
+    tauri::async_runtime::spawn_blocking(move || audio_playback.stop(&session_id))
+        .await
+        .map_err(|_| "audio playback failed to stop".to_string())??;
+    Ok(true)
+}

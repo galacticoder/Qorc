@@ -1116,11 +1116,9 @@ export const useDiscovery = (
     }, []);
 
     const getAvatarForDiscovery = useCallback(async (): Promise<AvatarData | null> => {
-        const shareWithOthers = profilePictureSystem.getShareWithOthers();
         const ownAvatar = profilePictureSystem.getOwnAvatarData?.() ?? null;
 
         if (
-            shareWithOthers &&
             ownAvatar &&
             ownAvatar.isDefault === false &&
             isValidAvatarData(ownAvatar)
@@ -2360,12 +2358,6 @@ export const useDiscovery = (
 
         const handler = (ev: Event) => {
             try {
-                if (ev.type === EventType.PROFILE_SETTINGS_UPDATED) {
-                    avatarStateVersionRef.current += 1;
-                    scheduleAvatarPublish('profile-settings-updated');
-                    return;
-                }
-
                 if (ev.type === EventType.PROFILE_PICTURE_UPDATED) {
                     const detail = (ev as CustomEvent).detail;
 
@@ -2378,11 +2370,9 @@ export const useDiscovery = (
         };
 
         window.addEventListener(EventType.PROFILE_PICTURE_UPDATED, handler as EventListener);
-        window.addEventListener(EventType.PROFILE_SETTINGS_UPDATED, handler as EventListener);
 
         return () => {
             window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handler as EventListener);
-            window.removeEventListener(EventType.PROFILE_SETTINGS_UPDATED, handler as EventListener);
             if (avatarPublishTimeoutRef.current) {
                 clearTimeout(avatarPublishTimeoutRef.current);
             }

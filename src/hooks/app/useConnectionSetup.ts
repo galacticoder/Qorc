@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import websocketClient from '../../lib/websocket/websocket';
+import { startupConnection } from '../../lib/transport/startup-connection';
 
 interface ConnectionSetupProps {
   setupComplete: boolean;
@@ -35,7 +35,7 @@ export function useConnectionSetup({
     if (!selectedServerUrl || !setupComplete) {
       return () => { cancelled = true; };
     }
-    
+
     if (
       Authentication.isSubmittingAuth ||
       Authentication.recoveryActive ||
@@ -46,7 +46,7 @@ export function useConnectionSetup({
     }
     const initializeConnection = async () => {
       try {
-        await websocketClient.connect();
+        await startupConnection.ensureConnected();
         if (!isCurrent()) return;
       } catch {
         if (!isCurrent()) return;

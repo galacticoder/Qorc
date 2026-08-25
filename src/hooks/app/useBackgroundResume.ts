@@ -15,6 +15,7 @@ import {
 
 interface BackgroundResumeResult {
   isResumingFromBackground: boolean;
+  backgroundCheckComplete: boolean;
   serverUrl: string;
   setupComplete: boolean;
 }
@@ -37,7 +38,8 @@ interface AuthenticationContext {
 export function useBackgroundResume(
   Authentication: AuthenticationContext
 ): BackgroundResumeResult {
-  const [isResumingFromBackground, setIsResumingFromBackground] = useState(true);
+  const [isResumingFromBackground, setIsResumingFromBackground] = useState(false);
+  const [backgroundCheckComplete, setBackgroundCheckComplete] = useState(false);
   const [serverUrl, setServerUrl] = useState('');
   const [setupComplete, setSetupComplete] = useState(false);
 
@@ -52,6 +54,7 @@ export function useBackgroundResume(
       try {
         const state = await awaitCurrent(session.getBackgroundState());
         const isBackgroundResume = !!(state && state.active);
+        if (isBackgroundResume) setIsResumingFromBackground(true);
         const explicitLogout = await awaitCurrent(isExplicitlyLoggedOut());
 
         if (isBackgroundResume) {
@@ -136,10 +139,11 @@ export function useBackgroundResume(
         console.error('[Resume] Error checking background state:', e);
       } finally {
         setIsResumingFromBackground(false);
+        setBackgroundCheckComplete(true);
       }
     };
     checkBackgroundState();
   }, []);
 
-  return { isResumingFromBackground, serverUrl, setupComplete };
+  return { isResumingFromBackground, backgroundCheckComplete, serverUrl, setupComplete };
 }

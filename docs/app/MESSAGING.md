@@ -69,8 +69,9 @@ Transport properties:
 - Neither peer learns the other's IP address.
 - Tor carries TCP. Logical application streams are multiplexed over a primary
   connection, and active call media uses four capability-bound, circuit-isolated
-  TCP lanes on the same onion service. Audio and visual traffic reserve distinct
-  selected lanes. Length framing is exact; a framing error
+  TCP lanes on the same onion service. Audio and visual traffic prefer distinct
+  selected lanes. Until an eligible dedicated lane is ready, either can use its
+  bounded primary-connection queue. Length framing is exact; a framing error
   that loses byte synchronization closes its TCP connection.
 - Tor reveals nothing about who connected, so an inbound connection has no
   transport-level identity. It is keyed synthetically until the handshake below
@@ -82,9 +83,10 @@ Transport properties:
   inbound handshake authenticate immediately after startup.
 
 Latency is that of a Tor rendezvous, roughly six hops. Calls use bounded lossy
-media streams and four ranked media lanes to prevent video or screen writes from
-blocking audio and to route around a delayed circuit, but media still has
-Tor rendezvous latency. See `docs/app/CALLING.md`.
+media streams and four ranked media lanes to keep video or screen writes off the
+selected audio circuit and to route around a delayed circuit. A bounded primary
+fallback keeps media setup from depending on a dedicated lane becoming ready,
+but media still has Tor rendezvous latency. See `docs/app/CALLING.md`.
 
 Before application data is accepted, peers complete
 `hybrid-mlkem1024-mldsa87-session-v5`:
@@ -109,15 +111,20 @@ additional data, separating audio, video, telemetry, calls, and screen shares.
 Call audio uses 20 ms Opus packets, batches up to four packets per encrypted
 write under pressure, retains at most five captures, applies an RTT-aware
 160–320 ms deadline, and uses an adaptive 60–100 ms receiver jitter buffer.
-Camera and screen media use persistent raw VP8 WebCodecs streams, target 60 FPS,
-adapt bitrate and resolution below the selected quality ceiling, and batch at
-most two consecutive encoded frames per write. A visual write receives an
-RTT-aware 400–1,500 ms freshness deadline on a Tor lane separate from audio.
-Sequence discontinuities trigger an authenticated keyframe request. The sender
-forces its next accepted codec input to be a keyframe, and the receiver replaces
-its bounded decoder without creating a playback buffer or container timeline.
-These lanes carry the same authenticated application frames as the primary
-connection.
+Camera and screen media use persistent raw VP8 WebCodecs streams. The encoder's
+ceiling is 1280x720 at 2.5 Mbit/s and 60 FPS; the actual capture source can lower
+the frame target, and the encoder adapts dimensions and bitrate below that
+ceiling under capture, codec, or send pressure. At most two consecutive encoded
+frames share one write. Visual traffic prefers an RTT-qualified lane separate
+from audio and otherwise enters the bounded primary queue with the same
+RTT-aware 400–1,500 ms freshness admission deadline. Once a primary media frame
+starts writing, a longer health deadline prevents cancellation in the middle of
+its length-prefixed TCP frame. Sequence discontinuities trigger an authenticated
+keyframe request. The sender forces its next accepted codec input to be a
+keyframe, and the receiver replaces its bounded decoder and renders only fresh,
+newest frames without creating a playback buffer or container timeline. The
+dedicated lanes and primary fallback carry the same authenticated application
+frames.
 `docs/app/CALLING.md` defines the complete call frame and queue behavior.
 
 Each direct application message is also signed with the certified ML-DSA key and

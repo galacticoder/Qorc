@@ -58,6 +58,8 @@ const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const MAX_STREAM_ID_BYTES = 96;
 const NATIVE_BRIDGE_RAW_MAX_BYTES = 4 * 1024 * 1024;
 const MAX_VISUAL_QUEUE_FRAMES = 6;
+const INITIAL_BRIDGE_CONNECT_ATTEMPTS = 2;
+const INITIAL_BRIDGE_RETRY_DELAY_MS = 250;
 const AUDIO_LANE_MIN_RTT_GAIN_MS = 50;
 const AUDIO_LANE_MIN_RTT_GAIN_RATIO = 0.1;
 const AUDIO_LANE_PATH_SWITCH_CONFIRMATIONS = 3;
@@ -82,6 +84,15 @@ const hasMeaningfulAudioPathAdvantage = (currentRttMs: number, candidateRttMs: n
         currentRttMs * AUDIO_LANE_MIN_RTT_GAIN_RATIO
     )
 );
+
+const isRetryableInitialBridgeError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.trim().toLowerCase();
+    return normalized.includes('bridge disconnected') ||
+        normalized.includes('connection failed: disconnected') ||
+        normalized.includes('p2p inbound adoption failed: disconnected') ||
+        normalized.includes('connection closed');
+};
 
 interface P2PKeyConfirmation {
     version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION;
@@ -147,7 +158,7 @@ function parseNativeP2PBridgeEnvelope(value: unknown): any {
         if (payload[0] === 0x7b) {
             data = JSON.parse(textDecoder.decode(payload));
         } else {
-            data = payload.slice();
+            data = payload;
         }
         return { type: 'message', connectionId, connectionToken: token, data };
     }
@@ -178,6 +189,8 @@ class P2PStream implements SecureStream {
     private readonly maxPendingEncryptedFrames: number;
     private readonly maxPendingEncryptedBytes: number;
     private readonly callStreamKeyContext: string | undefined;
+    private readonly streamIdBytes: Uint8Array;
+    private readonly maxWriteBytes: number;
 
     private transport: P2PConnection;
 
@@ -195,9 +208,14 @@ class P2PStream implements SecureStream {
         this.lossy = lossy;
         this.session = session;
         this.transport = transport;
+        this.streamIdBytes = textEncoder.encode(id);
         const isAudio = type === 'call-audio';
         const isVisual = type === 'call-video' || type === 'call-screen';
         const isTelemetry = type === 'call-telemetry';
+        this.maxWriteBytes = Math.min(
+            type.startsWith('call-') ? MAX_CALL_FRAME_SIZE : MAX_MESSAGE_FRAME_SIZE,
+            NATIVE_BRIDGE_RAW_MAX_BYTES - 2 - this.streamIdBytes.byteLength,
+        ) - NOISE_FRAME_OVERHEAD;
         this.maxReceiveQueueFrames = isAudio ? 5 : isVisual ? MAX_VISUAL_QUEUE_FRAMES : isTelemetry ? 16 : 256;
         this.maxReceiveQueueBytes = isAudio
             ? 64 * 1024
@@ -248,24 +266,19 @@ class P2PStream implements SecureStream {
             throw new Error('Stream is not writable');
         }
 
-        const transportLimit = NATIVE_BRIDGE_RAW_MAX_BYTES - 2 - textEncoder.encode(this.id).byteLength;
-        const maxSize = Math.min(
-            this.type.startsWith('call-') ? MAX_CALL_FRAME_SIZE : MAX_MESSAGE_FRAME_SIZE,
-            transportLimit
-        );
-        if (data.length + NOISE_FRAME_OVERHEAD > maxSize) {
+        if (data.length > this.maxWriteBytes) {
             throw new Error(`Data too large for stream type ${this.type}`);
         }
         const generation = this.lifecycleGeneration;
         const session = this.session;
-        const aad = textEncoder.encode(this.id);
         let encrypted: Uint8Array;
         try {
             encrypted = await session.encrypt(
                 data,
-                aad,
+                this.streamIdBytes,
                 options?.priority ?? 'normal',
-                this.callStreamKeyContext
+                this.callStreamKeyContext,
+                options?.transferOwnership ?? false,
             );
         } catch (error) {
             if (this.session === session && !session.isValid()) {
@@ -283,7 +296,7 @@ class P2PStream implements SecureStream {
             ) {
                 throw new Error('P2P stream changed while encrypting');
             }
-            await this.transport.sendData(this.id, encrypted, options);
+            await this.transport.sendData(this.streamIdBytes, encrypted, options);
         } finally {
             encrypted.fill(0);
         }
@@ -517,11 +530,11 @@ class P2PStream implements SecureStream {
                     const generation = this.lifecycleGeneration;
                     const session = this.session;
                     try {
-                        const aad = textEncoder.encode(this.id);
                         const decrypted = await session.decrypt(
                             frame,
-                            aad,
-                            this.callStreamKeyContext
+                            this.streamIdBytes,
+                            this.callStreamKeyContext,
+                            true,
                         );
                         if (
                             this._closed ||
@@ -592,6 +605,7 @@ class P2PConnection implements SecureConnection {
     private nativeAuthenticatedConnectionId: string | null = null;
     private audioLaneTelemetry: AudioLaneTelemetry | null = null;
     private audioEndpointUrl: string | undefined;
+    private sentAudioEndpointUrl: string | null = null;
     private primaryPathRttMs: number | null = null;
     private audioLaneEnterSamples = 0;
     private audioLaneExitSamples = 0;
@@ -1700,10 +1714,10 @@ class P2PConnection implements SecureConnection {
         const evaluatingAudioLanes = holdingAudioLane ||
             (realtime && previousSelectedAudioLane !== null) ||
             this.audioLaneEnterSamples >= AUDIO_LANE_PATH_SWITCH_CONFIRMATIONS;
-        const audioLaneRttCeiling = realtime && primaryPathRttMs !== null && evaluatingAudioLanes
-            ? holdingAudioLane
-                ? AUDIO_LANE_HOLD_RTT_CEILING_MS
-                : Math.max(
+        const mediaLaneRttCeiling = primaryPathRttMs === null
+            ? undefined
+            : visual
+                ? Math.max(
                     1,
                     Math.floor(
                         primaryPathRttMs - Math.max(
@@ -1712,13 +1726,30 @@ class P2PConnection implements SecureConnection {
                         )
                     )
                 )
+                : realtime && evaluatingAudioLanes
+                    ? holdingAudioLane
+                        ? AUDIO_LANE_HOLD_RTT_CEILING_MS
+                        : Math.max(
+                            1,
+                            Math.floor(
+                                primaryPathRttMs - Math.max(
+                                    AUDIO_LANE_MIN_RTT_GAIN_MS,
+                                    primaryPathRttMs * AUDIO_LANE_MIN_RTT_GAIN_RATIO
+                                )
+                            )
+                        )
+                    : undefined;
+        const audioEndpoint = (realtime || visual) &&
+            this.audioEndpointUrl &&
+            this.audioEndpointUrl !== this.sentAudioEndpointUrl
+            ? this.audioEndpointUrl
             : undefined;
         const res = await p2p.send(bridgeId, connectionToken, data, {
             ...options,
-            ...((realtime || visual) && this.audioEndpointUrl
-                ? { audioEndpoint: this.audioEndpointUrl }
+            ...(audioEndpoint ? { audioEndpoint } : {}),
+            ...(mediaLaneRttCeiling !== undefined
+                ? { audioLaneRttCeiling: mediaLaneRttCeiling }
                 : {}),
-            ...(audioLaneRttCeiling !== undefined ? { audioLaneRttCeiling } : {}),
         });
         if (res.audioLanes) {
             const selectedPath = res.audioLanes.selectedLane ? 'lane' : 'primary';
@@ -1726,19 +1757,14 @@ class P2PConnection implements SecureConnection {
                 ...res.audioLanes,
                 selectedPath,
                 primaryRttMs: primaryPathRttMs,
-                rttCeilingMs: audioLaneRttCeiling ?? null,
+                rttCeilingMs: mediaLaneRttCeiling ?? null,
             };
-            if (visual) {
-                this.audioLaneTelemetry = {
-                    ...this.audioLaneTelemetry,
-                    selectedPath: this.audioLaneTelemetry.selectedLane ? 'lane' : 'primary',
-                };
-            } else if (selectedPath === 'lane') {
+            if (!visual && selectedPath === 'lane') {
                 this.audioLaneEnterSamples = 0;
                 if (previousSelectedAudioLane !== res.audioLanes.selectedLane) {
                     this.audioLaneExitSamples = 0;
                 }
-            } else {
+            } else if (!visual) {
                 this.audioLaneExitSamples = 0;
             }
         }
@@ -1749,6 +1775,9 @@ class P2PConnection implements SecureConnection {
             connectionToken !== this.nativeConnectionToken
         ) {
             throw new Error('P2P bridge changed while sending');
+        }
+        if (audioEndpoint && (res.success || res.audioLanes?.endpointAvailable)) {
+            this.sentAudioEndpointUrl = audioEndpoint;
         }
 
         if (!res.success) {
@@ -1773,7 +1802,11 @@ class P2PConnection implements SecureConnection {
     }
 
     // Send data over the socket
-    async sendData(streamId: string, data: Uint8Array, options?: StreamWriteOptions): Promise<void> {
+    async sendData(
+        idBytes: Uint8Array,
+        data: Uint8Array,
+        options?: StreamWriteOptions,
+    ): Promise<void> {
 
         if (!this.session) {
             throw new Error('Not connected');
@@ -1784,7 +1817,6 @@ class P2PConnection implements SecureConnection {
         }
 
         // Frame the data with stream ID
-        const idBytes = textEncoder.encode(streamId);
         if (
             idBytes.byteLength === 0 ||
             idBytes.byteLength > MAX_STREAM_ID_BYTES ||
@@ -2454,6 +2486,7 @@ class P2PConnection implements SecureConnection {
 
     private resetAudioPathMetrics(): void {
         this.audioLaneTelemetry = null;
+        this.sentAudioEndpointUrl = null;
         this.primaryPathRttMs = null;
         this.audioLaneEnterSamples = 0;
         this.audioLaneExitSamples = 0;
@@ -3529,155 +3562,174 @@ export class P2PTransport implements SecureTransport {
         if (inflight) return inflight;
 
         const connectPromise = (async (): Promise<SecureConnection> => {
-            assertCurrent();
-            const appPeerId = this.resolveAppPeerId(peerId);
-
-            // Check for existing connection
-            let existing = this.connections.get(peerKey);
-            if (!existing) {
-                const alias = this.usernameAliases.get(peerId);
-                if (alias) existing = this.connections.get(alias);
-            }
-            if (existing) {
-                if (existing.state === 'failed' || existing.state === 'disconnected') {
-                    try { await existing.close('stale-state-cleanup'); } catch { }
+            let lastError: unknown = new Error('P2P connection failed');
+            for (let attempt = 0; attempt < INITIAL_BRIDGE_CONNECT_ATTEMPTS; attempt += 1) {
+                try {
                     assertCurrent();
-                    if (this.isCurrentConnection(peerKey, existing)) {
-                        this.connections.delete(peerKey);
+                    const appPeerId = this.resolveAppPeerId(peerId);
+
+                    let existing = this.connections.get(peerKey);
+                    if (!existing) {
+                        const alias = this.usernameAliases.get(peerId);
+                        if (alias) existing = this.connections.get(alias);
                     }
-                    existing = undefined;
-                } else if (existing.state === 'connecting' || existing.state === 'handshaking') {
-                    if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
-                        existing.updatePeerIdentity(certifiedPeerIdentity);
+                    if (existing) {
+                        if (existing.state === 'failed' || existing.state === 'disconnected') {
+                            try { await existing.close('stale-state-cleanup'); } catch { }
+                            assertCurrent();
+                            if (this.isCurrentConnection(peerKey, existing)) {
+                                this.connections.delete(peerKey);
+                            }
+                            existing = undefined;
+                        } else if (existing.state === 'connecting' || existing.state === 'handshaking') {
+                            if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
+                                existing.updatePeerIdentity(certifiedPeerIdentity);
+                            }
+                            const stateAgeMs = typeof (existing as any).getStateAgeMs === 'function'
+                                ? (existing as any).getStateAgeMs()
+                                : 0;
+                            if (stateAgeMs > (options.timeout || P2P_CONNECTION_TIMEOUT_MS)) {
+                                try { await existing.close('stale-connecting-timeout'); } catch { }
+                                assertCurrent();
+                                if (this.isCurrentConnection(peerKey, existing)) {
+                                    this.connections.delete(peerKey);
+                                }
+                                existing = undefined;
+                            }
+                        } else if (existing.state === 'connected') {
+                            if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
+                                existing.updatePeerIdentity(certifiedPeerIdentity);
+                            }
+                        }
                     }
-                    const stateAgeMs = typeof (existing as any).getStateAgeMs === 'function'
-                        ? (existing as any).getStateAgeMs()
-                        : 0;
-                    if (stateAgeMs > (options.timeout || P2P_CONNECTION_TIMEOUT_MS)) {
-                        try { await existing.close('stale-connecting-timeout'); } catch { }
-                        assertCurrent();
+
+                    if (existing) {
+                        if (existing.state === 'connected') {
+                            assertCurrent();
+                            return existing;
+                        }
+
+                        if (existing.state === 'connecting' || existing.state === 'handshaking') {
+                            if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
+                                existing.updatePeerIdentity(certifiedPeerIdentity);
+                            }
+
+                            return await new Promise<SecureConnection>((resolve, reject) => {
+                                let settled = false;
+                                const unsubscribe = existing.onStateChange((state) => {
+                                    if (settled) return;
+                                    if (!isCurrent()) {
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        try { unsubscribe(); } catch { }
+                                        reject(new Error('P2P connect crossed an account transition'));
+                                        return;
+                                    }
+                                    if (state === 'connected') {
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        try { unsubscribe(); } catch { }
+                                        resolve(existing);
+                                    } else if (state === 'failed' || state === 'disconnected') {
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        try { unsubscribe(); } catch { }
+                                        reject(new Error(`Connection failed: ${state}`));
+                                    }
+                                });
+
+                                const timeout = setTimeout(() => {
+                                    if (settled) return;
+                                    settled = true;
+                                    try { unsubscribe(); } catch { }
+                                    existing.close('stale-connecting-timeout').catch(() => { });
+                                    if (isCurrent() && this.isCurrentConnection(peerKey, existing)) {
+                                        this.connections.delete(peerKey);
+                                    }
+                                    reject(new Error(
+                                        isCurrent()
+                                            ? 'Connection timeout waiting for existing connection'
+                                            : 'P2P connect crossed an account transition'
+                                    ));
+                                }, options.timeout || P2P_CONNECTION_TIMEOUT_MS);
+                            });
+                        }
+
                         if (this.isCurrentConnection(peerKey, existing)) {
                             this.connections.delete(peerKey);
                         }
-                        existing = undefined;
                     }
-                } else if (existing.state === 'connected') {
-                    if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
-                        existing.updatePeerIdentity(certifiedPeerIdentity);
-                    }
-                }
-            }
 
-            if (existing) {
-                if (existing.state === 'connected') {
                     assertCurrent();
-                    return existing;
-                }
+                    if (new Set(this.connections.values()).size >= this.MAX_CONNECTIONS) {
+                        throw new Error(`Maximum P2P connections reached (${this.MAX_CONNECTIONS})`);
+                    }
+                    const connection = new P2PConnection(
+                        peerKey,
+                        certifiedPeerIdentity,
+                        ownKeys,
+                        localPeerId,
+                        this
+                    );
 
-                if (existing.state === 'connecting' || existing.state === 'handshaking') {
-                    if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
-                        existing.updatePeerIdentity(certifiedPeerIdentity);
+                    connection.onStateChange((state) => {
+                        if (!isCurrent()) return;
+                        if (state === 'connected') {
+                            if (!this.isCurrentConnection(peerKey, connection)) return;
+                            for (const handler of Array.from(this.connectHandlers)) {
+                                try { handler(appPeerId); } catch { }
+                            }
+                        } else if (state === 'disconnected' || state === 'failed') {
+                            if (!this.isCurrentConnection(peerKey, connection)) return;
+                            this.connections.delete(peerKey);
+                            for (const handler of Array.from(this.disconnectHandlers)) {
+                                try { handler(appPeerId, state); } catch { }
+                            }
+                        }
+
+                        if (options.onStateChange) {
+                            options.onStateChange(state);
+                        }
+                    });
+
+                    this.connections.set(peerKey, connection);
+
+                    try {
+                        await connection.connect();
+                        assertCurrent();
+                    } catch (error) {
+                        try {
+                            if (connection.state !== 'disconnected') {
+                                await connection.close('connect-attempt-failed');
+                            }
+                        } catch { }
+                        if (this.isCurrentConnection(peerKey, connection)) {
+                            this.connections.delete(peerKey);
+                        }
+                        throw error;
                     }
 
-                    return await new Promise<SecureConnection>((resolve, reject) => {
-                        let settled = false;
-                        const unsubscribe = existing.onStateChange((state) => {
-                            if (settled) return;
-                            if (!isCurrent()) {
-                                settled = true;
-                                clearTimeout(timeout);
-                                try { unsubscribe(); } catch { }
-                                reject(new Error('P2P connect crossed an account transition'));
-                                return;
-                            }
-                            if (state === 'connected') {
-                                settled = true;
-                                clearTimeout(timeout);
-                                try { unsubscribe(); } catch { }
-                                resolve(existing);
-                            } else if (state === 'failed' || state === 'disconnected') {
-                                settled = true;
-                                clearTimeout(timeout);
-                                try { unsubscribe(); } catch { }
-                                reject(new Error(`Connection failed: ${state}`));
-                            }
-                        });
-
-                        const timeout = setTimeout(() => {
-                            if (settled) return;
-                            settled = true;
-                            try { unsubscribe(); } catch { }
-                            existing.close('stale-connecting-timeout').catch(() => { });
-                            if (isCurrent() && this.isCurrentConnection(peerKey, existing)) {
-                                this.connections.delete(peerKey);
-                            }
-                            reject(new Error(
-                                isCurrent()
-                                    ? 'Connection timeout waiting for existing connection'
-                                    : 'P2P connect crossed an account transition'
-                            ));
-                        }, options.timeout || P2P_CONNECTION_TIMEOUT_MS);
+                    return connection;
+                } catch (error) {
+                    lastError = error;
+                    if (
+                        attempt + 1 >= INITIAL_BRIDGE_CONNECT_ATTEMPTS ||
+                        !isRetryableInitialBridgeError(error)
+                    ) {
+                        throw error;
+                    }
+                    assertCurrent();
+                    console.info('[P2P-HS] retrying transient initial bridge failure', {
+                        peer: peerId,
+                        attempt: attempt + 2,
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                    await new Promise<void>((resolve) => {
+                        setTimeout(resolve, INITIAL_BRIDGE_RETRY_DELAY_MS);
                     });
                 }
-
-                // Any other state, remove and create fresh
-                if (this.isCurrentConnection(peerKey, existing)) {
-                    this.connections.delete(peerKey);
-                }
             }
-
-            // Create new connection
-            assertCurrent();
-            if (new Set(this.connections.values()).size >= this.MAX_CONNECTIONS) {
-                throw new Error(`Maximum P2P connections reached (${this.MAX_CONNECTIONS})`);
-            }
-            const connection = new P2PConnection(
-                peerKey,
-                certifiedPeerIdentity,
-                ownKeys,
-                localPeerId,
-                this
-            );
-
-            connection.onStateChange((state) => {
-                if (!isCurrent()) return;
-                if (state === 'connected') {
-                    if (!this.isCurrentConnection(peerKey, connection)) return;
-                    for (const handler of Array.from(this.connectHandlers)) {
-                        try { handler(appPeerId); } catch { }
-                    }
-                } else if (state === 'disconnected' || state === 'failed') {
-                    if (!this.isCurrentConnection(peerKey, connection)) return;
-                    this.connections.delete(peerKey);
-                    for (const handler of Array.from(this.disconnectHandlers)) {
-                        try { handler(appPeerId, state); } catch { }
-                    }
-                }
-
-                if (options.onStateChange) {
-                    options.onStateChange(state);
-                }
-            });
-
-            this.connections.set(peerKey, connection);
-
-            try {
-                await connection.connect();
-                assertCurrent();
-            } catch (error) {
-                try {
-                    if (connection.state !== 'disconnected') {
-                        await connection.close('connect-attempt-failed');
-                    }
-                } catch { }
-                // Connection map keyed by peerKey,
-                if (this.isCurrentConnection(peerKey, connection)) {
-                    this.connections.delete(peerKey);
-                }
-                throw error;
-            }
-
-            return connection;
+            throw lastError;
         })();
 
         this.connectSingleflight.set(peerKey, connectPromise);

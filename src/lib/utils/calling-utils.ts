@@ -41,12 +41,14 @@ export const clearCallMediaState = (
   refs: {
     localStreamRef: { current: MediaStream | null };
     localVideoCanvasRef: { current: HTMLCanvasElement | null };
+    localScreenCanvasRef: { current: HTMLCanvasElement | null };
     remoteVideoCanvasRef: { current: HTMLCanvasElement | null };
     remoteScreenCanvasRef: { current: HTMLCanvasElement | null };
   },
   setters: {
     setLocalStream: (stream: MediaStream | null) => void;
     setLocalVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
+    setLocalScreenCanvas: (canvas: HTMLCanvasElement | null) => void;
     setRemoteVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
     setRemoteScreenCanvas: (canvas: HTMLCanvasElement | null) => void;
   },
@@ -56,10 +58,12 @@ export const clearCallMediaState = (
   releaseVisualCanvas(refs.remoteScreenCanvasRef.current);
   refs.localStreamRef.current = null;
   refs.localVideoCanvasRef.current = null;
+  refs.localScreenCanvasRef.current = null;
   refs.remoteVideoCanvasRef.current = null;
   refs.remoteScreenCanvasRef.current = null;
   setters.setLocalStream(null);
   setters.setLocalVideoCanvas(null);
+  setters.setLocalScreenCanvas(null);
   setters.setRemoteVideoCanvas(null);
   setters.setRemoteScreenCanvas(null);
 };

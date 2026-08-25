@@ -4,7 +4,7 @@ import { createInitialState } from './state';
 import { AvatarSystemState } from '../types/avatar-types';
 import { setSecureDB, initialize } from './init';
 import { clearPeerCache, cachePeerAvatar } from './cache';
-import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
+import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault } from './own-avatar';
 import { getPeerAvatar, getPeerAvatarHash } from './peer-avatar';
 
 class ProfilePictureSystem {
@@ -96,16 +96,6 @@ class ProfilePictureSystem {
     // Check if own avatar is default
     isOwnAvatarDefault(): boolean {
         return isOwnAvatarDefault(this.state);
-    }
-
-    // Set share with others
-    async setShareWithOthers(share: boolean): Promise<void> {
-        return setShareWithOthers(this.state, share, this.captureAccountOperation());
-    }
-
-    // Get share with others
-    getShareWithOthers(): boolean {
-        return getShareWithOthers(this.state);
     }
 
     // Get peer avatar

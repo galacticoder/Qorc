@@ -31,9 +31,47 @@ export interface NativeCameraFrame {
     capturedAt: number;
     width: number;
     height: number;
+    frameRate: number;
     enabled: boolean;
     jpeg: Uint8Array;
 }
+
+export interface NativeMicrophoneDevice {
+    device_id: string;
+    label: string;
+}
+
+export interface NativeMicrophoneFrame {
+    sequence: number;
+    capturedAt: number;
+    enabled: boolean;
+    pcm: Uint8Array;
+}
+
+const parseNativeMicrophoneFrame = (value: ArrayBuffer): NativeMicrophoneFrame | null => {
+    const bytes = new Uint8Array(value);
+    if (bytes.byteLength === 24 && bytes.every(byte => byte === 0)) return null;
+    if (bytes.byteLength !== 24 + 960 * Float32Array.BYTES_PER_ELEMENT) {
+        throw new Error('Invalid native microphone frame length');
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const sequence = view.getUint32(4, false);
+    const capturedAt = Number(view.getBigUint64(8, false));
+    if (
+        view.getUint8(0) !== 1 || view.getUint8(1) > 1 ||
+        view.getUint16(2, false) !== 0 || view.getUint32(16, false) !== 48_000 ||
+        view.getUint16(20, false) !== 960 || view.getUint16(22, false) !== 0 ||
+        sequence === 0 || !Number.isSafeInteger(capturedAt) || capturedAt <= 0
+    ) {
+        throw new Error('Invalid native microphone frame');
+    }
+    return {
+        sequence,
+        capturedAt,
+        enabled: view.getUint8(1) === 1,
+        pcm: bytes.subarray(24),
+    };
+};
 
 const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null => {
     const bytes = new Uint8Array(value);
@@ -47,13 +85,15 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
     const width = view.getUint16(20, false);
     const height = view.getUint16(22, false);
     const payloadLength = view.getUint32(24, false);
+    const frameRate = view.getUint16(28, false);
     const jpeg = bytes.subarray(32);
     if (
-        view.getUint8(0) !== 1 || view.getUint8(1) !== 1 || view.getUint8(2) > 1 ||
-        view.getUint8(3) !== 0 || view.getUint32(28, false) !== 0 ||
+        view.getUint8(0) !== 2 || view.getUint8(1) !== 1 || view.getUint8(2) > 1 ||
+        view.getUint8(3) !== 0 || view.getUint16(30, false) !== 0 ||
         !Number.isSafeInteger(sequence) || sequence <= 0 ||
         !Number.isSafeInteger(capturedAt) || capturedAt <= 0 ||
         width < 2 || height < 2 || width > 1280 || height > 720 ||
+        frameRate < 1 || frameRate > 60 ||
         width * height > 1280 * 720 || payloadLength !== jpeg.byteLength ||
         jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
         jpeg[jpeg.byteLength - 2] !== 0xff || jpeg[jpeg.byteLength - 1] !== 0xd9
@@ -65,6 +105,7 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
         capturedAt,
         width,
         height,
+        frameRate,
         enabled: view.getUint8(2) === 1,
         jpeg,
     };
@@ -460,6 +501,19 @@ export const audioCodec = {
                 'x-qor-opus-fec': fec ? '1' : '0',
             },
         }).then(value => new Uint8Array(value)),
+    decodeToPlayback: (sessionId: string, packet: Uint8Array, fec = false) =>
+        invoke<boolean>('audio_opus_decode_playback', packet, {
+            headers: {
+                'x-qor-audio-session': sessionId,
+                'x-qor-opus-fec': fec ? '1' : '0',
+            },
+        }),
+};
+
+export const nativeAudioPlayback = {
+    start: (sessionId: string, deviceId: string | null) =>
+        invoke<boolean>('audio_playback_start', { sessionId, deviceId }),
+    stop: (sessionId: string) => invoke<boolean>('audio_playback_stop', { sessionId }),
 };
 
 export const nativeCamera = {
@@ -477,6 +531,27 @@ export const nativeCamera = {
         invoke<ArrayBuffer>('camera_capture_pull', { sessionId, afterSequence })
             .then(parseNativeCameraFrame),
     stop: (sessionId: string) => invoke<boolean>('camera_capture_stop', { sessionId }),
+};
+
+export const nativeScreen = {
+    start: (sessionId: string) => invoke<boolean>('screen_capture_start', { sessionId }),
+    pull: (sessionId: string, afterSequence: number) =>
+        invoke<ArrayBuffer>('screen_capture_pull', { sessionId, afterSequence })
+            .then(parseNativeCameraFrame),
+    stop: (sessionId: string) => invoke<boolean>('screen_capture_stop', { sessionId }),
+};
+
+export const nativeMicrophone = {
+    devices: () => invoke<NativeMicrophoneDevice[]>('microphone_devices'),
+    outputDevices: () => invoke<NativeMicrophoneDevice[]>('audio_output_devices'),
+    start: (sessionId: string, deviceId: string | null) =>
+        invoke<boolean>('microphone_capture_start', { sessionId, deviceId }),
+    setEnabled: (sessionId: string, enabled: boolean) =>
+        invoke<boolean>('microphone_capture_set_enabled', { sessionId, enabled }),
+    pull: (sessionId: string, afterSequence: number) =>
+        invoke<ArrayBuffer>('microphone_capture_pull', { sessionId, afterSequence })
+            .then(parseNativeMicrophoneFrame),
+    stop: (sessionId: string) => invoke<boolean>('microphone_capture_stop', { sessionId }),
 };
 
 export const p2p = {
@@ -533,7 +608,7 @@ export const notifications = {
 export const system = {
     getInstanceId: () => invoke<string>('get_instance_id'),
     openExternal: (url: string) => invoke<boolean>('open_external', { url }),
-    requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'enumerate') =>
+    requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'microphone' | 'microphone-camera' | 'enumerate') =>
         invoke<boolean>('request_media_access', { kind }),
     getScreenSources: () => invoke<NativeScreenSource[]>('get_screen_sources'),
 };
@@ -623,7 +698,7 @@ export function isTauri(): boolean {
 }
 
 export async function requireNativeMediaAccess(
-    kind: 'audio' | 'video' | 'audio-video' | 'camera'
+    kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'microphone' | 'microphone-camera'
 ): Promise<void> {
     if (!isTauri()) return;
     const granted = await system.requestMediaAccess(kind);

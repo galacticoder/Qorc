@@ -15,6 +15,20 @@ import { bytesToHex } from './byte-utils';
 import { Base64 } from '../cryptography/base64';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 
+const DEFAULT_AVATAR_COLORS = [
+  '#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ED4245',
+  '#3BA55C', '#FAA61A', '#9B59B6', '#1ABC9C', '#E91E63'
+] as const;
+
+export function getDefaultAvatarColor(username: string): string {
+  const normalized = (username || '').toLowerCase().trim();
+  let hash = 0;
+  for (let i = 0; i < normalized.length; i++) {
+    hash = normalized.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return DEFAULT_AVATAR_COLORS[Math.abs(hash) % DEFAULT_AVATAR_COLORS.length];
+}
+
 // Truncates long hexadecimal usernames to first 8 characters
 export function truncateUsername(username: string): string {
   if (typeof username !== 'string' || username.length === 0) return '';
@@ -23,16 +37,7 @@ export function truncateUsername(username: string): string {
 
 // Generates a deterministic default avatar SVG for a username
 export function generateDefaultAvatar(username: string): string {
-  const normalized = (username || '').toLowerCase().trim();
-  const colors = [
-    '#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ED4245',
-    '#3BA55C', '#FAA61A', '#9B59B6', '#1ABC9C', '#E91E63'
-  ];
-  let hash = 0;
-  for (let i = 0; i < normalized.length; i++) {
-    hash = normalized.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const color = colors[Math.abs(hash) % colors.length];
+  const color = getDefaultAvatarColor(username);
 
   let initials = '?';
   const isHash = /^[a-f0-9]{32,}$/i.test(username);

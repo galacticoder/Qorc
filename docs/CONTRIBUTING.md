@@ -10,8 +10,13 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 ### Prerequisites
 
-- **Node.js**: Ensure you have Node.js installed (v18+ recommended).
+- **Node.js**: Ensure you have Node.js 18 or newer installed.
+- **pnpm**: Use the repository-pinned pnpm version through Corepack.
+- **Rust and Tauri**: Required for desktop client builds.
 - **Git**: For version control.
+- **Linux desktop build tools**: Tauri/GTK development packages, `dpkg-deb`,
+  `patchelf`, and the GStreamer 1.0 launcher, plugin scanner, plugins, and
+  libraries staged by the client build.
 
 ### Installation
 
@@ -43,6 +48,28 @@ This project and everyone participating in it is governed by the [Qor Code of Co
     *   **Server:** `node scripts/start-docker.cjs server`
     *   **Client:** `node scripts/start-client.cjs`
 
+### Desktop Build Modes
+
+`node scripts/start-client.cjs` stages the platform runtimes and PIR sidecar,
+builds release installers, and launches the result. Use
+`node scripts/start-client.cjs --bundle-only` to perform the same build without
+launching. Installer artifacts are written beneath
+`src-tauri/target/release/bundle`.
+
+On Linux, the build downloads and SHA-256-validates the release-pinned WebKitGTK
+packages, stages a curated GStreamer/PipeWire capture runtime from the build
+host, including the SPA audio and video conversion adapters, records every
+capture-runtime artifact in a SHA-256 manifest, and installs those private files
+into each bundle. Bundle preparation rejects stale manifests that do not contain
+both adapters. The resulting package does not use the repository or its `.cache`
+directory at runtime. The host desktop portal, PipeWire session, device
+permissions, and base system libraries remain platform requirements.
+
+`node scripts/start-client.cjs --run-only` skips all building and runtime
+staging. It launches the existing AppDir when available, otherwise the existing
+release executable. Use it only after a completed build; it does not include
+later source changes.
+
 ## Development Workflow
 
 1.  **Fork the repository** on GitHub.
@@ -63,12 +90,17 @@ This project and everyone participating in it is governed by the [Qor Code of Co
     ```bash
     pnpm test:security
     ```
-7.  **Commit your changes** with descriptive commit messages.
-8.  **Push to your fork:**
+7.  **Run the standalone visual-call codec harness** if you changed the VP8
+    encoder, decoder, batching, adaptation, or renderer pipeline:
+    ```bash
+    node scripts/test-call-video-codec.cjs
+    ```
+8.  **Commit your changes** with descriptive commit messages.
+9.  **Push to your fork:**
     ```bash
     git push origin feature/your-feature-name
     ```
-9.  **Open a Pull Request** against the `main` branch of the original repository.
+10. **Open a Pull Request** against the `main` branch of the original repository.
 
 ## Style Guide
 
@@ -84,6 +116,10 @@ If you find a bug, please create an issue on GitHub. Include:
 *   Expected vs. actual behavior.
 *   Screenshots if applicable.
 *   Your OS and environment details.
+*   For call or device failures reproduced through the client launcher, the
+    relevant `logs/instance-<QOR_INSTANCE_ID>-logs.txt` file. Use a different
+    `QOR_INSTANCE_ID` for each simultaneously running test client so their
+    native data and logs remain separate.
 
 ## Suggesting Enhancements
 

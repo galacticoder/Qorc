@@ -184,11 +184,14 @@ pub async fn open_external(url: String, app: AppHandle) -> Result<bool, String> 
 
 #[tauri::command]
 pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, String> {
+    tracing::info!(kind = %kind, "[CALL-DIAG] native-media-request-enter");
     let (audio, video, description, enumeration_only) = match kind.as_str() {
         "audio" => (true, false, "microphone", false),
         "video" => (false, true, "camera or screen/window capture", false),
         "audio-video" => (true, true, "microphone and camera", false),
         "camera" => (false, false, "camera", false),
+        "microphone" => (false, false, "microphone", false),
+        "microphone-camera" => (false, false, "microphone and camera", false),
         "enumerate" => (false, false, "media device names and identifiers", true),
         _ => return Err("Invalid media access type".to_string()),
     };
@@ -198,21 +201,26 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         let _ = (audio, video);
         if !enumeration_only {
             let _ = (description, app);
+            tracing::info!(kind = %kind, "[CALL-DIAG] native-media-request-auto-granted");
             return Ok(true);
         }
         let _dialog_guard = MediaDialogGuard::acquire()?;
-        return Ok(confirm_native_dialog(
+        tracing::info!(kind = %kind, "[CALL-DIAG] native-media-dialog-before");
+        let confirmed = confirm_native_dialog(
             &app,
             "Show media devices",
             format!("Allow Qor Chat to list your {description}?"),
             "Show devices",
         )
-        .await);
+        .await;
+        tracing::info!(kind = %kind, confirmed, "[CALL-DIAG] native-media-dialog-after");
+        return Ok(confirmed);
     }
 
     #[cfg(target_os = "linux")]
     {
         let _dialog_guard = MediaDialogGuard::acquire()?;
+        tracing::info!(kind = %kind, "[CALL-DIAG] native-media-dialog-before");
         let confirmed = confirm_native_dialog(
             &app,
             if enumeration_only {
@@ -232,6 +240,7 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
             },
         )
         .await;
+        tracing::info!(kind = %kind, confirmed, "[CALL-DIAG] native-media-dialog-after");
 
         let mut slot = MEDIA_PERMISSION_LEASE
             .lock()
@@ -245,6 +254,12 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         } else {
             None
         };
+        tracing::info!(
+            kind = %kind,
+            confirmed,
+            lease_stored = confirmed && !enumeration_only && (audio || video),
+            "[CALL-DIAG] native-media-request-complete"
+        );
         Ok(confirmed)
     }
 }

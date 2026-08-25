@@ -5,6 +5,9 @@ compile_error!("Qor desktop supports only Linux and Windows");
 
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -13,6 +16,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 // Module declarations
 mod account_vault;
 mod audio_codec;
+mod audio_playback;
 mod camera_capture;
 mod commands;
 mod crypto;
@@ -21,8 +25,10 @@ mod error;
 mod hybrid_native;
 mod json_bounds;
 mod message_content;
+mod microphone_capture;
 mod network;
 mod protocol_keys;
+mod screen_capture;
 mod signal_protocol;
 mod state;
 mod storage;
@@ -42,8 +48,116 @@ fn set_env_default(key: &str, value: &str) {
 }
 
 #[cfg(target_os = "linux")]
+fn prepend_env_paths(key: &str, candidates: Vec<PathBuf>) {
+    let mut paths = candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_dir())
+        .collect::<Vec<_>>();
+    if let Some(existing) = std::env::var_os(key) {
+        for existing_path in std::env::split_paths(&existing) {
+            if !paths.contains(&existing_path) {
+                paths.push(existing_path);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return;
+    }
+    if let Ok(value) = std::env::join_paths(paths) {
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_media_runtime() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(binary_dir) = executable.parent() else {
+        return;
+    };
+    if binary_dir.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return;
+    }
+    let Some(usr_dir) = binary_dir.parent() else {
+        return;
+    };
+    unsafe {
+        std::env::set_var("QOR_GSTREAMER_REQUIRE_BUNDLED", "1");
+    }
+    let usr_lib = usr_dir.join("lib");
+    let packaged_runtime = usr_lib.join("Qor").join("webkitgtk");
+    let capture_plugin_path = usr_lib
+        .join("Qor")
+        .join("screen-capture")
+        .join("gstreamer-1.0");
+    let private_capture_plugin_path = packaged_runtime.join("capture-plugins");
+    let private_plugin_path = packaged_runtime.join("gstreamer-1.0");
+    let app_plugin_path = usr_lib.join("gstreamer-1.0");
+    let private_library_path = packaged_runtime.join("lib");
+    let plugin_paths = vec![private_plugin_path.clone(), app_plugin_path.clone()];
+    let library_paths = vec![private_library_path.clone(), usr_lib.clone()];
+    prepend_env_paths("GST_PLUGIN_PATH_1_0", plugin_paths);
+    prepend_env_paths("LD_LIBRARY_PATH", library_paths);
+    if let Some(capture_plugin_path) = [private_capture_plugin_path, capture_plugin_path]
+        .into_iter()
+        .find(|path| path.is_dir())
+    {
+        unsafe {
+            std::env::set_var("QOR_GSTREAMER_CAPTURE_PLUGINS", capture_plugin_path);
+        }
+    }
+    if private_library_path.is_dir() {
+        unsafe {
+            std::env::set_var("QOR_GSTREAMER_RUNTIME_LIB", &private_library_path);
+        }
+    } else if usr_lib.is_dir() {
+        unsafe {
+            std::env::set_var("QOR_GSTREAMER_RUNTIME_LIB", &usr_lib);
+        }
+    }
+
+    unsafe {
+        std::env::remove_var("SPA_PLUGIN_DIR");
+        std::env::remove_var("QOR_GSTREAMER_SPA_PLUGINS");
+    }
+    let spa_paths = [packaged_runtime.join("spa-0.2"), usr_lib.join("spa-0.2")];
+    if let Some(spa_path) = spa_paths
+        .into_iter()
+        .find(|path| screen_capture::spa_runtime_is_complete(path))
+    {
+        unsafe {
+            std::env::set_var("SPA_PLUGIN_DIR", &spa_path);
+            std::env::set_var("QOR_GSTREAMER_SPA_PLUGINS", spa_path);
+        }
+    }
+
+    let gstreamer_launch = packaged_runtime.join("bin").join("qor-gst-launch-1.0");
+    if gstreamer_launch.is_file() {
+        unsafe {
+            std::env::set_var("QOR_GSTREAMER_LAUNCH", gstreamer_launch);
+        }
+    }
+    let plugin_scanner = [
+        packaged_runtime.join("bin").join("qor-gst-plugin-scanner"),
+        binary_dir.join("qor-gst-plugin-scanner"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file());
+    if let Some(plugin_scanner) = plugin_scanner {
+        unsafe {
+            std::env::set_var("GST_PLUGIN_SCANNER_1_0", &plugin_scanner);
+            std::env::set_var("QOR_GSTREAMER_PLUGIN_SCANNER", plugin_scanner);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn configure_linux_webview_rendering() {
-    set_env_default("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    set_env_default("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
+    configure_linux_media_runtime();
 
     if std::env::var_os("QOR_CHAT_SOFTWARE_RENDERING").is_some() {
         set_env_default("LIBGL_ALWAYS_SOFTWARE", "1");
@@ -87,6 +201,13 @@ fn init_logging() {
     for directive in [
         "qor_chat_lib::network::websocket=info",
         "qor_chat_lib::commands::websocket=info",
+        "qor_chat_lib::commands::system=info",
+        "qor_chat_lib::commands::camera=info",
+        "qor_chat_lib::camera_capture=info",
+        "qor_chat_lib::commands::microphone=info",
+        "qor_chat_lib::microphone_capture=info",
+        "qor_chat_call_diag=info",
+        "pulseaudio::client::reactor=off",
         "libsignal_protocol::session_management=off",
         "netlink_packet_route=error",
         "netlink_packet_route::link::buffer_tool=error",
@@ -117,14 +238,38 @@ fn init_logging() {
 /// Main entry point
 pub fn run() {
     configure_linux_webview_rendering();
+    let context = tauri::generate_context!();
     init_logging();
-    std::panic::set_hook(Box::new(|_| {
-        error!("[RUST-PANIC] application terminated unexpectedly");
+    std::panic::set_hook(Box::new(|panic_info| {
+        let message = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("non-string panic payload");
+        if let Some(location) = panic_info.location() {
+            error!(
+                panic_message = %message,
+                panic_file = location.file(),
+                panic_line = location.line(),
+                panic_column = location.column(),
+                "[RUST-PANIC] application terminated unexpectedly"
+            );
+        } else {
+            error!(
+                panic_message = %message,
+                "[RUST-PANIC] application terminated unexpectedly"
+            );
+        }
     }));
 
     install_rustls_provider();
     info!("Starting Qor-Chat v{}", env!("CARGO_PKG_VERSION"));
-
     // Build and run Tauri application
     let builder = tauri::Builder::default().manage(AppState::new());
 
@@ -145,26 +290,60 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.with_webview(|webview| {
-                    use webkit2gtk::glib::object::Cast;
+                    use webkit2gtk::glib::{object::Cast, translate::ToGlibPtr};
                     use webkit2gtk::{
                         PermissionRequestExt, UserMediaPermissionRequestExt, WebViewExt,
                     };
                     let wv = webview.inner();
                     wv.connect_permission_request(|_wv, req| {
+                        info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-callback-enter");
                         if let Some(media_request) =
                             req.downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
                         {
-                            let allowed = crate::commands::system::consume_media_permission_lease(
-                                media_request.is_for_audio_device(),
-                                media_request.is_for_video_device(),
+                            let requests_audio = media_request.is_for_audio_device();
+                            let requests_video = media_request.is_for_video_device();
+                            info!(
+                                target: "qor_chat_call_diag",
+                                requests_audio,
+                                requests_video,
+                                "[CALL-DIAG] webkit-media-request-classified"
+                            );
+                            info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-display-check-before");
+                            let is_display = unsafe {
+                                webkit2gtk::ffi::webkit_user_media_permission_is_for_display_device(
+                                    media_request.to_glib_none().0,
+                                ) != 0
+                            };
+                            info!(
+                                target: "qor_chat_call_diag",
+                                is_display,
+                                "[CALL-DIAG] webkit-display-check-after"
+                            );
+                            let allowed = is_display
+                                || crate::commands::system::consume_media_permission_lease(
+                                    requests_audio,
+                                    requests_video,
+                                );
+                            info!(
+                                target: "qor_chat_call_diag",
+                                requests_audio,
+                                requests_video,
+                                is_display,
+                                allowed,
+                                "[CALL-DIAG] webkit-permission-decision"
                             );
                             if allowed {
+                                info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-allow-before");
                                 req.allow();
+                                info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-allow-after");
                             } else {
+                                info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-deny-before");
                                 req.deny();
+                                info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-deny-after");
                             }
                             true
                         } else {
+                            info!(target: "qor_chat_call_diag", "[CALL-DIAG] webkit-permission-non-media");
                             false
                         }
                     });
@@ -228,11 +407,23 @@ pub fn run() {
             commands::audio::audio_opus_stop,
             commands::audio::audio_opus_encode,
             commands::audio::audio_opus_decode,
+            commands::audio::audio_opus_decode_playback,
+            commands::audio::audio_playback_start,
+            commands::audio::audio_playback_stop,
             commands::camera::camera_devices,
             commands::camera::camera_capture_start,
             commands::camera::camera_capture_set_enabled,
             commands::camera::camera_capture_pull,
             commands::camera::camera_capture_stop,
+            commands::screen_capture::screen_capture_start,
+            commands::screen_capture::screen_capture_pull,
+            commands::screen_capture::screen_capture_stop,
+            commands::microphone::microphone_devices,
+            commands::microphone::audio_output_devices,
+            commands::microphone::microphone_capture_start,
+            commands::microphone::microphone_capture_set_enabled,
+            commands::microphone::microphone_capture_pull,
+            commands::microphone::microphone_capture_stop,
             commands::storage::secure_get,
             commands::storage::secure_set,
             commands::storage::secure_remove,
@@ -302,7 +493,7 @@ pub fn run() {
             database::db_mutate_secure,
             database::db_delete,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 

@@ -194,7 +194,7 @@ export const Login = React.memo<LoginProps>(({
           tabIndex={isBusy ? -1 : undefined}
           style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
         >
-          Back to setup
+          Change server
         </button>
 
         <ThemeToggleButton className="auth-theme-toggle" />

@@ -2,12 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../../contexts/ThemeContext';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { RefreshCw } from 'lucide-react';
+import { LoaderCircle, RefreshCw } from 'lucide-react';
 import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { screenSharingSettings } from '../../lib/database/screen-sharing-settings';
 import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
-import { notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
+import { nativeCamera, nativeMicrophone, notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import {
   hasPrototypePollutionKeys,
@@ -17,20 +16,18 @@ import {
   sanitizeEventUsername,
 } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
-import { type ScreenSharingSettings } from '../../lib/types/screen-sharing-types';
 import {
   DEFAULT_EVENT_RATE_MAX,
   DEFAULT_EVENT_RATE_WINDOW_MS,
   MAX_EVENT_TYPE_LENGTH,
   MAX_EVENT_USERNAME_LENGTH,
   MAX_PROFILE_IMAGE_SIZE,
-  QUALITY_LABELS,
-  QUALITY_OPTIONS,
-  type QualityOption,
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
-import { AppSettingsStyles } from './sections/AppSettingsStyles';
+import { installAppSettingsStyles } from './sections/AppSettingsStyles';
 import { STORAGE_KEYS } from '../../lib/database/storage-keys';
+
+installAppSettingsStyles();
 
 interface AppSettingsProps {
   currentUsername?: string;
@@ -41,46 +38,7 @@ interface AppSettingsProps {
 
 interface NotificationSettings {
   desktop: boolean;
-  sound: boolean;
 }
-
-interface AudioSettings {
-  noiseSuppression: boolean;
-  echoCancellation: boolean;
-}
-
-type SectionId = 'account' | 'general' | 'audio' | 'voice-video' | 'privacy';
-
-const sectionGroups: Array<{
-  category: string;
-  items: Array<{ id: SectionId; label: string; icon: string }>;
-}> = [
-  {
-    category: 'User',
-    items: [{ id: 'account', label: 'My Account', icon: 'icon-user' }],
-  },
-  {
-    category: 'App',
-    items: [{ id: 'general', label: 'General', icon: 'icon-settings' }],
-  },
-  {
-    category: 'Calling',
-    items: [
-      { id: 'audio', label: 'Audio', icon: 'icon-volume' },
-      { id: 'voice-video', label: 'Voice & Video', icon: 'icon-monitor' },
-    ],
-  },
-  {
-    category: 'Data',
-    items: [{ id: 'privacy', label: 'Privacy & Safety', icon: 'icon-shield' }],
-  },
-];
-
-const qualityButtonLabels: Record<QualityOption, string> = {
-  low: 'Low',
-  medium: 'Balanced',
-  high: 'High',
-};
 
 function IconUse({ id, filled = false }: { id: string; filled?: boolean }) {
   return (
@@ -182,24 +140,19 @@ export const AppSettings = React.memo(function AppSettings({
   findUser,
 }: AppSettingsProps) {
   const { theme, resolvedTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-  const [activeSection, setActiveSection] = useState<SectionId>('account');
   const [isClearingData, setIsClearingData] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const clearArmTimerRef = useRef<number | null>(null);
   const [logoutArmed, setLogoutArmed] = useState(false);
   const logoutTimerRef = useRef<number | null>(null);
-  const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true, sound: true });
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>({ noiseSuppression: true, echoCancellation: true });
+  const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true });
   const [closeToTray, setCloseToTray] = useState(true);
   const [isTrayLoading, setIsTrayLoading] = useState(true);
-  const [screenSettings, setScreenSettings] = useState<ScreenSharingSettings | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
-  const [shareWithOthers, setShareWithOthers] = useState(false);
   const [copiedUsername, setCopiedUsername] = useState(false);
-  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
-  const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
-  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [micDevices, setMicDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
+  const [speakerDevices, setSpeakerDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
+  const [cameraDevices, setCameraDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const devicesLoadingRef = useRef(false);
   const [preferredMicId, setPreferredMicId] = useState('');
@@ -226,8 +179,7 @@ export const AppSettings = React.memo(function AppSettings({
 
   const saveSettings = useCallback((updates: Partial<{
     notifications: NotificationSettings;
-    audioSettings: AudioSettings;
-    preferredMicId: string;
+    preferredCallMicId: string;
     preferredSpeakerId: string;
     preferredCameraId: string;
   }>) => {
@@ -266,23 +218,23 @@ export const AppSettings = React.memo(function AppSettings({
     setDevicesLoading(true);
     try {
       if (!await system.requestMediaAccess('enumerate')) return;
-      const devices = await navigator.mediaDevices?.enumerateDevices?.();
-      if (!Array.isArray(devices) || devices.length > 128) {
+      const [microphones, speakers, cameras] = await Promise.all([
+        nativeMicrophone.devices(),
+        nativeMicrophone.outputDevices(),
+        nativeCamera.devices(),
+      ]);
+      if (microphones.length > 64 || speakers.length > 64 || cameras.length > 32) {
         throw new Error('Invalid media device list');
       }
-      setMicDevices(devices.filter((device) => device.kind === 'audioinput'));
-      setSpeakerDevices(devices.filter((device) => device.kind === 'audiooutput'));
-      setCameraDevices(devices.filter((device) => device.kind === 'videoinput'));
+      setMicDevices(microphones.map(device => ({ deviceId: device.device_id, label: device.label })));
+      setSpeakerDevices(speakers.map(device => ({ deviceId: device.device_id, label: device.label })));
+      setCameraDevices(cameras.map(device => ({ deviceId: device.device_id, label: device.label })));
     } catch {
       toast.error('Could not load media devices');
     } finally {
       devicesLoadingRef.current = false;
       setDevicesLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    setMounted(true);
   }, []);
 
   useEffect(() => {
@@ -297,7 +249,6 @@ export const AppSettings = React.memo(function AppSettings({
       try {
         await profilePictureSystem.initialize();
         setAvatarUrl(profilePictureSystem.getOwnAvatar());
-        setShareWithOthers(profilePictureSystem.getShareWithOthers());
       } catch (error) {
         console.error('[AppSettings] Failed to init profile picture:', error);
       }
@@ -314,32 +265,11 @@ export const AppSettings = React.memo(function AppSettings({
           setNotifications(parsed.notifications);
           tauriNotifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
         }
-        if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
-        if (parsed.preferredMicId) setPreferredMicId(parsed.preferredMicId);
+        if (parsed.preferredCallMicId) setPreferredMicId(parsed.preferredCallMicId);
         if (parsed.preferredSpeakerId) setPreferredSpeakerId(parsed.preferredSpeakerId);
         if (parsed.preferredCameraId) setPreferredCameraId(parsed.preferredCameraId);
       }
     } catch { }
-  }, []);
-
-  useEffect(() => {
-    let isMountedLocal = true;
-    const loadScreenSettings = async () => {
-      try {
-        const current = await screenSharingSettings.getSettings();
-        if (isMountedLocal) setScreenSettings(current);
-      } catch { }
-    };
-
-    loadScreenSettings();
-    const unsubscribe = screenSharingSettings.subscribe((newSettings) => {
-      if (isMountedLocal) setScreenSettings(newSettings);
-    });
-
-    return () => {
-      isMountedLocal = false;
-      unsubscribe();
-    };
   }, []);
 
   useEffect(() => {
@@ -362,18 +292,15 @@ export const AppSettings = React.memo(function AppSettings({
         }
 
         setAvatarUrl(profilePictureSystem.getOwnAvatar());
-        setShareWithOthers(profilePictureSystem.getShareWithOthers());
       } catch { }
     };
 
     window.addEventListener(EventType.PROFILE_PICTURE_UPDATED, handleAvatarUpdate as EventListener);
     window.addEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleAvatarUpdate as EventListener);
-    window.addEventListener(EventType.PROFILE_SETTINGS_UPDATED, handleAvatarUpdate as EventListener);
 
     return () => {
       window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleAvatarUpdate as EventListener);
       window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleAvatarUpdate as EventListener);
-      window.removeEventListener(EventType.PROFILE_SETTINGS_UPDATED, handleAvatarUpdate as EventListener);
     };
   }, []);
 
@@ -461,15 +388,6 @@ export const AppSettings = React.memo(function AppSettings({
     reader.readAsDataURL(selectedFile);
   };
 
-  const handleShareToggle = async (share: boolean) => {
-    try {
-      await profilePictureSystem.setShareWithOthers(share);
-      setShareWithOthers(share);
-    } catch {
-      toast.error('Failed to update profile sharing');
-    }
-  };
-
   const handleCloseToTrayChange = async (enabled: boolean) => {
     const previous = closeToTray;
     setCloseToTray(enabled);
@@ -481,19 +399,11 @@ export const AppSettings = React.memo(function AppSettings({
     }
   };
 
-  const handleNotificationToggle = (key: keyof NotificationSettings, checked: boolean) => {
-    const updated = { ...notifications, [key]: checked };
+  const handleDesktopNotificationsToggle = (checked: boolean) => {
+    const updated = { ...notifications, desktop: checked };
     setNotifications(updated);
     saveSettings({ notifications: updated });
-    if (key === 'desktop') {
-      tauriNotifications.setEnabled(checked).catch(() => { });
-    }
-  };
-
-  const handleAudioToggle = (key: keyof AudioSettings, checked: boolean) => {
-    const updated = { ...audioSettings, [key]: checked };
-    setAudioSettings(updated);
-    saveSettings({ audioSettings: updated });
+    tauriNotifications.setEnabled(checked).catch(() => { });
   };
 
   const handleDevicePreference = (
@@ -503,11 +413,7 @@ export const AppSettings = React.memo(function AppSettings({
     if (key === 'preferredMicId') setPreferredMicId(value);
     if (key === 'preferredSpeakerId') setPreferredSpeakerId(value);
     if (key === 'preferredCameraId') setPreferredCameraId(value);
-    saveSettings({ [key]: value });
-  };
-
-  const handleQualityChange = (quality: QualityOption) => {
-    screenSharingSettings.setQuality(quality).catch(() => toast.error('Failed to update quality'));
+    saveSettings(key === 'preferredMicId' ? { preferredCallMicId: value } : { [key]: value });
   };
 
   const armClearData = useCallback(() => {
@@ -667,55 +573,21 @@ export const AppSettings = React.memo(function AppSettings({
     }
   }, [unblockTarget, unblocking, blockingAvailable, loadBlockedUsers]);
 
-  if (!mounted) return null;
-
   return (
     <>
-      <AppSettingsStyles />
       <div className={`qor-settings-host ${themeClass}`}>
         <svg className="hidden-symbols" aria-hidden="true">
-          <symbol id="icon-user" viewBox="0 0 24 24"><path d="M20 21a8 8 0 0 0-16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></symbol>
-          <symbol id="icon-user-filled" viewBox="0 0 24 24"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM4 22a8 8 0 0 1 16 0z" fill="currentColor" /></symbol>
-          <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" fill="none" stroke="currentColor" strokeWidth="1.8" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H2.8a2 2 0 1 1 0-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 1 1 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2a2 2 0 1 1 4 0V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1z" fill="none" stroke="currentColor" strokeWidth="1.4" /></symbol>
-          <symbol id="icon-settings-filled" viewBox="0 0 24 24"><path fillRule="evenodd" clipRule="evenodd" d="M10.4 2h3.2a2 2 0 0 1 2 2v.24c0 .61.67.99 1.19.69l.21-.12a2 2 0 0 1 2.73.73l1.6 2.77a2 2 0 0 1-.73 2.73l-.21.12a.79.79 0 0 0 0 1.37l.21.12a2 2 0 0 1 .73 2.73l-1.6 2.77a2 2 0 0 1-2.73.73l-.21-.12a.79.79 0 0 0-1.19.69V20a2 2 0 0 1-2 2h-3.2a2 2 0 0 1-2-2v-.24a.79.79 0 0 0-1.19-.69l-.21.12a2 2 0 0 1-2.73-.73l-1.6-2.77a2 2 0 0 1 .73-2.73l.21-.12a.79.79 0 0 0 0-1.37l-.21-.12a2 2 0 0 1-.73-2.73l1.6-2.77A2 2 0 0 1 7 5.12l.21.12a.79.79 0 0 0 1.19-.69V4a2 2 0 0 1 2-2ZM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" fill="currentColor" /></symbol>
-          <symbol id="icon-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4zM15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></symbol>
-          <symbol id="icon-volume-filled" viewBox="0 0 24 24"><path d="M11.6 4.3a1 1 0 0 1 .4.8v13.8a1 1 0 0 1-1.64.77L5.65 15.8H3a1 1 0 0 1-1-1V9.2a1 1 0 0 1 1-1h2.65l4.71-3.87a1 1 0 0 1 1.24-.03z" fill="currentColor" /><path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></symbol>
-          <symbol id="icon-monitor" viewBox="0 0 24 24"><path d="M3 5h18v12H3zM8 21h8M12 17v4" fill="none" stroke="currentColor" strokeWidth="1.8" /></symbol>
-          <symbol id="icon-monitor-filled" viewBox="0 0 24 24"><path d="M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM11 17h2v3h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3z" fill="currentColor" /></symbol>
-          <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4 3 8 7 10 4-2 7-6 7-10V6z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /></symbol>
-          <symbol id="icon-shield-filled" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4 3 8 7 10 4-2 7-6 7-10V6z" fill="currentColor" /></symbol>
           <symbol id="icon-copy" viewBox="0 0 24 24"><path d="M8 8h10v12H8zM6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /></symbol>
           <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M9 5 7.5 7H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2.5L15 5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.8" /></symbol>
         </svg>
 
         <main className="settings-screen">
-          <aside className="settings-nav" aria-label="Settings sections">
-            <h1 className="settings-brand"><span>Qor Chat</span><strong>Settings</strong></h1>
-
-            {sectionGroups.map((group) => (
-              <div className="nav-block" key={group.category}>
-                <div className="nav-label">{group.category}</div>
-                {group.items.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`settings-tab ${activeSection === item.id ? 'active' : ''}`}
-                    data-settings-section={item.id}
-                    type="button"
-                    onClick={() => setActiveSection(item.id)}
-                  >
-                    <IconUse id={item.icon} filled={activeSection === item.id} />
-                    <span>{item.label}</span>
-                  </button>
-                ))}
-              </div>
-            ))}
-          </aside>
-
           <section className="settings-content">
-            <section className={`pane account-pane ${activeSection === 'account' ? 'active' : ''}`} data-settings-pane="account">
+            <h1 className="settings-brand"><strong>Settings</strong></h1>
+
+            <section className="pane account-pane" data-settings-pane="account">
               <header className="pane-head">
                 <div>
-                  <span className="pane-kicker">User</span>
                   <h2 className="pane-title">My Account</h2>
                 </div>
               </header>
@@ -755,14 +627,6 @@ export const AppSettings = React.memo(function AppSettings({
                         <IconUse id="icon-copy" />
                       </button>
                     </div>
-                  </div>
-
-                  <div className="account-share-row">
-                    <div>
-                      <div className="setting-label">Share with Others</div>
-                      <div className="setting-description">Allow other users to see your profile picture. When disabled, they see a default avatar.</div>
-                    </div>
-                    <SwitchButton checked={shareWithOthers} label="Share with Others" onChange={handleShareToggle} />
                   </div>
 
                   <div className="account-actions">
@@ -808,17 +672,15 @@ export const AppSettings = React.memo(function AppSettings({
               </div>
             </section>
 
-            <section className={`pane ${activeSection === 'general' ? 'active' : ''}`} data-settings-pane="general">
+            <section className="pane" data-settings-pane="general">
               <header className="pane-head">
                 <div>
-                  <span className="pane-kicker">App</span>
                   <h2 className="pane-title">General</h2>
                   <p className="pane-subtitle">Basic app behavior.</p>
                 </div>
               </header>
 
               <div className="settings-section">
-                <h3 className="section-title">Behavior</h3>
                 <div className="settings-list">
                   <div className="setting-row">
                     <div>
@@ -831,57 +693,27 @@ export const AppSettings = React.memo(function AppSettings({
               </div>
 
               <div className="settings-section">
-                <h3 className="section-title">Notifications</h3>
                 <div className="settings-list">
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Desktop Notifications</div>
                       <div className="setting-description">Show a notification popup when a new message arrives.</div>
                     </div>
-                    <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={(checked) => handleNotificationToggle('desktop', checked)} />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Sound Notifications</div>
-                      <div className="setting-description">Play a sound when a new message arrives.</div>
-                    </div>
-                    <SwitchButton checked={notifications.sound} label="Sound Notifications" onChange={(checked) => handleNotificationToggle('sound', checked)} />
+                    <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
                   </div>
                 </div>
               </div>
             </section>
 
-            <section className={`pane ${activeSection === 'audio' ? 'active' : ''}`} data-settings-pane="audio">
+            <section className="pane" data-settings-pane="devices">
               <header className="pane-head">
                 <div>
-                  <span className="pane-kicker">Calling</span>
-                  <h2 className="pane-title">Audio</h2>
-                  <p className="pane-subtitle">Voice processing and device selection.</p>
+                  <h2 className="pane-title">Devices</h2>
+                  <p className="pane-subtitle">Hardware used for calls.</p>
                 </div>
               </header>
 
               <div className="settings-section">
-                <h3 className="section-title">Voice Processing</h3>
-                <div className="settings-list">
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Noise Suppression</div>
-                      <div className="setting-description">Filter background noise during calls.</div>
-                    </div>
-                    <SwitchButton checked={audioSettings.noiseSuppression} label="Noise Suppression" onChange={(checked) => handleAudioToggle('noiseSuppression', checked)} />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Echo Cancellation</div>
-                      <div className="setting-description">Reduce echo and feedback during voice calls.</div>
-                    </div>
-                    <SwitchButton checked={audioSettings.echoCancellation} label="Echo Cancellation" onChange={(checked) => handleAudioToggle('echoCancellation', checked)} />
-                  </div>
-                </div>
-              </div>
-
-              <div className="settings-section">
-                <h3 className="section-title">Device Selection</h3>
                 <div className="settings-list">
                   <div className="setting-row">
                     <div>
@@ -901,7 +733,7 @@ export const AppSettings = React.memo(function AppSettings({
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Microphone</div>
-                      <div className="setting-description">Default microphone for calls and voice messages.</div>
+                      <div className="setting-description">Default microphone for calls.</div>
                     </div>
                     <select className="select" value={preferredMicId} onChange={(event) => handleDevicePreference('preferredMicId', event.target.value)}>
                       <option value="">System Default</option>
@@ -932,54 +764,9 @@ export const AppSettings = React.memo(function AppSettings({
               </div>
             </section>
 
-            <section className={`pane ${activeSection === 'voice-video' ? 'active' : ''}`} data-settings-pane="voice-video">
+            <section className="pane" data-settings-pane="privacy">
               <header className="pane-head">
                 <div>
-                  <span className="pane-kicker">Calling</span>
-                  <h2 className="pane-title">Voice & Video</h2>
-                  <p className="pane-subtitle">Camera and screen sharing quality.</p>
-                </div>
-              </header>
-
-              <div className="settings-section">
-                <h3 className="section-title">Video Quality</h3>
-                <div className="settings-list">
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Quality</div>
-                      <div className="setting-description">Set the preferred quality ceiling. Calls target 60 FPS and adapt resolution and bitrate when needed.</div>
-                    </div>
-                    <div className="segmented" role="group" aria-label="Quality">
-                      {QUALITY_OPTIONS.map((quality) => (
-                        <button
-                          key={quality}
-                          className={screenSettings?.quality === quality ? 'active' : ''}
-                          type="button"
-                          title={QUALITY_LABELS[quality]}
-                          onClick={() => handleQualityChange(quality)}
-                        >
-                          {qualityButtonLabels[quality]}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Reset settings</div>
-                      <div className="setting-description">Restore the video quality default.</div>
-                    </div>
-                    <button className="action" type="button" onClick={() => screenSharingSettings.resetToDefaults().catch(() => toast.error('Failed to reset settings'))}>
-                      Reset to Defaults
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            <section className={`pane ${activeSection === 'privacy' ? 'active' : ''}`} data-settings-pane="privacy">
-              <header className="pane-head">
-                <div>
-                  <span className="pane-kicker">Data</span>
                   <h2 className="pane-title">Privacy & Safety</h2>
                   <p className="pane-subtitle">Manage who can reach you.</p>
                 </div>
@@ -987,12 +774,6 @@ export const AppSettings = React.memo(function AppSettings({
 
               <div className="settings-section">
                 <div className="blocked-head">
-                  <div>
-                    <h3 className="section-title">Blocked users</h3>
-                    <p className="blocked-subtitle">
-                      Blocked users can't message or call you. They aren't told they've been blocked.
-                    </p>
-                  </div>
                   <button
                     className="action"
                     type="button"
@@ -1006,8 +787,8 @@ export const AppSettings = React.memo(function AppSettings({
                 {blockedUsersError && <div className="settings-error">{blockedUsersError}</div>}
 
                 {blockedUsersLoading && blockedUsers.length === 0 ? (
-                  <div className="blocked-empty">
-                    <div><span>Loading blocked users…</span></div>
+                  <div className="blocked-empty" role="status" aria-label="Loading blocked users">
+                    <LoaderCircle className="blocked-spinner" size={20} aria-hidden="true" />
                   </div>
                 ) : blockedUsers.length === 0 ? (
                   <div className="blocked-empty">

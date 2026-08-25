@@ -80,7 +80,6 @@ export const EventType = {
   // Profile picture events
   PROFILE_PICTURE_UPDATED: 'profile-picture-updated',
   PROFILE_PICTURE_SYSTEM_INITIALIZED: 'profile-picture-system-initialized',
-  PROFILE_SETTINGS_UPDATED: 'profile-settings-updated',
 
   // Block events
   BLOCK_STATUS_CHANGED: 'block-status-changed',
