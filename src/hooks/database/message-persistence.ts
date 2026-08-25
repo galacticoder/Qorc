@@ -1,6 +1,10 @@
 import type { Message } from '../../components/chat/messaging/types';
 import type { SecureDB } from '../../lib/database/secureDB';
-import { DB_MAX_PENDING_MESSAGES, MAX_UI_MESSAGES_TOTAL } from '../../lib/constants';
+import {
+  CONVERSATION_WARM_MESSAGE_COUNT,
+  DB_MAX_PENDING_MESSAGES,
+  MAX_UI_MESSAGES_TOTAL,
+} from '../../lib/constants';
 import { mergeReceipts } from '../../lib/utils/database-utils';
 
 const isVaultedTextMessage = (msg: Message): boolean => (
@@ -78,6 +82,18 @@ export const loadRecentMessages = async (
   const retainedMessages = savedMessages.slice(0, MAX_UI_MESSAGES_TOTAL);
 
   return retainedMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
+};
+
+export const loadConversationWarmPages = async (
+  secureDB: SecureDB,
+  currentUser: string,
+  limit = CONVERSATION_WARM_MESSAGE_COUNT,
+): Promise<Array<{ peerUsername: string; messages: Message[] }>> => {
+  const pages = await secureDB.loadConversationWarmPages(limit);
+  return pages.map((page) => ({
+    peerUsername: page.peerUsername,
+    messages: page.messages.map((message) => processMessageFromDB(message, currentUser)),
+  }));
 };
 
 // Load conversation messages with pagination

@@ -7,6 +7,7 @@ import { nativeMessageContent } from '../../../lib/tauri-bindings';
 
 export interface SecureCanvasTextProps {
     messageId: string;
+    contentVersion?: string;
     maxWidth?: number;
     fontSize?: number;
     color?: string;
@@ -42,6 +43,7 @@ const cssColorToHex = (
 
 export const SecureCanvasText = memo(function SecureCanvasText({
     messageId,
+    contentVersion,
     maxWidth = 400,
     fontSize = 14,
     color = 'inherit',
@@ -108,7 +110,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             cancelled = true;
             setImageSource(null);
         };
-    }, [isVisible, messageId, maxWidth, fontSize, color, isCurrentUser]);
+    }, [isVisible, messageId, contentVersion, maxWidth, fontSize, color, isCurrentUser]);
 
     const handleCopy = useCallback(async () => {
         await nativeMessageContent.copy(messageId);

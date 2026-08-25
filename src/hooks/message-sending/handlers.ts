@@ -148,7 +148,7 @@ export const createSessionResetRetryHandler = (
 
       const replacementEntry: PendingRetryMessage = {
         user: entry.user,
-        content: '',
+        content: entry.content,
         replyTo: entry.replyTo,
         messageSignalType: entry.messageSignalType,
         retryId: entry.retryId,

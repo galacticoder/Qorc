@@ -41,6 +41,7 @@ interface EmojiPickerProps {
   triggerId?: string;
   isCurrentUser?: boolean;
   secureDB?: SecureDB;
+  origin?: PickerPosition | null;
 }
 
 interface PickerPosition {
@@ -67,7 +68,7 @@ const CATEGORY_ICONS: Readonly<Record<string, LucideIcon>> = {
   flags: Flag,
 };
 
-const GRID_COLUMNS = 8;
+const GRID_COLUMNS = 6;
 const PAGE_SIZE = 160;
 
 function findTrigger(triggerId?: string): HTMLElement | null {
@@ -90,6 +91,7 @@ export function EmojiPicker({
   triggerId,
   isCurrentUser = false,
   secureDB,
+  origin,
 }: EmojiPickerProps) {
   const [catalog, setCatalog] = useState<EmojiCatalogView | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -97,9 +99,10 @@ export function EmojiPicker({
   const [searchQuery, setSearchQuery] = useState('');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [position, setPosition] = useState<PickerPosition | null>(null);
-  const [focusedEmoji, setFocusedEmoji] = useState<EmojiRecord | null>(null);
 
   const pickerRef = useRef<HTMLDivElement>(null);
+  const categoriesRef = useRef<HTMLDivElement>(null);
+  const categoryWheelLockRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -159,6 +162,15 @@ export function EmojiPicker({
     const pickerRect = picker.getBoundingClientRect();
     const pickerWidth = pickerRect.width;
     const pickerHeight = pickerRect.height;
+
+    if (origin) {
+      setPosition({
+        left: Math.round(clamp(origin.left, margin, viewportWidth - pickerWidth - margin)),
+        top: Math.round(clamp(origin.top, margin, viewportHeight - pickerHeight - margin)),
+      });
+      return;
+    }
+
     const trigger = findTrigger(triggerId);
 
     if (!trigger) {
@@ -189,7 +201,7 @@ export function EmojiPicker({
     left = clamp(left, margin, viewportWidth - pickerWidth - margin);
     top = clamp(top, margin, viewportHeight - pickerHeight - margin);
     setPosition({ left: Math.round(left), top: Math.round(top) });
-  }, [isCurrentUser, triggerId]);
+  }, [isCurrentUser, origin, triggerId]);
 
   useLayoutEffect(() => {
     calculatePosition();
@@ -242,9 +254,36 @@ export function EmojiPicker({
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-    setFocusedEmoji(null);
     scrollRef.current?.scrollTo({ top: 0 });
   }, [activeCategory, searchQuery]);
+
+  useEffect(() => {
+    const categories = categoriesRef.current;
+    if (!categories) return;
+    const handleWheel = (event: WheelEvent) => {
+      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+        ? event.deltaX
+        : event.deltaY;
+      if (delta === 0) return;
+      event.preventDefault();
+      if (categoryWheelLockRef.current) return;
+      const category = categories.querySelector<HTMLElement>('.emoji-picker__category');
+      const gap = Number.parseFloat(window.getComputedStyle(categories).columnGap) || 0;
+      const step = (category?.getBoundingClientRect().width ?? 0) + gap;
+      if (step <= 0) return;
+      const nextIndex = Math.round(categories.scrollLeft / step) + Math.sign(delta);
+      categories.scrollTo({ left: nextIndex * step, behavior: 'smooth' });
+      categoryWheelLockRef.current = setTimeout(() => {
+        categoryWheelLockRef.current = null;
+      }, 180);
+    };
+    categories.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      categories.removeEventListener('wheel', handleWheel);
+      if (categoryWheelLockRef.current) clearTimeout(categoryWheelLockRef.current);
+      categoryWheelLockRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const root = scrollRef.current;
@@ -306,7 +345,6 @@ export function EmojiPicker({
   if (typeof document === 'undefined') return null;
 
   const sectionLabel = isSearching ? 'Search results' : (selectedSection?.label ?? 'Emoji');
-  const previewLabel = focusedEmoji?.name ?? sectionLabel;
 
   return createPortal(
     <div
@@ -322,53 +360,12 @@ export function EmojiPicker({
       aria-modal="false"
       data-positioned={position ? 'true' : 'false'}
     >
-      <div className="emoji-picker__header">
-        <div className="emoji-picker__search">
-          <Search size={16} aria-hidden="true" />
-          <input
-            ref={searchInputRef}
-            type="search"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowDown') {
-                event.preventDefault();
-                focusFirstEmoji();
-              }
-            }}
-            placeholder="Search emoji"
-            aria-label="Search emoji"
-            autoComplete="off"
-            spellCheck={false}
-            maxLength={80}
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              className="emoji-picker__clear"
-              onClick={() => {
-                setSearchQuery('');
-                searchInputRef.current?.focus();
-              }}
-              aria-label="Clear search"
-              title="Clear search"
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <button
-          type="button"
-          className="emoji-picker__close"
-          onClick={onClose}
-          aria-label="Close emoji picker"
-          title="Close"
-        >
-          <X size={17} aria-hidden="true" />
-        </button>
-      </div>
-
-      <div className="emoji-picker__categories" role="tablist" aria-label="Emoji categories">
+      <div
+        ref={categoriesRef}
+        className="emoji-picker__categories"
+        role="tablist"
+        aria-label="Emoji categories"
+      >
         {sections.map((section) => {
           const Icon = CATEGORY_ICONS[section.id] ?? Shapes;
           const selected = !isSearching && selectedSection?.id === section.id;
@@ -392,7 +389,6 @@ export function EmojiPicker({
       <div ref={scrollRef} className="emoji-picker__scroll">
         <div className="emoji-picker__section-heading">
           <span>{sectionLabel}</span>
-          {!loadFailed && catalog && <span>{matchingEmojis.length}</span>}
         </div>
 
         {!catalog && !loadFailed && (
@@ -429,10 +425,7 @@ export function EmojiPicker({
                 className="emoji-picker__emoji"
                 data-emoji-option
                 onClick={() => chooseEmoji(record)}
-                onMouseEnter={() => setFocusedEmoji(record)}
-                onFocus={() => setFocusedEmoji(record)}
                 aria-label={`${record.name}, ${record.emoji}`}
-                title={record.name}
               >
                 <span aria-hidden="true">{record.emoji}</span>
               </button>
@@ -442,9 +435,39 @@ export function EmojiPicker({
         <div ref={sentinelRef} className="emoji-picker__sentinel" aria-hidden="true" />
       </div>
 
-      <div className="emoji-picker__footer" aria-live="polite">
-        {focusedEmoji && <span className="emoji-picker__preview" aria-hidden="true">{focusedEmoji.emoji}</span>}
-        <span title={previewLabel}>{previewLabel}</span>
+      <div className="emoji-picker__search">
+        <Search size={16} aria-hidden="true" />
+        <input
+          ref={searchInputRef}
+          type="search"
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              focusFirstEmoji();
+            }
+          }}
+          placeholder="Search emoji"
+          aria-label="Search emoji"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={80}
+        />
+        {searchQuery && (
+          <button
+            type="button"
+            className="emoji-picker__clear"
+            onClick={() => {
+              setSearchQuery('');
+              searchInputRef.current?.focus();
+            }}
+            aria-label="Clear search"
+            title="Clear search"
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        )}
       </div>
     </div>,
     document.body,

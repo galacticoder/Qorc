@@ -63,6 +63,7 @@ import { usePrefetchedComponent } from "../hooks/app/usePrefetchedComponent";
 import { useStartupConnection } from "../hooks/app/useStartupConnection";
 import { startupConnection } from "../lib/transport/startup-connection";
 import { useBackgroundResume } from "../hooks/app/useBackgroundResume";
+import { useStartupAvatarReadiness } from "../hooks/app/useStartupAvatarReadiness";
 import { useDiscovery } from "../hooks/discovery/useDiscovery";
 import { keyTransparencyClient } from "../lib/key-transparency/client";
 import { getInstanceLocalStorageItem, setInstanceLocalStorageItem } from "../lib/runtime/instance-storage";
@@ -330,6 +331,7 @@ const ChatApp: React.FC = () => {
     usersRef,
     undefined,
     fileHandler.handleFileMessageChunk,
+    fileHandler.cancelIncomingFileTransfer,
     Database.secureDBRef,
     findUser,
     Database.dbInitialized,
@@ -377,18 +379,30 @@ const ChatApp: React.FC = () => {
     removeConversation,
     getConversationMessages,
     toggleConversationPin,
+    conversationsLoaded,
   } = useConversations(
     Authentication.loginUsernameRef.current || '',
     Database.users,
     messages,
     setMessages,
     Database.secureDBRef.current,
-    findUser
+    findUser,
+    Database.initialDataLoaded
   );
 
   useLayoutEffect(() => {
     activeConversationRef.current = selectedConversation;
   }, [selectedConversation]);
+
+  const handleSelectConversation = useCallback((username: string) => {
+    Database.hydratePreloadedConversationMessages(username);
+    selectConversation(username);
+  }, [Database.hydratePreloadedConversationMessages, selectConversation]);
+
+  const handleRemoveConversation = useCallback(async (username: string) => {
+    Database.discardPreloadedConversationMessages(username);
+    await removeConversation(username);
+  }, [Database.discardPreloadedConversationMessages, removeConversation]);
 
   useEffect(() => {
     if (selectedConversation && typeof messageSender?.prefetchSessionForPeer === 'function') {
@@ -567,11 +581,19 @@ const ChatApp: React.FC = () => {
   });
 
   // App initialization
-  useAppInitialization({
+  const { avatarDataLoaded } = useAppInitialization({
     Authentication,
     Database,
     flushPendingSaves,
     setShowSettings,
+  });
+
+  const startupAvatarsLoaded = useStartupAvatarReadiness({
+    secureDB: Database.secureDBRef.current,
+    currentUsername: currentDisplayName || Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || '',
+    conversations,
+    avatarDataLoaded,
+    conversationsLoaded,
   });
 
   useEffect(() => {
@@ -801,7 +823,13 @@ const ChatApp: React.FC = () => {
     );
   }
 
-  if (!Database.dbInitialized || !Authentication.vaultReady) {
+  if (
+    !Database.dbInitialized ||
+    !Authentication.vaultReady ||
+    !Database.initialDataLoaded ||
+    !conversationsLoaded ||
+    !startupAvatarsLoaded
+  ) {
     return <FullscreenSpinner />;
   }
 
@@ -876,7 +904,7 @@ const ChatApp: React.FC = () => {
                     currentUsername={Authentication.loginUsernameRef.current || ''}
                     conversations={conversations}
                     selectedConversation={selectedConversation || undefined}
-                    onSelectConversation={selectConversation}
+                    onSelectConversation={handleSelectConversation}
                     onAddConversation={async (username) => {
                       await addConversation(username);
                       setShowNewChatInput(false);
@@ -884,7 +912,7 @@ const ChatApp: React.FC = () => {
                     getDisplayUsername={stableGetDisplayUsername}
                     showNewChatInput={showNewChatInput}
                     onNewChatOpenChange={setShowNewChatInput}
-                    onRemoveConversation={removeConversation}
+                    onRemoveConversation={handleRemoveConversation}
                     onTogglePin={toggleConversationPin}
                     onStartCall={(username, type) => { void callingHook.startCall(username, type); }}
                     onToggleBlock={handleToggleBlock}

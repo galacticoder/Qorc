@@ -24,6 +24,7 @@ mod database;
 mod error;
 mod hybrid_native;
 mod json_bounds;
+mod link_preview;
 mod message_content;
 mod microphone_capture;
 mod network;
@@ -206,6 +207,8 @@ fn init_logging() {
         "qor_chat_lib::camera_capture=info",
         "qor_chat_lib::commands::microphone=info",
         "qor_chat_lib::microphone_capture=info",
+        "qor_chat_lib::commands::message_content=info",
+        "qor_chat_lib::link_preview=info",
         "qor_chat_call_diag=info",
         "pulseaudio::client::reactor=off",
         "libsignal_protocol::session_management=off",
@@ -399,6 +402,8 @@ pub fn run() {
             commands::message_content::message_content_commit_pending,
             commands::message_content::message_content_has,
             commands::message_content::message_content_render,
+            commands::message_content::message_content_link_targets,
+            commands::message_content::message_link_preview_fetch,
             commands::message_content::message_content_clone_for_display,
             commands::message_content::message_content_copy,
             commands::message_content::message_content_revoke_send,

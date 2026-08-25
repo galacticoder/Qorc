@@ -3,6 +3,8 @@ export interface MessageReply {
   sender?: string;
   content?: string;
   secureContentId?: string;
+  contentVersion?: string;
+  isDeleted?: true;
 }
 
 export interface FileInfo {

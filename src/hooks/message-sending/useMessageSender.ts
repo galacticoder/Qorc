@@ -189,8 +189,10 @@ export function useMessageSender(
       if (recipientBlocked) throw new Error('recipient-blocked');
 
       const sanitizedContent = sanitizeContent(content);
-      const replyToData = sanitizeReply(replyTo);
       const messageType = mapSignalType(SignalType.MESSAGE, messageSignalType);
+      const replyToData = messageType === SignalType.MESSAGE
+        ? sanitizeReply(replyTo)
+        : undefined;
       const isEditMessage = messageType === SignalType.EDIT_MESSAGE;
       const isPrivateText = messageType === SignalType.MESSAGE || isEditMessage;
       const isReaction = messageType === SignalType.REACTION_ADD || messageType === SignalType.REACTION_REMOVE;

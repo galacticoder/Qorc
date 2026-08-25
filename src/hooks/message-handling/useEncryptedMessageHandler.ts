@@ -174,6 +174,7 @@ export function useEncryptedMessageHandler(
   usersRef?: React.RefObject<User[]>,
   options?: { rateLimit?: Partial<RateLimitConfig> },
   handleFileMessageChunk?: (data: any, meta: any) => Promise<boolean | void>,
+  cancelIncomingFileTransfer?: (from: string, fileId: string) => boolean,
   secureDBRef?: React.RefObject<any | null>,
   findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
   isDatabaseReady: boolean = true,
@@ -1929,6 +1930,15 @@ export function useEncryptedMessageHandler(
           return;
         }
 
+        if (payload.type === SignalType.FILE_TRANSFER_CANCEL) {
+          const fileId = sanitizeMessageId(payload.fileId);
+          if (fileId && payload.from && payload.from !== currentUser) {
+            cancelIncomingFileTransfer?.(payload.from, fileId);
+          }
+          commitAuthenticatedMessage();
+          return;
+        }
+
         // Handle typing indicators
         if (payload.type === SignalType.TYPING_START || payload.type === SignalType.TYPING_STOP) {
           await dispatchTypingIndicatorEvent(payload);
@@ -2123,7 +2133,7 @@ export function useEncryptedMessageHandler(
         }
       }
     },
-    [setMessages, saveMessageToLocalDB, isAuthenticated, getKeysOnDemand, usersRef, handleFileMessageChunk, requestBundleOnceCallback, requestAuthenticatedSessionReset, loginUsernameRef, secureDBRef, findUser, getSignalCiphertextKey, isDatabaseReady, mutatePersistedMessage, loadPersistedMessage, storePersistedMessage, parkForSenderVerification]
+    [setMessages, saveMessageToLocalDB, isAuthenticated, getKeysOnDemand, usersRef, handleFileMessageChunk, cancelIncomingFileTransfer, requestBundleOnceCallback, requestAuthenticatedSessionReset, loginUsernameRef, secureDBRef, findUser, getSignalCiphertextKey, isDatabaseReady, mutatePersistedMessage, loadPersistedMessage, storePersistedMessage, parkForSenderVerification]
   );
 
   const enqueueEncryptedMessage = useCallback(

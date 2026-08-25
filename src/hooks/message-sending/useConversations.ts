@@ -22,12 +22,15 @@ export const useConversations = (
   messages: Message[],
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   secureDB: SecureDB | null,
-  findUser: (handle: string) => Promise<any>
+  findUser: (handle: string) => Promise<any>,
+  initialDataLoaded: boolean
 ) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [lastReadByConversation, setLastReadByConversation] = useState<Map<string, number>>(new Map());
   const [pinStateByConversation, setPinStateByConversation] = useState<Map<string, { isPinned: boolean; pinnedAt: number }>>(new Map());
+  const [metadataLoaded, setMetadataLoaded] = useState(false);
+  const [conversationListLoaded, setConversationListLoaded] = useState(false);
 
   // Rate limiting state
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
@@ -48,7 +51,14 @@ export const useConversations = (
     setSelectedConversation(null);
     setLastReadByConversation(new Map());
     setPinStateByConversation(new Map());
+    setMetadataLoaded(false);
+    setConversationListLoaded(false);
   }, [currentUsername]);
+
+  useLayoutEffect(() => {
+    setMetadataLoaded(false);
+    setConversationListLoaded(false);
+  }, [secureDB]);
 
   const addConversation = useCallback(async (username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
     const owner = currentUsername;
@@ -216,7 +226,7 @@ export const useConversations = (
   }, [selectedConversation, markConversationAsRead, currentUsername]);
 
   useEffect(() => {
-    if (!secureDB) return;
+    if (!secureDB || !currentUsername) return;
     const account = currentUsername;
     const generation = accountGenerationRef.current;
     const db = secureDB;
@@ -248,6 +258,8 @@ export const useConversations = (
         }
       } catch (err) {
         if (isCurrent()) console.error('[useConversations] Failed to load read state', err);
+      } finally {
+        if (isCurrent()) setMetadataLoaded(true);
       }
     };
     loadReadState();
@@ -266,7 +278,13 @@ export const useConversations = (
   }, [messages, currentUsername]);
 
   useEffect(() => {
-    if (!messages || messages.length === 0 || !currentUsername) {
+    if (!initialDataLoaded || !metadataLoaded || !currentUsername) {
+      setConversationListLoaded(false);
+      return;
+    }
+
+    if (!messages || messages.length === 0) {
+      setConversationListLoaded(true);
       return;
     }
 
@@ -294,7 +312,8 @@ export const useConversations = (
           lastMessage: getConversationPreview(msg, currentUsername),
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement,
-          secureContentId: msg.secureContentId,
+          secureContentId: msg.isDeleted ? undefined : msg.secureContentId,
+          contentVersion: msg.controlState?.editOperationId,
         });
       } else {
         const updated = { ...conv };
@@ -302,7 +321,8 @@ export const useConversations = (
         if (msgTime.getTime() > (conv.lastMessageTime?.getTime() || 0)) {
           updated.lastMessage = getConversationPreview(msg, currentUsername);
           updated.lastMessageTime = msgTime;
-          updated.secureContentId = msg.secureContentId;
+          updated.secureContentId = msg.isDeleted ? undefined : msg.secureContentId;
+          updated.contentVersion = msg.controlState?.editOperationId;
         }
         if (unreadIncrement > 0) {
           updated.unreadCount = (conv.unreadCount || 0) + unreadIncrement;
@@ -329,6 +349,7 @@ export const useConversations = (
             lastMessageTime: conv.lastMessageTime,
             unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
             secureContentId: conv.secureContentId,
+            contentVersion: conv.contentVersion,
             displayName: exists.displayName || conv.displayName,
             isPinned: pinState?.isPinned,
             pinnedAt: pinState?.pinnedAt
@@ -361,6 +382,7 @@ export const useConversations = (
           if (
             (p.lastMessage || '') !== (c.lastMessage || '') ||
             (p.secureContentId || '') !== (c.secureContentId || '') ||
+            (p.contentVersion || '') !== (c.contentVersion || '') ||
             pTime !== cTime ||
             (p.unreadCount || 0) !== (c.unreadCount || 0) ||
             (p.displayName || '') !== (c.displayName || '') ||
@@ -378,7 +400,8 @@ export const useConversations = (
 
       return next;
     });
-  }, [messages, currentUsername, selectedConversation, lastReadByConversation, pinStateByConversation]);
+    setConversationListLoaded(true);
+  }, [messages, currentUsername, selectedConversation, lastReadByConversation, pinStateByConversation, initialDataLoaded, metadataLoaded]);
 
   useEffect(() => {
     if (!selectedConversation) return;
@@ -458,5 +481,6 @@ export const useConversations = (
     removeConversation,
     getConversationMessages,
     toggleConversationPin,
+    conversationsLoaded: metadataLoaded && conversationListLoaded,
   };
 };

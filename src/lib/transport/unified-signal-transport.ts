@@ -70,7 +70,7 @@ export function isAckTrackedSignalType(type: unknown): type is SignalType {
 const LIVE_ONLY_SIGNAL_TYPES: ReadonlySet<SignalType> = new Set([
     SignalType.CALL_SIGNAL,
     SignalType.TYPING_START, SignalType.TYPING_STOP,
-    SignalType.FILE_MESSAGE_CHUNK
+    SignalType.FILE_MESSAGE_CHUNK, SignalType.FILE_TRANSFER_CANCEL
 ]);
 
 export function isLiveOnlySignalType(type: unknown): type is SignalType {
@@ -738,7 +738,7 @@ class UnifiedSignalTransport {
 
     private static readonly PRIORITY_SEND_TYPES: ReadonlySet<SignalType> = new Set([
         SignalType.RECEIPT_BATCH, SignalType.TYPING_START, SignalType.TYPING_STOP,
-        SignalType.FILE_TRANSPORT_ACK, SignalType.FILE_CHUNK_NACK,
+        SignalType.FILE_TRANSPORT_ACK, SignalType.FILE_CHUNK_NACK, SignalType.FILE_TRANSFER_CANCEL,
         SignalType.SESSION_RESET_REQUEST, SignalType.CALL_SIGNAL
     ]);
 

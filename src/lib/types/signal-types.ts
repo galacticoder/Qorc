@@ -24,6 +24,7 @@ export enum SignalType {
   FILE_MESSAGE_CHUNK = 'file-message-chunk',
   FILE_CHUNK_NACK = 'file-chunk-nack',
   FILE_TRANSPORT_ACK = 'file-transport-ack',
+  FILE_TRANSFER_CANCEL = 'file-transfer-cancel',
 
   // Hybrid and Signal Protocol
   // P2P calling

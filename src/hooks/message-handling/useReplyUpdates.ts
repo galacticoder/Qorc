@@ -3,6 +3,7 @@ import { Message } from '@/components/chat/messaging/types';
 import { EventType } from '@/lib/types/event-types';
 import { REPLY_MAX_TRACKED_ORIGINS, REPLY_MAX_REPLIES_PER_ORIGIN, REPLY_RATE_LIMIT_WINDOW_MS, REPLY_RATE_LIMIT_MAX_EVENTS } from '@/lib/constants';
 import { exactEventDetail, sanitizeMessageId } from '@/lib/sanitizers';
+import { isPlausibleControlOperationId } from '@/lib/messages/message-controls';
 import { setMessagesWithResult } from '../../lib/utils/set-messages-result';
 import { nativeMessageContent } from '../../lib/tauri-bindings';
 
@@ -58,7 +59,7 @@ export const useReplyUpdates = (
   }, [messages]);
 
   // Update reply fields when a message is edited
-  const updateReplyFields = useCallback((editedMessageId: string, contentVaultId: string) => {
+  const updateReplyFields = useCallback((editedMessageId: string, contentVaultId: string, operationId: string) => {
     const account = currentUsername;
     const generation = accountGenerationRef.current;
     const isCurrent = () => !!account &&
@@ -89,6 +90,8 @@ export const useReplyUpdates = (
                 ...msg.replyTo,
                 content: '',
                 secureContentId: contentVaultId,
+                contentVersion: operationId,
+                isDeleted: undefined,
                 sender: editedMessage.sender
               }
             } as Message;
@@ -106,7 +109,7 @@ export const useReplyUpdates = (
   }, [onMessagesUpdate, persistMessage, currentUsername]);
 
   // Update reply fields when a message is deleted
-  const handleMessageDeleted = useCallback((deletedMessageId: string) => {
+  const handleMessageDeleted = useCallback((deletedMessageId: string, operationId: string) => {
     const account = currentUsername;
     const generation = accountGenerationRef.current;
     const isCurrent = () => !!account &&
@@ -128,8 +131,10 @@ export const useReplyUpdates = (
             ...msg,
             replyTo: {
               ...msg.replyTo,
-              content: '[Message deleted]',
+              content: '',
               secureContentId: undefined,
+              contentVersion: operationId,
+              isDeleted: true,
               sender: msg.replyTo.sender || '[Unknown]'
             }
           } as Message;
@@ -151,7 +156,7 @@ export const useReplyUpdates = (
   useEffect(() => {
     const handleMessageEdit = (event: CustomEvent) => {
       try {
-        const detail = exactEventDetail(event, ['account', 'contentVaultId', 'messageId']);
+        const detail = exactEventDetail(event, ['account', 'contentVaultId', 'messageId', 'operationId']);
         if (!detail || detail.account !== currentUsername) return;
         const now = Date.now();
         const bucket = rateLimitRef.current;
@@ -166,10 +171,13 @@ export const useReplyUpdates = (
 
         const messageId = sanitizeMessageId(detail.messageId);
         const contentVaultId = sanitizeMessageId(detail.contentVaultId);
-        if (!messageId || !contentVaultId) {
+        const operationId = isPlausibleControlOperationId(detail.operationId)
+          ? detail.operationId
+          : null;
+        if (!messageId || !contentVaultId || !operationId) {
           return;
         }
-        updateReplyFields(messageId, contentVaultId);
+        updateReplyFields(messageId, contentVaultId, operationId);
       } catch (_error) {
         console.error('[ReplyUpdates] Error handling message edit event:', _error);
       }
@@ -177,7 +185,7 @@ export const useReplyUpdates = (
 
     const handleMessageDelete = (event: CustomEvent) => {
       try {
-        const detail = exactEventDetail(event, ['account', 'messageId']);
+        const detail = exactEventDetail(event, ['account', 'messageId', 'operationId']);
         if (!detail || detail.account !== currentUsername) return;
         const now = Date.now();
         const bucket = rateLimitRef.current;
@@ -191,10 +199,13 @@ export const useReplyUpdates = (
         }
 
         const messageId = sanitizeMessageId(detail.messageId);
-        if (!messageId) {
+        const operationId = isPlausibleControlOperationId(detail.operationId)
+          ? detail.operationId
+          : null;
+        if (!messageId || !operationId) {
           return;
         }
-        handleMessageDeleted(messageId);
+        handleMessageDeleted(messageId, operationId);
       } catch (_error) {
         console.error('[ReplyUpdates] Error handling message delete event:', _error);
       }

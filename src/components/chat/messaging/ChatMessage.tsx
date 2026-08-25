@@ -17,8 +17,10 @@ import { UserAvatar } from "../../ui/UserAvatar";
 import { EventType } from "../../../lib/types/event-types.ts";
 import { SignalType } from "../../../lib/types/signal-types.ts";
 import { SecureCanvasText } from "./SecureCanvasText";
+import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { createDownloadLink } from "../../../lib/utils/file-utils";
 import { nativeMessageContent } from "../../../lib/tauri-bindings";
+import { MessageLinkPreviews } from "./MessageLinkPreview";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -27,6 +29,13 @@ interface ExtendedChatMessageProps extends ChatMessageProps {
 interface SystemAction {
   readonly label: string;
   readonly onClick: () => void;
+}
+
+interface MessageAnchorRect {
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+  readonly left: number;
 }
 
 // Check if string is valid JSON
@@ -96,7 +105,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const safeIsCurrentUser = useMemo(() => isCurrentUser || false, [isCurrentUser]);
 
   const bubbleRef = useRef<HTMLDivElement | null>(null);
-  const { openPicker, closePicker, isPickerOpen } = useEmojiPicker();
+  const { openPicker, openPickerOrigin, closePicker, isPickerOpen } = useEmojiPicker();
 
   const messageTriggerIdRef = useRef<string | null>(null);
   if (!messageTriggerIdRef.current) {
@@ -106,7 +115,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const messageTriggerId = messageTriggerIdRef.current;
   const pickerOpen = isPickerOpen(messageTriggerId);
 
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ anchorRect: MessageAnchorRect } | null>(null);
   const [isContentRendered, setIsContentRendered] = useState(false);
   const downloadGenerationRef = useRef(0);
   useEffect(() => {
@@ -212,12 +221,17 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     e.preventDefault();
     e.stopPropagation();
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = safeIsCurrentUser ? rect.right : rect.left;
-    const y = rect.bottom + 5;
-
-    setContextMenu({ x, y });
-  }, [safeIsCurrentUser]);
+    const anchor = bubbleRef.current ?? e.currentTarget;
+    const rect = anchor.getBoundingClientRect();
+    setContextMenu({
+      anchorRect: {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+      },
+    });
+  }, []);
 
   const isDownloadable = useMemo(() => {
     return !!(isFileMessageType && secureDB && message.id);
@@ -303,26 +317,29 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         >
           {message.replyTo && (
             <div
-              className="mb-1 p-3 rounded text-sm max-w-full select-none cursor-pointer hover:opacity-90 transition-opacity relative overflow-hidden"
-              style={{
-                backgroundColor: 'hsl(var(--secondary))',
-                borderLeft: `4px solid ${safeIsCurrentUser ? 'hsl(var(--primary-foreground))' : 'hsl(var(--primary))'}`,
-              }}
+              className="qor-message-reply-preview mb-1 select-none"
               role="note"
-              aria-label={`Reply to ${displayReplyToSender}`}
+              aria-label={`Replying to ${displayReplyToSender}`}
               onClick={() => onReplyClick?.(message.replyTo!.id)}
             >
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className="font-medium text-xs text-foreground/80">{displayReplyToSender}</span>
-              </div>
-              <div className="text-xs text-muted-foreground truncate opacity-90">
-                <SecureCanvasText
-                  messageId={message.replyTo.secureContentId || message.replyTo.id}
-                  maxWidth={250}
-                  fontSize={12}
-                  color="inherit"
-                  onContextMenu={handleContextMenu}
-                />
+              <UserAvatar
+                username={message.replyTo.sender || ''}
+                size="xs"
+                className="qor-message-reply-preview-avatar"
+              />
+              <div className="qor-message-reply-preview-copy">
+                <span className="qor-message-reply-preview-name">{displayReplyToSender}</span>
+                <div className="qor-message-reply-preview-text">
+                  {message.replyTo.isDeleted ? (
+                    <span className="qor-message-reply-preview-deleted">Message deleted</span>
+                  ) : (
+                    <BannerMessagePreview
+                      messageId={message.replyTo.secureContentId || message.replyTo.id}
+                      contentVersion={message.replyTo.contentVersion}
+                      maxWidth={250}
+                    />
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -353,7 +370,20 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                 )}
               </div>
             ) : (
-                <div className="relative max-w-full" ref={bubbleRef}>
+                <div
+                  className={cn(
+                    "relative flex max-w-full flex-col",
+                    safeIsCurrentUser ? "items-end" : "items-start"
+                  )}
+                  ref={bubbleRef}
+                >
+                  <MessageLinkPreviews
+                    messageId={message.secureContentId || message.id}
+                    contentVersion={message.controlState?.editOperationId}
+                    enabled={isContentRendered}
+                    secureDB={secureDB}
+                    onContextMenu={handleContextMenu}
+                  />
                   <div
                     className="px-4 py-3 text-sm transition-opacity duration-200"
                     style={{
@@ -366,6 +396,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                   >
                     <SecureCanvasText
                       messageId={message.secureContentId || message.id}
+                      contentVersion={message.controlState?.editOperationId}
                       maxWidth={350}
                       fontSize={14}
                       color="var(--color-on-accent)"
@@ -444,19 +475,20 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           triggerId={messageTriggerId}
           isCurrentUser={safeIsCurrentUser}
           secureDB={secureDB}
+          origin={openPickerOrigin}
         />
       )}
 
       {contextMenu && (
         <MessageContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
+          anchorRect={contextMenu.anchorRect}
+          isCurrentUser={safeIsCurrentUser}
           onClose={() => setContextMenu(null)}
           onCopy={!isFileMessageType ? handleCopyMessage : undefined}
           onEdit={!isFileMessageType && safeIsCurrentUser ? handleEdit : undefined}
           onReply={handleReply}
           onDelete={safeIsCurrentUser ? handleDelete : undefined}
-          onReact={() => openPicker(messageTriggerId)}
+          onReact={(origin) => openPicker(messageTriggerId, origin)}
           onReactionSelect={handlePickEmoji}
           onDownload={isDownloadable ? handleDownload : undefined}
           canEdit={!isFileMessageType && safeIsCurrentUser}

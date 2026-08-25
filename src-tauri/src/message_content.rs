@@ -1,7 +1,9 @@
 //! Native-only private message content handling
 
 use serde::Serialize;
+use std::collections::HashSet;
 use std::io::Cursor;
+use std::sync::LazyLock;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -13,6 +15,15 @@ const MAX_PRIVATE_MESSAGE_CHARS: usize = 16 * 1024;
 const MAX_RENDER_WIDTH: u32 = 800;
 const MAX_RENDER_HEIGHT: u32 = 4096;
 const MAX_USERNAME_BYTES: usize = 100;
+const MAX_LINK_URL_BYTES: usize = 2048;
+const MAX_MESSAGE_LINK_PREVIEWS: usize = 3;
+
+static MESSAGE_LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)(?:https?://|www\.)[^\s<>{}\[\]"']+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?::[0-9]{1,5})?(?:[/?#][^\s<>{}\[\]"']*)?"#,
+    )
+    .expect("valid message link regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundContentBinding {
@@ -46,6 +57,112 @@ pub struct RenderedMessageContent {
     pub png_base64: String,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeMessageLinkTarget {
+    pub url: String,
+    pub display_url: String,
+    pub host: String,
+}
+
+fn trim_link_candidate(value: &str) -> &str {
+    value
+        .trim_start_matches(['(', '[', '{', '<', '"', '\''])
+        .trim_end_matches(['.', ',', '!', ';', ':', ')', ']', '}', '>', '"', '\''])
+}
+
+fn looks_like_bare_domain(value: &str) -> bool {
+    let authority = value.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = match authority.rsplit_once(':') {
+        Some((host, port))
+            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            host
+        }
+        Some(_) => return false,
+        None => authority,
+    };
+    let labels = host.split('.').collect::<Vec<_>>();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || label.starts_with('-')
+                || label.ends_with('-')
+        })
+    {
+        return false;
+    }
+    labels.last().is_some_and(|label| {
+        (2..=24).contains(&label.len()) && label.bytes().all(|byte| byte.is_ascii_alphabetic())
+    })
+}
+
+pub fn parse_message_link(value: &str) -> Option<NativeMessageLinkTarget> {
+    let candidate = trim_link_candidate(value);
+    if candidate.is_empty() || candidate.len() > MAX_LINK_URL_BYTES {
+        return None;
+    }
+    let normalized = if candidate
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+        || looks_like_bare_domain(candidate)
+    {
+        format!("https://{candidate}")
+    } else {
+        candidate.to_string()
+    };
+    let parsed = url::Url::parse(&normalized).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    let host = parsed.host_str()?.trim_end_matches('.').to_string();
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    let url = parsed.to_string();
+    if url.len() > MAX_LINK_URL_BYTES {
+        return None;
+    }
+    let display_url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(&url)
+        .trim_end_matches('/')
+        .to_string();
+    Some(NativeMessageLinkTarget {
+        url,
+        display_url,
+        host,
+    })
+}
+
+pub fn message_links(content: &str) -> Vec<NativeMessageLinkTarget> {
+    let mut seen = HashSet::with_capacity(MAX_MESSAGE_LINK_PREVIEWS);
+    MESSAGE_LINK_RE
+        .find_iter(content)
+        .filter(|matched| {
+            matched.start() == 0
+                || content[..matched.start()]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| character != '@')
+        })
+        .filter_map(|matched| parse_message_link(matched.as_str()))
+        .filter(|target| seen.insert(target.url.clone()))
+        .take(MAX_MESSAGE_LINK_PREVIEWS)
+        .collect()
 }
 
 fn parse_rgb(color: &str) -> QorResult<(u8, u8, u8)> {
@@ -680,5 +797,25 @@ mod tests {
             !png.windows(b"unique-secret-render-sentinel".len())
                 .any(|window| { window == b"unique-secret-render-sentinel" })
         );
+    }
+
+    #[test]
+    fn extracts_normalizes_and_limits_message_links() {
+        let links = message_links(
+            "See [repo](https://example.com/a?b=1), www.test.org, third.test/path, https://fourth.test and https://example.com/a?b=1.",
+        );
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "https://example.com/a?b=1");
+        assert_eq!(links[0].display_url, "example.com/a?b=1");
+        assert_eq!(links[0].host, "example.com");
+        assert_eq!(links[1].url, "https://www.test.org/");
+        assert_eq!(links[2].url, "https://third.test/path");
+    }
+
+    #[test]
+    fn ignores_unsafe_message_links() {
+        assert!(message_links("javascript:alert(1)").is_empty());
+        assert!(message_links("https://user:pass@example.com/").is_empty());
+        assert!(message_links("person@example.com").is_empty());
     }
 }

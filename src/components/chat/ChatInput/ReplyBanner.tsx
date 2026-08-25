@@ -1,16 +1,17 @@
-import { useState, useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { Cross2Icon } from "../assets/icons";
 import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
 import { SignalType } from '@/lib/types/signal-types';
-import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, HEX_PATTERN } from '@/lib/constants';
+import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS } from '@/lib/constants';
 import { hasExtension } from '@/lib/utils/file-utils';
-import { SecureCanvasText } from '../messaging/SecureCanvasText';
+import { UserAvatar } from '../../ui/UserAvatar';
+import { BannerMessagePreview } from './BannerMessagePreview';
 
 interface ReplyBannerProps {
   readonly replyTo: Message;
   readonly onCancelReply: () => void;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly displaySender: string;
 }
 
 const isVoiceNote = (message: Message): boolean => {
@@ -29,21 +30,7 @@ const isVideo = (message: Message): boolean => {
   return Boolean(message.filename && hasExtension(message.filename, VIDEO_EXTENSIONS));
 };
 
-const sanitizeDisplayName = (name: string): string => {
-  return HEX_PATTERN.test(name) ? 'User' : name;
-};
-
-export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: ReplyBannerProps) {
-  const [displaySender, setDisplaySender] = useState(sanitizeDisplayName(replyTo.sender));
-
-  useEffect(() => {
-    if (getDisplayUsername) {
-      getDisplayUsername(replyTo.sender)
-        .then((resolved) => setDisplaySender(sanitizeDisplayName(resolved)))
-        .catch(() => setDisplaySender(sanitizeDisplayName(replyTo.sender)));
-    }
-  }, [replyTo.sender, getDisplayUsername]);
-
+export function ReplyBanner({ replyTo, onCancelReply, displaySender }: ReplyBannerProps) {
   const isImageMsg = useMemo(() => isImage(replyTo), [replyTo]);
   const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);
   const isVoiceMsg = useMemo(() => isVoiceNote(replyTo), [replyTo]);
@@ -51,74 +38,50 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
     replyTo.type === SignalType.FILE || replyTo.type === SignalType.FILE_MESSAGE || replyTo.filename,
     [replyTo]
   );
-
   return (
-    <div
-      className="flex items-center gap-2 px-4 py-2 text-muted-foreground border-b border-border/50 rounded-t-xl relative select-none"
-      style={{ backgroundColor: 'hsl(var(--secondary))' }}
-    >
-      <div className="absolute inset-0 bg-muted/40 pointer-events-none rounded-t-xl" />
-      <div className="relative flex items-center gap-2 flex-1 min-w-0">
-        <svg
-          className="w-3.5 h-3.5 flex-shrink-0"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
-          />
-        </svg>
-
-        <div className="flex items-center gap-1.5 min-w-0 flex-1">
-          <span className="text-xs font-medium text-foreground flex-shrink-0">
-            {displaySender}
-          </span>
-          <span className="text-xs flex-shrink-0">•</span>
-
+    <div className="qor-reply-banner select-none">
+      <UserAvatar username={replyTo.sender} size="xs" className="qor-reply-banner-avatar" />
+      <div className="qor-reply-banner-copy">
+        <span className="qor-reply-banner-name">{displaySender}</span>
+        <div className="qor-reply-banner-preview">
           {isImageMsg ? (
             <>
-              <Image className="w-3 h-3 flex-shrink-0" />
-              <span className="text-xs truncate">{replyTo.filename || 'Image'}</span>
+              <Image className="qor-reply-banner-preview-icon" />
+              <span className="qor-reply-banner-preview-text">{replyTo.filename || 'Image'}</span>
             </>
           ) : isVideoMsg ? (
             <>
-              <Video className="w-3 h-3 flex-shrink-0" />
-              <span className="text-xs truncate">{replyTo.filename || 'Video'}</span>
+              <Video className="qor-reply-banner-preview-icon" />
+              <span className="qor-reply-banner-preview-text">{replyTo.filename || 'Video'}</span>
             </>
           ) : isVoiceMsg ? (
             <>
-              <Mic className="w-3 h-3 flex-shrink-0" />
-              <span className="text-xs truncate">Voice message</span>
+              <Mic className="qor-reply-banner-preview-icon" />
+              <span className="qor-reply-banner-preview-text">Voice message</span>
             </>
           ) : isFileMsg ? (
             <>
-              <Paperclip className="w-3 h-3 flex-shrink-0" />
-              <span className="text-xs truncate">{replyTo.filename || 'File'}</span>
+              <Paperclip className="qor-reply-banner-preview-icon" />
+              <span className="qor-reply-banner-preview-text">{replyTo.filename || 'File'}</span>
             </>
+          ) : replyTo.secureContentId ? (
+            <BannerMessagePreview
+              messageId={replyTo.secureContentId}
+              contentVersion={replyTo.controlState?.editOperationId}
+            />
           ) : (
-            replyTo.secureContentId ? (
-              <SecureCanvasText
-                messageId={replyTo.secureContentId}
-                maxWidth={240}
-                fontSize={12}
-                color="inherit"
-              />
-            ) : (
-              <span className="text-xs truncate">Message</span>
-            )
+            <span className="qor-reply-banner-preview-text">Message</span>
           )}
         </div>
       </div>
       <button
-        className="flex-shrink-0 w-5 h-5 rounded hover:bg-muted/50 flex items-center justify-center transition-colors relative z-10"
+        type="button"
+        className="qor-reply-banner-close"
         onClick={onCancelReply}
         aria-label="Cancel reply"
+        title="Cancel reply"
       >
-        <Cross2Icon className="h-3 w-3" />
+        <Cross2Icon aria-hidden="true" />
       </button>
     </div>
   );

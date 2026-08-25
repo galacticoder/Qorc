@@ -88,6 +88,7 @@ export function useFileSender(
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
   const [fileSendPhase, setFileSendPhase] = useState<FileSendPhase>('idle');
+  const [fileName, setFileName] = useState('');
 
   const currentTransferRef = useRef<TransferState | null>(null);
   const currentFileRef = useRef<File | null>(null);
@@ -880,6 +881,7 @@ export function useFileSender(
       setIsSendingFile(true);
       setFileSendPhase('preparing');
       setProgress(0);
+      setFileName(sanitizeFilename(rawFile.name || SignalType.FILE));
 
       const recipientBlocked = await blockingSystem.isUserBlocked(targetUsername);
       if (!isCurrent()) throw new Error('File transfer canceled or account changed');
@@ -903,6 +905,7 @@ export function useFileSender(
       const fileId = crypto.randomUUID();
 
       const safeName = sanitizeFilename(file.name || SignalType.FILE);
+      setFileName(safeName);
       const state: TransferState = {
         fileId,
         fileName: safeName,
@@ -1137,9 +1140,11 @@ export function useFileSender(
       }
 
     } catch (error) {
-      console.error('[FILE-SENDER] Send failed', { error: (error as Error)?.message });
       setProgress(0);
-      throw error;
+      if (!operation.canceled) {
+        console.error('[FILE-SENDER] Send failed', { error: (error as Error)?.message });
+        throw error;
+      }
     } finally {
       try {
         const st = currentTransferRef.current;
@@ -1159,6 +1164,7 @@ export function useFileSender(
       sendOperationRef.current = null;
       setFileSendPhase('idle');
       setIsSendingFile(false);
+      setFileName('');
     }
   }, [
     targetUsername,
@@ -1179,6 +1185,26 @@ export function useFileSender(
     const operation = sendOperationRef.current;
     if (operation) operation.canceled = true;
     const st = currentTransferRef.current;
+    if (st) {
+      void unifiedSignalTransport.send(
+        st.recipientUsername,
+        { fileId: st.fileId },
+        SignalType.FILE_TRANSFER_CANCEL,
+      ).catch(() => { });
+      if (secureDB && typeof secureDB.cancelOutgoingFileMessage === 'function') {
+        void secureDB.cancelOutgoingFileMessage(st.recipientUsername, st.fileId)
+          .then((canceled: unknown) => {
+            if (!canceled) return;
+            window.dispatchEvent(new CustomEvent(EventType.LOCAL_FILE_SEND_CANCELED, {
+              detail: {
+                account: st.ownerUsername,
+                fileId: st.fileId,
+              },
+            }));
+          })
+          .catch(() => { });
+      }
+    }
     const activeRetransmit = activeRetransmitContextRef.current;
     if (activeRetransmit && (!st || activeRetransmit.fileId === st.fileId)) {
       activeRetransmitContextRef.current = null;
@@ -1198,8 +1224,9 @@ export function useFileSender(
       setFileSendPhase('idle');
       setIsSendingFile(false);
       setProgress(0);
+      setFileName('');
     }
-  }, [releaseRetainedTransfer]);
+  }, [releaseRetainedTransfer, secureDB]);
 
   useEffect(() => {
     const clearPeerTransfers = (peer: string): void => {
@@ -1280,5 +1307,5 @@ export function useFileSender(
     clearRetainedTransfers();
   }, [cancelCurrent, clearRetainedTransfers]);
 
-  return { sendFile, progress, isSendingFile, fileSendPhase, cancelCurrent };
+  return { sendFile, progress, isSendingFile, fileSendPhase, fileName, cancelCurrent };
 }

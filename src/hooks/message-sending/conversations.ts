@@ -35,6 +35,10 @@ export const getConversationPreview = (message: Message, currentUsername: string
     return 'System message';
   }
 
+  if (message.isDeleted) {
+    return 'Message deleted';
+  }
+
   const filename = sanitizePreviewText(message.filename);
   const isMe = message.sender === currentUsername;
   const prefix = isMe ? 'You' : message.sender;

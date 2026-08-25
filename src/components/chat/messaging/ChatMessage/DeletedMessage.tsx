@@ -42,12 +42,9 @@ export function DeletedMessage({ senderUsername, displayName, timestamp, isCurre
         </div>
 
         <div
-          className="px-4 py-3 text-sm whitespace-pre-wrap break-words italic"
+          className="qor-deleted-message-bubble px-4 py-3 text-sm whitespace-pre-wrap break-words italic"
           style={{
-            backgroundColor: 'var(--color-surface)',
-            color: 'var(--color-text-secondary)',
             borderRadius: 'var(--message-bubble-radius)',
-            border: '1px dashed var(--color-border-strong, rgba(255,255,255,0.22))',
             minWidth: '3rem',
             userSelect: 'none'
           }}

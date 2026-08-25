@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
@@ -110,14 +110,15 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
   const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
   const backgroundLoadConversationRef = useRef<string | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const prevMessagesLengthRef = useRef(messages.length);
+  const lastMessageIdRef = useRef<string | null>(messages[messages.length - 1]?.id || null);
 
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
   const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation);
   const keyChangePending = useHasPendingIdentityChange(selectedConversation);
   const recoveryWarning = useKeyTransparencyRecoveryWarning(selectedConversation);
-  const initialScrollDoneRef = useRef<Map<string, boolean>>(new Map());
-
   useEffect(() => {
     if (!currentUsername) {
       keyTransparencyWarningStore.clear();
@@ -132,14 +133,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     setEditingMessage(null);
     processedInScrollRef.current.clear();
     lastScrollTimeRef.current = 0;
-    if (selectedConversation) {
-      initialScrollDoneRef.current.delete(selectedConversation);
-    }
   }, [selectedConversation, handleConversationChange]);
 
   useEffect(() => {
     loadedMessagesCountRef.current.clear();
-    initialScrollDoneRef.current.clear();
     processedInScrollRef.current.clear();
     backgroundLoadConversationRef.current = null;
     setReplyTo(null);
@@ -149,45 +146,44 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Scroll container to bottom
   const scrollToBottom = useCallback((container: Element) => {
     try {
+      shouldStickToBottomRef.current = true;
       container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
     } catch { }
   }, []);
 
-  useEffect(() => {
-    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!scrollContainer) return;
-
-    // Wait for messages to be loaded before scrolling
-    const t1 = setTimeout(() => {
-      if (messages.length > 0) scrollToBottom(scrollContainer);
-    }, 150);
-    const t2 = setTimeout(() => {
-      scrollToBottom(scrollContainer);
-    }, 500);
-    const t3 = setTimeout(() => {
-      scrollToBottom(scrollContainer);
-    }, 1000);
-
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-    };
-  }, [selectedConversation, scrollToBottom]);
-
-  useEffect(() => {
-    if (!selectedConversation) return;
-    const alreadyScrolled = initialScrollDoneRef.current.get(selectedConversation);
-    if (alreadyScrolled) return;
-
+  useLayoutEffect(() => {
+    shouldStickToBottomRef.current = true;
+    prevMessagesLengthRef.current = messages.length;
+    lastMessageIdRef.current = messages[messages.length - 1]?.id || null;
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
 
     scrollToBottom(scrollContainer);
-    if (messages.length > 0 || !hasMoreMessages) {
-      initialScrollDoneRef.current.set(selectedConversation, true);
-    }
-  }, [messages, selectedConversation, scrollToBottom, hasMoreMessages]);
+    const frame = requestAnimationFrame(() => scrollToBottom(scrollContainer));
+    return () => cancelAnimationFrame(frame);
+  }, [selectedConversation, scrollToBottom]);
+
+  useEffect(() => {
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    const messageStack = scrollAreaRef.current?.querySelector('.qor-message-stack');
+    if (!scrollContainer || !messageStack || typeof ResizeObserver === 'undefined') return;
+
+    let frame: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (!shouldStickToBottomRef.current) return;
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (shouldStickToBottomRef.current) scrollToBottom(scrollContainer);
+      });
+    });
+    observer.observe(messageStack);
+
+    return () => {
+      observer.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [selectedConversation, scrollToBottom]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -205,15 +201,24 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const conversationToLoad = selectedConversation;
     backgroundLoadConversationRef.current = conversationToLoad;
     let cancelled = false;
+    let settleFrame: number | null = null;
+    let distanceFromBottom = 0;
     const isCurrentLoad = () => (
       !cancelled && backgroundLoadConversationRef.current === conversationToLoad
     );
 
     const loadBackgroundMessages = async () => {
-      setIsLoadingMore(true);
       try {
         await new Promise(resolve => setTimeout(resolve, INITIAL_LOAD_DELAY_MS));
         if (!isCurrentLoad()) return;
+
+        const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+        if (scrollContainer) {
+          distanceFromBottom = Math.max(
+            0,
+            scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
+          );
+        }
 
         const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) ?? 0;
 
@@ -229,13 +234,32 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         if (batch.length < CONVERSATION_SEGMENT_SIZE) setHasMoreMessages(false);
       } catch {
       } finally {
-        if (isCurrentLoad()) setIsLoadingMore(false);
+        if (isCurrentLoad()) {
+          const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+          if (scrollContainer) {
+            settleFrame = requestAnimationFrame(() => {
+              settleFrame = requestAnimationFrame(() => {
+                if (!isCurrentLoad()) return;
+                scrollContainer.scrollTop = Math.max(
+                  0,
+                  scrollContainer.scrollHeight - scrollContainer.clientHeight - distanceFromBottom,
+                );
+                if (backgroundLoadConversationRef.current === conversationToLoad) {
+                  backgroundLoadConversationRef.current = null;
+                }
+              });
+            });
+          } else if (backgroundLoadConversationRef.current === conversationToLoad) {
+            backgroundLoadConversationRef.current = null;
+          }
+        }
       }
     };
 
     void loadBackgroundMessages();
     return () => {
       cancelled = true;
+      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
       if (backgroundLoadConversationRef.current === conversationToLoad) {
         backgroundLoadConversationRef.current = null;
       }
@@ -244,7 +268,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   // Handle lazy loading of older messages on scroll
   const handleLazyLoadScroll = useCallback(async (scrollContainer: Element) => {
-    if (isLoadingMore || !hasMoreMessages || !selectedConversation || !loadMoreMessages) return;
+    if (
+      isLoadingMore ||
+      !hasMoreMessages ||
+      !selectedConversation ||
+      !loadMoreMessages ||
+      backgroundLoadConversationRef.current === selectedConversation
+    ) return;
 
     const scrollTop = scrollContainer.scrollTop;
 
@@ -325,8 +355,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const handleScroll = () => {
       void handleLazyLoadScroll(scrollContainer);
 
-      const atBottom = scrollContainer.scrollTop >=
-        scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
+      const distanceToBottom = scrollContainer.scrollHeight
+        - scrollContainer.scrollTop
+        - scrollContainer.clientHeight;
+      const atBottom = distanceToBottom <= NEAR_BOTTOM_THRESHOLD;
+      shouldStickToBottomRef.current = atBottom;
       if (!atBottom) {
         clearUnloadTimer();
         return;
@@ -359,9 +392,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, [messages, sendServerReadReceipt]);
 
   useReplyUpdates(messages, setMessages, saveMessageToLocalDB, currentUsername);
-
-  const prevMessagesLengthRef = useRef(messages.length);
-  const lastMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!scrollAreaRef.current) return;
@@ -581,7 +611,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         editingMessage.wireMessageId || editingMessage.id,
         newContent,
         SignalType.EDIT_MESSAGE,
-        editingMessage.replyTo,
+        null,
       );
       setEditingMessage(null);
     }
@@ -645,7 +675,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   >
                     <CallIcon className="w-4 h-4" />
                   </Button>
-                  <span className="qor-call-pill-divider" aria-hidden="true" />
                   <Button
                     size="sm"
                     variant="outline"
@@ -656,7 +685,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   >
                     <Video className="w-4 h-4" />
                   </Button>
-                  <span className="qor-call-pill-divider" aria-hidden="true" />
                 </>
               )}
               <Popover>

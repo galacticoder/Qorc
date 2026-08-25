@@ -20,6 +20,7 @@ export const EventType = {
   LOCAL_MESSAGE_EDIT: 'local-message-edit',
   LOCAL_MESSAGE_DELETE: 'local-message-delete',
   LOCAL_FILE_MESSAGE: 'local-file-message',
+  LOCAL_FILE_SEND_CANCELED: 'local-file-send-canceled',
   REMOTE_MESSAGE_EDIT: 'remote-message-edit',
   REMOTE_MESSAGE_DELETE: 'remote-message-delete',
   LOCAL_REACTION_UPDATE: 'local-reaction-update',

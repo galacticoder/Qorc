@@ -97,7 +97,7 @@ export const handleMessageDeletion = async (
 
   try {
     const deleteEvent = new CustomEvent(EventType.REMOTE_MESSAGE_DELETE, {
-      detail: { account, messageId: messageIdToDelete }
+      detail: { account, messageId: messageIdToDelete, operationId }
     });
     window.dispatchEvent(deleteEvent);
   } catch (_error) {
@@ -167,7 +167,7 @@ export const handleMessageEdit = async (
 
   try {
     const editEvent = new CustomEvent(EventType.REMOTE_MESSAGE_EDIT, {
-      detail: { account, messageId: messageIdToEdit, contentVaultId: secureContentId }
+      detail: { account, messageId: messageIdToEdit, contentVaultId: secureContentId, operationId }
     });
     window.dispatchEvent(editEvent);
   } catch (_error) {

@@ -206,6 +206,19 @@ export interface NativeRenderedMessageContent {
     height: number;
 }
 
+export interface NativeMessageLinkTarget {
+    url: string;
+    displayUrl: string;
+    host: string;
+}
+
+export interface NativeLinkPreview extends NativeMessageLinkTarget {
+    metadataFetched: boolean;
+    title: string | null;
+    description: string | null;
+    imageDataUrl: string | null;
+}
+
 export interface AuthPowBatchResult {
     solution: string | null;
     nextNonce: string;
@@ -445,6 +458,10 @@ export const nativeMessageContent = {
             fontSize,
             color,
         }),
+    linkTargets: (storageId: string) =>
+        invoke<NativeMessageLinkTarget[]>('message_content_link_targets', { storageId }),
+    fetchLinkPreview: (url: string) =>
+        invoke<NativeLinkPreview>('message_link_preview_fetch', { url }),
     cloneForDisplay: (sourceId: string, targetId: string, overwrite = false) =>
         invoke<NativeMessageContentCommitResult>('message_content_clone_for_display', {
             sourceId,

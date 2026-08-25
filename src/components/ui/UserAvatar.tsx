@@ -5,6 +5,11 @@ import { sanitizeEventText } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
 import { generateDefaultAvatar } from '../../lib/utils/avatar-utils';
 import {
+    getAvatarImageStatus,
+    markAvatarImageFailed,
+    markAvatarImageReady,
+} from '../../lib/avatar/image-readiness';
+import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
     MAX_EVENT_TYPE_LENGTH,
@@ -35,24 +40,27 @@ export const UserAvatar = memo(function UserAvatar({
     showFallback = true
 }: UserAvatarProps) {
     const fallbackAvatarUrl = React.useMemo(() => generateDefaultAvatar(username), [username]);
-    const [avatarUrl, setAvatarUrl] = useState<string | null>(() => {
-        if (isCurrentUser) {
-            return profilePictureSystem.getOwnAvatar() || fallbackAvatarUrl;
-        } else {
-            return profilePictureSystem.getPeerAvatar(username) || fallbackAvatarUrl;
-        }
-    });
-    const [isLoaded, setIsLoaded] = useState(false);
+    const initialAvatarUrl = React.useMemo(() => {
+        const stored = isCurrentUser
+            ? profilePictureSystem.getOwnAvatar()
+            : profilePictureSystem.getPeerAvatar(username);
+        return stored && getAvatarImageStatus(stored) !== 'failed' ? stored : fallbackAvatarUrl;
+    }, [username, isCurrentUser, fallbackAvatarUrl]);
+    const [avatarUrl, setAvatarUrl] = useState<string | null>(() => initialAvatarUrl);
+    const [isLoaded, setIsLoaded] = useState(() => getAvatarImageStatus(initialAvatarUrl) === 'ready');
     const currentUrlRef = React.useRef<string | null>(avatarUrl);
     const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
     const applyAvatarUrl = useCallback((nextUrl: string | null) => {
-        if (nextUrl !== currentUrlRef.current) {
-            currentUrlRef.current = nextUrl;
-            setAvatarUrl(nextUrl);
-            setIsLoaded(false);
+        const resolved = nextUrl && getAvatarImageStatus(nextUrl) === 'failed'
+            ? fallbackAvatarUrl
+            : nextUrl;
+        if (resolved !== currentUrlRef.current) {
+            currentUrlRef.current = resolved;
+            setAvatarUrl(resolved);
+            setIsLoaded(getAvatarImageStatus(resolved) === 'ready');
         }
-    }, []);
+    }, [fallbackAvatarUrl]);
 
     const loadAvatar = useCallback(() => {
         const stored = isCurrentUser
@@ -138,13 +146,17 @@ export const UserAvatar = memo(function UserAvatar({
                     src={avatarUrl}
                     alt=""
                     className={`w-full h-full object-cover transition-opacity duration-200 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
-                    loading="lazy"
-                    onLoad={() => setIsLoaded(true)}
+                    loading={isLoaded ? "eager" : "lazy"}
+                    onLoad={() => {
+                        markAvatarImageReady(avatarUrl);
+                        setIsLoaded(true);
+                    }}
                     onError={() => {
+                        markAvatarImageFailed(avatarUrl);
                         const replacement = avatarUrl === fallbackAvatarUrl ? null : fallbackAvatarUrl;
                         currentUrlRef.current = replacement;
                         setAvatarUrl(replacement);
-                        setIsLoaded(true);
+                        setIsLoaded(replacement ? getAvatarImageStatus(replacement) === 'ready' : true);
                     }}
                     draggable={false}
                     onDragStart={(e) => e.preventDefault()}

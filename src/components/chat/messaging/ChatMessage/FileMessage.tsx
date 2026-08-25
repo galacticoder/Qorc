@@ -11,6 +11,7 @@ import {
 } from "../../../../lib/utils/file-utils";
 import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from "../../../../lib/constants";
 import type { Message } from "../types";
+import { MaterialFileIcon } from "../../../ui/MaterialFileIcon";
 
 interface FileContentProps {
   readonly message: Message;
@@ -129,6 +130,7 @@ export const FileContent: React.FC<FileContentProps> = ({
         }
       } : undefined}
     >
+      <MaterialFileIcon fileName={filename} className="qor-file-card-icon" />
       {children}
     </div>
   );
@@ -223,8 +225,11 @@ export const FileContent: React.FC<FileContentProps> = ({
               onError={() => setVideoError(true)}
             />
             <div className="qor-file-media-foot">
-              <span className="qor-file-name" title={filename}>{filename}</span>
-              <span className="qor-file-size">{sizeLabel}</span>
+              <MaterialFileIcon fileName={filename} className="qor-file-media-icon" />
+              <div className="qor-file-meta">
+                <span className="qor-file-name" title={filename}>{filename}</span>
+                <span className="qor-file-size">{sizeLabel}</span>
+              </div>
             </div>
           </div>
         ) : (

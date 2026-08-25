@@ -11,9 +11,11 @@ import { unifiedSignalTransport } from "../../lib/transport/unified-signal-trans
 import { SignalType } from "../../lib/types/signal-types";
 import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
 import type { HybridKeys } from '../../lib/types/auth-types';
+import { isCanonicalAuthUsername, sanitizeMessageId } from '../../lib/sanitizers';
 
 const FILE_PERSIST_RETRY_BASE_MS = 1_500;
 const FILE_PERSIST_RETRY_MAX_MS = 15_000;
+const MAX_CANCELED_FILE_TRANSFERS = 512;
 
 export function useFileHandler(
   getKeysOnDemand: () => Promise<HybridKeys | null>,
@@ -31,6 +33,7 @@ export function useFileHandler(
   const nackTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const nackAttemptsRef = useRef<Map<string, number>>(new Map());
   const ackRetryTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const canceledTransfersRef = useRef<Map<string, number>>(new Map());
   const accountGenerationRef = useRef(0);
   const activeAccountRef = useRef<string | null>(activeAccount || null);
 
@@ -108,6 +111,7 @@ export function useFileHandler(
       releaseFileEntry((incomingFileChunksRef.current as any)[key]);
       delete (incomingFileChunksRef.current as any)[key];
     }
+    canceledTransfersRef.current.clear();
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
@@ -145,6 +149,33 @@ export function useFileHandler(
     }, INACTIVITY_TIMEOUT_MS);
     cleanupTimersRef.current.set(fileKey, timeout);
   }, [clearTimer, clearNackTimer, clearMacState]);
+
+  const cancelIncomingFileTransfer = useCallback((from: string, fileId: string): boolean => {
+    if (!isCanonicalAuthUsername(from) || sanitizeMessageId(fileId) !== fileId) return false;
+    const fileKey = `${from}\0${fileId}`;
+    const now = Date.now();
+    for (const [key, expiresAt] of canceledTransfersRef.current) {
+      if (expiresAt <= now) canceledTransfersRef.current.delete(key);
+    }
+    canceledTransfersRef.current.delete(fileKey);
+    while (canceledTransfersRef.current.size >= MAX_CANCELED_FILE_TRANSFERS) {
+      const oldest = canceledTransfersRef.current.keys().next().value;
+      if (typeof oldest !== 'string') break;
+      canceledTransfersRef.current.delete(oldest);
+    }
+    canceledTransfersRef.current.set(fileKey, now + INACTIVITY_TIMEOUT_MS);
+
+    const entry = incomingFileChunksRef.current[fileKey];
+    if (!entry) return true;
+    clearTimer(fileKey);
+    clearNackTimer(fileKey);
+    nackAttemptsRef.current.delete(fileKey);
+    clearMacState(fileKey);
+    releaseFileEntry(entry);
+    delete incomingFileChunksRef.current[fileKey];
+    dispatchCanceledEvent({ from, filename: entry.safeFilename, reason: 'sender-canceled' });
+    return true;
+  }, [clearMacState, clearNackTimer, clearTimer]);
 
   const handleFileMessageChunk = useCallback(
     async (payload: any, message: any) => {
@@ -184,6 +215,11 @@ export function useFileHandler(
           recoveryProbe,
         } = data;
         if (toUser !== account) return;
+        const canceledUntil = canceledTransfersRef.current.get(fileKey);
+        if (canceledUntil !== undefined) {
+          if (canceledUntil > Date.now()) return true;
+          canceledTransfersRef.current.delete(fileKey);
+        }
         
         if (!isValidChunkIndex(chunkIndex, totalChunks)) return;
         const store = incomingFileChunksRef.current as any;
@@ -493,5 +529,5 @@ export function useFileHandler(
     [getKeysOnDemand, onNewMessage, setLoginError, scheduleInactivityTimer, clearTimer, clearNackTimer, clearMacState, secureDBRef, usersRef, findUser]
   );
 
-  return { handleFileMessageChunk, cleanup };
+  return { handleFileMessageChunk, cancelIncomingFileTransfer, cleanup };
 }

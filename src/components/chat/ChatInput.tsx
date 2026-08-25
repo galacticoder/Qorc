@@ -3,17 +3,19 @@ import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { Message } from "./messaging/types";
 import { useFileSender } from "./ChatInput/useFileSender";
-import { ProgressBar } from "./ChatInput/ProgressBar";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
 import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
 import { MessageReply } from "./messaging/types";
-import { MAX_FILE_SIZE, MAX_VOICE_NOTE_DURATION_SECONDS } from "@/lib/constants";
+import { HEX_PATTERN, MAX_FILE_SIZE, MAX_VOICE_NOTE_DURATION_SECONDS } from "@/lib/constants";
 import { sanitizeMessage } from "@/lib/sanitizers";
 import type { HybridKeys } from "@/lib/types/auth-types";
 import type { HybridPublicKeys } from '@/lib/types/message-sending-types';
 import { toast } from "sonner";
+import { Paperclip, SendHorizontal } from "lucide-react";
+import { Cross2Icon } from "./assets/icons";
+import { MaterialFileIcon } from "../ui/MaterialFileIcon";
 
 interface ChatInputProps {
   onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void;
@@ -36,6 +38,11 @@ interface ChatInputProps {
   secureDB?: any;
   ensurePeerSession?: (peerUsername: string) => Promise<void>;
 }
+
+const safeReplyDisplayName = (value: string): string => {
+  const trimmed = value.trim();
+  return !trimmed || HEX_PATTERN.test(trimmed) ? 'User' : trimmed;
+};
 
 // Main chat input component for sending messages and files
 export function ChatInput({
@@ -60,11 +67,12 @@ export function ChatInput({
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
+  const [replyDisplaySender, setReplyDisplaySender] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLInputElement>(null);
   const editingMessageIdRef = useRef<string | null>(null);
 
-  const { sendFile, progress, isSendingFile, fileSendPhase, cancelCurrent } = useFileSender(
+  const { sendFile, progress, isSendingFile, fileSendPhase, fileName, cancelCurrent } = useFileSender(
     currentUsername,
     selectedConversation,
     users,
@@ -86,6 +94,30 @@ export function ChatInput({
     setMessage("");
     messageInputRef.current?.focus();
   }, [editingMessage, selectedConversation, currentUsername]);
+
+  useEffect(() => {
+    const sender = replyTo?.sender;
+    if (!sender) {
+      setReplyDisplaySender('');
+      return;
+    }
+
+    let cancelled = false;
+    const fallback = safeReplyDisplayName(sender);
+    setReplyDisplaySender(fallback);
+    if (getDisplayUsername) {
+      void getDisplayUsername(sender)
+        .then((resolved) => {
+          if (!cancelled) setReplyDisplaySender(safeReplyDisplayName(resolved));
+        })
+        .catch(() => {
+          if (!cancelled) setReplyDisplaySender(fallback);
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [getDisplayUsername, replyTo?.sender]);
 
   useLayoutEffect(() => {
     editingMessageIdRef.current = null;
@@ -113,7 +145,7 @@ export function ChatInput({
           editingMessage!.wireMessageId || editingMessage!.id,
           sanitizedMessage,
           SignalType.EDIT_MESSAGE,
-          editingMessage!.replyTo,
+          null,
         )
       : onSendMessage("", sanitizedMessage, SignalType.MESSAGE, outboundReply);
 
@@ -137,6 +169,11 @@ export function ChatInput({
 
   // Handle file selection and upload
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (disabled || isSendingFile || isSending) {
+      e.target.value = '';
+      return;
+    }
+
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -161,7 +198,7 @@ export function ChatInput({
         fileInputRef.current.value = '';
       }
     }
-  }, [validateFile, sendFile]);
+  }, [disabled, isSending, isSendingFile, validateFile, sendFile]);
 
   // Handle sending voice notes as audio files
   const handleSendVoiceNote = useCallback(async (audioBlob: Blob, durationSec: number) => {
@@ -227,88 +264,81 @@ export function ChatInput({
     }
   }, [handleSend]);
 
+  const fileProgressPercent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  const fileProgressStyle = {
+    '--qor-file-send-progress': `${fileProgressPercent}%`,
+  } as React.CSSProperties;
+
   return (
     <>
-      {isSendingFile && (
-        <div className="qor-chat-progress" role="status" aria-live="polite">
-          <div className="qor-chat-progress-label">
-            <span>{fileSendPhase === 'preparing' ? 'Preparing encrypted file…' : 'Sending file…'}</span>
-            <div className="qor-chat-progress-right">
-              {fileSendPhase === 'sending' && progress > 0 && (
-                <span>{Math.round(Math.max(0, Math.min(1, progress)) * 100)}%</span>
-              )}
-              <button
-                type="button"
-                className="qor-chat-progress-cancel"
-                onClick={() => cancelCurrent()}
-                aria-label="Cancel file transfer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-          <ProgressBar
-            progress={progress}
-            indeterminate={fileSendPhase !== 'sending' || progress <= 0}
-          />
-        </div>
-      )}
-
       <div className="qor-input-shell">
-        {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
-        {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} getDisplayUsername={getDisplayUsername} />}
+        {isSendingFile && (
+          <div
+            className="qor-file-send-banner"
+            style={fileProgressStyle}
+            role="progressbar"
+            aria-live="polite"
+            aria-label={fileSendPhase === 'preparing' ? 'Preparing encrypted file' : 'Sending file'}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={fileProgressPercent}
+          >
+            <span className="qor-file-send-banner-fill" aria-hidden="true" />
+            <MaterialFileIcon fileName={fileName} className="qor-file-send-banner-icon" />
+            <span className="qor-file-send-banner-name" title={fileName || 'File'}>
+              {fileName || 'File'}
+            </span>
+            <span className="qor-file-send-banner-percent">{fileProgressPercent}%</span>
+            <button
+              type="button"
+              className="qor-file-send-banner-cancel"
+              onClick={cancelCurrent}
+              aria-label="Cancel file transfer"
+              title="Cancel file transfer"
+            >
+              <Cross2Icon aria-hidden="true" />
+            </button>
+          </div>
+        )}
+        {editingMessage && (
+          <EditingBanner editingMessage={editingMessage} onCancelEdit={onCancelEdit} />
+        )}
+        {replyTo && (
+          <ReplyBanner
+            replyTo={replyTo}
+            onCancelReply={onCancelReply}
+            displaySender={replyDisplaySender || 'User'}
+          />
+        )}
 
-        {showVoiceRecorder ? (
+        {showVoiceRecorder && (
           <VoiceRecorder
             onSendVoiceNote={handleSendVoiceNote}
             onCancel={() => setShowVoiceRecorder(false)}
             disabled={isSendingFile || isSending}
           />
-        ) : (
-          <div
-            className={`qor-message-box ${editingMessage || replyTo ? 'has-banner' : ''}`}
-          >
+        )}
+        <div
+          className={`qor-message-box ${isSendingFile || editingMessage || replyTo || showVoiceRecorder ? 'has-banner' : ''}`}
+        >
             {/* File Upload */}
             <div className="qor-file-upload-wrapper">
-              <label
-                htmlFor="file-input"
+              <button
+                type="button"
                 className="qor-composer-icon-btn"
+                title="Add a file"
+                aria-label="Add a file"
+                disabled={disabled || isSendingFile || isSending}
+                onClick={() => fileInputRef.current?.click()}
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 337 337"
-                  aria-hidden="true"
-                >
-                  <circle
-                    strokeWidth={20}
-                    stroke="hsl(var(--muted-foreground))"
-                    fill="none"
-                    r="158.5"
-                    cy="168.5"
-                    cx="168.5"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeWidth={25}
-                    stroke="hsl(var(--muted-foreground))"
-                    d="M167.759 79V259"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeWidth={25}
-                    stroke="hsl(var(--muted-foreground))"
-                    d="M79 167.138H259"
-                  />
-                </svg>
-              </label>
+                <Paperclip aria-hidden="true" />
+              </button>
               <input
                 ref={fileInputRef}
                 type={SignalType.FILE}
-                id="file-input"
                 style={{ display: 'none' }}
                 onChange={handleFileChange}
-                disabled={disabled || isSendingFile}
+                disabled={disabled || isSendingFile || isSending}
               />
             </div>
 
@@ -323,7 +353,11 @@ export function ChatInput({
             {/* Message Input */}
             <input
               ref={messageInputRef}
-              placeholder={editingMessage ? "Type the complete replacement message…" : "Message..."}
+              placeholder={editingMessage
+                ? "Editing message..."
+                : replyTo
+                  ? `Replying to ${replyDisplaySender || 'User'}...`
+                  : "Message..."}
               type="text"
               id="messageInput"
               value={message}
@@ -339,26 +373,12 @@ export function ChatInput({
               onClick={handleSend}
               disabled={!message.trim() || !selectedConversation || disabled}
               className="qor-send-button"
+              title="Send message"
+              aria-label="Send message"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 664 663"
-                style={{ height: '18px', width: '18px' }}
-              >
-                <path fill="none" d="M646.293 331.888L17.7538 17.6187L155.245 331.888M646.293 331.888L17.753 646.157L155.245 331.888M646.293 331.888L318.735 330.228L155.245 331.888" />
-                <path
-                  strokeLinejoin="round"
-                  strokeLinecap="round"
-                  strokeWidth="33.67"
-                  stroke={message.trim() ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))'}
-                  fill={message.trim() ? 'hsl(var(--primary) / 0.2)' : 'none'}
-                  d="M646.293 331.888L17.7538 17.6187L155.245 331.888M646.293 331.888L17.753 646.157L155.245 331.888M646.293 331.888L318.735 330.228L155.245 331.888"
-                />
-              </svg>
+              <SendHorizontal aria-hidden="true" />
             </button>
-          </div>
-        )}
+        </div>
       </div>
     </>
   );

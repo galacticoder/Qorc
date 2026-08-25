@@ -12,11 +12,14 @@ export interface UseSecureDBReturn {
   users: User[];
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
   dbInitialized: boolean;
+  initialDataLoaded: boolean;
   dbInitError: string | null;
   retryInitializeDB: () => void;
   secureDBRef: React.RefObject<any>;
   saveMessageToLocalDB: (message: Message, activeConversationPeer?: string) => Promise<void>;
   loadMoreConversationMessages: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
+  hydratePreloadedConversationMessages: (peerUsername: string) => number;
+  discardPreloadedConversationMessages: (peerUsername: string) => void;
   flushPendingSaves: () => Promise<void>;
 }
 

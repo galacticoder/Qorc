@@ -397,7 +397,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         left: bounds.left,
         top: bounds.top,
         width: bounds.width,
-        height: Math.min(640, Math.max(340, bounds.height * 0.62))
+        height: Math.min(600, Math.max(320, bounds.height * 0.58))
       });
     };
     updateBounds();
@@ -647,7 +647,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         'fixed z-50 select-none overflow-hidden bg-background shadow-xl [&_button]:cursor-pointer',
         isExpandedScreenShare && 'left-[5vw] top-[5vh] h-[90vh] w-[90vw] rounded-2xl border border-border',
         !isExpandedScreenShare && !isDocked && 'aspect-video w-[min(92vw,520px)] rounded-2xl border border-border',
-        isDocked && 'border-b border-border shadow-none',
+        isDocked && 'rounded-xl border border-border shadow-none',
         isAttached && !attachmentBounds && !isExpandedScreenShare && 'pointer-events-none opacity-0'
       )}
       style={modalStyle}
@@ -662,10 +662,11 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       >
         {!isVideoCall ? (
           <div
-            className="absolute inset-0 flex items-center justify-center overflow-hidden"
+            className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden text-white/80"
             style={avatarStageStyle}
           >
             <UserAvatar username={call.peer || ''} size="xl" className="relative" />
+            {!isConnected && <p className="mt-3 text-sm font-medium">{callStatusText}</p>}
           </div>
         ) : activeMainStageSource === 'screen' && hasSharedScreen ? (
           <CanvasDisplay canvas={sharedScreenCanvas} objectFit="contain" className="h-full w-full" />
@@ -697,9 +698,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             style={avatarStageStyle}
           >
             <UserAvatar username={call.peer || ''} size="xl" className="mb-3 opacity-70" />
-            <p className="text-sm font-medium">
-              {isRinging ? 'Calling' : 'Waiting for video...'}
-            </p>
+            {!isConnected && <p className="text-sm font-medium">{callStatusText}</p>}
           </div>
         )}
 
@@ -769,17 +768,27 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         >
           <div
             className={cn(
-              'flex select-none items-center gap-2 drop-shadow-lg',
+              'flex select-none items-center gap-2',
+              !isDocked && 'drop-shadow-lg',
               !isExpandedScreenShare && !isDocked && 'cursor-move'
             )}
             onMouseDown={!isExpandedScreenShare && !isDocked ? handleDragStart : undefined}
           >
-            <UserAvatar username={call.peer || ''} size="xs" />
-            <div className="flex min-w-0 flex-col text-shadow-sm">
+            <UserAvatar
+              username={call.peer || ''}
+              size="xs"
+              className={isDocked ? 'qor-docked-call-avatar' : undefined}
+            />
+            <div className={cn(
+              'flex min-w-0 flex-col justify-center',
+              isDocked ? 'qor-docked-call-copy' : 'text-shadow-sm'
+            )}>
               <span className="max-w-48 truncate text-sm font-semibold leading-none">{displayPeerName}</span>
-              <span className="mt-1 text-[10px] font-medium text-white/80">
-                {callStatusText}
-              </span>
+              {isConnected && (
+                <span className="mt-1 text-[10px] font-medium text-white/80">
+                  {formatClockDurationSeconds(callDuration)}
+                </span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-1.5" onMouseDown={(event) => event.stopPropagation()}>

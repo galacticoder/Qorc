@@ -13,7 +13,7 @@ export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonPr
       variant="ghost"
       size="sm"
       className={cn(
-        "h-8 w-8 rounded-full transition-all duration-200 flex items-center justify-center flex-shrink-0",
+        "h-8 w-8 cursor-pointer rounded-full transition-all duration-200 flex items-center justify-center flex-shrink-0",
         "focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0",
         "text-muted-foreground hover:bg-muted hover:text-foreground",
         disabled && "opacity-50 cursor-not-allowed"

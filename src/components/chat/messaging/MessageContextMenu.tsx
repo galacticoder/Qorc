@@ -2,15 +2,27 @@ import React, { useLayoutEffect, useRef, useState } from 'react';
 import { Pencil, Reply, Trash2, Download, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
+interface MessageAnchorRect {
+    readonly top: number;
+    readonly right: number;
+    readonly bottom: number;
+    readonly left: number;
+}
+
+interface MenuPosition {
+    readonly top: number;
+    readonly left: number;
+}
+
 interface MessageContextMenuProps {
-    x: number;
-    y: number;
+    anchorRect: MessageAnchorRect;
+    isCurrentUser: boolean;
     onClose: () => void;
     onCopy?: () => void;
     onEdit?: () => void;
     onReply?: () => void;
     onDelete?: () => void;
-    onReact?: () => void;
+    onReact?: (position: MenuPosition) => void;
     onReactionSelect?: (emoji: string) => void;
     onDownload?: () => void;
     canEdit: boolean;
@@ -19,8 +31,8 @@ interface MessageContextMenuProps {
 }
 
 export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
-    x,
-    y,
+    anchorRect,
+    isCurrentUser,
     onClose,
     onCopy,
     onEdit,
@@ -34,7 +46,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     isFile,
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
-    const [position, setPosition] = useState({ top: y, left: x });
+    const [position, setPosition] = useState<MenuPosition | null>(null);
 
     const QUICK_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢'];
 
@@ -61,129 +73,151 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     }, [onClose]);
 
     useLayoutEffect(() => {
-        if (menuRef.current) {
-            const rect = menuRef.current.getBoundingClientRect();
-            const viewportWidth = window.innerWidth;
-            const viewportHeight = window.innerHeight;
+        const menu = menuRef.current;
+        if (!menu) return;
 
-            let newTop = y;
-            let newLeft = x;
+        const margin = 8;
+        const gap = 6;
+        const menuRect = menu.getBoundingClientRect();
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const clamp = (value: number, minimum: number, maximum: number) => (
+            Math.min(Math.max(value, minimum), Math.max(minimum, maximum))
+        );
+        const alignedLeft = isCurrentUser
+            ? anchorRect.right - menuRect.width
+            : anchorRect.left;
+        const belowTop = anchorRect.bottom + gap;
+        const preferredSideLeft = isCurrentUser
+            ? anchorRect.left - menuRect.width - gap
+            : anchorRect.right + gap;
+        const alternateSideLeft = isCurrentUser
+            ? anchorRect.right + gap
+            : anchorRect.left - menuRect.width - gap;
+        const sideFits = (left: number) => (
+            left >= margin && left + menuRect.width <= viewportWidth - margin
+        );
 
-            // Check right edge
-            if (x + rect.width > viewportWidth) {
-                newLeft = x - rect.width;
-            }
-
-            // Check bottom edge
-            if (y + rect.height > viewportHeight) {
-                newTop = y - rect.height;
-            }
-
-            setPosition({ top: newTop, left: newLeft });
+        let top: number;
+        let left: number;
+        if (belowTop + menuRect.height <= viewportHeight - margin) {
+            top = belowTop;
+            left = alignedLeft;
+        } else if (sideFits(preferredSideLeft)) {
+            top = anchorRect.top;
+            left = preferredSideLeft;
+        } else if (sideFits(alternateSideLeft)) {
+            top = anchorRect.top;
+            left = alternateSideLeft;
+        } else {
+            top = anchorRect.top - menuRect.height - gap;
+            left = alignedLeft;
         }
-    }, [x, y]);
+
+        setPosition({
+            top: Math.round(clamp(top, margin, viewportHeight - menuRect.height - margin)),
+            left: Math.round(clamp(left, margin, viewportWidth - menuRect.width - margin)),
+        });
+    }, [anchorRect, isCurrentUser]);
 
     return createPortal(
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[200px] rounded-xl overflow-hidden shadow-xl border text-card-foreground flex flex-col"
+            className="qor-message-context-menu fixed z-50 rounded-xl overflow-hidden shadow-xl flex flex-col"
             style={{
-                top: position.top,
-                left: position.left,
-                backgroundColor: 'hsl(var(--card))',
-                borderColor: 'hsl(var(--border))',
-                animation: 'in 0.1s ease-out'
+                top: position?.top ?? 0,
+                left: position?.left ?? 0,
+                visibility: position ? 'visible' : 'hidden',
             }}
         >
-            {/* Reaction Strip */}
-            <div className="flex items-center justify-between p-2 bg-muted/30 border-b border-border/50 gap-1">
+            <div className="qor-message-context-reactions">
                 {QUICK_REACTIONS.map((emoji) => (
                     <button
                         key={emoji}
+                        type="button"
                         onClick={(e) => {
                             e.stopPropagation();
                             onReactionSelect?.(emoji);
                             onClose();
                         }}
-                        className="p-1.5 hover:bg-background rounded-full transition-transform hover:scale-125 focus:outline-none text-lg leading-none"
+                        className="qor-message-context-reaction"
+                        aria-label={`React with ${emoji}`}
                     >
                         {emoji}
                     </button>
                 ))}
-                <div className="w-px h-6 bg-gray-300 mx-1" />
                 <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onReact?.();
-                        onClose();
-                    }}
-                    className="p-1.5 hover:bg-background rounded-full transition-colors text-muted-foreground hover:text-foreground"
+                    type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onReact?.(position ?? { top: anchorRect.top, left: anchorRect.left });
+                            onClose();
+                        }}
+                    className="qor-message-context-more-reactions"
                     title="Add Reaction"
+                    aria-label="Add reaction"
                 >
                     <SmilePlus className="w-5 h-5" />
                 </button>
             </div>
 
-            {/* Action Bar */}
-            <div className="flex items-center justify-around p-2">
+            <div className="qor-message-context-actions">
                 <button
+                    type="button"
                     onClick={(e) => { e.stopPropagation(); onReply?.(); onClose(); }}
-                    className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                    className="qor-message-context-action"
                     title="Reply"
+                    aria-label="Reply"
                 >
-                    <Reply className="w-5 h-5 group-hover:text-indigo-500" />
+                    <Reply className="w-5 h-5" />
                 </button>
 
                 {onCopy && (
-                    <>
-                        <div className="w-px h-5 bg-gray-300" />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onCopy?.(); onClose(); }}
-                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
-                            title="Copy"
-                        >
-                            <Copy className="w-5 h-5 group-hover:text-indigo-500" />
-                        </button>
-                    </>
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onCopy?.(); onClose(); }}
+                        className="qor-message-context-action"
+                        title="Copy"
+                        aria-label="Copy"
+                    >
+                        <Copy className="w-5 h-5" />
+                    </button>
                 )}
 
                 {canEdit && (
-                    <>
-                        <div className="w-px h-5 bg-gray-300" />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onEdit?.(); onClose(); }}
-                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
-                            title="Edit"
-                        >
-                            <Pencil className="w-5 h-5 group-hover:text-indigo-500" />
-                        </button>
-                    </>
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onEdit?.(); onClose(); }}
+                        className="qor-message-context-action"
+                        title="Edit"
+                        aria-label="Edit"
+                    >
+                        <Pencil className="w-5 h-5" />
+                    </button>
                 )}
 
                 {isFile && (
-                    <>
-                        <div className="w-px h-5 bg-gray-300" />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onDownload?.(); onClose(); }}
-                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
-                            title="Download"
-                        >
-                            <Download className="w-5 h-5 group-hover:text-indigo-500" />
-                        </button>
-                    </>
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onDownload?.(); onClose(); }}
+                        className="qor-message-context-action"
+                        title="Download"
+                        aria-label="Download"
+                    >
+                        <Download className="w-5 h-5" />
+                    </button>
                 )}
 
                 {canDelete && (
-                    <>
-                        <div className="w-px h-5 bg-gray-300" />
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onDelete?.(); onClose(); }}
-                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
-                            title="Delete"
-                        >
-                            <Trash2 className="w-5 h-5 group-hover:text-red-600" />
-                        </button>
-                    </>
+                    <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onDelete?.(); onClose(); }}
+                        className="qor-message-context-action qor-message-context-action--danger"
+                        title="Delete"
+                        aria-label="Delete"
+                    >
+                        <Trash2 className="w-5 h-5" />
+                    </button>
                 )}
             </div>
         </div>,

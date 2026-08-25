@@ -197,6 +197,24 @@ export function useLocalMessageHandlers({
     } catch { }
   }, [setMessages, allowEvent, captureAccountOperation, currentUsername]);
 
+  const handleLocalFileSendCanceled = useCallback((event: CustomEvent) => {
+    try {
+      const isCurrent = captureAccountOperation();
+      if (!isCurrent()) return;
+      const detail = exactEventDetail(event, ['account', 'fileId']);
+      if (!detail || detail.account !== currentUsername) return;
+      const fileId = sanitizeMessageId(detail.fileId);
+      if (!fileId || !allowEvent(EventType.LOCAL_FILE_SEND_CANCELED)) return;
+      setMessages((previous) => !isCurrent() ? previous : previous.map((message) => (
+        message.id === fileId &&
+        message.sender === currentUsername &&
+        message.isCurrentUser === true
+          ? { ...message, content: 'This message was deleted', isDeleted: true }
+          : message
+      )));
+    } catch { }
+  }, [allowEvent, captureAccountOperation, currentUsername, setMessages]);
+
   const handleLocalReactionUpdate = useCallback((event: CustomEvent) => {
     try {
       const isCurrent = captureAccountOperation();
@@ -234,13 +252,15 @@ export function useLocalMessageHandlers({
     window.addEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
     window.addEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
     window.addEventListener(EventType.LOCAL_FILE_MESSAGE, handleLocalFileMessage as EventListener);
+    window.addEventListener(EventType.LOCAL_FILE_SEND_CANCELED, handleLocalFileSendCanceled as EventListener);
     window.addEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
 
     return () => {
       window.removeEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
       window.removeEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
       window.removeEventListener(EventType.LOCAL_FILE_MESSAGE, handleLocalFileMessage as EventListener);
+      window.removeEventListener(EventType.LOCAL_FILE_SEND_CANCELED, handleLocalFileSendCanceled as EventListener);
       window.removeEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
     };
-  }, [handleLocalMessageDelete, handleLocalMessageEdit, handleLocalFileMessage, handleLocalReactionUpdate]);
+  }, [handleLocalMessageDelete, handleLocalMessageEdit, handleLocalFileMessage, handleLocalFileSendCanceled, handleLocalReactionUpdate]);
 }

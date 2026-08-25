@@ -19,6 +19,7 @@ interface VoiceMessageProps {
 }
 
 const WAVEFORM_BARS = 48;
+const MEDIA_DURATION_TOLERANCE_SECONDS = 1;
 const DEFAULT_WAVEFORM = Array.from({ length: WAVEFORM_BARS }, (_, index) => (
   0.2 + Math.abs(Math.sin((index + 1) * 1.37)) * 0.62
 ));
@@ -80,7 +81,10 @@ export function VoiceMessage({
     try {
       setError(null);
       if (audio.paused) {
-        if (audio.ended || (isFinite(audio.duration) && audio.currentTime >= audio.duration - 0.05)) {
+        const playbackEnd = Number.isFinite(audio.duration)
+          ? Math.min(audio.duration, MAX_VOICE_NOTE_DURATION_SECONDS)
+          : MAX_VOICE_NOTE_DURATION_SECONDS;
+        if (audio.ended || audio.currentTime >= playbackEnd - 0.05) {
           audio.load();
           setCurrentTime(0);
         }
@@ -108,13 +112,13 @@ export function VoiceMessage({
       return;
     }
 
-    if (d > MAX_VOICE_NOTE_DURATION_SECONDS) {
+    if (d > MAX_VOICE_NOTE_DURATION_SECONDS + MEDIA_DURATION_TOLERANCE_SECONDS) {
       audioRef.current?.pause();
       setError('Voice message duration is invalid');
       return;
     }
 
-    setDuration(d);
+    setDuration(Math.min(d, MAX_VOICE_NOTE_DURATION_SECONDS));
     setError(null);
   }, [filenameDuration]);
 
@@ -122,14 +126,17 @@ export function VoiceMessage({
     const audio = audioRef.current;
     if (!audio) return;
 
-    if (
-      !Number.isFinite(audio.currentTime)
-      || audio.currentTime < 0
-      || audio.currentTime > MAX_VOICE_NOTE_DURATION_SECONDS
-    ) {
+    if (!Number.isFinite(audio.currentTime) || audio.currentTime < 0) {
       audio.pause();
       setIsPlaying(false);
       setError('Voice message duration is invalid');
+      return;
+    }
+
+    if (audio.currentTime >= MAX_VOICE_NOTE_DURATION_SECONDS) {
+      audio.pause();
+      setIsPlaying(false);
+      setCurrentTime(MAX_VOICE_NOTE_DURATION_SECONDS);
       return;
     }
 
@@ -162,7 +169,11 @@ export function VoiceMessage({
   const restColor = isCurrentUser ? 'rgba(255,255,255,0.38)' : 'color-mix(in srgb, var(--qor-accent) 32%, transparent)';
 
   if (error || urlError) {
-    return <div className="qor-file-error">{urlError || error || 'Failed to load audio'}</div>;
+    return (
+      <div className="qor-deleted-message-bubble qor-voice-message-error">
+        {urlError || error || 'Failed to load audio'}
+      </div>
+    );
   }
 
   return (

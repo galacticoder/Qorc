@@ -1,6 +1,6 @@
 import { SQLiteKV } from './sqlite-kv';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { hasValidMessageControlState } from '../messages/message-controls';
+import { hasValidMessageControlState, isControlOperationId } from '../messages/message-controls';
 import type { Message } from '../../components/chat/messaging/types';
 import { validateFileData, mergeReceipts } from '../utils/database-utils';
 import { isCanonicalAuthUsername as isCanonicalUsername, sanitizeMessageId } from '../sanitizers';
@@ -20,6 +20,7 @@ import {
    HYBRID_ENVELOPE_MAX_AGE_MS,
   MAX_KNOWN_PEERS,
   CONVERSATION_SEGMENT_SIZE,
+  CONVERSATION_WARM_MESSAGE_COUNT,
   MAX_CONVERSATION_STORED_MESSAGES,
  } from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
@@ -358,7 +359,10 @@ export class SecureDB {
         typeof message.replyTo !== 'object' ||
         sanitizeMessageId(message.replyTo.id) !== message.replyTo.id ||
         (message.replyTo.secureContentId !== undefined &&
-          sanitizeMessageId(message.replyTo.secureContentId) !== message.replyTo.secureContentId)
+          sanitizeMessageId(message.replyTo.secureContentId) !== message.replyTo.secureContentId) ||
+        (message.replyTo.contentVersion !== undefined &&
+          !isControlOperationId(message.replyTo.contentVersion)) ||
+        (message.replyTo.isDeleted !== undefined && message.replyTo.isDeleted !== true)
       ) {
         throw new Error('Invalid stored reply identifiers');
       }
@@ -499,6 +503,14 @@ export class SecureDB {
     }
     const layout = await this.conversationLayout(peer);
     if (!layout || needed <= 0) return [];
+    return this.loadConversationTailFromLayout(peer, layout, needed);
+  }
+
+  private async loadConversationTailFromLayout(
+    peer: string,
+    layout: { firstSegment: number; lastSegment: number },
+    needed: number,
+  ): Promise<StoredMessage[]> {
     const collected: StoredMessage[][] = [];
     let total = 0;
     for (let index = layout.lastSegment; index >= layout.firstSegment && total < needed; index -= 1) {
@@ -614,6 +626,7 @@ export class SecureDB {
   private async persistConversationWrites(
     writes: PreparedConversationWrite[],
     additionalWrites: Array<{ store: string; key: string; value: Uint8Array }> = [],
+    additionalDeletes: Array<{ store: string; key: string }> = [],
   ): Promise<void> {
     if (writes.length === 0) return;
     const relationshipPeers = writes
@@ -621,7 +634,7 @@ export class SecureDB {
       .map(({ peer }) => peer);
     if (
       writes.length > MAX_CONVERSATION_BATCH_WRITES ||
-      writes.length + relationshipPeers.length + additionalWrites.length + 1 > 512
+      writes.length + relationshipPeers.length + additionalWrites.length + additionalDeletes.length + 1 > 512
     ) {
       throw new Error('Conversation write batch limit exceeded');
     }
@@ -632,6 +645,13 @@ export class SecureDB {
     if (additionalTargets.size !== additionalWrites.length) {
       throw new Error('Duplicate additional conversation write');
     }
+    const additionalDeleteTargets = new Set(additionalDeletes.map(({ store, key }) => `${store}\0${key}`));
+    if (
+      additionalDeleteTargets.size !== additionalDeletes.length ||
+      Array.from(additionalDeleteTargets).some((target) => additionalTargets.has(target))
+    ) {
+      throw new Error('Invalid additional conversation deletion');
+    }
     if (relationshipPeers.some((peer) => (
       additionalTargets.has(`${STORAGE_KEYS.DELIBERATE_CALL_ADMISSION}\0${peer}`)
     ))) {
@@ -640,7 +660,10 @@ export class SecureDB {
     const evictedFileIds = Array.from(new Set(writes.flatMap(({ evictedFileIds: ids }) => ids)));
     if (
       evictedFileIds.length > MAX_CONVERSATION_MUTATION_DELETIONS ||
-      evictedFileIds.some((fileId) => additionalTargets.has(`files\0${fileId}`))
+      evictedFileIds.some((fileId) => (
+        additionalTargets.has(`files\0${fileId}`) ||
+        additionalDeleteTargets.has(`files\0${fileId}`)
+      ))
     ) {
       throw new Error('Conversation file cleanup limit exceeded');
     }
@@ -708,6 +731,7 @@ export class SecureDB {
             key: SecureDB.segmentKey(peer, index),
           }))),
           ...evictedFileIds.map((key) => ({ store: STORAGE_STORES.FILES, key })),
+          ...additionalDeletes,
         ],
       );
       for (const { peer, segments, deletedSegments } of writes) {
@@ -853,6 +877,47 @@ export class SecureDB {
         throw new Error('Deliberate contact did not change local state');
       }
       return updated;
+    });
+  }
+
+  async cancelOutgoingFileMessage(
+    peerUsername: string,
+    messageId: string,
+  ): Promise<StoredMessage | null> {
+    if (!this.nativeReady) throw new Error('Native database is not initialized');
+    if (
+      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      sanitizeMessageId(messageId) !== messageId
+    ) {
+      throw new Error('Invalid outgoing file message selector');
+    }
+
+    return this.withMessageLock(async () => {
+      const existing = await this.loadConversation(peerUsername);
+      const index = existing.findIndex((message) => message.id === messageId);
+      if (index === -1) return null;
+      const current = existing[index];
+      if (
+        current.sender !== this.username ||
+        current.recipient !== peerUsername ||
+        !isFileMessage(current)
+      ) return null;
+
+      const canceled = {
+        ...current,
+        content: 'This message was deleted',
+        isDeleted: true,
+      };
+      const next = existing.slice();
+      next[index] = canceled;
+      const write = await this.prepareConversationWrite(peerUsername, next, peerUsername);
+      if (!write) return canceled;
+      await this.persistConversationWrites(
+        [write],
+        [],
+        [{ store: STORAGE_STORES.FILES, key: current.id! }],
+      );
+      return canceled;
     });
   }
 
@@ -1389,6 +1454,30 @@ export class SecureDB {
       return metadata
         .map((entry) => entry.lastMessage)
         .sort((a, b) => (b.timestamp as number) - (a.timestamp as number));
+    });
+  }
+
+  async loadConversationWarmPages(
+    limit = CONVERSATION_WARM_MESSAGE_COUNT,
+  ): Promise<Array<{ peerUsername: string; messages: StoredMessage[] }>> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > CONVERSATION_SEGMENT_SIZE) {
+      throw new Error('Invalid conversation warm-page limit');
+    }
+    return this.withMessageLock(async () => {
+      const metadata = await this.loadIndexedConversationMetadataUnlocked();
+      metadata.sort((left, right) => (
+        (right.lastMessage.timestamp as number) - (left.lastMessage.timestamp as number)
+      ));
+      const pages: Array<{ peerUsername: string; messages: StoredMessage[] }> = [];
+      for (const entry of metadata) {
+        const messages = await this.loadConversationTailFromLayout(
+          entry.peerUsername,
+          { firstSegment: entry.firstSegment, lastSegment: entry.lastSegment },
+          limit,
+        );
+        pages.push({ peerUsername: entry.peerUsername, messages });
+      }
+      return pages;
     });
   }
 

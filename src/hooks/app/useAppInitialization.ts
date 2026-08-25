@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { EventType } from '../../lib/types/event-types';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { torNetworkManager } from '../../lib/transport/tor-network';
@@ -28,14 +28,23 @@ export function useAppInitialization({
   flushPendingSaves,
   setShowSettings,
 }: AppInitializationProps) {
+  const [avatarDataLoaded, setAvatarDataLoaded] = useState(false);
 
   // Initialize profile picture system
   useEffect(() => {
-    if (Database.secureDBRef.current) {
-      profilePictureSystem.setSecureDB(Database.secureDBRef.current);
-      profilePictureSystem.initialize().catch(() => { });
+    const db = Database.secureDBRef.current;
+    if (!db || !Database.dbInitialized) {
+      setAvatarDataLoaded(false);
+      return;
     }
-  }, [Database.secureDBRef.current]);
+    let cancelled = false;
+    setAvatarDataLoaded(false);
+    profilePictureSystem.setSecureDB(db);
+    void profilePictureSystem.initialize().catch(() => undefined).then(() => {
+      if (!cancelled && Database.secureDBRef.current === db) setAvatarDataLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [Database.dbInitialized, Database.secureDBRef.current]);
 
   // Handle settings open/close events
   useEffect(() => {
@@ -100,4 +109,6 @@ export function useAppInitialization({
       }
     };
   }, []);
+
+  return { avatarDataLoaded };
 }

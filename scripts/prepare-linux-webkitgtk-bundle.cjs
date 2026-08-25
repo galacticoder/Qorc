@@ -41,12 +41,29 @@ const requiredSpaPaths = [
   'spa-0.2/videoconvert/libspa-videoconvert.so'
 ];
 const gStreamerPlugins = [
+  'libgstapp.so',
+  'libgstaudioconvert.so',
+  'libgstaudiorate.so',
+  'libgstaudioresample.so',
+  'libgstautoconvert.so',
+  'libgstautodetect.so',
   'libgstcoreelements.so',
+  'libgstencoding.so',
+  'libgstisomp4.so',
   'libgstjpeg.so',
+  'libgstmatroska.so',
+  'libgstogg.so',
   'libgstopengl.so',
+  'libgstopus.so',
+  'libgstopusparse.so',
+  'libgstpbtypes.so',
+  'libgstplayback.so',
   'libgstpipewire.so',
+  'libgsttranscode.so',
+  'libgsttypefindfunctions.so',
   'libgstvideoconvertscale.so',
-  'libgstvideorate.so'
+  'libgstvideorate.so',
+  'libgstvolume.so'
 ];
 const binaryPath = path.join(tauriDir, 'target', 'release', 'qor');
 const libraries = [

@@ -13,7 +13,7 @@ import { EventType } from "../../../lib/types/event-types";
 import { blockingSystem } from "../../../lib/blocking/blocking-system";
 import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
 import { formatRelativeAge } from "../../../lib/utils/date-utils";
-import { SecureCanvasText } from "./SecureCanvasText";
+import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { UnreadIndicator } from "./UnreadIndicator";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
@@ -26,6 +26,7 @@ export interface Conversation {
   readonly unreadCount?: number;
   readonly displayName?: string;
   readonly secureContentId?: string;
+  readonly contentVersion?: string;
   readonly isPinned?: boolean;
   readonly pinnedAt?: number;
 }
@@ -157,11 +158,13 @@ const ConversationItem = memo<ConversationItemProps>(({
           </div>
         ) : conversation.secureContentId ? (
           <div className="qor-conversation-preview">
-            <SecureCanvasText
+            <BannerMessagePreview
               messageId={conversation.secureContentId}
+              contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
               maxWidth={200}
               fontSize={12}
-              color="inherit"
+              color="var(--qor-conversation-preview-text)"
+              className="qor-conversation-secure-message-preview"
             />
           </div>
         ) : conversation.lastMessage ? (

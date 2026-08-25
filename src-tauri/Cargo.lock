@@ -4607,6 +4607,7 @@ dependencies = [
  "uuid",
  "v4l",
  "webkit2gtk",
+ "webpki-roots",
  "winapi 0.3.9",
  "windows 0.58.0",
  "x11rb",

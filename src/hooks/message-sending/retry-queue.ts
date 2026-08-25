@@ -171,6 +171,9 @@ export const enqueueRetry = (
   peer: string,
   entry: PendingRetryMessage
 ): boolean => {
+  if (!validateDurableRetryEntry(entry, peer)) {
+    throw new Error('Pending retry entry is invalid');
+  }
   pruneExpiredRetryEntries(map);
   let queue = map.get(peer);
   if (!queue) {
@@ -226,7 +229,9 @@ const cloneRetryMap = (map: Map<string, PendingRetryMessage[]>): Map<string, Pen
     entries.map((entry) => ({
       ...entry,
       user: { username: entry.user.username },
-      replyTo: entry.replyTo && typeof entry.replyTo === 'object' ? { ...entry.replyTo } : entry.replyTo,
+      replyTo: entry.messageSignalType === SignalType.MESSAGE && entry.replyTo && typeof entry.replyTo === 'object'
+        ? { ...entry.replyTo }
+        : undefined,
     })),
   ]));
 

@@ -1,15 +1,24 @@
 //! Renderer entry points for opaque native message content operations
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
+use crate::link_preview::{NativeLinkPreview, fetch_link_preview};
 use crate::message_content::{
-    ContentCommitResult, RenderedMessageContent, clone_content_for_display, commit_pending_content,
-    load_native_content_record, render_private_message, revoke_outbound_binding,
-    store_outgoing_content,
+    ContentCommitResult, NativeMessageLinkTarget, RenderedMessageContent,
+    clone_content_for_display, commit_pending_content, load_native_content_record, message_links,
+    parse_message_link, render_private_message, revoke_outbound_binding, store_outgoing_content,
 };
 use crate::state::AppState;
+
+const MAX_PARALLEL_LINK_PREVIEW_FETCHES: usize = 8;
+static LINK_PREVIEW_FETCH_LIMIT: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_PARALLEL_LINK_PREVIEW_FETCHES));
 
 #[tauri::command]
 pub async fn message_content_store_outgoing(
@@ -136,6 +145,94 @@ pub async fn message_content_render(
     .await
     .map_err(|_| "Native message rendering failed".to_string())?
     .map_err(|error| error.safe_message())
+}
+
+#[tauri::command]
+pub async fn message_content_link_targets(
+    storage_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<NativeMessageLinkTarget>, String> {
+    let lifecycle_lock = state.inner().database_lifecycle_lock.clone();
+    let lifecycle_guard = lifecycle_lock.lock_owned().await;
+    let db = state
+        .inner()
+        .database()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    let targets = tokio::task::spawn_blocking(move || {
+        let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
+            crate::error::QorError::NotInitialized(
+                "Native message content is unavailable".to_string(),
+            )
+        })?;
+        let plaintext = std::str::from_utf8(record.content.as_slice()).map_err(|_| {
+            crate::error::QorError::DecryptionFailed(
+                "Native message content is not valid UTF-8".to_string(),
+            )
+        })?;
+        Ok::<Vec<NativeMessageLinkTarget>, crate::error::QorError>(message_links(plaintext))
+    })
+    .await
+    .map_err(|_| "Native message operation failed".to_string())?
+    .map_err(|error| error.safe_message())?;
+    drop(lifecycle_guard);
+    tracing::info!(
+        count = targets.len(),
+        "[LINK-PREVIEW] native link extraction complete"
+    );
+    Ok(targets)
+}
+
+#[tauri::command]
+pub async fn message_link_preview_fetch(
+    url: String,
+    state: State<'_, AppState>,
+) -> Result<NativeLinkPreview, String> {
+    tracing::info!("[LINK-PREVIEW] metadata request received");
+    let Some(target) = parse_message_link(&url) else {
+        tracing::warn!("[LINK-PREVIEW] metadata request rejected: invalid URL");
+        return Err("Invalid link preview URL".to_string());
+    };
+    let fallback = NativeLinkPreview::from(target.clone());
+    let Some(tor) = state.inner().tor_manager() else {
+        tracing::warn!("[LINK-PREVIEW] metadata skipped: Tor manager unavailable");
+        return Ok(fallback);
+    };
+    if !tor.is_ready().await {
+        tracing::warn!("[LINK-PREVIEW] metadata skipped: Tor transport unavailable");
+        return Ok(fallback);
+    }
+    let Ok(_permit) = LINK_PREVIEW_FETCH_LIMIT.acquire().await else {
+        return Ok(fallback);
+    };
+    tracing::info!(
+        active = MAX_PARALLEL_LINK_PREVIEW_FETCHES
+            .saturating_sub(LINK_PREVIEW_FETCH_LIMIT.available_permits()),
+        "[LINK-PREVIEW] parallel metadata fetch started"
+    );
+    match tokio::time::timeout(
+        Duration::from_secs(25),
+        fetch_link_preview(target, tor.get_socks_port()),
+    )
+    .await
+    {
+        Ok(preview) => {
+            if preview.metadata_fetched {
+                tracing::info!(
+                    has_title = preview.title.is_some(),
+                    has_description = preview.description.is_some(),
+                    has_image = preview.image_data_url.is_some(),
+                    "[LINK-PREVIEW] metadata fetch complete"
+                );
+            } else {
+                tracing::warn!("[LINK-PREVIEW] metadata fetch failed");
+            }
+            Ok(preview)
+        }
+        Err(_) => {
+            tracing::warn!("[LINK-PREVIEW] metadata fetch timed out");
+            Ok(fallback)
+        }
+    }
 }
 
 #[tauri::command]

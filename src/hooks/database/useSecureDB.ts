@@ -3,7 +3,11 @@ import type { Dispatch, SetStateAction } from 'react';
 import { SecureDB } from '../../lib/database/secureDB';
 import type { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
-import { DB_MAX_PENDING_MESSAGES, DB_SAVE_DEBOUNCE_MS } from '../../lib/constants';
+import {
+  CONVERSATION_WARM_MESSAGE_COUNT,
+  DB_MAX_PENDING_MESSAGES,
+  DB_SAVE_DEBOUNCE_MS,
+} from '../../lib/constants';
 import type { UseSecureDBProps, UseSecureDBReturn } from '../../lib/types/database-types';
 import {
   initializeSecureDB,
@@ -13,6 +17,7 @@ import {
 } from './initialization';
 import {
   loadRecentMessages,
+  loadConversationWarmPages,
   loadConversationMessages,
   mergeMessages,
   flushPendingMessages,
@@ -35,6 +40,7 @@ import { STORAGE_KEYS, STORAGE_STORES } from '../../lib/database/storage-keys';
 export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): UseSecureDBReturn => {
   const secureDBRef = useRef<SecureDB | null>(null);
   const [dbInitialized, setDbInitialized] = useState(false);
+  const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [dbInitError, setDbInitError] = useState<string | null>(null);
   const [dbInitAttempt, setDbInitAttempt] = useState(0);
   const [users, setUsersState] = useState<User[]>([]);
@@ -58,6 +64,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   const inflightDbOpRef = useRef<Promise<void>>(Promise.resolve());
   const userSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const usersLoadedGenerationRef = useRef<number | null>(null);
+  const preloadedConversationMessagesRef = useRef<Map<string, Message[]>>(new Map());
 
   const setUsers = useCallback<Dispatch<SetStateAction<User[]>>>((action) => {
     setUsersState((previous) => {
@@ -101,6 +108,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       debouncedSaveRef.current = null;
       saveFlushInFlightRef.current = null;
       setDbInitialized(false);
+      setInitialDataLoaded(false);
       setDbInitError(null);
       initializingDbRef.current = false;
       secureDBRef.current?.dispose();
@@ -111,6 +119,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       usersLoadedGenerationRef.current = null;
       pendingMessagesRef.current = [];
       pendingSaveMessagesRef.current.clear();
+      preloadedConversationMessagesRef.current.clear();
       setUsers([]);
       setMessages([]);
     }
@@ -258,6 +267,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     secureDBRef.current?.dispose();
     secureDBRef.current = null;
     setDbInitialized(false);
+    setInitialDataLoaded(false);
     setDbInitError(null);
     setDbInitAttempt((attempt) => attempt + 1);
   }, []);
@@ -281,6 +291,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
     const loadData = async () => {
       if (!isCurrent()) return;
+      setInitialDataLoaded(false);
+      preloadedConversationMessagesRef.current.clear();
 
       if (loadedAccountRef.current !== null && loadedAccountRef.current !== currentUser) {
         pendingMessagesRef.current = [];
@@ -293,26 +305,45 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       usersLoadedGenerationRef.current = null;
       loadedAccountRef.current = currentUser;
 
-      // Load only conversation previews
-      try {
-        const recentMessages = await loadRecentMessages(db, currentUser);
-        if (isCurrent() && recentMessages.length > 0) {
-          setMessages(prev => isCurrent() ? mergeMessages(prev, recentMessages, currentUser) : prev);
+      const [warmPagesResult, usersResult] = await Promise.allSettled([
+        loadConversationWarmPages(db, currentUser, CONVERSATION_WARM_MESSAGE_COUNT),
+        loadUsers(db),
+      ]);
+      if (!isCurrent()) return;
+
+      if (warmPagesResult.status === 'fulfilled') {
+        const warmPages = warmPagesResult.value;
+        preloadedConversationMessagesRef.current = new Map(
+          warmPages.map((page) => [page.peerUsername, page.messages]),
+        );
+        const previewMessages = warmPages.flatMap((page) => (
+          page.messages.length > 0 ? [page.messages[page.messages.length - 1]] : []
+        ));
+        if (previewMessages.length > 0) {
+          setMessages(prev => isCurrent()
+            ? mergeMessages(prev, previewMessages, currentUser)
+            : prev);
         }
-      } catch (err) {
-        console.error('[useSecureDB] Failed to load messages', err);
+      } else {
+        console.error('[useSecureDB] Failed to preload conversation messages', warmPagesResult.reason);
+        try {
+          const previewMessages = await loadRecentMessages(db, currentUser);
+          if (isCurrent() && previewMessages.length > 0) {
+            setMessages((previous) => mergeMessages(previous, previewMessages, currentUser));
+          }
+        } catch (error) {
+          if (isCurrent()) console.error('[useSecureDB] Failed to load conversation previews', error);
+        }
       }
 
-      // Load users
-      try {
-        const savedUsers = await loadUsers(db);
-        if (isCurrent()) {
-          setUsers(savedUsers);
-          usersLoadedGenerationRef.current = generation;
-        }
-      } catch (err) {
-        console.error('[useSecureDB] Failed to load users', err);
+      if (usersResult.status === 'fulfilled') {
+        setUsers(usersResult.value);
+        usersLoadedGenerationRef.current = generation;
+      } else {
+        console.error('[useSecureDB] Failed to load users', usersResult.reason);
       }
+
+      setInitialDataLoaded(true);
     };
 
     void loadData();
@@ -596,6 +627,18 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     [Authentication?.loginUsernameRef?.current, setMessages]
   );
 
+  const hydratePreloadedConversationMessages = useCallback((peerUsername: string): number => {
+    const currentUser = activeAccountRef.current;
+    const cached = preloadedConversationMessagesRef.current.get(peerUsername);
+    if (!currentUser || !cached || cached.length === 0) return 0;
+    setMessages((previous) => mergeMessages(previous, cached, currentUser));
+    return cached.length;
+  }, [setMessages]);
+
+  const discardPreloadedConversationMessages = useCallback((peerUsername: string): void => {
+    preloadedConversationMessagesRef.current.delete(peerUsername);
+  }, []);
+
   const flushPendingSaves = useCallback(async () => {
     const db = secureDBRef.current;
     if (!db) return;
@@ -620,11 +663,14 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     users,
     setUsers,
     dbInitialized,
+    initialDataLoaded,
     dbInitError,
     retryInitializeDB,
     secureDBRef,
     saveMessageToLocalDB,
     loadMoreConversationMessages,
+    hydratePreloadedConversationMessages,
+    discardPreloadedConversationMessages,
     flushPendingSaves,
   };
 };
