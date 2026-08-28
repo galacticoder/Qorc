@@ -6,8 +6,7 @@
  *   node scripts/install-deps.cjs --client
  *   node scripts/install-deps.cjs --server
  * Components:
- *   haproxy, jq, redis, postgres, docker
- *   all  -> installs a reasonable set: haproxy, jq
+ *   jq, redis, postgres, docker
  */
 
 const os = require('os');
@@ -224,11 +223,6 @@ async function installRedisTlsLocal() {
 async function installComponent(name) {
   const plat = process.platform;
   switch (name) {
-    case 'haproxy': {
-      if (findInPath('haproxy')) return true;
-      if (plat === 'linux') return await installLinux('haproxy');
-      return false;
-    }
     case 'jq': {
       if (findInPath('jq')) return true;
       if (plat === 'linux') return await installLinux('jq');
@@ -309,109 +303,6 @@ async function installComponent(name) {
         if (pmHas('apk')) return await trySudo(['apk', 'add', '--no-cache', 'build-base', 'python3-dev']);
         return false;
       }
-      return false;
-    }
-    case 'liboqs': {
-      const forceRebuild = process.env.FORCE_REBUILD === '1';
-      if (!forceRebuild) {
-        const libPaths = ['/usr/local/lib/liboqs.so', '/usr/lib/liboqs.so', '/usr/lib64/liboqs.so', '/usr/lib/x86_64-linux-gnu/liboqs.so'];
-
-        for (const p of libPaths) {
-          if (fs.existsSync(p)) return true;
-        }
-      }
-
-      if (plat === 'linux') {
-        if (!findInPath('git')) {
-          console.log('[INFO] git required to build liboqs');
-          return false;
-        }
-        if (!findInPath('cmake')) {
-          console.log('[INFO] cmake required to build liboqs');
-          return false;
-        }
-        if (!findInPath('ninja')) {
-          console.log('[INFO] ninja required to build liboqs');
-          return false;
-        }
-
-        console.log('[INFO] Building liboqs from latest source...');
-        const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'liboqs-'));
-        const srcDir = path.join(tmpRoot, 'src');
-        try {
-          await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/liboqs.git', srcDir], { stdio: 'inherit' });
-
-          const buildDir = path.join(srcDir, 'build');
-          await require('fs/promises').mkdir(buildDir, { recursive: true });
-          await execFileAsync('cmake', ['-GNinja', '-DCMAKE_INSTALL_PREFIX=/usr/local', '-DBUILD_SHARED_LIBS=ON', '-DOQS_DIST_BUILD=ON', '..'], { cwd: buildDir, stdio: 'inherit' });
-          await execFileAsync('ninja', [], { cwd: buildDir, stdio: 'inherit' });
-
-          const installed = await trySudo(['ninja', 'install'], { cwd: buildDir });
-          if (!installed) {
-            console.log('[INFO] Run: cd', buildDir, '&& sudo ninja install');
-            return false;
-          }
-
-          await trySudo(['ldconfig']);
-          return true;
-        } catch (e) {
-          console.log('[INFO] Build failed:', e.message);
-          return false;
-        }
-      }
-      console.log('[INFO] Install liboqs from: https://github.com/open-quantum-safe/liboqs');
-      return false;
-    }
-    case 'oqs-provider': {
-      const forceRebuild = process.env.FORCE_REBUILD === '1';
-      if (!forceRebuild) {
-        const modPaths = ['/usr/local/lib/ossl-modules/oqsprovider.so', '/usr/local/lib64/ossl-modules/oqsprovider.so',
-          '/usr/lib/ossl-modules/oqsprovider.so', '/usr/lib64/ossl-modules/oqsprovider.so'];
-
-        for (const p of modPaths) {
-          if (fs.existsSync(p)) {
-            try {
-              const { stdout } = await execFileAsync('openssl', ['list', '-providers']);
-              if (/oqs/i.test(stdout || '')) return true;
-            } catch { }
-          }
-        }
-      }
-
-      if (plat === 'linux') {
-        if (!findInPath('git')) {
-          console.log('[INFO] git required to build oqs-provider');
-          return false;
-        }
-        if (!findInPath('cmake')) {
-          console.log('[INFO] cmake required to build oqs-provider');
-          return false;
-        }
-
-        console.log('[INFO] Building oqs-provider from latest source...');
-        const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'oqs-provider-'));
-        const srcDir = path.join(tmpRoot, 'src');
-        try {
-          await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/oqs-provider.git', srcDir], { stdio: 'inherit' });
-
-          const buildDir = path.join(srcDir, '_build');
-          await require('fs/promises').mkdir(buildDir, { recursive: true });
-          await execFileAsync('cmake', ['-S', '..', '-B', '.'], { cwd: buildDir, stdio: 'inherit' });
-          await execFileAsync('cmake', ['--build', '.'], { cwd: buildDir, stdio: 'inherit' });
-
-          const installed = await trySudo(['cmake', '--install', '.'], { cwd: buildDir });
-          if (!installed) {
-            console.log('[INFO] Run: cd', buildDir, '&& sudo cmake --install .');
-            return false;
-          }
-
-          return true;
-        } catch (e) {
-          console.log('[INFO] Build failed:', e.message);
-          return false;
-        }
-      }
-      console.log('[INFO] Install oqs-provider from: https://github.com/open-quantum-safe/oqs-provider');
       return false;
     }
     case 'cmake': {
@@ -586,22 +477,18 @@ async function installComponent(name) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: haproxy, jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, tauri, libevent, rust');
+    console.log('Components: jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, pnpm, tauri, libevent, rust');
     console.log('Presets:');
-    console.log('  all      - All server and edge dependencies');
+    console.log('  all      - Server build and runtime dependencies');
     console.log('  server   - Server runtime dependencies');
     console.log('  client   - Client runtime dependencies');
-    console.log('  edge     - Edge/proxy dependencies');
-    console.log('  quantum  - Quantum-safe crypto dependencies');
     process.exit(args.length === 0 ? 1 : 0);
   }
 
   const presets = {
-    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'jq', 'docker'],
+    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'jq', 'docker'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
-    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri'],
-    edge: ['haproxy'],
-    quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']
+    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri']
   };
 
   const expanded = [];

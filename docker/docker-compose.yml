@@ -95,7 +95,6 @@ services:
     env_file:
       - ../.env
     environment:
-      - HAPROXY_BUILD_ROOT=/app/haproxy-build
       - HAPROXY_HTTPS_PORT=8443
       - HAPROXY_STATS_PORT=8404
       - TOR_HS_INTRO_POINTS=${TOR_HS_INTRO_POINTS:-3}
@@ -115,7 +114,6 @@ services:
       - ../server:/app/server:rw
       - ../shared:/app/shared:ro
       - redis-certs:/app/redis-certs:ro
-      - haproxy-build:/app/haproxy-build
     tmpfs:
       - /var/run
     restart: unless-stopped
@@ -136,4 +134,3 @@ volumes:
   postgres-certs:
   redis-data:
   redis-certs:
-  haproxy-build:

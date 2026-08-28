@@ -10,17 +10,6 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
-function findInPath(bin) {
-  const parts = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
-  for (const dir of parts) {
-    for (const ext of exts) {
-      try { const p = path.join(dir, bin + ext); if (fs.existsSync(p)) return p; } catch { }
-    }
-  }
-  return null;
-}
-
 async function hasOqsProvider(env) {
   try {
     const { stdout } = await execFileAsync('openssl', ['list', '-providers'], { env });
@@ -37,34 +26,15 @@ async function hasOqsProvider(env) {
       process.exit(1);
     }
 
-    if (!findInPath('openssl')) {
-      console.error('[SETUP] openssl not found. Install openssl and oqs provider first.');
-      console.error('[SETUP] You can configure OPENSSL_CONF to point to a local config that loads oqsprovider.so');
-      process.exit(1);
-    }
-
     const baseDir = path.join('server', 'config', 'certs');
     await fsp.mkdir(baseDir, { recursive: true });
     const localConf = path.join('server', 'config', 'openssl-oqs.cnf');
-
-
-    const modulePaths = [
-      '/usr/local/lib/ossl-modules/oqsprovider.so',
-      '/usr/local/lib64/ossl-modules/oqsprovider.so',
-      '/usr/lib/ossl-modules/oqsprovider.so',
-      '/usr/lib64/ossl-modules/oqsprovider.so',
-      '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so'
-    ];
-
-    let modulePath = null;
-    const envModule = process.env.OQS_PROVIDER_MODULE;
-    if (envModule) {
-      try {
-        if (fs.existsSync(envModule)) modulePath = envModule;
-      } catch { }
-    }
-    if (!modulePath) {
-      modulePath = modulePaths.find(p => fs.existsSync(p)) || modulePaths[0];
+    const runtimeRoot = '/opt/qor-edge';
+    const runtimeLibDir = path.join(runtimeRoot, 'lib');
+    const modulePath = path.join(runtimeLibDir, 'ossl-modules', 'oqsprovider.so');
+    if (!fs.existsSync(modulePath)) {
+      console.error(`[SETUP] Bundled OQS provider is unavailable: ${modulePath}`);
+      process.exit(1);
     }
 
     try {
@@ -102,20 +72,16 @@ async function hasOqsProvider(env) {
     const env = { ...process.env };
     env.OPENSSL_CONF = localConf;
     env.OQS_PROVIDER_MODULE = modulePath;
-    try { env.OPENSSL_MODULES = path.dirname(modulePath); } catch { }
+    env.OPENSSL_MODULES = path.dirname(modulePath);
 
     env.LD_LIBRARY_PATH = [
-      '/usr/local/lib',
-      '/usr/lib/x86_64-linux-gnu',
+      runtimeLibDir,
       process.env.LD_LIBRARY_PATH || ''
     ].filter(Boolean).join(':');
 
     const ok = await hasOqsProvider(env);
     if (!ok) {
-      console.error('[SETUP] ERROR: oqs provider not detected in openssl list.');
-      console.error('[SETUP] Quantum-secure setup requires OQS provider to be installed.');
-      console.error('[SETUP] Ensure oqsprovider module is installed in one of:');
-      modulePaths.forEach(p => console.error(`  - ${p}`));
+      console.error(`[SETUP] Bundled OQS provider failed to load: ${modulePath}`);
       process.exit(1);
     }
 

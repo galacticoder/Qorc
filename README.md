@@ -67,17 +67,18 @@ server deployment is supported only on Linux, use Docker for the server on
 Windows. These are source-build requirements: an installed Qor bundle does not
 require this repository, Node.js, pnpm, Rust, Cargo, or the build cache.
 
-### Install dependencies
+### Install client build dependencies
 
 ```bash
-node scripts/install-deps.cjs --server
 node scripts/install-deps.cjs --client
 ```
 
-The dependency installer targets Linux and checks server or client dependencies
-such as Redis, Postgres, OpenSSL, Node, pnpm, Rust, build tools, and Tauri. It
-also accepts individual components and the `all`, `server`, `client`, `edge`,
-and `quantum` presets, run it with `--help` for the list.
+The dependency installer targets Linux and checks source-build dependencies.
+The Docker server and load-balancer images carry their runtime dependencies;
+the load-balancer image specifically embeds authenticated HAProxy, Tor, OQS,
+and private-library artifacts and never downloads or installs them at startup.
+Run the installer with `--help` for the remaining source-build components and
+presets.
 
 ### Configure environment
 
@@ -142,6 +143,11 @@ Start the load balancer:
 ```bash
 node scripts/start-docker.cjs loadbalancer
 ```
+
+The load-balancer image uses the versioned archive under
+`docker/edge-runtime`. HAProxy and the patched Tor hidden-service runtime are
+part of the image, independent of host packages, and have no runtime download,
+package-manager, or system-binary fallback.
 
 To understand all commands available:
 

@@ -9,11 +9,18 @@ const { pathToFileURL } = require('url');
 
 const repoRoot = path.resolve(__dirname, '..');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
+const edgeRuntimeRoot = '/opt/qor-edge';
+const edgeRuntimeLibDir = path.join(edgeRuntimeRoot, 'lib');
+const bundledHaproxyBin = path.join(edgeRuntimeRoot, 'bin', 'haproxy');
+const bundledOqsModule = path.join(edgeRuntimeLibDir, 'ossl-modules', 'oqsprovider.so');
 
 if (process.platform !== 'linux') {
   console.error('[LB] Native load-balancer deployment supports only Linux.');
   process.exit(1);
 }
+
+delete process.env.LD_PRELOAD;
+process.env.LD_LIBRARY_PATH = edgeRuntimeLibDir;
 
 function loadDotEnv(filePath) {
   try {
@@ -94,31 +101,21 @@ async function isPinnedHaproxyVersion(haproxyBin) {
   });
 }
 
-async function readOqsModulePath() {
-  try {
-    const infoPath = path.join(repoRoot, 'server', 'config', 'oqs-module-path.txt');
-    if (!fs.existsSync(infoPath)) return null;
-    const raw = fs.readFileSync(infoPath, 'utf8').trim();
-    if (!raw) return null;
-    if (!fs.existsSync(raw)) return null;
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
 async function ensureQuantumReady() {
   const localConf = path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
   const hapCfgPath = path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
-
-  let oqsModule = await readOqsModulePath();
-  let env = { ...process.env, OPENSSL_CONF: localConf };
-  if (oqsModule) {
-    env.OQS_PROVIDER_MODULE = oqsModule;
-    if (process.platform !== 'win32') {
-      try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
-    }
+  const oqsModule = bundledOqsModule;
+  if (!fs.existsSync(oqsModule)) {
+    throw new Error(`Bundled OQS provider is unavailable: ${oqsModule}`);
   }
+  process.env.OQS_PROVIDER_MODULE = oqsModule;
+  process.env.OPENSSL_MODULES = path.dirname(oqsModule);
+  const env = {
+    ...process.env,
+    OPENSSL_CONF: localConf,
+    OQS_PROVIDER_MODULE: oqsModule,
+    OPENSSL_MODULES: path.dirname(oqsModule)
+  };
 
   let needSetup = !fs.existsSync(localConf) || !fs.existsSync(hapCfgPath);
   if (!needSetup) {
@@ -126,89 +123,34 @@ async function ensureQuantumReady() {
     if (!ok) needSetup = true;
   }
   if (needSetup) {
-    log('Running quantum setup...');
+    log('Generating edge TLS configuration from the bundled crypto runtime...');
     await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
-    oqsModule = await readOqsModulePath();
-    env = { ...process.env, OPENSSL_CONF: localConf };
-    if (oqsModule) {
-      env.OQS_PROVIDER_MODULE = oqsModule;
-      if (process.platform !== 'win32') {
-        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
-      }
-    }
   }
 
-  const ok2 = await hasOqsProvider(env);
-  if (!ok2) {
-    log('Ensuring dependencies (may prompt for sudo)...');
-    await runNodeScript(path.join(repoRoot, 'scripts', 'install-deps.cjs'), ['quantum'], { ...process.env, FORCE_REBUILD: '1' });
-    await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
-    oqsModule = await readOqsModulePath();
-    env = { ...process.env, OPENSSL_CONF: localConf };
-    if (oqsModule) {
-      env.OQS_PROVIDER_MODULE = oqsModule;
-      if (process.platform !== 'win32') {
-        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
-      }
-    }
+  if (!await hasOqsProvider(env)) {
+    throw new Error('Bundled OQS provider failed to load');
   }
 
   process.env.OPENSSL_CONF = localConf;
   process.env.LB_OPENSSL_CONF = localConf;
   process.env.LB_HAPROXY_CFG = hapCfgPath;
-  if (oqsModule) {
-    process.env.OQS_PROVIDER_MODULE = oqsModule;
-    if (process.platform !== 'win32') {
-      try { process.env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
-    }
-  }
 }
 
 async function ensureHaproxyBuiltOrReady() {
   const localConf = process.env.LB_OPENSSL_CONF || path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
   const hapCfgPath = process.env.LB_HAPROXY_CFG || path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
   const env = { ...process.env, OPENSSL_CONF: localConf };
-
-  const buildRoot = path.resolve(
-    process.env.HAPROXY_BUILD_ROOT || path.join(os.homedir(), '.cache', 'qor-chat', 'haproxy')
-  );
-  const buildMetaPath = path.join(buildRoot, 'haproxy-build.json');
-  let buildMeta = null;
-  try {
-    if (fs.existsSync(buildMetaPath)) buildMeta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
-  } catch { }
-
-  const builtBin = buildMeta?.haproxy_bin || null;
-  const metadataIsPinned = buildMeta?.haproxy_version === '3.2.21' &&
-    buildMeta?.archive_sha256 === '0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339';
-  if (metadataIsPinned && builtBin && fs.existsSync(builtBin)) {
-    const [versionOk, configOk] = await Promise.all([
-      isPinnedHaproxyVersion(builtBin),
-      testHaproxyConfig(builtBin, hapCfgPath, env),
-    ]);
-    if (versionOk && configOk) { process.env.LB_HAPROXY_BIN = builtBin; return; }
+  const bundledBin = bundledHaproxyBin;
+  if (!fs.existsSync(bundledBin)) {
+    throw new Error(`Bundled HAProxy executable is unavailable: ${bundledBin}`);
   }
-
-  log('Building HAProxy with OQS...');
-  await runNodeScript(path.join(repoRoot, 'scripts', 'build-quantum-haproxy.cjs'));
-
-  if (fs.existsSync(buildMetaPath)) {
-    try {
-      const meta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
-      const metadataMatches = meta.haproxy_version === '3.2.21' &&
-        meta.archive_sha256 === '0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339';
-      if (metadataMatches && meta.haproxy_bin && fs.existsSync(meta.haproxy_bin)) {
-        const [versionOk, configOk] = await Promise.all([
-          isPinnedHaproxyVersion(meta.haproxy_bin),
-          testHaproxyConfig(meta.haproxy_bin, hapCfgPath, env),
-        ]);
-        if (versionOk && configOk) { process.env.LB_HAPROXY_BIN = meta.haproxy_bin; return; }
-      }
-    } catch { }
-  }
-  logErr('Failed to prepare a HAProxy binary that validates the PQC config.');
-  logErr(`Pinned build metadata was not usable: ${buildMetaPath}`);
-  process.exit(1);
+  const [versionOk, configOk] = await Promise.all([
+    isPinnedHaproxyVersion(bundledBin),
+    testHaproxyConfig(bundledBin, hapCfgPath, env),
+  ]);
+  if (!versionOk) throw new Error('Bundled HAProxy version does not match 3.2.21');
+  if (!configOk) throw new Error('Bundled HAProxy rejected the required PQ TLS configuration');
+  process.env.LB_HAPROXY_BIN = bundledBin;
 }
 
 class LBTUI {
@@ -1045,8 +987,8 @@ async function ensureStatsCredentials() {
   await ensureHaproxyCerts();
   await ensureStatsCredentials();
 
-  const hapBin = process.env.LB_HAPROXY_BIN || 'haproxy';
-  process.env.LB_HAPROXY_BIN = hapBin;
+  const hapBin = process.env.LB_HAPROXY_BIN;
+  if (!hapBin) throw new Error('Bundled HAProxy runtime was not selected');
 
   if (!process.env.HAPROXY_CERT_PATH) {
     process.env.HAPROXY_CERT_PATH = path.join(repoRoot, 'server', 'config', 'certs');

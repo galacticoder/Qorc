@@ -1,14 +1,13 @@
-import { spawn, execSync } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { constants, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createWriteStream } from 'fs';
-import { pipeline } from 'stream/promises';
-import { extract } from 'tar';
-import { findInPath } from './lb-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const EDGE_RUNTIME_ROOT = '/opt/qor-edge';
+const BUNDLED_TOR_DIR = path.join(EDGE_RUNTIME_ROOT, 'tor');
+const BUNDLED_LIBRARY_DIR = path.join(EDGE_RUNTIME_ROOT, 'lib');
 
 const HIDDEN_SERVICE_INTRO_POINTS = (() => {
     const parsed = Number.parseInt(process.env.TOR_HS_INTRO_POINTS || '', 10);
@@ -16,11 +15,11 @@ const HIDDEN_SERVICE_INTRO_POINTS = (() => {
 })();
 
 export class TorManager {
-    constructor(scriptsDir) {
-        this.scriptsDir = scriptsDir;
+    constructor() {
         this.dataDir = path.resolve(__dirname, '..', 'config', 'tor');
         this.hiddenServiceDir = path.join(this.dataDir, 'hidden_service');
-        this.torBundleDir = path.join(this.dataDir, 'bundle');
+        this.torBundleDir = BUNDLED_TOR_DIR;
+        this.torExecutableName = 'tor';
         this.torrcPath = path.join(this.dataDir, 'torrc');
         this.pidPath = path.join(this.dataDir, 'tor.pid');
         this.logPath = path.join(this.dataDir, 'tor.log');
@@ -31,7 +30,6 @@ export class TorManager {
         this.checkInterval = 5000;
         this.isRunningState = false;
         this.isPublishedState = false;
-        this.arch = process.arch;
     }
 
     async getOnionAddress() {
@@ -40,7 +38,9 @@ export class TorManager {
             const hostnameFile = path.join(this.hiddenServiceDir, 'hostname');
             if (existsSync(hostnameFile)) {
                 const content = await fs.readFile(hostnameFile, 'utf8');
-                this._onionAddress = content.trim();
+                const hostname = content.trim().toLowerCase();
+                if (!/^[a-z2-7]{56}\.onion$/.test(hostname)) return null;
+                this._onionAddress = hostname;
                 return this._onionAddress;
             }
         } catch { }
@@ -48,32 +48,24 @@ export class TorManager {
     }
 
     getTorBinaryPath() {
-        return path.join(this.torBundleDir, 'tor');
+        return path.join(this.torBundleDir, this.torExecutableName);
     }
 
-    getTorEnvironment(torBin) {
+    getTorEnvironment() {
         const env = { ...process.env };
 
         delete env.OPENSSL_CONF;
         delete env.OPENSSL_MODULES;
         delete env.OQS_PROVIDER_MODULE;
-
-        if (path.resolve(torBin) !== path.resolve(this.getTorBinaryPath())) {
-            return env;
-        }
+        delete env.LD_PRELOAD;
 
         const bundledLibraryDirs = [
+            BUNDLED_LIBRARY_DIR,
             this.torBundleDir,
             path.join(this.torBundleDir, 'lib64'),
             path.join(this.torBundleDir, 'lib')
         ].filter((directory) => existsSync(directory));
-        const inheritedLibraryDirs = (process.env.LD_LIBRARY_PATH || '')
-            .split(path.delimiter)
-            .filter(Boolean);
-        env.LD_LIBRARY_PATH = [...new Set([
-            ...bundledLibraryDirs,
-            ...inheritedLibraryDirs
-        ])].join(path.delimiter);
+        env.LD_LIBRARY_PATH = [...new Set(bundledLibraryDirs)].join(path.delimiter);
 
         return env;
     }
@@ -137,125 +129,15 @@ export class TorManager {
     }
 
     async getTorBinary() {
-        const configuredTor = process.env.LB_TOR_BIN?.trim();
-        if (configuredTor) {
-            try {
-                await fs.access(configuredTor, fs.constants.X_OK);
-                return configuredTor;
-            } catch {
-                console.error(`[TOR] Configured LB_TOR_BIN is not executable: ${configuredTor}`);
-                return null;
-            }
-        }
-
-        // Check for latest bundled tor version
         const bundledTor = this.getTorBinaryPath();
-        if (existsSync(bundledTor)) {
-            try {
-                await fs.access(bundledTor, fs.constants.X_OK);
-                return bundledTor;
-            } catch {
-                console.log('[TOR] Bundled tor is invalid, removing...');
-                await fs.rm(this.torBundleDir, { recursive: true, force: true }).catch(() => {});
-            }
-        }
-
-        // Try to download latest version
-        console.log('[TOR] Downloading latest Tor bundle...');
-        const downloaded = await this.downloadTor();
-        if (downloaded && existsSync(bundledTor)) {
+        try {
+            const stat = await fs.stat(bundledTor);
+            if (!stat.isFile()) throw new Error('not a regular file');
+            await fs.access(bundledTor, constants.X_OK);
             return bundledTor;
-        }
-
-        // Fall back to system tor
-        const systemTor = findInPath('tor');
-        if (systemTor) {
-            console.warn('[TOR] Using system tor (download failed, may be outdated)');
-            return systemTor;
-        }
-
-        return null;
-    }
-
-    async fetchLatestVersion() {
-        try {
-            const response = await fetch('https://dist.torproject.org/torbrowser/');
-            const html = await response.text();
-            
-            const versionRegex = /href="(\d+\.\d+\.\d+)\/"/g;
-            const versions = [];
-            let match;
-            
-            while ((match = versionRegex.exec(html)) !== null) {
-                versions.push(match[1]);
-            }
-            
-            versions.sort((a, b) => {
-                const aParts = a.split('.').map(Number);
-                const bParts = b.split('.').map(Number);
-                for (let i = 0; i < 3; i++) {
-                    if (aParts[i] !== bParts[i]) {
-                        return bParts[i] - aParts[i];
-                    }
-                }
-                return 0;
-            });
-            
-            return versions[0] || '15.0.3';
-        } catch (err) {
-            console.warn('[TOR] Failed to fetch latest version:', err.message);
-            return '15.0.3';
-        }
-    }
-
-    async getDownloadUrl() {
-        const arch = this.arch === 'arm64' ? 'linux-aarch64' : 'linux-x86_64';
-        const version = await this.fetchLatestVersion();
-        
-        return `https://dist.torproject.org/torbrowser/${version}/tor-expert-bundle-${arch}-${version}.tar.gz`;
-    }
-
-    async downloadTor() {
-        try {
-            const url = await this.getDownloadUrl();
-            const filename = path.basename(url);
-            const archivePath = path.join(this.dataDir, filename);
-
-            console.log(`[TOR] Downloading from ${url}...`);
-
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            await fs.mkdir(this.dataDir, { recursive: true });
-            const fileStream = createWriteStream(archivePath);
-            await pipeline(response.body, fileStream);
-
-            console.log('[TOR] Extracting...');
-
-            await fs.mkdir(this.torBundleDir, { recursive: true });
-            await extract({
-                file: archivePath,
-                cwd: this.torBundleDir,
-                strip: 1,
-                filter: (path) => {
-                    const allowed = ['tor', 'lib', 'lib64', 'obfs4proxy', 
-                                   'snowflake-client', 'lyrebird', 'geoip', 'geoip6', 
-                                   'pluggable_transports'];
-                    return allowed.some(a => path.includes(a));
-                }
-            });
-
-            const torBin = this.getTorBinaryPath();
-            await fs.chmod(torBin, 0o755);
-            await fs.unlink(archivePath).catch(() => {});
-
-            console.log('[TOR] Tor bundle installed');
-            return true;
-        } catch (err) {
-            console.error('[TOR] Download failed:', err.message);
-            return false;
+        } catch (error) {
+            console.error('[TOR] Bundled Tor executable is unavailable:', error.message);
+            return null;
         }
     }
 
@@ -267,11 +149,13 @@ export class TorManager {
                     process.kill(pid, 0);
                     if (process.platform === 'linux') {
                         try {
-                            const comm = await fs.readFile(`/proc/${pid}/comm`, 'utf8');
-                            if (!comm.trim().includes('tor')) {
-                                return false;
-                            }
+                            const [runningExecutable, bundledExecutable] = await Promise.all([
+                                fs.readlink(`/proc/${pid}/exe`),
+                                fs.realpath(this.getTorBinaryPath())
+                            ]);
+                            if (path.resolve(runningExecutable) !== path.resolve(bundledExecutable)) return false;
                         } catch {
+                            return false;
                         }
                     }
                     return true;
@@ -293,7 +177,11 @@ export class TorManager {
 
         if (typeof process.getuid === 'function') {
             try {
-                execSync(`chown -R ${process.getuid()}:${process.getgid()} "${this.dataDir}"`);
+                execFileSync('chown', [
+                    '-R',
+                    `${process.getuid()}:${process.getgid()}`,
+                    this.dataDir
+                ], { stdio: 'ignore' });
             } catch (err) {
                 console.warn('[TOR] Failed to chown tor directories:', err.message);
             }
@@ -328,7 +216,7 @@ export class TorManager {
 
         const torBin = await this.getTorBinary();
         if (!torBin) {
-            console.error('[TOR] tor binary not found and download failed.');
+            console.error('[TOR] The bundled Tor runtime is missing or invalid.');
             return false;
         }
 
@@ -339,7 +227,7 @@ export class TorManager {
             this.torProcess = spawn(torBin, ['-f', this.torrcPath], {
                 detached: true,
                 stdio: ['ignore', logStream.fd, logStream.fd],
-                env: this.getTorEnvironment(torBin)
+                env: this.getTorEnvironment()
             });
             this.torProcess.unref();
             await logStream.close();

@@ -15,6 +15,11 @@ server/config/certs/**
 server/config/*
 !server/config/config.js
 !server/config/constants.js
+!server/config/audiences.js
+!server/config/error-codes.js
+!server/config/infrastructure.js
+!server/config/protocol-keys.js
+!server/config/redis-keys.js
 !server/config/secure-credentials.js
 config/pnpm-lock.yaml
 config/*.ts

@@ -1,63 +1,22 @@
-FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS tor-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    curl \
-    libevent-dev \
-    liblzma-dev \
-    libssl-dev \
-    libzstd-dev \
-    patch \
-    pkg-config \
-    python3 \
-    zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-COPY docker/tor/patches/0001-retry-hsdesc-upload.patch /build/hsdesc-upload-retry.patch
-
-RUN curl --fail --silent --show-error \
-      --proto '=https' --tlsv1.2 --max-filesize 16777216 \
-      --output tor.tar.gz \
-      https://dist.torproject.org/tor-0.4.9.11.tar.gz \
-    && echo "2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed  tor.tar.gz" | sha256sum -c - \
-    && echo "0e1f8eea86ba7ce2798c11cd4656b1e6a8d5b9d5eaaaa8349102c787040a1b51  hsdesc-upload-retry.patch" | sha256sum -c - \
-    && tar --extract --gzip --file tor.tar.gz --no-same-owner --no-same-permissions \
-    && cd tor-0.4.9.11 \
-    && patch --batch --forward --fuzz=0 -p1 < ../hsdesc-upload-retry.patch \
-    && ./configure \
-      --prefix=/opt/qor-tor \
-      --disable-asciidoc \
-      --disable-html-manual \
-      --disable-manpage \
-      --disable-system-torrc \
-      --enable-gcc-hardening \
-      --enable-linker-hardening \
-    && make -j"$(nproc)" src/app/tor src/test/test \
-    && src/test/test hs_service/upload_retry_schedule \
-    && install -D -m 0755 src/app/tor /opt/qor-tor/bin/tor
-
 FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LB_TOR_BIN=/opt/qor-tor/bin/tor
+ENV LD_LIBRARY_PATH=/opt/qor-edge/lib
 
 LABEL org.qor-chat.tor.version="0.4.9.11" \
       org.qor-chat.tor.source-sha256="2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed" \
-      org.qor-chat.tor.patch-sha256="0e1f8eea86ba7ce2798c11cd4656b1e6a8d5b9d5eaaaa8349102c787040a1b51"
+      org.qor-chat.tor.patch-sha256="0e1f8eea86ba7ce2798c11cd4656b1e6a8d5b9d5eaaaa8349102c787040a1b51" \
+      org.qor-chat.haproxy.version="3.2.21" \
+      org.qor-chat.haproxy.source-sha256="0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339" \
+      org.qor-chat.edge-runtime.sha256="c3a9cf4759fb29f17b9e0e4e4da5e6213dd5cd7a8602f9ed695cb12be89e4c33"
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    libssl-dev \
     ca-certificates \
     gnupg \
     iptables \
     iproute2 \
-    tor \
+    openssl \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
@@ -66,7 +25,16 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=tor-builder /opt/qor-tor /opt/qor-tor
+COPY docker/edge-runtime/qor-edge-runtime-linux-x86_64-v1.tar.gz /tmp/qor-edge-runtime.tar.gz
+COPY docker/edge-runtime/THIRD_PARTY_NOTICES.txt /opt/qor-edge/THIRD_PARTY_NOTICES.txt
+
+RUN echo "c3a9cf4759fb29f17b9e0e4e4da5e6213dd5cd7a8602f9ed695cb12be89e4c33  /tmp/qor-edge-runtime.tar.gz" \
+      | sha256sum -c - \
+    && tar --extract --gzip --file /tmp/qor-edge-runtime.tar.gz \
+      --directory /opt --no-same-owner --no-same-permissions \
+    && test -x /opt/qor-edge/bin/haproxy \
+    && test -x /opt/qor-edge/tor/tor \
+    && rm /tmp/qor-edge-runtime.tar.gz
 
 WORKDIR /app
 
@@ -74,14 +42,10 @@ COPY scripts/ ./scripts/
 COPY server/ ./server/
 COPY shared/ ./shared/
 
-RUN node scripts/install-deps.cjs --quantum
-RUN node scripts/install-deps.cjs --edge
-RUN node scripts/install-deps.cjs --server
-
 EXPOSE 8443 8080 8404
 
 COPY server/package.json /app/package.json
-RUN npm install tar
-RUN npm install
+RUN npm install --omit=dev --no-audit --no-fund \
+    && npm cache clean --force
 
 CMD ["node", "scripts/start-loadbalancer.cjs"]

@@ -1,7 +1,7 @@
 
-import { execFileAsync, findInPath } from './lb-utils.js';
+import { execFileAsync } from './lb-utils.js';
 import fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { constants, existsSync } from 'fs';
 import path from 'path';
 import {
     HAPROXY_PID_FILE as HAPROXY_PID_FILENAME,
@@ -14,6 +14,9 @@ const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH ||
     path.join('/app/server/config', 'haproxy-auto.cfg');
 const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE ||
     (IS_ROOT && process.platform !== 'win32' ? `/var/run/${HAPROXY_PID_FILENAME}` : path.join(TEMP_DIRECTORY, HAPROXY_PID_FILENAME));
+const BUNDLED_HAPROXY_BIN = '/opt/qor-edge/bin/haproxy';
+const BUNDLED_LIBRARY_DIR = '/opt/qor-edge/lib';
+const BUNDLED_OQS_MODULE = '/opt/qor-edge/lib/ossl-modules/oqsprovider.so';
 
 export class HAProxyManager {
     constructor() {
@@ -23,16 +26,17 @@ export class HAProxyManager {
         this.maxConsecutiveFailures = 3;
         this.configPath = HAPROXY_CONFIG_PATH;
         this.pidFile = HAPROXY_PID_FILE;
-        this.haproxyBin = process.env.LB_HAPROXY_BIN || process.env.HAPROXY_BIN || 'haproxy';
+        this.haproxyBin = BUNDLED_HAPROXY_BIN;
     }
 
-    // Check if HAProxy is installed
+    // Only the immutable bundled executable is accepted.
     async isInstalled() {
         try {
-            if (path.isAbsolute(this.haproxyBin)) {
-                return existsSync(this.haproxyBin);
-            }
-            return !!findInPath(this.haproxyBin);
+            if (!path.isAbsolute(this.haproxyBin)) return false;
+            const stat = await fs.stat(this.haproxyBin);
+            if (!stat.isFile()) return false;
+            await fs.access(this.haproxyBin, constants.X_OK);
+            return true;
         } catch {
             return false;
         }
@@ -54,8 +58,7 @@ export class HAProxyManager {
     // Start HAProxy with generated configuration
     async start() {
         if (!await this.isInstalled()) {
-            console.warn('[AUTO-LB] HAProxy not installed');
-            console.log('[WARNING] HAProxy not installed. Install it first (e.g., run: node scripts/install-deps.cjs haproxy), then retry.');
+            console.warn('[AUTO-LB] Bundled HAProxy runtime is unavailable');
             return false;
         }
 
@@ -74,8 +77,11 @@ export class HAProxyManager {
 
             // Start HAProxy
             const env = { ...process.env };
-            if (process.platform !== 'win32' && process.env.LD_LIBRARY_PATH) {
-                env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
+            if (process.platform !== 'win32') {
+                delete env.LD_PRELOAD;
+                env.LD_LIBRARY_PATH = BUNDLED_LIBRARY_DIR;
+                env.OPENSSL_MODULES = path.dirname(BUNDLED_OQS_MODULE);
+                env.OQS_PROVIDER_MODULE = BUNDLED_OQS_MODULE;
             }
             let openssl_conf = '';
             if (process.platform !== 'win32' && process.env.OPENSSL_CONF) {
@@ -85,16 +91,6 @@ export class HAProxyManager {
             }
             if (openssl_conf) {
                 env.OPENSSL_CONF = openssl_conf;
-            }
-
-            let oqs_module = '';
-            if (process.platform !== 'win32' && process.env.OQS_PROVIDER_MODULE) {
-                try {
-                    if (existsSync(process.env.OQS_PROVIDER_MODULE)) oqs_module = process.env.OQS_PROVIDER_MODULE;
-                } catch { }
-            }
-            if (oqs_module) {
-                env.OQS_PROVIDER_MODULE = oqs_module;
             }
 
             // Clean up stale stats socket if present
@@ -170,14 +166,12 @@ export class HAProxyManager {
         try {
             const env = { ...process.env };
             if (process.platform !== 'win32') {
-                if (process.env.LD_LIBRARY_PATH) {
-                    env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
-                }
+                delete env.LD_PRELOAD;
+                env.LD_LIBRARY_PATH = BUNDLED_LIBRARY_DIR;
+                env.OPENSSL_MODULES = path.dirname(BUNDLED_OQS_MODULE);
+                env.OQS_PROVIDER_MODULE = BUNDLED_OQS_MODULE;
                 if (process.env.OPENSSL_CONF) {
                     env.OPENSSL_CONF = process.env.OPENSSL_CONF;
-                }
-                if (process.env.OQS_PROVIDER_MODULE) {
-                    env.OQS_PROVIDER_MODULE = process.env.OQS_PROVIDER_MODULE;
                 }
             }
 

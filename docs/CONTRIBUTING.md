@@ -28,12 +28,12 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 2.  **Install dependencies:**
     ```bash
-    node scripts/install-deps.cjs --server
     node scripts/install-deps.cjs --client
     ```
-    Run both. The `--all` preset covers the server and edge toolchain only, it
-    does not install pnpm, Rust, or Tauri, so the client will not build without
-    `--client`. The installer targets Linux.
+    The Docker server stack carries its runtime dependencies. The edge image
+    consumes the authenticated runtime archive under `docker/edge-runtime`
+    instead of installing or downloading HAProxy, Tor, or OQS. The installer
+    remains available for Linux source-build prerequisites.
 
 3.  **Generate Certificates:**
     ```bash

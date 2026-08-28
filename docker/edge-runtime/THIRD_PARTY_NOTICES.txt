@@ -1,0 +1,32 @@
+Qor edge runtime third-party notices
+====================================
+
+The authenticated edge-runtime archive contains unmodified or Qor-patched
+binary distributions of the following components. The archive manifest records
+the hashes of the distributed binaries and libraries.
+
+HAProxy 3.2.21
+  Source: https://www.haproxy.org/download/3.2/src/haproxy-3.2.21.tar.gz
+  License: GPL-2.0-or-later, with the OpenSSL linking exception described by
+  HAProxy's LICENSE file, exportable headers are LGPL-2.1 or later.
+
+Tor 0.4.9.11, with Qor's hidden-service descriptor publication patch
+  Source: https://dist.torproject.org/tor-0.4.9.11.tar.gz
+  Patch: docker/tor/patches/0001-retry-hsdesc-upload.patch
+  License: BSD-3-Clause and other permissive licenses detailed in Tor's LICENSE.
+
+liboqs 0.16.0
+  Source: https://github.com/open-quantum-safe/liboqs/tree/0.16.0
+  License: MIT, with separately licensed implementations detailed by liboqs.
+
+Open Quantum Safe OpenSSL provider 0.12.0-dev (dfefe2d)
+  Source: https://github.com/open-quantum-safe/oqs-provider/tree/dfefe2d
+  License: MIT.
+
+The private OpenSSL, zlib, libevent, xz/liblzma, zstd, PCRE2, and libxcrypt
+runtime libraries originate from the pinned Ubuntu 22.04 build base. Their
+copyright and license records are available from the corresponding Ubuntu
+source packages.
+
+Qor's source tree retains the exact Tor patch, source archive hashes, runtime
+archive hash, and per-file binary hashes needed to identify this distribution.

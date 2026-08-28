@@ -6,8 +6,13 @@ const path = require('path');
 
 const BUILD_CONTEXT_PREFIX = 'qor-chat-docker-build-';
 const SAFE_SERVER_CONFIG_FILES = Object.freeze([
+    'audiences.js',
     'config.js',
     'constants.js',
+    'error-codes.js',
+    'infrastructure.js',
+    'protocol-keys.js',
+    'redis-keys.js',
     'secure-credentials.js'
 ]);
 

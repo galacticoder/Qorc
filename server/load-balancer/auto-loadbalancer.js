@@ -55,10 +55,9 @@ class AutoLoadBalancer {
     const clusterDir = path.dirname(here);
     this.serverDir = path.resolve(clusterDir, '..');
     this.repoRoot = path.resolve(this.serverDir, '..');
-    this.scriptsDir = path.resolve(this.repoRoot, 'scripts');
 
     this.haproxyManager = new HAProxyManager();
-    this.torManager = new TorManager(this.scriptsDir);
+    this.torManager = new TorManager();
     this.commandListener = new LBCommandListener(this.repoRoot, this.handleCommand.bind(this));
   }
 

@@ -259,23 +259,19 @@ the password does not appear in command arguments. It is not an operator setting
 | `HAPROXY_AUTO_CONFIG` | `false` | `server/cluster/cluster-integration.js` | Exact `true` lets a primary write HAProxy configuration from cluster state. |
 | `HAPROXY_AUTO_RELOAD` | `false` | same | Exact `true` validates and reloads HAProxy after an update. |
 | `HAPROXY_UPDATE_INTERVAL` | `60000`, 5000-3600000 | same | Single-flight configuration refresh interval. |
-| `HAPROXY_BIN` | `haproxy` | `server/load-balancer/haproxy-manager.js` | HAProxy executable. |
-| `LB_HAPROXY_BIN` | Selected by launcher | load-balancer launcher | Effective system or repository-built HAProxy executable. |
 | `LB_HAPROXY_CFG` | `server/config/haproxy-quantum.cfg` | load-balancer launcher | PQ-enabled HAProxy configuration. |
 | `LB_OPENSSL_CONF` | Derived from `OPENSSL_CONF` | load-balancer launcher | OpenSSL provider configuration passed to HAProxy. |
-| `HAPROXY_BUILD_ROOT` | User cache, `/app/haproxy-build` in Docker | HAProxy build and load-balancer launcher | Persistent location for the SHA-256-verified pinned HAProxy 3.2.21 source and executable. |
 | `SERVER_<server-id>_URL` | Unset | `server/load-balancer/haproxy-config-generator.js` | Optional backend URL override for a discovered server ID. |
 
 ## PQ TLS and installation tooling
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `OPENSSL_CONF` | Unset | quantum setup/build and load-balancer modules | OpenSSL configuration that loads the selected providers. |
-| `OPENSSL_MODULES` | Unset | same | OpenSSL provider module directory. |
-| `OQS_PROVIDER_MODULE` | Auto-detected | same | Explicit `oqsprovider` module path. |
-| `LD_LIBRARY_PATH` | Inherited | quantum tooling | Dynamic-library search path for HAProxy/OpenSSL dependencies. |
+| `OPENSSL_CONF` | Generated edge configuration | load-balancer modules | OpenSSL configuration that loads the bundled providers. |
+| `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qor-edge`; external overrides are not accepted. |
+| `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qor-edge`; external overrides are not accepted. |
+| `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qor-edge`; inherited paths are not used by HAProxy or Tor. |
 | `OQS_SIG` | Tool-selected | `scripts/setup-quantum-haproxy.cjs` | Preferred supported PQ signature algorithm for generated PQ certificate tooling. |
-| `FORCE_REBUILD` | `0` | install/build scripts | `1` forces rebuilding quantum dependencies. |
 | `TLS_REDIS_SERVER` | Installer-generated path | `scripts/start-server.cjs` | Repository-local TLS Redis executable override. |
 | `REDIS_SERVER_BIN` | `redis-server` | same | System Redis executable fallback. |
 | `REDIS_TLS_SOURCE_URL` | Redis 7.2.5 release URL | `scripts/install-deps.cjs` | Source archive used to build the local TLS Redis helper. |
