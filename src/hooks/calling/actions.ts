@@ -12,7 +12,7 @@ function callDiagnostic(phase: string, details: Record<string, unknown> = {}): v
   console.info('[CALL-DIAG]', { phase, ...details });
 }
 
-async function ensurePeerMaterial(
+async function validatePeerMaterial(
   refs: ActionRefs,
   peer: string,
   expectedService: SecureCallingService,
@@ -55,9 +55,9 @@ async function ensurePeerMaterial(
       );
     }
   }
-  if (refs.ensurePeerSession) {
+  if (refs.checkPeerSession) {
     callDiagnostic('action.peer-session-before');
-    await refs.ensurePeerSession(peer);
+    await refs.checkPeerSession(peer);
     callDiagnostic('action.peer-session-after');
     if (refs.serviceRef.current !== expectedService) {
       throw new Error('Calling account changed while establishing the signaling session');
@@ -74,7 +74,7 @@ export interface ActionRefs {
   remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
-  ensurePeerSession?: (username: string) => Promise<void>;
+  checkPeerSession?: (username: string) => Promise<void>;
 }
 
 export interface ActionSetters {
@@ -128,7 +128,7 @@ export const createStartCall = (
     });
 
     try {
-      await ensurePeerMaterial(refs, peer, service, currentUsername);
+      await validatePeerMaterial(refs, peer, service, currentUsername);
       callDiagnostic('action.service-start-before', {
         callType,
         elapsedMs: Math.round(performance.now() - startedAt),
@@ -199,7 +199,7 @@ export const createAnswerCall = (refs: ActionRefs, currentUsername: string) => {
       if (peer !== undefined && peer.trim() !== peerUsername) {
         throw new Error('Call answer peer does not match the active call');
       }
-      await ensurePeerMaterial(refs, peerUsername, service, currentUsername);
+      await validatePeerMaterial(refs, peerUsername, service, currentUsername);
 
       await service.answerCall(callId);
     } catch (_error: any) {

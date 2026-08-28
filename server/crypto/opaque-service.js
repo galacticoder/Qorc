@@ -81,7 +81,7 @@ export class OPAQUEServer {
     static #initialized = false;
     static #dummyAuthPublicKey = createDummyAuthPublicKey();
 
-    static #ensureUint8Array(val) {
+    static #Uint8Array(val) {
         if (val instanceof Uint8Array) return new Uint8Array(val);
         return new Uint8Array(0);
     }
@@ -138,9 +138,9 @@ export class OPAQUEServer {
      * Create OPAQUE record for storage
      */
     static createRegistrationRecord(envelope, authPublicKey, salt) {
-        const envelopeBytes = this.#ensureUint8Array(envelope);
-        const authPublicKeyBytes = this.#ensureUint8Array(authPublicKey);
-        const saltBytes = this.#ensureUint8Array(salt);
+        const envelopeBytes = this.#Uint8Array(envelope);
+        const authPublicKeyBytes = this.#Uint8Array(authPublicKey);
+        const saltBytes = this.#Uint8Array(salt);
         try {
             if (
                 envelopeBytes.length !== OPAQUE_ENVELOPE_BYTES ||
@@ -215,11 +215,11 @@ export class OPAQUEServer {
             throw new Error('Invalid server-entry authentication record');
         }
 
-        const blinded = this.#ensureUint8Array(blindedElement);
-        const secretKey = this.#ensureUint8Array(record.oprfSecretKey);
-        const authPublicKey = this.#ensureUint8Array(record.authPublicKey);
-        let envelope = this.#ensureUint8Array(record.envelope);
-        let salt = this.#ensureUint8Array(record.salt);
+        const blinded = this.#Uint8Array(blindedElement);
+        const secretKey = this.#Uint8Array(record.oprfSecretKey);
+        const authPublicKey = this.#Uint8Array(record.authPublicKey);
+        let envelope = this.#Uint8Array(record.envelope);
+        let salt = this.#Uint8Array(record.salt);
         let evaluated = null;
         let serverNonce = null;
         let delivered = false;
@@ -291,10 +291,10 @@ export class OPAQUEServer {
     }
 
     static finishLoginWithPublicKey(clientAuthMessage, authPublicKey, serverNonce, authChannelBinding) {
-        const signature = this.#ensureUint8Array(clientAuthMessage);
-        const publicKey = this.#ensureUint8Array(authPublicKey);
-        const nonce = this.#ensureUint8Array(serverNonce);
-        const channelBinding = this.#ensureUint8Array(authChannelBinding);
+        const signature = this.#Uint8Array(clientAuthMessage);
+        const publicKey = this.#Uint8Array(authPublicKey);
+        const nonce = this.#Uint8Array(serverNonce);
+        const channelBinding = this.#Uint8Array(authChannelBinding);
         let transcript = null;
         try {
             if (
@@ -375,19 +375,19 @@ export class OPAQUEServer {
                 }
             }
 
-            signature = this.#ensureUint8Array(clientAuthMessage);
+            signature = this.#Uint8Array(clientAuthMessage);
             if (signature.length !== ML_DSA_SIGNATURE_BYTES) {
                 signature.fill(0);
                 signature = new Uint8Array(ML_DSA_SIGNATURE_BYTES);
                 invalidInput = true;
             }
-            nonce = this.#ensureUint8Array(serverNonce);
+            nonce = this.#Uint8Array(serverNonce);
             if (nonce.length !== OPAQUE_NONCE_BYTES) {
                 nonce.fill(0);
                 nonce = new Uint8Array(OPAQUE_NONCE_BYTES);
                 invalidInput = true;
             }
-            channelBinding = this.#ensureUint8Array(authChannelBinding);
+            channelBinding = this.#Uint8Array(authChannelBinding);
             if (channelBinding.length !== AUTH_CHANNEL_BINDING_BYTES) {
                 channelBinding.fill(0);
                 channelBinding = new Uint8Array(AUTH_CHANNEL_BINDING_BYTES);

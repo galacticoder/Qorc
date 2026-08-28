@@ -23,6 +23,11 @@ absent and saves them to `.env`. It never replaces a
 present malformed value or rotates an existing value. Every authorized node
 behind the same logical server identity must use the same values.
 
+For the single-host Docker deployment, `scripts/start-docker.cjs` also fills
+missing container connection defaults and generates independent
+`DATABASE_PASSWORD` and `REDIS_PASSWORD` values. It preserves every value that
+is already present in `.env`.
+
 ## Server and HTTPS
 
 | Name | Default / range | Owner | Purpose |
@@ -310,7 +315,7 @@ server-runtime use above.
 
 | Name | Default / required | Purpose |
 | ---- | ------------------ | ------- |
-| `REDIS_BIND_HOST` | `0.0.0.0` | Host interface for the published mutual-TLS Redis port. Prefer a private/VPN address, or `127.0.0.1` for one host. |
+| `REDIS_BIND_HOST` | `127.0.0.1` | Host interface for the published mutual-TLS Redis port. Set a private/VPN address only when another host must connect. |
 | `REDIS_EXTERNAL_PORT` | `6379` | Published Redis port. |
 | `POSTGRES_BIND_HOST` | `127.0.0.1` | Host interface for the published TLS PostgreSQL port. |
 | `PG_ALLOWED_CIDR` | `172.16.0.0/12` | Network allowed by the generated `hostssl ... scram-sha-256` rules. Tighten it before exposing PostgreSQL to another host. |

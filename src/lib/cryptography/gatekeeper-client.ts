@@ -41,10 +41,7 @@ export class GatekeeperClient {
         this.initPromise = this.loadTokens();
     }
 
-    /**
-     * Ensure tokens are loaded from storage
-     */
-    async ensureReady(): Promise<void> {
+    async checkReady(): Promise<void> {
         if (this.initPromise) {
             await this.initPromise;
         }
@@ -61,8 +58,7 @@ export class GatekeeperClient {
      */
     async startEntryRequest(password: string): Promise<Record<string, any>> {
         return this.withMutation(async () => {
-        await this.ensureReady();
-        // Clear any old pending tokens from failed attempts
+        await this.checkReady();
         this.storedTokens = this.storedTokens.filter((token) => {
             if (token.unblindedToken) return true;
             wipeAnonymousToken(token);
@@ -121,7 +117,7 @@ export class GatekeeperClient {
         abortSignal?: AbortSignal
     ): Promise<Record<string, any>> {
         return this.withMutation(async () => {
-        await this.ensureReady();
+        await this.checkReady();
         if (!this.pendingEntrySecret) throw new Error('Server entry request not started');
         let proof: Awaited<ReturnType<OPAQUEClient['finishLogin']>> | null = null;
         let generated: Awaited<ReturnType<PrivacyPassClient['generateTokenBatch']>> | null = null;
@@ -186,7 +182,7 @@ export class GatekeeperClient {
         issuerEpoch: number
     ): Promise<void> {
         return this.withMutation(async () => {
-        await this.ensureReady();
+        await this.checkReady();
 
         const originalTokens = this.storedTokens;
         const pendingTokens = originalTokens.filter(t => !t.unblindedToken);
@@ -219,7 +215,7 @@ export class GatekeeperClient {
      */
     async getRedemptionPayload(): Promise<Record<string, any> | null> {
         return this.withMutation(async () => {
-        await this.ensureReady();
+        await this.checkReady();
 
         const ambiguousTokens = this.storedTokens.filter(token => token.pending && !token.used);
         if (ambiguousTokens.length > 0) {
@@ -257,7 +253,7 @@ export class GatekeeperClient {
 
     async commitPendingTokenUsage(): Promise<void> {
         return this.withMutation(async () => {
-        await this.ensureReady();
+        await this.checkReady();
 
         const pendingTokens = this.storedTokens
             .filter(t => t.unblindedToken && !t.used && t.pending)
@@ -274,7 +270,7 @@ export class GatekeeperClient {
 
     async cancelPendingEntry(): Promise<void> {
         return this.withMutation(async () => {
-            try { await this.ensureReady(); } catch { }
+            try { await this.checkReady(); } catch { }
             this.pendingEntrySecret?.fill(0);
             this.pendingEntrySecret = null;
             this.opaqueClient.clear();
@@ -291,7 +287,7 @@ export class GatekeeperClient {
      */
     async reserveRedemptionPayload(): Promise<Record<string, any> | null> {
         return this.withMutation(async () => {
-            await this.ensureReady();
+            await this.checkReady();
 
             let storeChanged = false;
             for (const token of this.storedTokens) {
@@ -428,7 +424,7 @@ export class GatekeeperClient {
 
     async dispose(): Promise<void> {
         return this.withMutation(async () => {
-            try { await this.ensureReady(); } catch { }
+            try { await this.checkReady(); } catch { }
             for (const token of this.storedTokens) wipeAnonymousToken(token);
             this.storedTokens = [];
             this.pendingEntrySecret?.fill(0);

@@ -261,7 +261,7 @@ function scheduleJitteredUpload(
 /**
  * Keep the public avatar pool populated with this client's share of cover PURBs
  */
-export async function ensureAvatarCoverBlobs(): Promise<void> {
+export async function validateAvatarCoverBlobs(): Promise<void> {
     const now = Date.now();
     if (coverUploadBatchPending || now - lastCoverUploadAt < COVER_REFRESH_MS) return;
     coverUploadBatchPending = true;

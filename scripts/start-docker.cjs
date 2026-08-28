@@ -2,6 +2,7 @@
 /**
  * Docker deployment helper script
  * Usage:
+ *   node scripts/start-docker.cjs all
  *   node scripts/start-docker.cjs server
  *   node scripts/start-docker.cjs loadbalancer
  *   node scripts/start-docker.cjs server --build
@@ -13,6 +14,7 @@ const path = require('path');
 const readline = require('readline');
 const fs = require('fs');
 const net = require('net');
+const { Writable } = require('stream');
 const { randomBytes } = require('crypto');
 const {
     createDockerBuildContext,
@@ -23,25 +25,27 @@ const args = process.argv.slice(2);
 const command = args[0];
 const flags = args.slice(1);
 
-if (process.platform !== 'linux' && process.platform !== 'win32') {
-    console.error('[DOCKER] Qor deployment supports only Linux and Windows hosts.');
+if (!['linux', 'win32', 'darwin'].includes(process.platform)) {
+    console.error('[DOCKER] Qor deployment supports Linux, Windows, and macOS hosts running Docker Linux containers.');
     process.exit(1);
 }
 
-const validProfiles = ['server', 'loadbalancer'];
+const validProfiles = ['server', 'loadbalancer', 'all'];
 const validServices = ['redis', 'postgres', 'server', 'loadbalancer'];
 
 function showHelp() {
     console.log('Docker Deployment Helper');
     console.log('');
     console.log('Usage:');
+    console.log('  node scripts/start-docker.cjs all                    - Start the complete deployment');
     console.log('  node scripts/start-docker.cjs <profile>              - Start profile stack');
     console.log('  node scripts/start-docker.cjs <profile> --build      - Rebuild and start profile');
-    console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, postgres)');
+    console.log('  node scripts/start-docker.cjs all --build            - Build and start the complete deployment');
+    console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, postgres, redis)');
     console.log('  node scripts/start-docker.cjs stop all            - Stop all services');
     console.log('  node scripts/start-docker.cjs delete <service>    - Stop, remove containers, and delete images');
     console.log('  node scripts/start-docker.cjs reset               - Stop all services and remove volumes');
-    console.log('  node scripts/start-docker.cjs logs <service>      - View logs');
+    console.log('  node scripts/start-docker.cjs logs [service]      - View all logs or one service');
     console.log('');
     process.exit(0);
 }
@@ -122,8 +126,7 @@ function readEnv() {
 
 // Helper to update .env file
 function updateEnvFile(updates) {
-    if (!fs.existsSync(envPath)) return;
-    let content = fs.readFileSync(envPath, 'utf8');
+    let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
 
     for (const [key, value] of Object.entries(updates)) {
         const regex = new RegExp(`^${key}=.*`, 'm');
@@ -136,13 +139,112 @@ function updateEnvFile(updates) {
     }
 
     fs.writeFileSync(envPath, content, 'utf8');
-    const sensitiveKeys = new Set(['AUTH_ROOT_SEED', 'SERVER_TRANSPORT_IDENTITY_SEED']);
+    try { fs.chmodSync(envPath, 0o600); } catch { }
     console.log(`[INFO] Updated .env: ${Object.keys(updates).map((key) => (
-        sensitiveKeys.has(key) ? `${key}=[generated]` : `${key}=${updates[key]}`
+        /(PASSWORD|SEED|KEY|SECRET|TOKEN)/i.test(key) ? `${key}=[generated]` : `${key}=${updates[key]}`
     )).join(', ')}`);
 }
 
-function ensureDockerIdentitySeeds(env) {
+function promptForHiddenInput(prompt) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error('SERVER_PASSWORD is missing. Add SERVER_PASSWORD=<12-512 character password> to .env, then run this command again.');
+    }
+
+    return new Promise((resolve) => {
+        let muted = false;
+        const hiddenOutput = new Writable({
+            write(chunk, encoding, callback) {
+                if (!muted) process.stdout.write(chunk, encoding);
+                callback();
+            }
+        });
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: hiddenOutput,
+            terminal: true
+        });
+
+        process.stdout.write(prompt);
+        muted = true;
+        rl.question('', (answer) => {
+            muted = false;
+            rl.close();
+            process.stdout.write('\n');
+            resolve(answer);
+        });
+    });
+}
+
+async function checkDockerEnvironment(env, needsServerPassword) {
+    const updates = {};
+    const defaults = {
+        DB_PORT: '5432',
+        DB_NAME: 'Qor',
+        DATABASE_USER: 'postgres',
+        REDIS_URL: 'rediss://redis:6379',
+        REDIS_EXTERNAL_PORT: '6379',
+        REDIS_TLS_SERVERNAME: 'redis',
+        REDIS_CA_CERT_PATH: '/app/redis-certs/redis-ca.crt',
+        REDIS_CLIENT_CERT_PATH: '/app/redis-certs/redis-client.crt',
+        REDIS_CLIENT_KEY_PATH: '/app/redis-certs/redis-client.key',
+        PGSSLROOTCERT: '/app/postgres-certs/root.crt',
+        DB_TLS_SERVERNAME: 'postgres',
+        TLS_CERT_PATH: 'server/config/certs/localhost.crt',
+        TLS_KEY_PATH: 'server/config/certs/localhost.key',
+        PORT: '3000',
+        HAPROXY_HTTPS_PORT: '8443',
+        HAPROXY_STATS_PORT: '8404'
+    };
+
+    for (const [key, value] of Object.entries(defaults)) {
+        if (!env[key]) updates[key] = value;
+    }
+    if (!env.DATABASE_PASSWORD) updates.DATABASE_PASSWORD = randomBytes(32).toString('base64url');
+    if (!env.REDIS_PASSWORD) updates.REDIS_PASSWORD = randomBytes(32).toString('base64url');
+
+    if (needsServerPassword && !env.SERVER_PASSWORD) {
+        let password = '';
+        while (password.length < 12 || password.length > 512) {
+            password = await promptForHiddenInput('Choose a server password (12-512 characters): ');
+            if (password.length < 12 || password.length > 512) {
+                console.error('[ERROR] The server password must be 12-512 characters.');
+            }
+        }
+        updates.SERVER_PASSWORD = password;
+    }
+
+    if (Object.keys(updates).length > 0) {
+        updateEnvFile(updates);
+        Object.assign(env, updates);
+    }
+}
+
+function checkSupportedDockerRuntime() {
+    let runtime;
+    try {
+        runtime = execFileSync('docker', ['version', '--format', '{{.Server.Os}}/{{.Server.Arch}}'], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe']
+        }).trim().toLowerCase();
+    } catch (error) {
+        throw new Error(`Docker is unavailable or is not running: ${error.message}`);
+    }
+
+    const [operatingSystem, rawArchitecture] = runtime.split('/');
+    const architecture = rawArchitecture === 'x86_64' ? 'amd64'
+        : rawArchitecture === 'aarch64' ? 'arm64'
+            : rawArchitecture;
+    if (operatingSystem !== 'linux') {
+        throw new Error(`Docker is running ${operatingSystem || 'an unknown container mode'}. Switch Docker to Linux containers.`);
+    }
+    if (!['amd64', 'arm64'].includes(architecture)) {
+        throw new Error(`Docker architecture '${rawArchitecture || 'unknown'}' is unsupported. Qor server images support amd64 and arm64.`);
+    }
+
+    console.log(`[INFO] Docker runtime: linux/${architecture}`);
+}
+
+function checkDockerIdentitySeeds(env) {
     const updates = {};
     for (const key of ['AUTH_ROOT_SEED', 'SERVER_TRANSPORT_IDENTITY_SEED']) {
         const configured = env[key];
@@ -182,7 +284,7 @@ async function main() {
             if (serviceToStop === 'all') {
                 // Stop all services
                 try {
-                    const psOutput = execSync('docker compose -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"', {
+                    const psOutput = execSync('docker compose --env-file .env -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"', {
                         cwd: repoRoot,
                         encoding: 'utf8'
                     });
@@ -194,18 +296,23 @@ async function main() {
                     }
 
                     console.log(`[INFO] Stopping ${runningServices.length} service(s): ${runningServices.join(', ')}`);
-                    execSync('docker compose -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
+                    execSync('docker compose --env-file .env -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
                     console.log(`[SUCCESS] Stopped: ${runningServices.join(', ')}`);
                 } catch (error) {
                     console.log('[INFO] Stopping all Docker services...');
-                    execSync('docker compose -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
+                    execSync('docker compose --env-file .env -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
                 }
                 process.exit(0);
             }
 
+            if (!validServices.includes(serviceToStop)) {
+                console.error(`[ERROR] Unknown service: ${serviceToStop}`);
+                process.exit(1);
+            }
+
             // Stop specific service
             try {
-                const psOutput = execSync(`docker compose -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"`, {
+                const psOutput = execSync('docker compose --env-file .env -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"', {
                     cwd: repoRoot,
                     encoding: 'utf8'
                 });
@@ -217,7 +324,7 @@ async function main() {
                 }
 
                 console.log(`[INFO] Stopping service: ${serviceToStop}`);
-                execSync(`docker compose -f docker/docker-compose.yml --profile "*" stop ${serviceToStop}`, { cwd: repoRoot, stdio: 'inherit' });
+                execSync(`docker compose --env-file .env -f docker/docker-compose.yml --profile "*" stop ${serviceToStop}`, { cwd: repoRoot, stdio: 'inherit' });
                 console.log(`[SUCCESS] Stopped: ${serviceToStop}`);
             } catch (error) {
                 console.error(`[ERROR] Failed to stop service: ${serviceToStop}`);
@@ -297,6 +404,10 @@ async function main() {
 
         if (command === 'logs') {
             const service = flags[0] || '';
+            if (service && !validServices.includes(service)) {
+                console.error(`[ERROR] Unknown service: ${service}`);
+                process.exit(1);
+            }
             console.log(`[INFO] Viewing logs${service ? ` for ${service}` : ''}...`);
             execSync(`docker compose --env-file .env -f docker/docker-compose.yml --profile "*" logs -f ${service}`, { cwd: repoRoot, stdio: 'inherit' });
             process.exit(0);
@@ -305,7 +416,7 @@ async function main() {
         if (command === 'reset') {
             console.log('[INFO] Stopping containers and removing volumes...');
             try {
-                execSync('docker compose -f docker/docker-compose.yml --profile "*" down -v', { cwd: repoRoot, stdio: 'inherit' });
+                execSync('docker compose --env-file .env -f docker/docker-compose.yml --profile "*" down -v', { cwd: repoRoot, stdio: 'inherit' });
                 console.log('[SUCCESS] Reset complete.');
             } catch (error) {
                 console.error('[ERROR] Failed to reset:', error.message);
@@ -321,11 +432,13 @@ async function main() {
             showHelp();
         }
 
+        checkSupportedDockerRuntime();
         fs.mkdirSync(hostLogsPath, { recursive: true });
 
         console.log('[INFO] Checking for port conflicts...');
         const env = readEnv();
-        ensureDockerIdentitySeeds(env);
+        await checkDockerEnvironment(env, command === 'server' || command === 'all');
+        checkDockerIdentitySeeds(env);
         const updates = {};
 
         // 1. Postgres
@@ -353,7 +466,7 @@ async function main() {
         }
 
         // 4. LoadBalancer
-        if (command === 'loadbalancer') {
+        if (command === 'loadbalancer' || command === 'all') {
             const httpsPort = parseInt(env.HAPROXY_HTTPS_PORT || '8443', 10);
             const availableHttpsPort = await findAvailablePort(httpsPort, 'loadbalancer', 8443);
             if (availableHttpsPort !== httpsPort) {
@@ -376,7 +489,7 @@ async function main() {
             }
         }
 
-        const buildFlag = flags.includes('--build') ? '--build' : '';
+        const shouldBuild = flags.includes('--build');
 
         const rl = readline.createInterface({
             input: process.stdin,
@@ -394,35 +507,35 @@ async function main() {
             try {
                 dockerBuildContext = createDockerBuildContext(repoRoot);
                 process.env.QOR_DOCKER_BUILD_CONTEXT = dockerBuildContext;
+                const targetServices = command === 'all' ? 'server loadbalancer' : command;
+                const buildServices = command === 'all'
+                    ? 'postgres redis server loadbalancer'
+                    : command === 'server'
+                        ? 'postgres redis server'
+                        : 'redis loadbalancer';
+                const profileFlags = command === 'all'
+                    ? '--profile server --profile loadbalancer'
+                    : `--profile ${command}`;
+                let sharedServices = 'redis';
+                if (command === 'server' || command === 'all') sharedServices = 'postgres redis';
+
+                if (shouldBuild) {
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildServices}`, { cwd: repoRoot, stdio: 'inherit' });
+                }
+
+                const sharedRecreateFlag = shouldBuild ? '' : '--no-recreate';
+                execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans ${sharedRecreateFlag} ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
 
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
-                    let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis';
 
-                    if (sharedServices) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
-                    }
-
-                    if (buildFlag) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
-                    }
-
-                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d --remove-orphans ${command}`;
+                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml ${profileFlags} up -d --remove-orphans ${targetServices}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
-                    let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis';
-
-                    if (sharedServices) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
-                    }
-
-                    if (buildFlag) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
-                    }
-
-                    const dockerRun = spawn('docker', ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--no-deps', '--service-ports', '-it', '--rm', command], {
+                    const foregroundArgs = command === 'all'
+                        ? ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', '--profile', 'server', '--profile', 'loadbalancer', 'up', '--remove-orphans', 'server', 'loadbalancer']
+                        : ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--no-deps', '--service-ports', '-it', '--rm', command];
+                    const dockerRun = spawn('docker', foregroundArgs, {
                         cwd: repoRoot,
                         stdio: 'inherit',
                         env: { ...process.env }
@@ -447,7 +560,9 @@ async function main() {
                     console.log(`[SUCCESS] Docker ${command} stack started in background!`);
                     console.log('');
                     console.log('View logs:');
-                    console.log(`  node scripts/start-docker.cjs logs ${command}`);
+                    console.log(command === 'all'
+                        ? '  node scripts/start-docker.cjs logs'
+                        : `  node scripts/start-docker.cjs logs ${command}`);
                     console.log('');
                     console.log('Stop services:');
                     console.log(`  node scripts/start-docker.cjs stop ${command}`);

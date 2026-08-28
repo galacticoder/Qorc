@@ -131,7 +131,7 @@ let emojiCategories: readonly EmojiCategory[] = [];
 let emojiByValue = new Map<string, IndexedEmojiRecord>();
 let emojiCatalogPromise: Promise<void> | null = null;
 
-function ensureEmojiCatalogLoaded(): Promise<void> {
+function validateEmojiCatalogLoaded(): Promise<void> {
   if (!emojiCatalogPromise) {
     emojiCatalogPromise = import('../data/emoji-catalog').then((localCatalog) => {
       const nextRecords: IndexedEmojiRecord[] = [];
@@ -221,7 +221,7 @@ function parsePersistedUsage(value: unknown): Map<string, UsageEntry> {
   return parsed;
 }
 
-async function ensureUsageLoaded(state: UsageState, secureDB?: SecureDB): Promise<void> {
+async function validateUsageLoaded(state: UsageState, secureDB?: SecureDB): Promise<void> {
   if (state.loaded || !secureDB) return;
   if (!state.loadPromise) {
     state.loadPromise = (async () => {
@@ -332,9 +332,9 @@ function searchScore(
 }
 
 export async function getEmojiCatalog(secureDB?: SecureDB): Promise<EmojiCatalogView> {
-  await ensureEmojiCatalogLoaded();
+  await validateEmojiCatalogLoaded();
   const state = getUsageState(secureDB);
-  await ensureUsageLoaded(state, secureDB);
+  await validateUsageLoaded(state, secureDB);
   return {
     version: localEmojiVersion,
     categories: emojiCategories,
@@ -373,11 +373,11 @@ export function searchEmojiCatalog(
 }
 
 export async function recordEmojiUsage(emoji: string, secureDB?: SecureDB): Promise<void> {
-  await ensureEmojiCatalogLoaded();
+  await validateEmojiCatalogLoaded();
   if (!emojiByValue.has(emoji)) return;
 
   const state = getUsageState(secureDB);
-  await ensureUsageLoaded(state, secureDB);
+  await validateUsageLoaded(state, secureDB);
 
   const previous = state.stats.get(emoji);
   state.stats.set(emoji, {

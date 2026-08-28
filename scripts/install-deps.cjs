@@ -182,7 +182,7 @@ async function installRedisTlsLocal() {
     await execFileAsync('make', ['BUILD_TLS=yes'], { cwd: extractedDir, stdio: 'inherit' });
   } catch (e) {
     console.log('[INFO] Redis TLS build failed:', e.message);
-    console.log('[INFO] Ensure OpenSSL dev libraries are installed (e.g., libssl-dev / openssl-devel).');
+    console.log('[INFO] confirm OpenSSL dev libraries are installed');
     return false;
   }
 
@@ -201,7 +201,6 @@ async function installRedisTlsLocal() {
     return false;
   }
 
-  // Persist TLS_REDIS_SERVER into project .env so start-server.cjs can use it
   try {
     const envPath = path.join(repoRoot, '.env');
     let envText = '';
@@ -251,7 +250,7 @@ async function installComponent(name) {
       const tlsInstalled = await installRedisTlsLocal();
       if (tlsInstalled) return true;
 
-      console.log('[INFO] Install a TLS-enabled Redis manually (Redis >= 6 built with BUILD_TLS=yes) and ensure redis-server supports --tls-port.');
+      console.log('[INFO] Install a TLS-enabled Redis manually (Redis >= 6 built with BUILD_TLS=yes) and make sure redis-server supports --tls-port.');
       return false;
     }
     case 'postgres': {

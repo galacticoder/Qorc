@@ -19,7 +19,7 @@ The calling stack is divided into five responsibilities:
    local account. It connects service callbacks to React state and destroys the
    service across logout, account replacement, or unmount.
 2. Calling actions validate UI requests, resolve current certified peer
-   material, restore a saved authenticated endpoint when needed, and ensure
+   material, restore a saved authenticated endpoint when needed, and check
    a Signal session exists.
 3. `SecureCallingService` owns the single active call, capture devices, media
    streams, timers, call signaling, bounded media queues, and cleanup.
@@ -54,7 +54,7 @@ Code references:
 Calling does not trust a username, onion address, or call ID by itself. Before
 outbound call setup can proceed, the application resolves the peer's certified
 discovery material, verifies its account-root and key bindings through key
-transparency, registers the peer with the P2P transport, and ensures that native
+transparency, registers the peer with the P2P transport, and checks that native
 Signal has a session for that peer.
 
 Resolution is cache-first. An in-memory certificate may be reused for up to five
@@ -233,7 +233,7 @@ Starting a call performs these operations in order:
    type, self-call rule, and blocking state.
 2. Reuse or resolve the current certified peer bundle, register it with P2P,
    restore its authenticated saved endpoint when the runtime has none, and
-   ensure the native Signal session.
+   check the native Signal session.
 3. Create the call ID and enter `connecting`.
 4. Confirm Signal signaling is available before activating privacy-sensitive
    microphone or camera capture or opening a media route.

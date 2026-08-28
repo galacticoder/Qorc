@@ -1099,7 +1099,7 @@ class UnifiedSignalTransport {
                 return preServerWritePolicyFailure;
             }
 
-            const deliveryReady = await websocketClient.ensureDeliveryReadyForSend();
+            const deliveryReady = await websocketClient.checkDeliveryReadyForSend();
             if (!deliveryReady) {
                 this.cancelBlindRouteAck(requestId);
                 activeRequestId = null;
@@ -1188,7 +1188,7 @@ class UnifiedSignalTransport {
         }
     };
 
-    private ensureBlindAckHandler(): boolean {
+    private checkBlindAckHandler(): boolean {
         if (this.blindAckHandlerRegistered) return true;
         this.blindAckHandlerRegistered = true;
         try {
@@ -1201,7 +1201,7 @@ class UnifiedSignalTransport {
     }
 
     private awaitBlindRouteAck(requestId: string, timeoutMs: number): Promise<{ acked: boolean; success?: boolean; error?: string }> {
-        if (!this.ensureBlindAckHandler()) throw new Error('Blind-route acknowledgement handler unavailable');
+        if (!this.checkBlindAckHandler()) throw new Error('Blind-route acknowledgement handler unavailable');
         if (this.blindAckWaiters.size >= MAX_BLIND_ACK_WAITERS || this.blindAckWaiters.has(requestId)) {
             throw new Error('Blind-route acknowledgement capacity reached');
         }
@@ -1803,7 +1803,7 @@ class UnifiedSignalTransport {
                         return;
                     }
                     
-                    if (!(await websocketClient.ensureDeliveryReadyForSend())) {
+                    if (!(await websocketClient.checkDeliveryReadyForSend())) {
                         this.cancelBlindRouteAck(requestId);
                         continue;
                     }

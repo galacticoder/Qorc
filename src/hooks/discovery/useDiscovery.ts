@@ -31,7 +31,7 @@ import {
     validateCertifiedPeerBundleV3
 } from '@/lib/utils/certified-identity-utils';
 import type { AvatarData } from '@/lib/types/avatar-types';
-import { publishAvatarToStore, fetchAvatarFromStore, ensureAvatarCoverBlobs, isValidAvatarRef } from '@/lib/avatar/avatar-store-client';
+import { publishAvatarToStore, fetchAvatarFromStore, validateAvatarCoverBlobs as validateAvatarCoverBlobs, isValidAvatarRef } from '@/lib/avatar/avatar-store-client';
 import type { AvatarRef } from '@/lib/crypto/avatar-blob-crypto';
 import type { HybridKeys } from '@/lib/types/auth-types';
 import type { PeerCertificateBundle } from '@/lib/types/p2p-types';
@@ -1631,7 +1631,7 @@ export const useDiscovery = (
                 publishedAvatarStateVersion = avatarStateVersionRef.current;
                 const avatar = await getAvatarForDiscovery();
                 if (!isCurrentOwner()) return false;
-                void ensureAvatarCoverBlobs();
+                void validateAvatarCoverBlobs();
                 const avatarRef = avatar ? await publishAvatarToStore(avatar) : null;
                 if (!isCurrentOwner()) return false;
                 const publishOwner = String(accountHandle ?? '').trim().toLowerCase();
@@ -1778,7 +1778,7 @@ export const useDiscovery = (
                     return fail('oprf-token-missing');
                 }
 
-                const transparencyStatus = await keyTransparencyClient.ensureOwnIdentity({
+                const transparencyStatus = await keyTransparencyClient.validateOwnIdentity({
                     ownerUsername: String(accountHandle).trim().toLowerCase(),
                     discoveryEncryptionKey: currentResult.encryptionKey,
                     accountRoot: {

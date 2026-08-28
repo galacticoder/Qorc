@@ -155,7 +155,7 @@ fn sidecar_path(app: &tauri::AppHandle) -> QorResult<PathBuf> {
     materialize_embedded_client(&cache.join("native").join("pir"))
 }
 
-fn ensure_started(app: &tauri::AppHandle) -> QorResult<()> {
+fn validation_started(app: &tauri::AppHandle) -> QorResult<()> {
     let mut guard = SIDECAR
         .lock()
         .map_err(|_| QorError::Internal("PIR lock".into()))?;
@@ -234,7 +234,7 @@ pub async fn pir_generate_query(
     if target_row >= count.next_power_of_two().max(2048) {
         return Err(QorError::Internal("Invalid PIR row".to_string()));
     }
-    ensure_started(&app)?;
+    validation_started(&app)?;
 
     let mut payload = Vec::with_capacity(12);
     payload.extend_from_slice(&count.to_le_bytes());
@@ -288,7 +288,7 @@ pub async fn pir_generate_batch_query(
     {
         return Err(QorError::Internal("Invalid PIR row".to_string()));
     }
-    ensure_started(&app)?;
+    validation_started(&app)?;
 
     let mut payload = Vec::with_capacity(12 + target_rows.len() * 4);
     payload.extend_from_slice(&count.to_le_bytes());

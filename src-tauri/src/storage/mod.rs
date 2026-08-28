@@ -35,7 +35,7 @@ struct StoreUsage {
     total_bytes: u64,
 }
 
-/// Secure storage handler
+/// Storage handler
 pub struct SecureStorage {
     aes_key: Zeroizing<[u8; 32]>,
     xchacha_key: Zeroizing<[u8; 32]>,
@@ -50,8 +50,8 @@ impl SecureStorage {
         let store_dir = config_dir.join("secure-store");
         let master_key_path = config_dir.join("master.key");
 
-        file::ensure_dir(&config_dir, 0o700).await?;
-        file::ensure_dir(&store_dir, 0o700).await?;
+        file::check_dir(&config_dir, 0o700).await?;
+        file::check_dir(&store_dir, 0o700).await?;
         file::remove_stale_temp_files(&config_dir).await?;
         file::remove_stale_temp_files(&store_dir).await?;
 
@@ -105,7 +105,7 @@ impl SecureStorage {
             file::validate_private_file_metadata(&metadata)?;
             if metadata.len() > ENCRYPTED_ITEM_MAX_BYTES as u64 {
                 return Err(QorError::StorageInitFailed(
-                    "Secure storage contains an oversized item".to_string(),
+                    "Storage contains an oversized item".to_string(),
                 ));
             }
             usage.item_count = usage.item_count.saturating_add(1);
@@ -114,7 +114,7 @@ impl SecureStorage {
                 || usage.total_bytes > SECURE_STORE_MAX_TOTAL_BYTES
             {
                 return Err(QorError::StorageInitFailed(
-                    "Secure storage exceeds its capacity limit".to_string(),
+                    "Storage exceeds its capacity limit".to_string(),
                 ));
             }
         }
@@ -194,7 +194,7 @@ impl SecureStorage {
     pub async fn set_item(&self, key: &str, value: &[u8]) -> QorResult<()> {
         if value.len() > SECURE_VALUE_MAX_BYTES {
             return Err(QorError::InvalidArgument(
-                "Secure storage value exceeds its size limit".to_string(),
+                "Storage value exceeds its size limit".to_string(),
             ));
         }
         // Generate random nonce
@@ -274,7 +274,7 @@ impl SecureStorage {
             || next_total_bytes > SECURE_STORE_MAX_TOTAL_BYTES
         {
             return Err(QorError::FileOperationFailed(
-                "Secure storage capacity exceeded".to_string(),
+                "Storage capacity exceeded".to_string(),
             ));
         }
         file::atomic_write(&file_path, &file_data, 0o600).await?;

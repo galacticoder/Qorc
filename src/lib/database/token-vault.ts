@@ -121,7 +121,7 @@ export class TokenVault {
     }
 
     private async replaceTokensInternal(newTokens: AnonymousToken[], generation: number): Promise<void> {
-        await this.ensureCurrentOwner(generation);
+        await this.validateCurrentOwner(generation);
         if (!Array.isArray(newTokens) || newTokens.length !== VAULT_CONFIG.MAX_TOKENS) {
             throw new Error('Invalid replacement token batch');
         }
@@ -159,7 +159,7 @@ export class TokenVault {
     }
 
     private async storeTokensInternal(newTokens: AnonymousToken[], generation: number): Promise<void> {
-        await this.ensureCurrentOwner(generation);
+        await this.validateCurrentOwner(generation);
         if (!Array.isArray(newTokens) || newTokens.length > 250) throw new Error('Invalid token batch');
         const originalTokens = this.tokens;
         const discarded = originalTokens.filter((token) => !isPrivacyPassTokenEpochUsable(token.tokenSecret));
@@ -255,7 +255,7 @@ export class TokenVault {
      */
     async getPendingTokens(limit: number = 250): Promise<AnonymousToken[]> {
         return this.withMutation(async (generation) => {
-            await this.ensureCurrentOwner(generation);
+            await this.validateCurrentOwner(generation);
             if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
                 throw new Error('Invalid pending token limit');
             }
@@ -268,7 +268,7 @@ export class TokenVault {
 
     async discardPendingTokens(): Promise<void> {
         await this.withMutation(async (generation) => {
-            await this.ensureCurrentOwner(generation);
+            await this.validateCurrentOwner(generation);
             const originalTokens = this.tokens;
             const discarded = originalTokens.filter(token => !token.unblindedToken && !token.used);
             if (discarded.length === 0) return;
@@ -296,7 +296,7 @@ export class TokenVault {
     }
 
     private async updateTokensInternal(updatedTokens: AnonymousToken[], generation: number): Promise<void> {
-        await this.ensureCurrentOwner(generation);
+        await this.validateCurrentOwner(generation);
         if (!Array.isArray(updatedTokens) || updatedTokens.length > 250) {
             throw new Error('Invalid token update batch');
         }
@@ -357,7 +357,7 @@ export class TokenVault {
             return [];
         }
         if (!this.isUnlocked || !this.serverScope) return [];
-        await this.ensureCurrentOwner(generation);
+        await this.validateCurrentOwner(generation);
         const originalTokens = this.tokens;
         const reserved: AnonymousToken[] = [];
         const retained = this.tokens.filter((t) => {
@@ -479,18 +479,15 @@ export class TokenVault {
         }
     }
 
-    /**
-     * Ensure vault is unlocked before operations
-     */
-    private ensureUnlocked(): void {
+    private checkUnlocked(): void {
         if (!this.isUnlocked || !this.serverScope) {
             throw new Error('Vault is locked');
         }
     }
 
-    private async ensureCurrentOwner(generation: number): Promise<void> {
+    private async validateCurrentOwner(generation: number): Promise<void> {
         this.assertGeneration(generation);
-        this.ensureUnlocked();
+        this.checkUnlocked();
         const owner = this.serverScope;
         const currentOwner = await getCurrentServerScope();
         this.assertGeneration(generation);

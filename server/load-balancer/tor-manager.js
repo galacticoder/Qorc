@@ -171,7 +171,7 @@ export class TorManager {
         return this.isPublishedState;
     }
 
-    async ensureConfig(listenPort) {
+    async validateConfig(listenPort) {
         await fs.mkdir(this.dataDir, { recursive: true, mode: 0o700 });
         await fs.mkdir(this.hiddenServiceDir, { recursive: true, mode: 0o700 });
 
@@ -203,7 +203,7 @@ export class TorManager {
     }
 
     async start(listenPort) {
-        await this.ensureConfig(listenPort);
+        await this.validateConfig(listenPort);
 
         if (await this.isRunning()) {
             console.log('[TOR] Tor is already running.');

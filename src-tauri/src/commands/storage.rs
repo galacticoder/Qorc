@@ -63,7 +63,7 @@ pub async fn secure_set(
         return Err(reject_secure_key(&key));
     }
     if value.len() > crate::storage::SECURE_VALUE_MAX_BYTES {
-        return Err("Secure storage value exceeds its size limit".to_string());
+        return Err("Storage value exceeds its size limit".to_string());
     }
     let storage = state
         .inner()

@@ -33,7 +33,7 @@ export const useCalling = (
   authContext: ReturnType<typeof useAuth>,
   options?: {
     getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
-    ensurePeerSession?: (username: string) => Promise<void>;
+    checkPeerSession?: (username: string) => Promise<void>;
   }
 ) => {
   if (!authContext) {
@@ -94,7 +94,7 @@ export const useCalling = (
     remoteVideoCanvasRef,
     remoteScreenCanvasRef,
     getPeerCertificate: options?.getPeerCertificate,
-    ensurePeerSession: options?.ensurePeerSession,
+    checkPeerSession: options?.checkPeerSession,
   };
 
   const actionSetters: ActionSetters = {
@@ -191,12 +191,12 @@ export const useCalling = (
 
   const startCall = useCallback(
     createStartCall(actionRefs, actionSetters, currentUsername),
-    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession]
+    [currentUsername, options?.getPeerCertificate, options?.checkPeerSession]
   );
 
   const answerCall = useCallback(
     createAnswerCall(actionRefs, currentUsername),
-    [currentUsername, options?.getPeerCertificate, options?.ensurePeerSession]
+    [currentUsername, options?.getPeerCertificate, options?.checkPeerSession]
   );
 
   const declineCall = useCallback(

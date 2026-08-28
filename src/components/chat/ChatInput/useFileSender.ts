@@ -92,7 +92,7 @@ export function useFileSender(
   getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>,
   findUser?: (handle: string) => Promise<any>,
   secureDB?: any,
-  ensurePeerSession?: (peerUsername: string) => Promise<void>
+  checkPeerSession?: (peerUsername: string) => Promise<void>
 ) {
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
@@ -107,11 +107,8 @@ export function useFileSender(
   const lastRefillRef = useRef<number>(Date.now());
   const sessionEstablishedAt = useRef<Map<string, number>>(new Map());
   const peersNeedingSessionRefresh = useRef<Set<string>>(new Set());
-  // Transfers retained (with their keys + file handle) for a window after sending
-  // so we can honour a receiver's retransmit request for chunks it dropped.
   const retainedTransfersRef = useRef<Map<string, RetainedTransfer>>(new Map());
   const activeRetransmitContextRef = useRef<RetainedTransfer | null>(null);
-  // Per fileId|peer throttle so a peer can't spam retransmit requests.
   const retransmitRateRef = useRef<Map<string, number>>(new Map());
   const retransmitInFlightRef = useRef<Set<string>>(new Set());
   const retentionTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -234,7 +231,7 @@ export function useFileSender(
     }
   }, []);
 
-  // Take a token from rate limiter if available
+  // Take token from rate limiter if available
   const takeToken = useCallback((): boolean => {
     refillTokens();
     if (rateTokensRef.current >= 1) {
@@ -244,7 +241,7 @@ export function useFileSender(
     return false;
   }, [refillTokens]);
 
-  // Compute MAC for chunk integrity verification
+  // chunk integrity verification
   const computeChunkMacAsync = useCallback(async (
     iv: Uint8Array,
     authTag: Uint8Array,
@@ -298,8 +295,7 @@ export function useFileSender(
     }, INACTIVITY_TIMEOUT_MS);
   }, []);
 
-  // Ensure Signal session is established
-  const ensureSignalSession = useCallback(async (forceReestablish: boolean = false): Promise<boolean> => {
+  const validateSignalSession = useCallback(async (forceReestablish: boolean = false): Promise<boolean> => {
     const generation = accountGenerationRef.current;
     const owner = currentUsername;
     const isCurrent = () => !!targetUsername && isTransferAuthorized(owner, generation, targetUsername);
@@ -342,8 +338,8 @@ export function useFileSender(
         }
       }
 
-      if (!hasUsableSession && ensurePeerSession) {
-        await ensurePeerSession(targetUsername);
+      if (!hasUsableSession && checkPeerSession) {
+        await checkPeerSession(targetUsername);
         if (!isCurrent()) return false;
       }
 
@@ -407,9 +403,9 @@ export function useFileSender(
     } catch {
       return false;
     }
-  }, [getKeysOnDemand, targetUsername, currentUsername, isTransferAuthorized, rememberSessionEstablished, ensurePeerSession]);
+  }, [getKeysOnDemand, targetUsername, currentUsername, isTransferAuthorized, rememberSessionEstablished, checkPeerSession]);
 
-  // Send encrypted file chunks
+  // Send file chunks
   const sendChunks = useCallback(async (
     state: TransferState,
     userKeys: readonly UserKeyEnvelope[]
@@ -446,7 +442,7 @@ export function useFileSender(
         if (retryCause === 'session-reset' || hasPendingReset) {
           state.lastSentIndex = -1;
           setProgress(0);
-          if (!await ensureSignalSession(true)) {
+          if (!await validateSignalSession(true)) {
             retryCause = 'session-reset';
             if (restartAttempt < MAX_RESTARTS) {
               await new Promise(r => setTimeout(r, 1000));
@@ -600,7 +596,7 @@ export function useFileSender(
     }
 
     return false;
-  }, [computeChunkMacAsync, currentUsername, ensureSignalSession, scheduleInactivityTimer, targetUsername, takeToken, isTransferAuthorized]);
+  }, [computeChunkMacAsync, currentUsername, validateSignalSession, scheduleInactivityTimer, targetUsername, takeToken, isTransferAuthorized]);
 
   const sendSingleChunk = useCallback(async (
     ctx: RetainedTransfer,
@@ -1043,7 +1039,7 @@ export function useFileSender(
         throw new Error('Local Dilithium keys unavailable');
       }
 
-      const sessionOk = await ensureSignalSession();
+      const sessionOk = await validateSignalSession();
       if (!isCurrent()) throw new Error('Account changed during session setup');
       if (!sessionOk) {
         console.error('[FILE-SENDER] No Signal session with recipient');

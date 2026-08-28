@@ -21,7 +21,7 @@ export function setSecureDB(state: AvatarSystemState, db: SecureDB | null): void
 // Initialize avatar system
 export async function initialize(
     state: AvatarSystemState,
-    ensureHandlerFn: () => void,
+    checkHandlerFn: () => void,
     isCurrent: () => boolean = () => true
 ): Promise<void> {
     if (state.initialized || !state.secureDB) return;
@@ -33,7 +33,7 @@ export async function initialize(
     let generatedOwnAvatar = false;
 
     try {
-        ensureHandlerFn();
+        checkHandlerFn();
 
         try {
             const storedAvatar = await secureDB.retrieve(STORAGE_KEYS.PROFILE_AVATARS, STORAGE_KEYS.AVATAR_OWN);

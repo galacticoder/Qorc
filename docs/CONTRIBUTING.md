@@ -10,13 +10,11 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 ### Prerequisites
 
-- **Node.js**: Ensure you have Node.js 18 or newer installed.
-- **pnpm**: Use the repository-pinned pnpm version through Corepack.
-- **Rust and Tauri**: Required for desktop client builds.
-- **Git**: For version control.
-- **Linux desktop build tools**: Tauri/GTK development packages, `dpkg-deb`,
-  `patchelf`, and the GStreamer 1.0 launcher, plugin scanner, plugins, and
-  libraries staged by the client build.
+- **Docker server:** Node.js 18 or newer plus Docker Compose v2 and Buildx.
+- **Desktop client:** Node.js 18 or newer, the repository-pinned pnpm through
+  Corepack, Rust/Tauri, and the platform build dependencies listed in the root
+  README.
+- **Git:** Only required when cloning or contributing through Git.
 
 ### Installation
 
@@ -26,27 +24,18 @@ This project and everyone participating in it is governed by the [Qor Code of Co
     cd Qor-Chat
     ```
 
-2.  **Install dependencies:**
+2.  **Start a complete Docker server:**
+    ```bash
+    node scripts/start-docker.cjs all
+    ```
+    Docker carries the server dependencies and the helper fills only missing
+    `.env` values. It does not replace or rotate existing values.
+
+3.  **Or build the desktop client:**
     ```bash
     node scripts/install-deps.cjs --client
+    node scripts/start-client.cjs
     ```
-    The Docker server stack carries its runtime dependencies. The edge image
-    consumes the authenticated runtime archive under `docker/edge-runtime`
-    instead of installing or downloading HAProxy, Tor, or OQS. The installer
-    remains available for Linux source-build prerequisites.
-
-3.  **Generate Certificates:**
-    ```bash
-    node scripts/generate_tls.cjs
-    ```
-
-4.  **Set a server password:** add `SERVER_PASSWORD` (12-512 characters) to
-    `.env`. The launchers generate the remaining required values on first run.
-    See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md).
-
-5.  **Start the Application:**
-    *   **Server:** `node scripts/start-docker.cjs server`
-    *   **Client:** `node scripts/start-client.cjs`
 
 ### Desktop Build Modes
 
@@ -104,7 +93,7 @@ later source changes.
 
 ## Style Guide
 
-*   **Linting:** This project uses ESLint. Please ensure your code passes linting before submitting a PR (`pnpm lint`). The project is pnpm-only, `pnpm-lock.yaml` is the committed lockfile.
+*   **Linting:** This project uses ESLint. Please check your code passes linting before submitting a PR (`pnpm lint`). The project is pnpm-only, `pnpm-lock.yaml` is the committed lockfile.
 *   **Formatting:** Try to follow the existing code style.
 *   **TypeScript:** Use TypeScript for all new UI code (`.ts`, `.tsx`).
 

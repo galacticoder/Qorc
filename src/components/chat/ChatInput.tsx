@@ -38,7 +38,7 @@ interface ChatInputProps {
   getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
   findUser?: (handle: string) => Promise<any>;
   secureDB?: any;
-  ensurePeerSession?: (peerUsername: string) => Promise<void>;
+  checkPeerSession?: (peerUsername: string) => Promise<void>;
   fileSenderOverride?: FileSenderController;
 }
 
@@ -66,7 +66,7 @@ export function ChatInput({
   getPeerHybridKeys,
   findUser,
   secureDB,
-  ensurePeerSession,
+  checkPeerSession: checkPeerSession,
   fileSenderOverride,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
@@ -85,7 +85,7 @@ export function ChatInput({
     getPeerHybridKeys,
     findUser,
     secureDB,
-    ensurePeerSession,
+    checkPeerSession,
   );
   const {
     sendFile,

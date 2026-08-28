@@ -477,7 +477,7 @@ fn remove_managed_path(path: &Path) -> QorResult<()> {
     })
 }
 
-fn ensure_private_directory(path: &Path) -> QorResult<()> {
+fn validate_private_directory(path: &Path) -> QorResult<()> {
     std::fs::create_dir_all(path).map_err(|error| {
         QorError::FileSystem(format!("Failed to create private Tor directory: {}", error))
     })?;
@@ -508,7 +508,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> QorResult<()> {
     let parent = path.parent().ok_or_else(|| {
         QorError::FileSystem("Private Tor file has no parent directory".to_string())
     })?;
-    ensure_private_directory(parent)?;
+    validate_private_directory(parent)?;
 
     let file_name = path
         .file_name()
@@ -1178,7 +1178,7 @@ impl TorManager {
         format!("./{}/{}", TRANSPORT_DIR, name)
     }
 
-    fn ensure_executable_path(path: &Path) -> QorResult<()> {
+    fn valid_executable_path(path: &Path) -> QorResult<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1194,14 +1194,14 @@ impl TorManager {
         Ok(())
     }
 
-    fn ensure_managed_executables(&self) -> QorResult<()> {
+    fn validate_managed_executables(&self) -> QorResult<()> {
         if is_regular_file_without_links(&self.tor_path) {
-            Self::ensure_executable_path(&self.tor_path)?;
+            Self::valid_executable_path(&self.tor_path)?;
         }
 
         let transport = self.managed_transport_path(DEFAULT_TRANSPORT);
         if is_regular_file_without_links(&transport) {
-            Self::ensure_executable_path(&transport)?;
+            Self::valid_executable_path(&transport)?;
         }
 
         Ok(())
@@ -1250,7 +1250,7 @@ impl TorManager {
                 "Authenticated bridge transport binary not found".to_string(),
             ));
         }
-        Self::ensure_executable_path(&resolved)?;
+        Self::valid_executable_path(&resolved)?;
 
         let config_path = self.managed_transport_config_path(DEFAULT_TRANSPORT);
         Ok(format!("{} exec {}", methods, config_path))
@@ -1383,7 +1383,7 @@ impl TorManager {
             ));
         }
 
-        ensure_private_directory(&self.tor_dir)?;
+        validate_private_directory(&self.tor_dir)?;
         let (_, expected_checksum) = self.pinned_bundle_target()?;
         if self.has_current_bundle(expected_checksum) {
             return Ok(());
@@ -1397,7 +1397,7 @@ impl TorManager {
         }
         self.extract_tor_bundle_bytes(embedded::EMBEDDED_TOR_BUNDLE.to_vec(), expected_checksum)
             .await?;
-        self.ensure_managed_executables()?;
+        self.validate_managed_executables()?;
         if !self.has_current_bundle(expected_checksum) {
             return Err(QorError::Verification(
                 "Materialized Tor runtime does not match its embedded archive".to_string(),
@@ -1814,12 +1814,12 @@ impl TorManager {
 
         let (normalized_config, data_dir) = self.validate_config(&config.config)?;
 
-        ensure_private_directory(&self.tor_dir)?;
+        validate_private_directory(&self.tor_dir)?;
 
         write_private_file(&self.config_path, normalized_config.as_bytes())?;
 
         if let Some(ref dir) = data_dir {
-            ensure_private_directory(dir)?;
+            validate_private_directory(dir)?;
             *self.configured_data_dir.write() = Some(dir.clone());
         }
 
@@ -1894,7 +1894,7 @@ impl TorManager {
             });
         }
 
-        if let Err(e) = self.ensure_managed_executables() {
+        if let Err(e) = self.validate_managed_executables() {
             return Ok(TorStartResult {
                 success: false,
                 starting: None,
@@ -1909,9 +1909,9 @@ impl TorManager {
             });
         }
 
-        ensure_private_directory(&self.tor_dir)?;
+        validate_private_directory(&self.tor_dir)?;
         let data_dir = self.get_data_dir();
-        ensure_private_directory(&data_dir)?;
+        validate_private_directory(&data_dir)?;
 
         let lock_file = data_dir.join("lock");
         let _ = fs::remove_file(&lock_file).await;

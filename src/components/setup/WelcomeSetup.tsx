@@ -74,7 +74,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
     try {
       await saveTorPreferences({ enableBridges, transport, bridgeLines });
       await startupConnection.setServerUrl(normalized);
-      await startupConnection.ensureConnected();
+      await startupConnection.checkConnected();
       if (!mountedRef.current) return;
       if (startupConnection.getState().phase !== 'ready') {
         setError(startupConnection.getState().error || 'Could not reach the server.');

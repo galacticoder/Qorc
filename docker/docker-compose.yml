@@ -8,7 +8,7 @@ services:
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
-      - "${REDIS_BIND_HOST:-0.0.0.0}:${REDIS_EXTERNAL_PORT:-6379}:6379"
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_EXTERNAL_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
       - redis-certs:/certs
@@ -61,8 +61,10 @@ services:
       - PGDATABASE=${DB_NAME}
       - PGUSER=postgres
       - PGPASSWORD=${DATABASE_PASSWORD}
+      - DATABASE_URL=
       - PGSSLROOTCERT=/app/postgres-certs/root.crt
       - DB_TLS_SERVERNAME=postgres
+      - REDIS_URL=rediss://redis:6379
       - NO_GUI
     depends_on:
       postgres:
@@ -98,6 +100,7 @@ services:
       - HAPROXY_HTTPS_PORT=8443
       - HAPROXY_STATS_PORT=8404
       - TOR_HS_INTRO_POINTS=${TOR_HS_INTRO_POINTS:-3}
+      - REDIS_URL=rediss://redis:6379
       - REDIS_CA_CERT_PATH=/app/redis-certs/redis-ca.crt
       - REDIS_CLIENT_CERT_PATH=/app/redis-certs/redis-client.crt
       - REDIS_CLIENT_KEY_PATH=/app/redis-certs/redis-client.key
@@ -121,13 +124,6 @@ services:
 networks:
   Qor-Chat-net:
     driver: bridge
-    driver_opts:
-      com.docker.network.bridge.name: Qor-Chat-br
-      com.docker.network.bridge.enable_ip_masquerade: "true"
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.25.0.0/16
 
 volumes:
   postgres-data:

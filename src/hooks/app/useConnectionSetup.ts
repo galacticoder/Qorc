@@ -46,7 +46,7 @@ export function useConnectionSetup({
     }
     const initializeConnection = async () => {
       try {
-        await startupConnection.ensureConnected();
+        await startupConnection.checkConnected();
         if (!isCurrent()) return;
       } catch {
         if (!isCurrent()) return;

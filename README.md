@@ -44,28 +44,90 @@ Qor-Chat is not a metadata-free system. The server can still observe timing,
 connection state, traffic volume, rounded database sizes, and some bucketed or
 cover-traffic protocol artifacts.
 
-## Setup
+## Run a Qor server with Docker
 
-### Prerequisites
+This is the simplest server setup. It works with Docker Linux containers on
+64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
+
+You need only:
+
+- Docker Engine with Docker Compose v2 and Docker Buildx on Linux, or Docker
+  Desktop on Windows or macOS. Docker Desktop already includes both plugins;
+  Windows must be using Linux containers.
+- Node.js 18 or newer to run the small deployment helper.
+- This repository, downloaded as an archive or cloned with Git.
+
+You do **NOT** install pnpm, Rust, Cargo, PostgreSQL, Redis, HAProxy, Tor,
+OpenSSL/OQS, or their build toolchains on the host. Docker carries the server
+runtime. The edge image contains authenticated, architecture matched copies of
+HAProxy, patched Tor, liboqs, the OQS provider, and their private libraries.
+
+From the repository root, run:
+
+```bash
+node scripts/start-docker.cjs all
+```
+
+When you run it, the helper:
+
+1. Checks that Docker is running Linux containers on amd64 or arm64.
+2. Creates `.env` when needed. If `SERVER_PASSWORD` is not already configured,
+   it asks for that one 12-512-character value with hidden input.
+3. Generates any missing database, Redis, authentication-root, and server
+   identity secrets and saves them in `.env` with restricted permissions.
+4. Detects occupied host ports and saves available replacements automatically.
+5. Asks whether to run in the background; pressing Enter accepts the normal
+   background mode.
+6. Builds and starts PostgreSQL, Redis, the Qor server, HAProxy, and the Tor
+   onion-service edge. TLS certificates are generated inside the stack.
+
+The first build pulls the Docker base images and installs the Node server
+dependencies inside the images; it does not install them on the host. Later
+starts reuse the built images:
+
+```bash
+node scripts/start-docker.cjs all
+```
+
+After source or Dockerfile changes, force an image rebuild with:
+
+```bash
+node scripts/start-docker.cjs all --build
+```
+
+Useful management commands:
+
+```bash
+node scripts/start-docker.cjs logs
+node scripts/start-docker.cjs stop all
+node scripts/start-docker.cjs --help
+```
+
+Existing `.env` values are preserved and never rotated. The load-balancer logs
+print the onion service address clients connect to. Keep `.env` and the Docker
+volumes backed up; they contain the stable server identity and saved data.
+`reset` intentionally removes the Docker volumes and is not a normal restart
+command.
+
+The `server` and `loadbalancer` profiles remain available separately for
+advanced or multi-host deployments, but a normal single host server should use
+`all`.
+
+## Build the desktop client from source
+
+Building the desktop application has additional requirements that are not
+needed for a Docker server or for an installed Qor app:
 
 - Node.js 18 or newer.
-- pnpm, normally through Corepack:
+- pnpm through Corepack (`corepack enable pnpm`).
+- Rust and Cargo.
+- On Linux, the Tauri/GTK development stack, `dpkg-deb`, `patchelf`, and a
+  complete GStreamer 1.0 installation. The build stages private WebKitGTK and
+  screen-capture runtimes from these inputs.
 
-  ```bash
-  corepack enable pnpm
-  ```
-
-- Rust/Cargo for the Tauri desktop build.
-- Docker for Docker deployment.
-- On a Linux build host, the Tauri/GTK development stack, `dpkg-deb`,
-  `patchelf`, and a complete GStreamer 1.0 installation are required. The
-  client build stages its private WebKitGTK and screen-capture runtimes from
-  these inputs.
-
-Desktop builds are supported only on x86_64 Linux and x86_64 Windows. Native
-server deployment is supported only on Linux, use Docker for the server on
-Windows. These are source-build requirements: an installed Qor bundle does not
-require this repository, Node.js, pnpm, Rust, Cargo, or the build cache.
+Desktop source builds are supported on x86_64 Linux and x86_64 Windows. An
+installed `.deb`, `.rpm`, `.AppImage`, `.msi`, or `.exe` is self-contained from
+the repository and does not need Node.js, pnpm, Rust, Cargo, or the build cache.
 
 ### Install client build dependencies
 
@@ -74,26 +136,8 @@ node scripts/install-deps.cjs --client
 ```
 
 The dependency installer targets Linux and checks source-build dependencies.
-The Docker server and load-balancer images carry their runtime dependencies;
-the load-balancer image specifically embeds authenticated HAProxy, Tor, OQS,
-and private-library artifacts and never downloads or installs them at startup.
-Run the installer with `--help` for the remaining source-build components and
-presets.
 
-### Configure environment
-
-Create or update `.env` for the server before starting it. `SERVER_PASSWORD` (12-512 characters, the anonymous server entry OPAQUE gate) is
-the only value you have to choose yourself.
-
-The launchers generate the rest on first run and write it back to `.env`:
-`AUTH_ROOT_SEED` and `SERVER_TRANSPORT_IDENTITY_SEED` as independent 32-byte
-random values, the TLS certificate and key, and the PostgreSQL CA bundle. They
-never overwrite or rotate a value that is already present, so every authorized
-node behind one logical server identity must keep the same seeds. See
-[docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md) for the full
-list and the accepted ranges.
-
-### Run locally
+### Build and run
 
 Start the desktop client:
 
@@ -121,39 +165,6 @@ node scripts/start-client.cjs --run-only
 whatever existing output is present, so source changes are not included until a
 normal or `--bundle-only` build completes. An installed `.deb`, `.rpm`,
 `.AppImage`, `.msi`, or `.exe` runs independently of the repository.
-
----
-### Deployment
-
-Start the server stack:
-
-```bash
-node scripts/start-docker.cjs server
-```
-
-The server profile starts Postgres, Redis, and the Node server. Add `--build` to
-rebuild images:
-
-```bash
-node scripts/start-docker.cjs server --build
-```
-
-Start the load balancer:
-
-```bash
-node scripts/start-docker.cjs loadbalancer
-```
-
-The load-balancer image uses the versioned archive under
-`docker/edge-runtime`. HAProxy and the patched Tor hidden-service runtime are
-part of the image, independent of host packages, and have no runtime download,
-package-manager, or system-binary fallback.
-
-To understand all commands available:
-
-```bash
-node scripts/start-docker.cjs --help
-```
 
 ## Security model brief summary
 

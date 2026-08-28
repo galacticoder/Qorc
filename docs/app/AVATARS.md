@@ -98,7 +98,7 @@ The avatar bytes themselves go to the content store as a PURB:
 
 Publishing (`useDiscovery` self-publish):
 1. `getAvatarForDiscovery` selects the avatar to share (real or default, per `shareWithOthers`).
-2. `ensureAvatarCoverBlobs` (throttled, fire-and-forget) contributes this client's share of **cover PURBs** to the public pool - random-content, uniform-size, fresh-ID blobs indistinguishable from real avatars at rest. This helps populate useful decoy sets when there are few real users, but upload failures, expiry, or global caps can still leave the pool too small. Each cover upload is independently jittered.
+2. `validateAvatarCoverBlobs` (throttled, fire-and-forget) contributes this client's share of **cover PURBs** to the public pool - random-content, uniform-size, fresh-ID blobs indistinguishable from real avatars at rest. This helps populate useful decoy sets when there are few real users, but upload failures, expiry, or global caps can still leave the pool too small. Each cover upload is independently jittered.
 3. `publishAvatarToStore` schedules the anonymous PUT with jitter and retries. The upload is authorized with one-time `account-auth` and `server-entry` Privacy Pass redemptions rather than a stable account credential. Cover PURBs use the same route and shape.
 4. A new reference is advertised only after its upload has succeeded. The first discovery publish after a change can therefore omit it, the periodic discovery refresh advertises the confirmed reference, normally within five minutes while the app remains connected.
 

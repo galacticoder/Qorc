@@ -220,7 +220,7 @@ export function readReadyPirTagIndex() {
   };
 }
 
-export async function ensurePirEpoch(epoch) {
+export async function checkPirEpoch(epoch) {
   if (!started) throw new Error('PIR service is not running');
   const slot = slots.find((candidate) => (
     !candidate.building && candidate.snapshot?.epoch === epoch

@@ -240,7 +240,7 @@ function commandPath(cmd) {
     }
 }
 
-function ensureProtocEnv() {
+function checkProtocEnv() {
     if (process.env.PROTOC && fs.existsSync(process.env.PROTOC)) {
         return;
     }
@@ -257,12 +257,12 @@ function ensureProtocEnv() {
         process.exit(1);
     }
 
-    const protocExe = ensureWindowsProtoc();
+    const protocExe = checkWindowsProtoc();
     process.env.PROTOC = protocExe;
     process.env.PATH = `${path.dirname(protocExe)}${path.delimiter}${process.env.PATH || ''}`;
 }
 
-function ensureWindowsProtoc() {
+function checkWindowsProtoc() {
     const cacheDir = path.join(repoRoot, '.cache', 'protoc', `v${protocVersion}`);
     const protocExe = path.join(cacheDir, 'bin', 'protoc.exe');
     if (fs.existsSync(protocExe)) {
@@ -309,7 +309,7 @@ function ensureWindowsProtoc() {
     return protocExe;
 }
 
-function ensureWindowsPerlEnv() {
+function checkWindowsPerlEnv() {
     if (process.platform !== 'win32') {
         return;
     }
@@ -320,7 +320,7 @@ function ensureWindowsPerlEnv() {
         return;
     }
 
-    prependPerlPath(ensurePortableStrawberryPerl());
+    prependPerlPath(checkPortableStrawberryPerl());
 }
 
 function perlPathEntries(perlExe) {
@@ -359,7 +359,7 @@ function perlUsable(perlExe) {
     }
 }
 
-function ensurePortableStrawberryPerl() {
+function checkPortableStrawberryPerl() {
     const cacheDir = path.join(repoRoot, '.cache', 'strawberry-perl', 'portable');
     const existing = findUsablePerl(cacheDir);
     if (existing) {
@@ -645,8 +645,8 @@ if (runOnly) {
 } else {
     console.log('[CLIENT] Building Tauri app...');
     acquireBuildLock();
-    ensureProtocEnv();
-    ensureWindowsPerlEnv();
+    checkProtocEnv();
+    checkWindowsPerlEnv();
     stageWebKitGtkRuntime();
     stageGStreamerPlugins();
     buildPirSidecars();

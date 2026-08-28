@@ -247,7 +247,7 @@ class DeliveryReceiptOutbox {
     return write;
   }
 
-  private async ensureReady(account: string): Promise<void> {
+  private async checkReady(account: string): Promise<void> {
     if (!isCanonicalUsername(account) || account !== this.activeAccount || account !== this.persistenceOwner) {
       throw new Error('Delivery receipt account is not current');
     }
@@ -259,7 +259,7 @@ class DeliveryReceiptOutbox {
 
   async queueDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
     if (!isCanonicalUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
-    await this.ensureReady(account);
+    await this.checkReady(account);
     this.pruneExpired();
     const key = entryKey(peerUsername, messageId);
     if (!this.hasCapacity(peerUsername, key)) return false;
@@ -279,7 +279,7 @@ class DeliveryReceiptOutbox {
 
   async requeueKnownDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
     if (!isCanonicalUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
-    await this.ensureReady(account);
+    await this.checkReady(account);
     this.pruneExpired();
     const key = entryKey(peerUsername, messageId);
     const existing = this.entries.get(key);

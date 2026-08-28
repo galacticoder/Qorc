@@ -537,7 +537,7 @@ export const useAuth = () => {
       setIsSubmittingAuth(true);
       setAuthStatus("Preparing private server-authentication connection...");
       try {
-        await websocketClient.ensureLinkedAuthenticationMode(operation.signal);
+        await websocketClient.validateLinkedAuthenticationMode(operation.signal);
         authLifecycle.assertCurrent(operation);
         setAuthStatus("Verifying entry...");
         

@@ -54,7 +54,7 @@ interface ChatInterfaceProps {
   readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
   readonly getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
   readonly findUser?: (handle: string) => Promise<any>;
-  readonly ensurePeerSession?: (peerUsername: string) => Promise<void>;
+  readonly checkPeerSession?: (peerUsername: string) => Promise<void>;
   readonly p2pConnected?: boolean;
   readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
   readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
@@ -88,7 +88,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   getKeysOnDemand,
   getPeerHybridKeys,
   findUser,
-  ensurePeerSession,
+  checkPeerSession: checkPeerSession,
   p2pConnected: _p2pConnected = false,
   loadMoreMessages,
   sendServerReadReceipt,
@@ -739,7 +739,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             getPeerHybridKeys={getPeerHybridKeys}
             findUser={findUser}
             secureDB={secureDB}
-            ensurePeerSession={ensurePeerSession}
+            checkPeerSession={checkPeerSession}
             fileSenderOverride={fileSenderOverride}
           />
         )}

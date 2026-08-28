@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-I support the latest version of the project only. Please ensure you are using the most recent release to benefit from the latest security patches.
+I support the latest version of the project only. Please make sure you are using the most recent release to benefit from the latest security patches.
 
 ## Reporting a Vulnerability
 

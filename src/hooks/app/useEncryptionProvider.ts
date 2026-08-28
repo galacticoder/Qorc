@@ -80,7 +80,7 @@ export function useEncryptionProvider({
   getKeysOnDemand,
   findUser,
 }: EncryptionProviderProps) {
-  const sessionEnsureRef = useRef(new Map<string, Promise<boolean>>());
+  const sessionValidationRef = useRef(new Map<string, Promise<boolean>>());
   const discoveryCacheRef = useRef(new Map<string, any>());
   const preKeyPendingRef = useRef(new Set<string>());
   const sessionReadyWaitersRef = useRef(new Map<string, { resolve: () => void; timeoutId: number }>());
@@ -114,7 +114,7 @@ export function useEncryptionProvider({
     discoveryResultMemoRef.current.clear();
     peerBundleInstalledRef.current.clear();
     mlKemInstallInFlightRef.current.clear();
-    sessionEnsureRef.current.clear();
+    sessionValidationRef.current.clear();
     preKeyPendingRef.current.clear();
     for (const waiter of sessionReadyWaitersRef.current.values()) {
       clearTimeout(waiter.timeoutId);
@@ -187,7 +187,7 @@ export function useEncryptionProvider({
 
     const resetEncryptionState = () => {
       encryptionGenerationRef.current += 1;
-      sessionEnsureRef.current.clear();
+      sessionValidationRef.current.clear();
       preKeyPendingRef.current.clear();
       for (const waiter of sessionReadyWaitersRef.current.values()) {
         clearTimeout(waiter.timeoutId);
@@ -656,10 +656,9 @@ export function useEncryptionProvider({
 
         if (isKeyTransparencyPeerRevoked(currentUser, resolvedUsername)) return deny('peer-revoked:pre-session');
 
-        // Ensure Signal Protocol session
-        const ensureSession = async (peer: string): Promise<{ hasSession: boolean; isOwner: boolean }> => {
+        const validateSession = async (peer: string): Promise<{ hasSession: boolean; isOwner: boolean }> => {
           const key = `${currentUser}:${peer}`;
-          const existing = sessionEnsureRef.current.get(key);
+          const existing = sessionValidationRef.current.get(key);
           if (existing) {
             const hasSession = await existing;
             return { hasSession: isCurrentOperation() && hasSession, isOwner: false };
@@ -783,14 +782,14 @@ export function useEncryptionProvider({
               hasSession = await signal.hasSession(currentUser, peer);
               return isCurrentOperation() && !!hasSession;
             } finally {
-              if (sessionEnsureRef.current.get(key) === promise) {
-                sessionEnsureRef.current.delete(key);
+              if (sessionValidationRef.current.get(key) === promise) {
+                sessionValidationRef.current.delete(key);
               }
             }
           })();
 
           if (!isCurrentOperation()) return { hasSession: false, isOwner: false };
-          sessionEnsureRef.current.set(key, promise);
+          sessionValidationRef.current.set(key, promise);
           const hasSession = await promise;
           if (!isCurrentOperation()) return { hasSession: false, isOwner: true };
           
@@ -807,7 +806,7 @@ export function useEncryptionProvider({
         await waitForSessionReady(resolvedUsername);
         if (!isCurrentOperation()) return deny('stale-operation');
 
-        const { hasSession, isOwner } = await ensureSession(resolvedUsername);
+        const { hasSession, isOwner } = await validateSession(resolvedUsername);
         if (!isCurrentOperation()) return deny('stale-operation');
         if (!hasSession) return deny('no-signal-session', { isOwner });
         if (isKeyTransparencyPeerRevoked(currentUser, resolvedUsername)) return deny('peer-revoked:post-session');

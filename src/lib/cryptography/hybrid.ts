@@ -106,7 +106,7 @@ function computeRoutingDigest(header: HybridPublicHeader): Uint8Array {
   }
 }
 
-function ensureUint8Array(input: Uint8Array | ArrayBuffer | string, label: string): Uint8Array {
+function checkUint8Array(input: Uint8Array | ArrayBuffer | string, label: string): Uint8Array {
   if (input instanceof Uint8Array) {
     const copy = new Uint8Array(input.length);
     copy.set(input);
@@ -429,7 +429,7 @@ export class Hybrid {
     options?: DecryptOptions
   ): Promise<HybridDecryptionResult> {
     let stage = 'sender-key-validation';
-    const senderPublic = ensureUint8Array(
+    const senderPublic = checkUint8Array(
       ownKeys?.senderDilithiumPublicKey,
       'senderDilithiumPublicKey',
     );

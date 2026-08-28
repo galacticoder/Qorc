@@ -489,7 +489,7 @@ export class WebSocketConnection {
     await previous;
     try {
       if (this.gatekeeper && this.gatekeeperServerId === serverScope) {
-        await this.gatekeeper.ensureReady();
+        await this.gatekeeper.checkReady();
         return this.gatekeeper;
       }
 
@@ -504,7 +504,7 @@ export class WebSocketConnection {
 
       const gatekeeper = new GatekeeperClient(serverScope);
       try {
-        await gatekeeper.ensureReady();
+        await gatekeeper.checkReady();
         if (await getCurrentServerScope() !== serverScope) {
           const error = new Error('Gatekeeper server scope changed during initialization');
           error.name = 'AbortError';
@@ -1133,9 +1133,9 @@ export class WebSocketConnection {
       try {
         await PinnedServer.load();
         this.assertConnectionOperationCurrent(operationGeneration);
-        this.torIntegration.ensureTorListener();
+        this.torIntegration.checkTorListener();
 
-        if (!await this.torIntegration.ensureTorReadyAsync()) {
+        if (!await this.torIntegration.checkTorReadyAsync()) {
           throw new Error('Tor network not ready');
         }
         this.assertConnectionOperationCurrent(operationGeneration);
@@ -1330,7 +1330,7 @@ export class WebSocketConnection {
           }
         }));
       } else {
-        const deliveryReady = await this.ensureUnlinkedDeliveryReady();
+        const deliveryReady = await this.checkUnlinkedDeliveryReady();
         assertConnectionCurrent();
         if (!deliveryReady) {
           this.scheduleDeliveryReadyRetry();
@@ -1453,11 +1453,11 @@ export class WebSocketConnection {
     return this.unlinkedAccountAuthorizationReady;
   }
 
-  private async ensureUnlinkedDeliveryReady(): Promise<boolean> {
+  private async checkUnlinkedDeliveryReady(): Promise<boolean> {
     if (this.unlinkedSessionReady) return true;
     if (this.unlinkedAuthorizationBlocked) return false;
     if (this.unlinkedDeliveryPromise) return this.unlinkedDeliveryPromise;
-    const operation = this.performEnsureUnlinkedDeliveryReady();
+    const operation = this.performValidateUnlinkedDeliveryReady();
     this.unlinkedDeliveryPromise = operation;
     try {
       return await operation;
@@ -1468,7 +1468,7 @@ export class WebSocketConnection {
     }
   }
 
-  private async performEnsureUnlinkedDeliveryReady(): Promise<boolean> {
+  private async performValidateUnlinkedDeliveryReady(): Promise<boolean> {
     if (!this.isInUnlinkedMode) return false;
     if (this.lifecycleState !== 'connected' || !this.sessionKeyMaterial) return false;
     const connectionToken = this.nativeConnectionToken;
@@ -1576,7 +1576,7 @@ export class WebSocketConnection {
       }
       if (this.unlinkedAuthorizationBlocked) return;
 
-      const ready = await this.ensureUnlinkedDeliveryReady().catch(() => false);
+      const ready = await this.checkUnlinkedDeliveryReady().catch(() => false);
       if (ready) {
         this.deliveryReadyRetryAttempts = 0;
       } else if (!this.unlinkedAuthorizationBlocked) {
@@ -2068,7 +2068,7 @@ export class WebSocketConnection {
     }
 
     try {
-      await this.ensureSessionKeys(false);
+      await this.validateSessionKeys(false);
       throwIfOperationAborted(options.signal);
       this.assertOutboundTransportContextCurrent(outboundContext);
       return await this.runOnSecureSendLane(async () => {
@@ -2141,8 +2141,7 @@ export class WebSocketConnection {
     }
   }
 
-  // Ensure session keys
-  private async ensureSessionKeys(force: boolean): Promise<void> {
+  private async validateSessionKeys(force: boolean): Promise<void> {
     if (!force && this.sessionKeyMaterial) {
       const age = Date.now() - this.sessionKeyMaterial.establishedAt;
       if (age < SESSION_REKEY_INTERVAL_MS) {
@@ -2203,12 +2202,12 @@ export class WebSocketConnection {
     return this.unlinkedSessionReady;
   }
 
-  async ensureDeliveryReadyForSend(): Promise<boolean> {
+  async checkDeliveryReadyForSend(): Promise<boolean> {
     if (!this.isInUnlinkedMode) return true;
     if (this.unlinkedSessionReady) return true;
     if (this.unlinkedAuthorizationBlocked) return false;
     if (this.lifecycleState !== 'connected') return false;
-    return await this.ensureUnlinkedDeliveryReady().catch(() => false);
+    return await this.checkUnlinkedDeliveryReady().catch(() => false);
   }
 
   async transmit(message: string): Promise<void> {
@@ -2333,7 +2332,7 @@ export class WebSocketConnection {
       throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
     }
     if (!this.unlinkedSessionReady && this.lifecycleState === 'connected') {
-      await this.ensureUnlinkedDeliveryReady();
+      await this.checkUnlinkedDeliveryReady();
       throwIfOperationAborted(abortSignal);
     }
     if (!this.unlinkedSessionReady) {
@@ -2426,7 +2425,7 @@ export class WebSocketConnection {
     }
   }
 
-  async ensureLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
+  async validateLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
     throwIfOperationAborted(abortSignal);
     const transition = this.privacyBoundaryTransition;
     if (transition) {

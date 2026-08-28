@@ -578,7 +578,6 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
 
     const serverPasswordRequired = ServerConfig.isServerPasswordGateReady();
 
-    // Ensure transport and gatekeeper signals always pass
     const isTransportSignal = [
       SignalType.REQUEST_SERVER_PUBLIC_KEY,
       SignalType.PQ_HANDSHAKE_INIT,

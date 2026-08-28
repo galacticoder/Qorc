@@ -1008,7 +1008,7 @@ class KeyTransparencyClient {
     );
   }
 
-  async ensureOwnIdentity(input: {
+  async validateOwnIdentity(input: {
     ownerUsername: string;
     discoveryEncryptionKey: Uint8Array;
     accountRoot: RootKeyPairInput;
@@ -1035,7 +1035,6 @@ class KeyTransparencyClient {
         const localRecoveryCommitment = keyTransparencyPublicKeyCommitment(recovery.publicKey);
 
         if (!verified.contact) {
-          console.log(`[KT ${new Date().toISOString()}] ensureOwnIdentity: no existing contact, registering own identity`, { owner: input.ownerUsername });
           try {
             await this.registerOwnIdentity(
               verified.context,
@@ -1047,13 +1046,12 @@ class KeyTransparencyClient {
               recovery,
             );
           } catch (e) {
-            console.log(`[KT-DIAG ${new Date().toISOString()}] ensureOwnIdentity: registerOwnIdentity THREW`, { owner: input.ownerUsername, error: e instanceof Error ? e.message : String(e) });
+            console.log(`[KT-DIAG ${new Date().toISOString()}] registerOwnIdentity THREW`, { owner: input.ownerUsername, error: e instanceof Error ? e.message : String(e) });
           }
           verified = await this.queryStateUnlocked(input.ownerUsername, input.discoveryEncryptionKey, generation);
           if (!verified.contact) {
             throw new Error('Key-transparency registration did not commit');
           }
-          console.log(`[KT-DIAG ${new Date().toISOString()}] ensureOwnIdentity: registration committed`, { owner: input.ownerUsername });
         }
 
         let current = verified.contact;

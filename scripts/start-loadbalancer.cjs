@@ -101,7 +101,7 @@ async function isPinnedHaproxyVersion(haproxyBin) {
   });
 }
 
-async function ensureQuantumReady() {
+async function checkQuantumReady() {
   const localConf = path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
   const hapCfgPath = path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
   const oqsModule = bundledOqsModule;
@@ -136,7 +136,7 @@ async function ensureQuantumReady() {
   process.env.LB_HAPROXY_CFG = hapCfgPath;
 }
 
-async function ensureHaproxyBuiltOrReady() {
+async function checkHaproxyBuiltOrReady() {
   const localConf = process.env.LB_OPENSSL_CONF || path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
   const hapCfgPath = process.env.LB_HAPROXY_CFG || path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
   const env = { ...process.env, OPENSSL_CONF: localConf };
@@ -771,7 +771,7 @@ class LBTUI {
 }
 
 
-async function ensureHaproxyCertFile() {
+async function checkHaproxyCertFile() {
   const certPath = process.env.TLS_CERT_PATH;
   const keyPath = process.env.TLS_KEY_PATH;
   const haproxyCertPath = path.join(repoRoot, 'server', 'config', 'certs', 'cert.pem');
@@ -797,13 +797,13 @@ async function ensureHaproxyCertFile() {
   }
 }
 
-async function ensureHaproxyCerts() {
-  await ensureHaproxyCertFile();
-  await ensureQuantumReady();
-  await ensureHaproxyBuiltOrReady();
+async function checkHaproxyCerts() {
+  await checkHaproxyCertFile();
+  await checkQuantumReady();
+  await checkHaproxyBuiltOrReady();
 }
 
-async function ensureStatsCredentials() {
+async function checkStatsCredentials() {
   const credsFile = path.join(repoRoot, 'server', 'config', '.haproxy-stats-creds.pqc');
   const keysFile = path.join(repoRoot, 'server', 'config', '.haproxy-keys.enc');
   const secureCredentialsPath = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
@@ -984,8 +984,8 @@ async function ensureStatsCredentials() {
   console.log('\x1b[34m║\x1b[32m            Load Balancer                 \x1b[34m║\x1b[0m');
   console.log('\x1b[34m╚════════════════════════════════════════════╝\x1b[0m');
 
-  await ensureHaproxyCerts();
-  await ensureStatsCredentials();
+  await checkHaproxyCerts();
+  await checkStatsCredentials();
 
   const hapBin = process.env.LB_HAPROXY_BIN;
   if (!hapBin) throw new Error('Bundled HAProxy runtime was not selected');

@@ -464,7 +464,7 @@ function findSudo() {
   }
 }
 
-async function ensureServerDeps() {
+async function validateServerDeps() {
   const nm = path.join(serverDir, 'node_modules');
   const hasNm = fs.existsSync(nm);
   const pkgLock = fs.existsSync(path.join(serverDir, 'package-lock.json'));
@@ -478,7 +478,7 @@ async function ensureServerDeps() {
   }
 }
 
-async function ensurePostgresBootstrap() {
+async function validatePostgresBootstrap() {
   const dbName = process.env.PGDATABASE || 'Qor';
   const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
   const port = process.env.PGPORT || '5432';
@@ -968,7 +968,7 @@ class ServerUI {
   }
 }
 
-async function ensureTLSIfMissing() {
+async function checkTLSIfMissing() {
   const hasCert = CONFIG.TLS_CERT_PATH && fileExistsMaybeRelative(CONFIG.TLS_CERT_PATH);
   const hasKey = CONFIG.TLS_KEY_PATH && fileExistsMaybeRelative(CONFIG.TLS_KEY_PATH);
   if (hasCert && hasKey) return;
@@ -1045,7 +1045,7 @@ async function ensureTLSIfMissing() {
   log('');
 }
 
-async function ensureDbCaBundleEnv() {
+async function validateDbCaBundleEnv() {
   if (process.env.DATABASE_CA_CERT) return;
 
   const pinnedPath = process.env.PGSSLROOTCERT;
@@ -1065,7 +1065,7 @@ async function ensureDbCaBundleEnv() {
   process.env.PGSSLROOTCERT = resolved;
 }
 
-async function ensureRedisTls() {
+async function validateRedisTls() {
   const rawUrl = CONFIG.REDIS_URL;
   let urlObj;
   try {
@@ -1215,11 +1215,11 @@ async function main() {
     console.log("Starting Server...");
   }
 
-  await ensureTLSIfMissing();
+  await checkTLSIfMissing();
   validateTLSCertificates();
-  await ensureDbCaBundleEnv();
-  await ensurePostgresBootstrap();
-  await ensureServerDeps();
+  await validateDbCaBundleEnv();
+  await validatePostgresBootstrap();
+  await validateServerDeps();
   try {
     if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
       const dockerCertsDir = '/app/redis-certs';
@@ -1321,7 +1321,7 @@ async function main() {
     process.exit(1);
   }
 
-  await ensureRedisTls();
+  await validateRedisTls();
 
   log('Configuration:');
   log(`  Server ID: ${CONFIG.SERVER_ID}`);

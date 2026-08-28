@@ -33,7 +33,7 @@ import { PostQuantumHash } from './post-quantum-hash.js';
 
 const UNIFIED_CRYPTO_MAC_BYTES = UTF8_ENCODER.encode(PROTOCOL_KEYS.UNIFIED_CRYPTO_MAC);
 
-function ensureUint8Array(value, label) {
+function checkUint8Array(value, label) {
   if (value instanceof Uint8Array) return value;
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -185,22 +185,22 @@ class PostQuantumAEAD {
   }
 
   static encrypt(plaintext, key, aad, explicitNonce) {
-    const keyBytes = ensureUint8Array(key, 'PostQuantumAEAD.encrypt.key');
+    const keyBytes = checkUint8Array(key, 'PostQuantumAEAD.encrypt.key');
     const nonce = explicitNonce
-      ? ensureUint8Array(explicitNonce, 'PostQuantumAEAD.encrypt.nonce')
+      ? checkUint8Array(explicitNonce, 'PostQuantumAEAD.encrypt.nonce')
       : QuantumRandomGenerator.generateRandomBytes(POST_QUANTUM_AEAD_NONCE_BYTES);
-    const aadBytes = aad ? ensureUint8Array(aad, 'PostQuantumAEAD.encrypt.aad') : undefined;
+    const aadBytes = aad ? checkUint8Array(aad, 'PostQuantumAEAD.encrypt.aad') : undefined;
     const aead = new PostQuantumAEAD(keyBytes);
-    const { ciphertext, tag } = aead.encrypt(ensureUint8Array(plaintext, 'PostQuantumAEAD.encrypt.plaintext'), nonce, aadBytes);
-    return { ciphertext: ensureUint8Array(ciphertext, 'PostQuantumAEAD.encrypt.ciphertext'), nonce, tag: ensureUint8Array(tag, 'PostQuantumAEAD.encrypt.tag') };
+    const { ciphertext, tag } = aead.encrypt(checkUint8Array(plaintext, 'PostQuantumAEAD.encrypt.plaintext'), nonce, aadBytes);
+    return { ciphertext: checkUint8Array(ciphertext, 'PostQuantumAEAD.encrypt.ciphertext'), nonce, tag: checkUint8Array(tag, 'PostQuantumAEAD.encrypt.tag') };
   }
 
   static decrypt(ciphertext, nonce, tag, key, aad) {
-    const keyBytes = ensureUint8Array(key, 'PostQuantumAEAD.decrypt.key');
-    const nonceBytes = ensureUint8Array(nonce, 'PostQuantumAEAD.decrypt.nonce');
-    const tagBytes = ensureUint8Array(tag, 'PostQuantumAEAD.decrypt.tag');
-    const cipherBytes = ensureUint8Array(ciphertext, 'PostQuantumAEAD.decrypt.ciphertext');
-    const aadBytes = aad ? ensureUint8Array(aad, 'PostQuantumAEAD.decrypt.aad') : undefined;
+    const keyBytes = checkUint8Array(key, 'PostQuantumAEAD.decrypt.key');
+    const nonceBytes = checkUint8Array(nonce, 'PostQuantumAEAD.decrypt.nonce');
+    const tagBytes = checkUint8Array(tag, 'PostQuantumAEAD.decrypt.tag');
+    const cipherBytes = checkUint8Array(ciphertext, 'PostQuantumAEAD.decrypt.ciphertext');
+    const aadBytes = aad ? checkUint8Array(aad, 'PostQuantumAEAD.decrypt.aad') : undefined;
     const aead = new PostQuantumAEAD(keyBytes);
     return aead.decrypt(cipherBytes, nonceBytes, tagBytes, aadBytes);
   }
@@ -541,7 +541,7 @@ class QuantumKDFService {
 
 class HybridService {
   static async generateHybridKeyPairFromSeed(seedMaterial) {
-    const seed = ensureUint8Array(seedMaterial, 'serverTransportIdentitySeed');
+    const seed = checkUint8Array(seedMaterial, 'serverTransportIdentitySeed');
     if (seed.length !== HASH_OUTPUT_BYTES) {
       throw new Error('Server transport identity seed must be exactly 32 bytes');
     }

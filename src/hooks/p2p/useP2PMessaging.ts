@@ -239,7 +239,7 @@ export function useP2PMessaging(
     [username, hybridKeys, destroyService, stableConnectionOptions]
   );
 
-  const ensureInitialized = useCallback(async (): Promise<boolean> => {
+  const checkInitialized = useCallback(async (): Promise<boolean> => {
     if (!username || activeUsernameRef.current !== username) {
       return false;
     }
@@ -281,7 +281,7 @@ export function useP2PMessaging(
     const generation = accountGenerationRef.current;
     if (isPeerConnected(peer)) return;
 
-    const ready = await ensureInitialized();
+    const ready = await checkInitialized();
     if (generation !== accountGenerationRef.current) throw createP2PError('AUTH_REQUIRED');
     if (!ready) {
       throw createP2PError('SERVICE_UNINITIALIZED');
@@ -446,7 +446,7 @@ export function useP2PMessaging(
 
     connectInFlightRef.current.set(peer, promise);
     return promise;
-  }, [connectToPeerBase, getPeerCertificate, isPeerConnected, ensureInitialized]);
+  }, [connectToPeerBase, getPeerCertificate, isPeerConnected, checkInitialized]);
 
   useLayoutEffect(() => {
     handleEncryptedMessagePayloadRef.current = options?.handleEncryptedMessagePayload || null;
@@ -505,10 +505,10 @@ export function useP2PMessaging(
     if (p2pStatus.isInitialized && p2pServiceRef.current) {
       return;
     }
-    ensureInitialized().catch((error) => {
+    checkInitialized().catch((error) => {
       console.warn('[P2P] initialize failed', error);
     });
-  }, [username, hybridKeys?.native, p2pStatus.isInitialized, ensureInitialized, destroyService]);
+  }, [username, hybridKeys?.native, p2pStatus.isInitialized, checkInitialized, destroyService]);
 
   useEffect(() => {
     if (!username || !p2pStatus.isInitialized || !p2pServiceRef.current || knownPeers.length === 0) return;

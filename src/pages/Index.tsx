@@ -269,7 +269,7 @@ const ChatApp: React.FC = () => {
         console.error('[Index] Failed to resolve stored session state:', err);
       }
 
-      void startupConnection.ensureConnected().catch(() => { });
+      void startupConnection.checkConnected().catch(() => { });
     })();
 
     return () => { cancelled = true; };
@@ -485,7 +485,7 @@ const ChatApp: React.FC = () => {
 
   const callingHook = useCalling(Authentication, {
     getPeerCertificate: p2pMessaging.getPeerCertificateForCall,
-    ensurePeerSession: messageSender.prefetchSessionForPeer,
+    checkPeerSession: messageSender.prefetchSessionForPeer,
   });
   const answerCurrentCall = useCallback(() => {
     const call = callingHook.currentCall;
@@ -706,14 +706,14 @@ const ChatApp: React.FC = () => {
 
   const handleKeepCurrentServer = useCallback(() => {
     setShowServerSetup(false);
-    void startupConnection.ensureConnected().catch(() => { });
+    void startupConnection.checkConnected().catch(() => { });
   }, []);
 
   const connectedForAuth = useCallback(async (): Promise<boolean> => {
     if (websocketClient.isConnectedToServer()) return true;
     Authentication.setAuthStatus('Connecting to server...');
     try {
-      await startupConnection.ensureConnected();
+      await startupConnection.checkConnected();
       return true;
     } catch {
       Authentication.setAuthStatus('');
@@ -965,7 +965,7 @@ const ChatApp: React.FC = () => {
                       getKeysOnDemand={Authentication.getKeysOnDemand}
                       getPeerHybridKeys={getPeerHybridKeys}
                       findUser={findUser}
-                      ensurePeerSession={messageSender.prefetchSessionForPeer}
+                      checkPeerSession={messageSender.prefetchSessionForPeer}
                       p2pConnected={p2pConnectedStatus}
                       loadMoreMessages={loadMoreConversationMessages}
                       sendServerReadReceipt={sendServerReadReceipt}

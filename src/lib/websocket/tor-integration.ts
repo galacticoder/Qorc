@@ -10,8 +10,7 @@ export class WebSocketTorIntegration {
 
   constructor(private onTorConnectionChange: (connected: boolean) => void) {}
 
-  // Ensure Tor connection listener is attached
-  ensureTorListener(): void {
+  checkTorListener(): void {
     if (this.torListener) {
       return;
     }
@@ -27,8 +26,7 @@ export class WebSocketTorIntegration {
     } catch { }
   }
 
-  // Check if Tor is ready
-  ensureTorReady(): boolean {
+  checkTorReady(): boolean {
     try {
       if (!torNetworkManager.isSupported()) {
         this.torReady = true;
@@ -42,14 +40,14 @@ export class WebSocketTorIntegration {
     }
   }
 
-  async ensureTorReadyAsync(): Promise<boolean> {
-    if (this.ensureTorReady()) {
+  async checkTorReadyAsync(): Promise<boolean> {
+    if (this.checkTorReady()) {
       return true;
     }
 
     try {
       const synced = await torNetworkManager.syncWithDaemon();
-      if (synced && this.ensureTorReady()) {
+      if (synced && this.checkTorReady()) {
         return true;
       }
 

@@ -146,7 +146,7 @@ impl DatabaseManager {
             .map_err(|e| QorError::StorageInitFailed(format!("DB temp setup failed: {e}")))?;
 
         // Initialize schema
-        Self::ensure_schema(&conn)?;
+        Self::validate_schema(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -236,7 +236,7 @@ impl DatabaseManager {
         self.delete(&self.native_message_content_store(), message_id)
     }
 
-    fn ensure_schema(conn: &Connection) -> QorResult<()> {
+    fn validate_schema(conn: &Connection) -> QorResult<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS kv_data (
                 store TEXT NOT NULL,
@@ -803,7 +803,7 @@ pub(crate) async fn activate_native_account_database(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Qor-chat-client".to_string());
     app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
-    crate::storage::file::ensure_dir(&app_config_dir, 0o700)
+    crate::storage::file::check_dir(&app_config_dir, 0o700)
         .await
         .map_err(|error| error.safe_message())?;
 

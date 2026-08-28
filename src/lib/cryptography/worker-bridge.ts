@@ -405,7 +405,7 @@ class WorkerChannel {
     private readonly maxPending: number
   ) {}
 
-  private ensureWorker(): void {
+  private validateWorker(): void {
     if (this.worker || typeof Worker === 'undefined' || this.restarting || this.disabled) {
       return;
     }
@@ -537,7 +537,7 @@ class WorkerChannel {
     setTimeout(() => {
       this.restarting = false;
       try {
-        this.ensureWorker();
+        this.validateWorker();
       } catch (error) {
         console.error(`[WorkerChannel:${this.label}] Restart attempt failed:`, error);
       }
@@ -576,7 +576,7 @@ class WorkerChannel {
     expectedType: WorkerRequestMessage['type'],
     timeoutOverrideMs?: number
   ): Promise<T> {
-    this.ensureWorker();
+    this.validateWorker();
     if (!this.worker) {
       throw new PostQuantumWorkerInfrastructureError('Worker not available');
     }
@@ -633,7 +633,7 @@ export class PostQuantumWorker {
     return typeof Worker !== 'undefined';
   }
 
-  private static ensureWorker(): void {
+  private static validateWorker(): void {
     if (PostQuantumWorker.worker || typeof Worker === 'undefined' || PostQuantumWorker.restarting || PostQuantumWorker.disabled) {
       return;
     }
@@ -821,7 +821,7 @@ export class PostQuantumWorker {
     setTimeout(() => {
       PostQuantumWorker.restarting = false;
       try {
-        PostQuantumWorker.ensureWorker();
+        PostQuantumWorker.validateWorker();
       } catch (error) {
         console.error('[PostQuantum][Worker] Restart attempt failed:', error);
       }
@@ -860,7 +860,7 @@ export class PostQuantumWorker {
     }
 
     try {
-      PostQuantumWorker.ensureWorker();
+      PostQuantumWorker.validateWorker();
 
       if (!PostQuantumWorker.worker) {
         throw new PostQuantumWorkerInfrastructureError('Worker not available');
@@ -895,7 +895,7 @@ export class PostQuantumWorker {
       throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
     }
 
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -925,7 +925,7 @@ export class PostQuantumWorker {
       throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
     }
 
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -957,7 +957,7 @@ export class PostQuantumWorker {
       throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
     }
 
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1006,7 +1006,7 @@ export class PostQuantumWorker {
   }
 
   static async ppGenerateTokenBatch(count: number, purpose: string = ACCOUNT_AUTH_PURPOSE): Promise<{ blindedTokens: Uint8Array[]; tokenSecrets: any[] }> {
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
       throw new Error('Worker not available');
     }
@@ -1035,7 +1035,7 @@ export class PostQuantumWorker {
   }
 
   static async ppUnblindTokens(tokenSecrets: any[], signedBlindedTokens: Uint8Array[], proof: Uint8Array, serverPublicKey: Uint8Array): Promise<{ completedTokens: any[] }> {
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
       throw new Error('Worker not available');
     }
@@ -1067,7 +1067,7 @@ export class PostQuantumWorker {
 
   static async opaqueStartRegistration(password: Uint8Array): Promise<{ blindedElement: Uint8Array; blindingFactor: Uint8Array }> {
     validateOpaquePassword(password);
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1099,7 +1099,7 @@ export class PostQuantumWorker {
       evaluatedElement: serverResponse.evaluatedElement,
       serverNonce: serverResponse.serverNonce,
     };
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1128,7 +1128,7 @@ export class PostQuantumWorker {
 
   static async opaqueStartLogin(password: Uint8Array): Promise<{ blindedElement: Uint8Array; blindingFactor: Uint8Array }> {
     validateOpaquePassword(password);
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1170,7 +1170,7 @@ export class PostQuantumWorker {
       serverNonce: serverResponse.serverNonce,
       salt: serverResponse.salt,
     };
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1208,7 +1208,7 @@ export class PostQuantumWorker {
     ) {
       throw new Error('Invalid private-auth slot');
     }
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1252,7 +1252,7 @@ export class PostQuantumWorker {
     if (!(authChannelBinding instanceof Uint8Array) || authChannelBinding.length !== 64) {
       throw new Error('Invalid authentication channel binding');
     }
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
@@ -1330,7 +1330,7 @@ export class PostQuantumWorker {
     if (explicitNonce !== undefined && (
       !(explicitNonce instanceof Uint8Array) || explicitNonce.length !== PQ_AEAD_NONCE_SIZE
     )) throw new Error('Invalid AEAD nonce');
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
       throw new Error('Worker not available for AEAD');
     }
@@ -1386,7 +1386,7 @@ export class PostQuantumWorker {
     if (additionalData !== undefined && (
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
     )) throw new Error('Invalid AEAD additional data');
-    PostQuantumWorker.ensureWorker();
+    PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
       throw new Error('Worker not available for AEAD');
     }

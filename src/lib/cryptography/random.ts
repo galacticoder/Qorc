@@ -9,9 +9,9 @@ import { bytesToHex } from '../utils/byte-utils';
 export class PostQuantumRandom {
   private static maxRandomBytes = PQ_RANDOM_DEFAULT_MAX_BYTES;
 
-  private static ensureSecureRandom(): void {
+  private static validateSecureRandom(): void {
     if (typeof globalThis === 'undefined' || !globalThis.crypto || typeof globalThis.crypto.getRandomValues !== 'function') {
-      throw new Error('Secure random number generator not available. Requires a secure context (HTTPS).');
+      throw new Error('Secure random number generator not available. Requires secure context.');
     }
   }
 
@@ -63,7 +63,7 @@ export class PostQuantumRandom {
     if (bytes.length > PQ_RANDOM_MAX_BYTES_LIMIT) {
       throw new Error(`Random target exceeds ${PQ_RANDOM_MAX_BYTES_LIMIT} byte limit`);
     }
-    PostQuantumRandom.ensureSecureRandom();
+    PostQuantumRandom.validateSecureRandom();
 
     const maxChunk = 65536;
     for (let offset = 0; offset < bytes.length; offset += maxChunk) {
@@ -73,7 +73,7 @@ export class PostQuantumRandom {
   }
 
   static randomUUID(): string {
-    PostQuantumRandom.ensureSecureRandom();
+    PostQuantumRandom.validateSecureRandom();
     if (typeof globalThis.crypto?.randomUUID === 'function') {
       return globalThis.crypto.randomUUID();
     }

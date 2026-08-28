@@ -210,7 +210,7 @@ class StartupConnection {
     return normalized;
   }
 
-  async ensureTor(): Promise<boolean> {
+  async validateTor(): Promise<boolean> {
     if (!torNetworkManager.isSupported()) return true;
     if (this.torInFlight) return this.torInFlight;
 
@@ -280,7 +280,7 @@ class StartupConnection {
     return run;
   }
 
-  async ensureConnected(): Promise<void> {
+  async checkConnected(): Promise<void> {
     if (websocketClient.isConnectedToServer()) {
       this.update({ phase: 'ready', error: '', step: '', failureTarget: null });
       return;
@@ -298,7 +298,7 @@ class StartupConnection {
 
       let torReady = false;
       try {
-        torReady = await this.ensureTor();
+        torReady = await this.validateTor();
       } catch (error) {
         if (this.generation !== generation) return;
         const message = 'Tor could not connect. Check your network or bridge settings.';
@@ -379,7 +379,7 @@ class StartupConnection {
     await torNetworkManager.shutdown().catch(() => { });
     (window as any).__TOR_MODE__ = false;
     try {
-      const ready = await this.ensureTor();
+      const ready = await this.validateTor();
       if (!ready) {
         const message = this.state.step || 'Tor could not connect. Check your network or bridge settings.';
         this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
@@ -397,7 +397,7 @@ class StartupConnection {
     this.inFlight = null;
     this.torInFlight = null;
     this.update({ phase: 'idle', error: '', step: '', failureTarget: null });
-    return this.ensureConnected();
+    return this.checkConnected();
   }
 
   reset(): void {

@@ -13,7 +13,7 @@ fn invalid_private_path(message: &str) -> QorError {
 pub fn validate_private_file_metadata(metadata: &std::fs::Metadata) -> QorResult<()> {
     if !metadata.file_type().is_file() {
         return Err(invalid_private_path(
-            "Secure storage path is not a regular file",
+            "Storage path is not a regular file",
         ));
     }
     #[cfg(unix)]
@@ -21,12 +21,12 @@ pub fn validate_private_file_metadata(metadata: &std::fs::Metadata) -> QorResult
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != unsafe { libc::geteuid() } {
             return Err(invalid_private_path(
-                "Secure storage file has an invalid owner",
+                "Storage file has an invalid owner",
             ));
         }
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(invalid_private_path(
-                "Secure storage file permissions are too broad",
+                "Storage file permissions are too broad",
             ));
         }
     }
@@ -72,12 +72,12 @@ async fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
     fs::rename(temp_path, path).await
 }
 
-pub async fn ensure_dir(path: &Path, mode: u32) -> QorResult<()> {
+pub async fn check_dir(path: &Path, mode: u32) -> QorResult<()> {
     match fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => {
             return Err(invalid_private_path(
-                "Secure storage path is not a directory",
+                "Storage path is not a directory",
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -89,7 +89,7 @@ pub async fn ensure_dir(path: &Path, mode: u32) -> QorResult<()> {
     let metadata = fs::symlink_metadata(path).await?;
     if !metadata.file_type().is_dir() {
         return Err(invalid_private_path(
-            "Secure storage path is not a directory",
+            "Storage path is not a directory",
         ));
     }
 
@@ -98,7 +98,7 @@ pub async fn ensure_dir(path: &Path, mode: u32) -> QorResult<()> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != unsafe { libc::geteuid() } {
             return Err(invalid_private_path(
-                "Secure storage directory has an invalid owner",
+                "Storage directory has an invalid owner",
             ));
         }
         let perms = std::fs::Permissions::from_mode(mode);
@@ -112,7 +112,7 @@ pub async fn atomic_write(path: &Path, data: &[u8], mode: u32) -> QorResult<()> 
     let parent = path.parent().ok_or_else(|| {
         QorError::FileOperationFailed("Cannot determine parent directory".to_string())
     })?;
-    ensure_dir(parent, 0o700).await?;
+    check_dir(parent, 0o700).await?;
 
     let temp_path = parent.join(format!(".tmp_{}", uuid::Uuid::new_v4()));
 
@@ -162,7 +162,7 @@ pub async fn atomic_write_if_absent(path: &Path, data: &[u8], mode: u32) -> QorR
     let parent = path.parent().ok_or_else(|| {
         QorError::FileOperationFailed("Cannot determine parent directory".to_string())
     })?;
-    ensure_dir(parent, 0o700).await?;
+    check_dir(parent, 0o700).await?;
 
     let temp_path = parent.join(format!(".tmp_{}", uuid::Uuid::new_v4()));
     let result = async {
@@ -283,7 +283,7 @@ pub async fn remove_stale_temp_files(dir: &Path) -> QorResult<()> {
             fs::remove_file(path).await?;
         } else {
             return Err(invalid_private_path(
-                "Secure storage contains an invalid temporary item",
+                "Storage contains an invalid temporary item",
             ));
         }
     }
@@ -297,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn no_clobber_write_keeps_one_concurrent_winner() {
         let dir = std::env::temp_dir().join(format!("qor-storage-test-{}", uuid::Uuid::new_v4()));
-        ensure_dir(&dir, 0o700).await.unwrap();
+        check_dir(&dir, 0o700).await.unwrap();
         let path = dir.join("master.key");
         let first = [0x11; 64];
         let second = [0x22; 64];

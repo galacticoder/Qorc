@@ -125,7 +125,7 @@ function validateWorkerResponse(message, job) {
   return { ciphertexts: message.ciphertexts, maskedRecords: message.maskedRecords };
 }
 
-function ensureWorker() {
+function validateWorker() {
   if (worker) return worker;
   const created = new Worker(new URL('./auth-crypto-worker.js', import.meta.url), {
     type: 'module',
@@ -192,7 +192,7 @@ function dispatchNext() {
   const job = queuedJobs.shift();
   let target;
   try {
-    target = ensureWorker();
+    target = validateWorker();
     target.ref();
     currentJob = job;
     job.timer = setTimeout(() => {

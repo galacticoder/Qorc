@@ -499,7 +499,7 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     setIsLoggedIn?.(false);
     promptForServerEntry(auth);
     try {
-      await websocketClient.ensureLinkedAuthenticationMode();
+      await websocketClient.validateLinkedAuthenticationMode();
     } catch {
       if (isAuthOperationCurrent(auth, operation)) {
         websocketClient.setServerEntryPromptPending?.(false);

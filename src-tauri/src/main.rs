@@ -538,7 +538,7 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
 
     // Initialize secure storage
     storage::init(&state, config_dir).await?;
-    info!("Secure storage initialized");
+    info!("Storage initialized");
 
     // Initialize Signal Protocol handler
     signal_protocol::init(&state).await?;

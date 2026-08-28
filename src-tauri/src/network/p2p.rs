@@ -2052,7 +2052,7 @@ impl IrohWorker {
         );
     }
 
-    fn ensure_audio_lanes(&mut self, connection_token: u64) {
+    fn check_audio_lanes(&mut self, connection_token: u64) {
         if !self
             .authenticated_connections
             .read()
@@ -3010,7 +3010,7 @@ impl IrohWorker {
                         self.audio_lane_onion_hosts
                             .insert(connection_token, onion_host);
                     }
-                    self.ensure_audio_lanes(connection_token);
+                    self.check_audio_lanes(connection_token);
                 }
                 if realtime_visual {
                     if tokio::time::Instant::now() >= deadline {

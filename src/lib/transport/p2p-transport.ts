@@ -984,7 +984,7 @@ class P2PConnection implements SecureConnection {
         }
     }
 
-    public ensureIncomingResponderActive(): void {
+    public checkIncomingResponderActive(): void {
         if (!this.bridgeConnectionId || !this.nativeConnectionToken) return;
         if (this.session || this._state === 'handshaking') return;
         if (this.incomingResponderPromise) return;
@@ -2711,7 +2711,7 @@ class P2PConnection implements SecureConnection {
             (this._state === 'connecting' || this._state === 'handshaking') &&
             this._pendingHandshakeToRespond?.type === 'init'
         ) {
-            this.ensureIncomingResponderActive();
+            this.checkIncomingResponderActive();
         }
     }
 
