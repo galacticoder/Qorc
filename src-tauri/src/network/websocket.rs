@@ -26,6 +26,7 @@ use crate::json_bounds::enforce_bounded_json_structure;
 // Constants
 const WEBSOCKET_UPGRADE_TIMEOUT_SECS: u64 = 30;
 const SOCKS_CONNECT_TIMEOUT_SECS: u64 = 150;
+const SERVER_CONNECTION_TIMEOUT_SECS: u64 = 10;
 const _: () = assert!(
     SOCKS_CONNECT_TIMEOUT_SECS > 120,
     "must outlast Tor's own SocksTimeout so Tor owns the give-up decision"
@@ -611,9 +612,17 @@ impl WebSocketHandler {
         *self.state.write() = ConnectionState::Connecting;
         *self.connecting_started_at.write() = Some(Instant::now());
 
-        let connection_result = self
-            .create_connection(&url_str, attempt_id, connect_cancel_rx)
-            .await;
+        let connection_result = match tokio::time::timeout(
+            Duration::from_secs(SERVER_CONNECTION_TIMEOUT_SECS),
+            self.create_connection(&url_str, attempt_id, connect_cancel_rx),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(QorError::Network(
+                "Server connection timed out after 10 seconds".to_string(),
+            )),
+        };
         self.clear_connecting_attempt(attempt_id);
         match connection_result {
             Ok(_) => Ok(ConnectResult {

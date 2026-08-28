@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from "react";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
-import { TorIndicator } from "../ui/TorIndicator";
 import { toast } from "sonner";
 import { system } from "../../lib/tauri-bindings";
 import { EventType } from "../../lib/types/event-types.ts";
@@ -36,24 +35,7 @@ const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): 
   } catch { }
 };
 
-const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
-  return (
-    <div
-      className={className}
-      style={{
-        display: 'grid',
-        gridTemplateRows: '1fr',
-        transition: 'grid-template-rows 300ms cubic-bezier(0.4, 0, 0.2, 1)',
-      }}
-    >
-      <div style={{ overflow: 'hidden' }}>
-        {children}
-      </div>
-    </div>
-  );
-};
-
-export const Login = React.memo<LoginProps>(({
+export const Login = React.memo<LoginProps>(({ 
   onAccountSubmit,
   isGeneratingKeys,
   authStatus,
@@ -169,109 +151,106 @@ export const Login = React.memo<LoginProps>(({
     : isSignup
       ? "Create account"
       : "Sign in";
-  const description = showPasswordPrompt
-    ? "Identify yourself to the server."
-    : isSignup
-      ? "Choose your username, password, and local encryption passphrase."
-      : "Use the account for this server and unlock your local encryption key.";
-
   return (
     <section className={`screen screen-${prefix}`}>
       <div className={`${prefix}-scene`}>
-        <div className={`${prefix}-screen-brand`} aria-label="Qor Chat">
-          <QorBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
-          <span className={`${prefix}-brand-name`}>Qor Chat</span>
+        <header className={`${prefix}-topbar`}>
+          <div className={`${prefix}-screen-brand`} aria-label="Qor">
+            <QorBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
+            <span className={`${prefix}-brand-name`}>Qor</span>
+          </div>
+
+        </header>
+
+        <div className="auth-bottom-actions">
+          <ThemeToggleButton className="auth-theme-toggle" />
+          <div>
+            <button
+              type="button"
+              className={`${prefix}-back-setup`}
+              onClick={() => { if (!isBusy) handleBackToSetup(); }}
+              disabled={isBusy}
+              aria-disabled={isBusy}
+              tabIndex={isBusy ? -1 : undefined}
+            >
+              Change server
+            </button>
+          </div>
         </div>
-
-        <TorIndicator variant={prefix} />
-
-        <button
-          type="button"
-          className={`${prefix}-back-setup`}
-          onClick={() => { if (!isBusy) handleBackToSetup(); }}
-          disabled={isBusy}
-          aria-disabled={isBusy}
-          tabIndex={isBusy ? -1 : undefined}
-          style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
-        >
-          Change server
-        </button>
-
-        <ThemeToggleButton className="auth-theme-toggle" />
 
         <main className={`${prefix}-simple`} aria-label={isSignup ? "Create account" : "Sign in"}>
           <header className={`${prefix}-simple-head`}>
             <h1>{heading}</h1>
-            {!isSignup && !showPasswordPrompt && <p aria-hidden="true"></p>}
-            <p>{description}</p>
+            {showPasswordPrompt && <p>Identify yourself to the server.</p>}
           </header>
 
-          <AnimatedHeightWrapper>
-            <div key={`${accountAuthenticated}-${mode}-${showPasswordPrompt}`}>
-              {showPasswordPrompt ? (
-                <ServerPasswordForm
-                  serverPassword={serverPassword}
-                  setServerPassword={setServerPassword}
-                  disabled={isSubmitting || isGeneratingKeys}
-                  authStatus={authStatus}
-                  onSubmit={async (event) => {
-                    event.preventDefault();
-                    const submittedPassword = serverPassword;
-                    setServerPassword("");
-                    setIsSubmitting(true);
-                    try {
-                      await handleServerPasswordSubmit(submittedPassword);
-                    } finally {
-                      setIsSubmitting(false);
-                    }
-                  }}
-                />
-              ) : isSignup ? (
-                <SignUpForm
-                  onSubmit={handleAccountSubmit}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  authStatus={authStatus}
-                  initialUsername={initialUsername}
-                />
-              ) : (
-                <SignInForm
-                  onSubmit={handleAccountSubmit}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  authStatus={authStatus}
-                  initialUsername={initialUsername}
-                />
-              )}
-            </div>
-          </AnimatedHeightWrapper>
+          <div className="auth-simple-form-wrap" key={`${accountAuthenticated}-${mode}-${showPasswordPrompt}`}>
+            {showPasswordPrompt ? (
+              <ServerPasswordForm
+                serverPassword={serverPassword}
+                setServerPassword={setServerPassword}
+                disabled={isSubmitting || isGeneratingKeys}
+                authStatus={authStatus}
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  const submittedPassword = serverPassword;
+                  setServerPassword("");
+                  setIsSubmitting(true);
+                  try {
+                    await handleServerPasswordSubmit(submittedPassword);
+                  } finally {
+                    setIsSubmitting(false);
+                  }
+                }}
+              />
+            ) : isSignup ? (
+              <SignUpForm
+                onSubmit={handleAccountSubmit}
+                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                authStatus={authStatus}
+                initialUsername={initialUsername}
+              />
+            ) : (
+              <SignInForm
+                onSubmit={handleAccountSubmit}
+                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                authStatus={authStatus}
+                initialUsername={initialUsername}
+              />
+            )}
+          </div>
 
-          {!accountAuthenticated && !showPasswordPrompt && (
-            <>
-              <p className={`${prefix}-simple-legal`}>
-                By signing {isSignup ? "up" : "in"}, you agree to the{' '}
-                <button type="button" onClick={() => handleExternalLink(TERMS_URL)}>
-                  Terms of Service
-                </button>{' '}
-                and{' '}
-                <button type="button" onClick={() => handleExternalLink(PRIVACY_URL)}>
-                  Privacy Policy
-                </button>.
-              </p>
-              <p className={`${prefix}-simple-switch`}>
-                {isSignup ? "Already have an account? " : "Don't have an account? "}
-                <button
-                  type="button"
-                  onClick={() => { if (!isBusy) handleModeToggle(); }}
-                  disabled={isBusy}
-                  aria-label={isSignup ? "Switch to login" : "Switch to registration"}
-                  aria-disabled={isBusy}
-                  tabIndex={isBusy ? -1 : undefined}
-                  style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
-                >
-                  {isSignup ? "Sign in" : "Create Account"}
-                </button>
-              </p>
-            </>
-          )}
+          <footer className="auth-simple-footer">
+            {!accountAuthenticated && !showPasswordPrompt && (
+              <div className="auth-simple-account-actions">
+                <p className={`${prefix}-simple-legal`}>
+                  By signing {isSignup ? "up" : "in"}, you agree to the{' '}
+                  <button type="button" onClick={() => handleExternalLink(TERMS_URL)}>
+                    Terms of Service
+                  </button>{' '}
+                  and{' '}
+                  <button type="button" onClick={() => handleExternalLink(PRIVACY_URL)}>
+                    Privacy Policy
+                  </button>.
+                </p>
+                <p className={`${prefix}-simple-switch`}>
+                  {isSignup ? "Already have an account? " : "Don't have an account? "}
+                  <button
+                    type="button"
+                    onClick={() => { if (!isBusy) handleModeToggle(); }}
+                    disabled={isBusy}
+                    aria-label={isSignup ? "Switch to login" : "Switch to registration"}
+                    aria-disabled={isBusy}
+                    tabIndex={isBusy ? -1 : undefined}
+                    style={isBusy ? { pointerEvents: 'none', opacity: 0.4, cursor: 'not-allowed' } : undefined}
+                  >
+                    {isSignup ? "Sign in" : "Create account"}
+                  </button>
+                </p>
+              </div>
+            )}
+
+          </footer>
         </main>
       </div>
     </section>

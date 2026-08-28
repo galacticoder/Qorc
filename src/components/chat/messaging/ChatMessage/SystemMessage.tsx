@@ -19,9 +19,7 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
         'text-xs rounded-lg px-3 py-1.5 flex items-center gap-2',
         isError
           ? 'bg-red-500 text-white font-medium'
-          : callType
-            ? 'qor-system-message-call text-zinc-100'
-            : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-100'
+          : 'qor-system-message-call text-zinc-100'
         )}>
         {(isError || showCallIcon) && callType && <CallIcon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />}
         <span>{content}</span>

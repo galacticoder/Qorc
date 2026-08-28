@@ -695,15 +695,6 @@ pub struct TorInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CircuitRotationResult {
-    pub success: bool,
-    pub ip_changed: Option<bool>,
-    pub before_ip: Option<String>,
-    pub after_ip: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TorVerifyResult {
     pub success: bool,
     pub ip_address: Option<String>,
@@ -2097,57 +2088,6 @@ impl TorManager {
         }
         self.refresh_bootstrap_from_control().await;
         self.is_running() && self.bootstrapped.load(Ordering::Relaxed)
-    }
-
-    pub async fn rotate_circuit(&self) -> QorResult<CircuitRotationResult> {
-        if !self.is_running() {
-            return Ok(CircuitRotationResult {
-                success: false,
-                ip_changed: None,
-                before_ip: None,
-                after_ip: None,
-                error: Some("Tor not running".to_string()),
-            });
-        }
-
-        self.send_newnym_signal().await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        Ok(CircuitRotationResult {
-            success: true,
-            ip_changed: None,
-            before_ip: None,
-            after_ip: None,
-            error: None,
-        })
-    }
-
-    async fn send_newnym_signal(&self) -> QorResult<()> {
-        let control_port = self.get_control_port();
-        let cookie_path = self.control_cookie_path();
-
-        tokio::task::spawn_blocking(move || {
-            let mut conn = Self::control_authenticate(control_port, &cookie_path)?;
-
-            writeln!(conn.stream, "SIGNAL NEWNYM")?;
-
-            let mut line = String::new();
-            if read_bounded_line(&mut conn.reader, &mut line)? == 0 {
-                return Err(QorError::TorControl(
-                    "Tor control closed during circuit rotation".to_string(),
-                ));
-            }
-
-            if line.trim_end() != "250 OK" {
-                return Err(QorError::TorControl(
-                    "Circuit not established yet".to_string(),
-                ));
-            }
-
-            Ok::<_, QorError>(())
-        })
-        .await
-        .map_err(|e| QorError::Internal(format!("Task failed: {}", e)))?
     }
 
     pub async fn publish_onion_service(

@@ -4,7 +4,7 @@ import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { Trash2, Search, Phone, Video, Loader2, Pin, PinOff, X, Ban, Plus } from "lucide-react";
+import { Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -17,6 +17,8 @@ import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { UnreadIndicator } from "./UnreadIndicator";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
+import { CallIcon } from "../assets/icons";
+import { ConversationOptionsPopover } from "./ConversationOptionsPopover";
 
 export interface Conversation {
   readonly id: string;
@@ -37,7 +39,7 @@ interface ConversationListProps {
   readonly selectedConversation?: string;
   readonly onSelectConversation: (username: string) => void;
   readonly onRemoveConversation?: (username: string) => void;
-  readonly onAddConversation?: (username: string) => Promise<void>;
+  readonly onAddConversation?: (username: string, signal?: AbortSignal) => Promise<void>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly showNewChatInput?: boolean;
   readonly onNewChatOpenChange?: (open: boolean) => void;
@@ -126,6 +128,42 @@ const ConversationItem = memo<ConversationItemProps>(({
           >
             {displayName}
           </span>
+          {(onTogglePin || onRemove) && (
+            <div
+              className={cn(
+                "qor-conversation-action-pill",
+                conversation.isPinned && "is-pinned"
+              )}
+            >
+              {onTogglePin && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleTogglePin}
+                  className="qor-conversation-tiny-btn"
+                  aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
+                  aria-pressed={conversation.isPinned}
+                >
+                  <Pin
+                    className="h-3 w-3"
+                    fill={conversation.isPinned ? "currentColor" : "none"}
+                  />
+                </Button>
+              )}
+
+              {onRemove && !conversation.isPinned && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleRemove}
+                  className="qor-conversation-tiny-btn danger"
+                  aria-label={`Remove conversation with ${displayName}`}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+          )}
           {conversation.lastMessageTime && (
             <span
               className={cn(
@@ -161,7 +199,7 @@ const ConversationItem = memo<ConversationItemProps>(({
             <BannerMessagePreview
               messageId={conversation.secureContentId}
               contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
-              maxWidth={200}
+              maxWidth={800}
               fontSize={12}
               color="var(--qor-conversation-preview-text)"
               className="qor-conversation-secure-message-preview"
@@ -177,55 +215,26 @@ const ConversationItem = memo<ConversationItemProps>(({
         ) : null}
       </div>
 
-      {(callStatus || onRemove || onTogglePin) && (
+      {callStatus && (
         <div className="qor-conversation-controls">
-          {callStatus && (
-            <div
-              className={cn(
-                "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
-                callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
-                callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
-                callStatus.status === 'connected' && "bg-green-100 text-green-800"
-              )}
-              role="status"
-              aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
-            >
-              {callStatus.status === 'connecting' ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : callStatus.isVideo ? (
-                <Video className="w-3.5 h-3.5" />
-              ) : (
-                <Phone className="w-3.5 h-3.5" />
-              )}
-            </div>
-          )}
-
-          {onTogglePin && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleTogglePin}
-              className={cn(
-                "qor-conversation-tiny-btn",
-                conversation.isPinned ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-              )}
-              aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
-            >
-              {conversation.isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
-            </Button>
-          )}
-
-          {onRemove && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleRemove}
-              className="qor-conversation-tiny-btn danger opacity-0 group-hover:opacity-100"
-              aria-label={`Remove conversation with ${displayName}`}
-            >
-              <Trash2 className="h-3 w-3" />
-            </Button>
-          )}
+          <div
+            className={cn(
+              "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
+              callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
+              callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
+              callStatus.status === 'connected' && "bg-green-100 text-green-800"
+            )}
+            role="status"
+            aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
+          >
+            {callStatus.status === 'connecting' ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : callStatus.isVideo ? (
+              <Video className="w-3.5 h-3.5" />
+            ) : (
+              <Phone className="w-3.5 h-3.5" />
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -268,39 +277,40 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
 
       <div className="qor-cm-row-main">
         <span className="qor-cm-row-name" title={displayName}>{displayName}</span>
+        {displayName.toLowerCase() !== username.toLowerCase() && (
+          <span className="qor-cm-row-username" title={username}>@{username}</span>
+        )}
       </div>
 
-      <div className="qor-cm-row-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          className="qor-cm-action"
+      <div className="qor-call-pill qor-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="qor-call-pill-btn"
           title="Audio call"
           aria-label={`Call ${displayName}`}
           disabled={blocked || !onCall}
           onClick={() => onCall?.(username, 'audio')}
         >
-          <Phone aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className="qor-cm-action"
+          <CallIcon className="w-4 h-4" aria-hidden="true" />
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="qor-call-pill-btn"
           title="Video call"
           aria-label={`Video call ${displayName}`}
           disabled={blocked || !onCall}
           onClick={() => onCall?.(username, 'video')}
         >
-          <Video aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className={cn("qor-cm-action", blocked ? "is-blocked" : "danger")}
-          title={blocked ? "Unblock user" : "Block user"}
-          aria-label={blocked ? `Unblock ${displayName}` : `Block ${displayName}`}
-          disabled={!onToggleBlock}
-          onClick={() => onToggleBlock?.(username, !blocked)}
-        >
-          <Ban aria-hidden="true" />
-        </button>
+          <Video className="w-4 h-4" aria-hidden="true" />
+        </Button>
+        <ConversationOptionsPopover
+          username={username}
+          blocked={blocked}
+          onToggleBlock={onToggleBlock}
+          ariaLabel={`Conversation options for ${displayName}`}
+        />
       </div>
     </div>
   );
@@ -328,6 +338,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
+  const activeDiscoveryRef = React.useRef<AbortController | null>(null);
   const [blockVersion, setBlockVersion] = useState(0);
   const typingUserSet = useMemo(() => new Set(typingUsers), [typingUsers]);
 
@@ -371,28 +382,51 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       onRemoveConversation(conversationToDelete);
     }
     setShowConfirmDialog(false);
-    setConversationToDelete(null);
   }, [conversationToDelete, onRemoveConversation]);
 
   // Handle cancel removal
   const handleCancelRemove = useCallback(() => {
     setShowConfirmDialog(false);
-    setConversationToDelete(null);
+  }, []);
+
+  const handleRemoveDialogOpenChange = useCallback((open: boolean) => {
+    setShowConfirmDialog(open);
+  }, []);
+
+  const cancelActiveDiscovery = useCallback(() => {
+    const controller = activeDiscoveryRef.current;
+    if (!controller) return;
+    activeDiscoveryRef.current = null;
+    controller.abort();
+    setIsAdding(false);
+  }, []);
+
+  useEffect(() => () => {
+    activeDiscoveryRef.current?.abort();
+    activeDiscoveryRef.current = null;
   }, []);
 
   // Handle add new chat
   const handleAddChat = useCallback(async () => {
-    if (!newChatUsername.trim() || !onAddConversation) return;
+    const username = newChatUsername.trim();
+    if (!username || !onAddConversation || activeDiscoveryRef.current) return;
 
+    const controller = new AbortController();
+    activeDiscoveryRef.current = controller;
     setIsAdding(true);
     try {
-      await onAddConversation(newChatUsername.trim());
+      await onAddConversation(username, controller.signal);
+      if (controller.signal.aborted) return;
       setNewChatUsername("");
       onNewChatOpenChange?.(false);
     } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return;
       toast.error(error instanceof Error ? error.message : "Failed to add conversation");
     } finally {
-      setIsAdding(false);
+      if (activeDiscoveryRef.current === controller) {
+        activeDiscoveryRef.current = null;
+        setIsAdding(false);
+      }
     }
   }, [newChatUsername, onAddConversation, onNewChatOpenChange]);
 
@@ -517,11 +551,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, [pinnedChats, unpinnedChats]);
 
   const handleNewChatOpenChange = useCallback((open: boolean) => {
-    onNewChatOpenChange?.(open);
-    if (!open && !isAdding) {
+    if (!open) {
+      cancelActiveDiscovery();
       setNewChatUsername("");
     }
-  }, [onNewChatOpenChange, isAdding]);
+    onNewChatOpenChange?.(open);
+  }, [cancelActiveDiscovery, onNewChatOpenChange]);
 
   const handleChatFromModal = useCallback((username: string) => {
     onSelectConversation(username);
@@ -536,14 +571,10 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           role="dialog"
           aria-modal="true"
           aria-labelledby="conversation-modal-title"
-          aria-describedby="conversation-modal-description"
         >
           <div className="qor-cm-head">
             <div className="qor-cm-head-text">
-              <DialogTitle id="conversation-modal-title">Add conversation</DialogTitle>
-              <DialogDescription id="conversation-modal-description">
-                Start a new chat, place a call, or block a user.
-              </DialogDescription>
+              <DialogTitle id="conversation-modal-title">Add and manage your conversations</DialogTitle>
             </div>
             <button
               type="button"
@@ -555,7 +586,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </button>
           </div>
 
-          <div className="qor-cm-search">
+          <div className={cn("qor-cm-search", isAdding && "is-searching")}>
             <span className="qor-cm-search-icon" aria-hidden="true">
               {isAdding ? <Loader2 className="animate-spin" /> : <Search />}
             </span>
@@ -576,6 +607,17 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 }
               }}
             />
+            {isAdding && (
+              <button
+                type="button"
+                className="qor-cm-search-cancel"
+                onClick={cancelActiveDiscovery}
+                aria-label="Cancel user search"
+                title="Cancel search"
+              >
+                <X aria-hidden="true" />
+              </button>
+            )}
           </div>
 
           {(filteredConversations.length > 0 || canAddTyped) ? (
@@ -591,8 +633,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                     <span className="qor-cm-add-icon" aria-hidden="true">
                       {isAdding ? <Loader2 className="animate-spin" /> : <Plus />}
                     </span>
-                    <span className="qor-cm-add-text">
-                      Start chat with <strong>{newChatUsername.trim()}</strong>
+                    <span className="qor-cm-add-copy">
+                      <strong className="qor-cm-add-name">{newChatUsername.trim()}</strong>
+                      <span className="qor-cm-add-text">Start a new conversation</span>
                     </span>
                   </button>
                 )}
@@ -617,6 +660,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             <div className="qor-cm-body qor-cm-body-static">
               <div className="qor-cm-scroll-inner">
                 <div className="qor-cm-empty">
+                  <span className="qor-cm-empty-icon" aria-hidden="true">
+                    <Search />
+                  </span>
                   <div className="qor-cm-empty-copy">
                     <h3>{trimmedQuery ? "No matches" : "No conversations yet"}</h3>
                     <p>
@@ -624,11 +670,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                         ? "Type a full username above to start a new chat."
                         : "Search a username above to start your first conversation."}
                     </p>
-                  </div>
-                  <div className="conversation-empty-lines qor-cm-empty-lines" aria-hidden="true">
-                    {Array.from({ length: 14 }).map((_, index) => (
-                      <span key={index} />
-                    ))}
                   </div>
                 </div>
               </div>
@@ -689,35 +730,52 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         </ScrollArea>
       )}
 
-      <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+      <Dialog open={showConfirmDialog} onOpenChange={handleRemoveDialogOpenChange}>
         <DialogContent
-          className="remove-dialog"
+          className="qor-delete-conversation-dialog"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="remove-title"
-          aria-describedby="remove-description"
+          aria-labelledby="delete-conversation-title"
+          aria-describedby="delete-conversation-description"
         >
-          <div className="dialog-head">
-            <div className="danger-mark" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M12 9v4m0 4h.01M10.3 3.9 2.6 17.2A2.4 2.4 0 0 0 4.7 21h14.6a2.4 2.4 0 0 0 2.1-3.8L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+          <div className="qor-delete-conversation-head">
+            <div className="qor-delete-conversation-head-copy">
+              <DialogTitle id="delete-conversation-title">Delete conversation</DialogTitle>
+              <DialogDescription id="delete-conversation-description">
+                This permanently deletes this conversation and its messages from this device. This cannot be undone.
+              </DialogDescription>
             </div>
-            <DialogTitle className="dialog-title" id="remove-title">Remove conversation?</DialogTitle>
-            <DialogDescription className="dialog-copy" id="remove-description">
-              This removes the conversation from this device. Messages with this user will no longer appear in your chat list.
-            </DialogDescription>
-          </div>
-          <div className="target-user">
-            <div className="avatar" aria-hidden="true" />
-            <div><strong>{displayUsername}</strong></div>
-          </div>
-          <div className="dialog-actions">
-            <button className="dialog-button" type="button" onClick={handleCancelRemove} aria-label="Cancel removal">
-              Cancel
+            <button
+              type="button"
+              className="qor-delete-conversation-close"
+              onClick={handleCancelRemove}
+              aria-label="Close delete conversation dialog"
+              title="Close"
+            >
+              <X aria-hidden="true" />
             </button>
-            <button className="dialog-button remove" type="button" onClick={handleConfirmRemove} aria-label="Confirm removal">
-              Remove
+          </div>
+
+          <div className="qor-delete-conversation-target">
+            <UserAvatar
+              username={conversationToDelete || ''}
+              size="md"
+              className="qor-delete-conversation-avatar"
+            />
+            <div className="qor-delete-conversation-user-copy">
+              <span className="qor-delete-conversation-name" title={displayUsername}>{displayUsername}</span>
+              {conversationToDelete && displayUsername.toLowerCase() !== conversationToDelete.toLowerCase() && (
+                <span className="qor-delete-conversation-username" title={conversationToDelete}>@{conversationToDelete}</span>
+              )}
+            </div>
+            <button
+              className="qor-delete-conversation-delete"
+              type="button"
+              onClick={handleConfirmRemove}
+              aria-label="Delete conversation"
+            >
+              <Trash2 aria-hidden="true" />
+              Delete
             </button>
           </div>
         </DialogContent>

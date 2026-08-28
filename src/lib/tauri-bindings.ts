@@ -341,7 +341,6 @@ export const tor = {
     status: () => invoke<TorStatus>('tor_status'),
     info: () => invoke<TorInfo>('tor_info'),
     verifyConnection: () => invoke<{ success: boolean; ip_address?: string; error?: string }>('tor_verify_connection'),
-    rotateCircuit: () => invoke<{ success: boolean; ip_changed?: boolean; before_ip?: string; after_ip?: string }>('tor_rotate_circuit'),
 };
 
 export const signal = {
@@ -451,12 +450,14 @@ export const nativeMessageContent = {
         overwrite,
     }),
     has: (storageId: string) => invoke<boolean>('message_content_has', { storageId }),
-    render: (storageId: string, maxWidth: number, fontSize: number, color: string) =>
+    render: (storageId: string, maxWidth: number, fontSize: number, color: string, singleLine = false, maxLines = 0) =>
         invoke<NativeRenderedMessageContent>('message_content_render', {
             storageId,
             maxWidth,
             fontSize,
             color,
+            singleLine,
+            maxLines,
         }),
     linkTargets: (storageId: string) =>
         invoke<NativeMessageLinkTarget[]>('message_content_link_targets', { storageId }),

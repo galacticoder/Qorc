@@ -11,17 +11,114 @@ import {
     loadLinkPreviewFromCache,
     saveLinkPreviewToCache,
 } from '../../../lib/database/link-preview-cache';
+import { SEGMENT_UNLOAD_IDLE_MS } from '../../../lib/constants';
 
 interface MessageLinkPreviewsProps {
     messageId: string;
     contentVersion?: string;
-    enabled: boolean;
     secureDB?: SecureDB | null;
     onContextMenu?: (event: React.MouseEvent) => void;
 }
 
 const previewRequests = new Map<string, Promise<NativeLinkPreview>>();
 const MAX_CACHED_PREVIEWS = 16;
+const MAX_CACHED_MESSAGE_TARGETS = 2048;
+const MAX_CACHED_MESSAGE_PREVIEWS = 512;
+const MESSAGE_PREVIEW_MEMORY_TTL_MS = SEGMENT_UNLOAD_IDLE_MS;
+
+type ExpiringTargetRequest = {
+    expiresAt: number;
+    request: Promise<NativeMessageLinkTarget[]>;
+};
+
+type ExpiringMessagePreviews = {
+    expiresAt: number;
+    previews: NativeLinkPreview[];
+};
+
+const targetRequests = new Map<string, ExpiringTargetRequest>();
+const messagePreviewCache = new Map<string, ExpiringMessagePreviews>();
+
+const messageCacheKey = (
+    messageId: string,
+    contentVersion: string | undefined,
+    secureDB?: SecureDB | null,
+): string => {
+    const scope = secureDB?.getAccountScope() || '';
+    const version = contentVersion || '';
+    return `${scope.length}:${scope}${messageId.length}:${messageId}${version.length}:${version}`;
+};
+
+const trimExpiredCache = <T,>(cache: Map<string, T & { expiresAt: number }>, maximum: number): void => {
+    const now = Date.now();
+    for (const [key, entry] of cache) {
+        if (entry.expiresAt <= now) cache.delete(key);
+    }
+    while (cache.size >= maximum) {
+        const oldest = cache.keys().next().value;
+        if (!oldest) break;
+        cache.delete(oldest);
+    }
+};
+
+const cachedTargets = (cacheKey: string, messageId: string): Promise<NativeMessageLinkTarget[]> => {
+    const now = Date.now();
+    const cached = targetRequests.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        targetRequests.delete(cacheKey);
+        cached.expiresAt = now + MESSAGE_PREVIEW_MEMORY_TTL_MS;
+        targetRequests.set(cacheKey, cached);
+        return cached.request;
+    }
+    if (cached) targetRequests.delete(cacheKey);
+    trimExpiredCache(targetRequests, MAX_CACHED_MESSAGE_TARGETS);
+
+    const request = (async (): Promise<NativeMessageLinkTarget[]> => {
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            try {
+                return (await nativeMessageContent.linkTargets(messageId)).slice(0, 3);
+            } catch (error) {
+                lastError = error;
+                if (attempt < 4) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 50 * (attempt + 1)));
+                }
+            }
+        }
+        throw lastError;
+    })();
+    const entry = {
+        expiresAt: now + MESSAGE_PREVIEW_MEMORY_TTL_MS,
+        request,
+    };
+    targetRequests.set(cacheKey, entry);
+    void request.catch(() => {
+        if (targetRequests.get(cacheKey) === entry) targetRequests.delete(cacheKey);
+    });
+    return request;
+};
+
+const readMessagePreviewCache = (cacheKey: string): NativeLinkPreview[] | undefined => {
+    const cached = messagePreviewCache.get(cacheKey);
+    if (!cached) return undefined;
+    if (cached.expiresAt <= Date.now()) {
+        messagePreviewCache.delete(cacheKey);
+        return undefined;
+    }
+    messagePreviewCache.delete(cacheKey);
+    cached.expiresAt = Date.now() + MESSAGE_PREVIEW_MEMORY_TTL_MS;
+    messagePreviewCache.set(cacheKey, cached);
+    return cached.previews;
+};
+
+const writeMessagePreviewCache = (cacheKey: string, previews: NativeLinkPreview[]): void => {
+    trimExpiredCache(messagePreviewCache, MAX_CACHED_MESSAGE_PREVIEWS);
+    messagePreviewCache.delete(cacheKey);
+    messagePreviewCache.set(cacheKey, {
+        expiresAt: Date.now() + MESSAGE_PREVIEW_MEMORY_TTL_MS,
+        previews,
+    });
+};
 
 const fetchCachedPreview = (
     target: NativeMessageLinkTarget,
@@ -71,37 +168,54 @@ const basicPreview = (target: NativeMessageLinkTarget): NativeLinkPreview => ({
 export function MessageLinkPreviews({
     messageId,
     contentVersion,
-    enabled,
     secureDB,
     onContextMenu,
 }: MessageLinkPreviewsProps) {
-    const [previews, setPreviews] = useState<NativeLinkPreview[]>([]);
+    const cacheKey = messageCacheKey(messageId, contentVersion, secureDB);
+    const [previews, setPreviews] = useState<NativeLinkPreview[]>(() => (
+        readMessagePreviewCache(cacheKey) || []
+    ));
 
     useEffect(() => {
-        setPreviews([]);
-        if (!enabled) return;
+        const retained = readMessagePreviewCache(cacheKey);
+        setPreviews(retained || []);
         let cancelled = false;
         const load = async (): Promise<void> => {
-            let targets: NativeMessageLinkTarget[] = [];
-            for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
-                try {
-                    targets = (await nativeMessageContent.linkTargets(messageId)).slice(0, 3);
-                    break;
-                } catch {
-                    if (attempt === 4) return;
-                    await new Promise((resolve) => window.setTimeout(resolve, 50 * (attempt + 1)));
-                }
+            let targets: NativeMessageLinkTarget[];
+            try {
+                targets = await cachedTargets(cacheKey, messageId);
+            } catch {
+                return;
             }
-            if (cancelled || targets.length === 0) return;
-            setPreviews(targets.map(basicPreview));
+            if (cancelled) return;
+            if (targets.length === 0) {
+                writeMessagePreviewCache(cacheKey, []);
+                setPreviews([]);
+                return;
+            }
+            const previous = readMessagePreviewCache(cacheKey);
+            const sameTargets = previous?.length === targets.length && previous.every((preview, index) => (
+                preview.url === targets[index].url
+            ));
+            if (!sameTargets) {
+                const basic = targets.map(basicPreview);
+                writeMessagePreviewCache(cacheKey, basic);
+                setPreviews(basic);
+            } else if (previous) {
+                setPreviews(previous);
+            }
             const enrich = async (target: NativeMessageLinkTarget): Promise<void> => {
                 for (let attempt = 0; attempt < 3 && !cancelled; attempt += 1) {
                     try {
                         const enriched = await fetchCachedPreview(target, secureDB);
                         if (cancelled) return;
-                        setPreviews((current) => current.map((preview) => (
-                            preview.url === target.url ? enriched : preview
-                        )));
+                        setPreviews((current) => {
+                            const next = current.map((preview) => (
+                                preview.url === target.url ? enriched : preview
+                            ));
+                            writeMessagePreviewCache(cacheKey, next);
+                            return next;
+                        });
                         if (enriched.metadataFetched) return;
                     } catch {
                         console.warn('[LINK-PREVIEW] metadata invoke failed');
@@ -111,11 +225,14 @@ export function MessageLinkPreviews({
                     }
                 }
             };
-            await Promise.all(targets.map(enrich));
+            const targetsToEnrich = targets.filter((target) => !previous?.some((preview) => (
+                preview.url === target.url && preview.metadataFetched
+            )));
+            await Promise.all(targetsToEnrich.map(enrich));
         };
         void load();
         return () => { cancelled = true; };
-    }, [messageId, contentVersion, enabled, secureDB]);
+    }, [cacheKey, messageId, secureDB]);
 
     const openPreview = useCallback((url: string) => {
         void system.openExternal(url).catch(() => { });

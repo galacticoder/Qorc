@@ -11,6 +11,8 @@ export interface SecureCanvasTextProps {
     maxWidth?: number;
     fontSize?: number;
     color?: string;
+    singleLine?: boolean;
+    maxLines?: number;
     fontFamily?: string;
     isCurrentUser?: boolean;
     onCopy?: () => void;
@@ -18,36 +20,14 @@ export interface SecureCanvasTextProps {
     onContextMenu?: (e: React.MouseEvent) => void;
 }
 
-const cssColorToHex = (
-    requestedColor: string,
-    element: HTMLElement | null,
-    isCurrentUser: boolean,
-): string => {
-    const fallback = isCurrentUser ? '#ffffff' : '#0f172a';
-    if (!element || typeof window === 'undefined') return fallback;
-    const probe = document.createElement('span');
-    probe.style.position = 'absolute';
-    probe.style.visibility = 'hidden';
-    probe.style.pointerEvents = 'none';
-    probe.style.color = requestedColor === 'inherit' ? 'currentColor' : requestedColor;
-    element.appendChild(probe);
-    const computed = window.getComputedStyle(probe).color;
-    probe.remove();
-    const match = computed.match(/^rgba?\(\s*(\d+)\s*[, ]\s*(\d+)\s*[, ]\s*(\d+)/i);
-    if (!match) return fallback;
-    const toHex = (value: string) => Math.max(0, Math.min(255, Number(value)))
-        .toString(16)
-        .padStart(2, '0');
-    return `#${toHex(match[1])}${toHex(match[2])}${toHex(match[3])}`;
-};
-
 export const SecureCanvasText = memo(function SecureCanvasText({
     messageId,
     contentVersion,
     maxWidth = 400,
     fontSize = 14,
     color = 'inherit',
-    isCurrentUser = false,
+    singleLine = false,
+    maxLines = 0,
     onCopy,
     onRendered,
     onContextMenu,
@@ -57,8 +37,10 @@ export const SecureCanvasText = memo(function SecureCanvasText({
         () => ({ width: 40, height: Math.ceil(fontSize * 1.4) }),
         [fontSize],
     );
-    const [dimensions, setDimensions] = useState(initialDimensions);
-    const [imageSource, setImageSource] = useState<string | null>(null);
+    const [renderedFrame, setRenderedFrame] = useState(() => ({
+        ...initialDimensions,
+        imageSource: null as string | null,
+    }));
     const [isVisible, setIsVisible] = useState(false);
 
     const onRenderedRef = useRef(onRendered);
@@ -80,23 +62,36 @@ export const SecureCanvasText = memo(function SecureCanvasText({
 
     useEffect(() => {
         if (!isVisible) {
-            setImageSource(null);
+            setRenderedFrame((current) => current.imageSource === null
+                ? current
+                : { ...current, imageSource: null });
             return;
         }
         let cancelled = false;
         const render = async (): Promise<void> => {
-            const resolvedColor = cssColorToHex(color, containerRef.current, isCurrentUser);
             for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
                 try {
                     const rendered = await nativeMessageContent.render(
                         messageId,
                         Math.max(20, Math.min(800, Math.floor(maxWidth))),
                         Math.max(10, Math.min(32, fontSize)),
-                        resolvedColor,
+                        '#ffffff',
+                        singleLine,
+                        Math.max(0, Math.min(8, Math.floor(maxLines))),
                     );
                     if (cancelled) return;
-                    setDimensions({ width: rendered.width, height: rendered.height });
-                    setImageSource(`data:image/png;base64,${rendered.pngBase64}`);
+                    const nextImageSource = `data:image/png;base64,${rendered.pngBase64}`;
+                    const decodedMask = new Image();
+                    decodedMask.src = nextImageSource;
+                    try {
+                        await decodedMask.decode();
+                    } catch { }
+                    if (cancelled) return;
+                    setRenderedFrame({
+                        width: rendered.width,
+                        height: rendered.height,
+                        imageSource: nextImageSource,
+                    });
                     onRenderedRef.current?.();
                     return;
                 } catch {
@@ -108,9 +103,10 @@ export const SecureCanvasText = memo(function SecureCanvasText({
         void render();
         return () => {
             cancelled = true;
-            setImageSource(null);
         };
-    }, [isVisible, messageId, contentVersion, maxWidth, fontSize, color, isCurrentUser]);
+    }, [isVisible, messageId, contentVersion, maxWidth, fontSize, singleLine, maxLines]);
+
+    const { width, height, imageSource } = renderedFrame;
 
     const handleCopy = useCallback(async () => {
         await nativeMessageContent.copy(messageId);
@@ -129,8 +125,8 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             ref={containerRef}
             className="secure-canvas-text"
             style={{
-                width: dimensions.width,
-                height: dimensions.height,
+                width,
+                height,
                 position: 'relative',
                 display: 'block',
                 overflow: 'hidden',
@@ -140,14 +136,23 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             tabIndex={0}
         >
             {imageSource ? (
-                <img
-                    src={imageSource}
-                    alt=""
+                <span
                     aria-hidden="true"
-                    draggable={false}
-                    width={dimensions.width}
-                    height={dimensions.height}
-                    style={{ display: 'block', width: '100%', height: '100%', userSelect: 'none' }}
+                    style={{
+                        display: 'block',
+                        width: '100%',
+                        height: '100%',
+                        backgroundColor: color === 'inherit' ? 'currentColor' : color,
+                        maskImage: `url("${imageSource}")`,
+                        maskPosition: 'center',
+                        maskRepeat: 'no-repeat',
+                        maskSize: '100% 100%',
+                        WebkitMaskImage: `url("${imageSource}")`,
+                        WebkitMaskPosition: 'center',
+                        WebkitMaskRepeat: 'no-repeat',
+                        WebkitMaskSize: '100% 100%',
+                        userSelect: 'none',
+                    }}
                 />
             ) : null}
         </div>

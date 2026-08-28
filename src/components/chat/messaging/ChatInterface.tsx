@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "../ChatInput.tsx";
+import type { FileSenderController } from "../ChatInput/useFileSender";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/types/signal-types.ts";
 import { MessageReply } from "./types";
@@ -16,11 +17,10 @@ import {
 import { keyTransparencyClient } from "@/lib/key-transparency/client";
 import { keyTransparencyEpochStartMs } from "@/lib/key-transparency/crypto";
 import { TypingIndicatorList } from "./TypingIndicatorList";
-import { Video, MoreVertical, ShieldOff, TriangleAlert } from 'lucide-react';
+import { Video, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
 import type { CallState } from "../../../lib/transport/secure-calling-service";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { BlockUserButton } from "../calls/BlockUserButton";
+import { ConversationOptionsPopover } from './ConversationOptionsPopover';
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { useBlockStatus } from '@/hooks/useBlockStatus';
 import {
@@ -63,9 +63,19 @@ interface ChatInterfaceProps {
   readonly secureDB?: any;
   readonly currentCall?: CallState | null;
   readonly startCall: (targetUser: string, callType?: 'audio' | 'video') => Promise<string>;
+  readonly fileSenderOverride?: FileSenderController;
+  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
 }
 
-export const ChatInterface = React.memo<ChatInterfaceProps>(({
+const distanceFromChatBottom = (container: Element): number => (
+  Math.max(0, -container.scrollTop)
+);
+
+const distanceFromChatTop = (container: Element): number => (
+  Math.max(0, container.scrollHeight - container.clientHeight + container.scrollTop)
+);
+
+export const ChatInterface = React.memo<ChatInterfaceProps>(({ 
   onSendMessage,
   messages,
   setMessages,
@@ -87,6 +97,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   secureDB,
   currentCall,
   startCall,
+  fileSenderOverride,
+  onToggleBlock,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -106,11 +118,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const isUserBlocked = useBlockStatus(selectedConversation, { eventRateMax: DEFAULT_UI_EVENT_RATE_MAX });
   const hasAttachedCall = Boolean(currentCall && selectedConversation === currentCall.peer);
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
+  const messageActionsDisabled = isUserBlocked || isBlockedByUser;
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
   const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
   const backgroundLoadConversationRef = useRef<string | null>(null);
-  const shouldStickToBottomRef = useRef(true);
   const prevMessagesLengthRef = useRef(messages.length);
   const lastMessageIdRef = useRef<string | null>(messages[messages.length - 1]?.id || null);
 
@@ -143,16 +155,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     setEditingMessage(null);
   }, [currentUsername]);
 
-  // Scroll container to bottom
   const scrollToBottom = useCallback((container: Element) => {
     try {
-      shouldStickToBottomRef.current = true;
-      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+      container.scrollTo({ top: 0, behavior: 'auto' });
     } catch { }
   }, []);
 
   useLayoutEffect(() => {
-    shouldStickToBottomRef.current = true;
     prevMessagesLengthRef.current = messages.length;
     lastMessageIdRef.current = messages[messages.length - 1]?.id || null;
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
@@ -161,28 +170,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     scrollToBottom(scrollContainer);
     const frame = requestAnimationFrame(() => scrollToBottom(scrollContainer));
     return () => cancelAnimationFrame(frame);
-  }, [selectedConversation, scrollToBottom]);
-
-  useEffect(() => {
-    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    const messageStack = scrollAreaRef.current?.querySelector('.qor-message-stack');
-    if (!scrollContainer || !messageStack || typeof ResizeObserver === 'undefined') return;
-
-    let frame: number | null = null;
-    const observer = new ResizeObserver(() => {
-      if (!shouldStickToBottomRef.current) return;
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        if (shouldStickToBottomRef.current) scrollToBottom(scrollContainer);
-      });
-    });
-    observer.observe(messageStack);
-
-    return () => {
-      observer.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
-    };
   }, [selectedConversation, scrollToBottom]);
 
   useEffect(() => {
@@ -201,8 +188,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const conversationToLoad = selectedConversation;
     backgroundLoadConversationRef.current = conversationToLoad;
     let cancelled = false;
-    let settleFrame: number | null = null;
-    let distanceFromBottom = 0;
     const isCurrentLoad = () => (
       !cancelled && backgroundLoadConversationRef.current === conversationToLoad
     );
@@ -211,14 +196,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       try {
         await new Promise(resolve => setTimeout(resolve, INITIAL_LOAD_DELAY_MS));
         if (!isCurrentLoad()) return;
-
-        const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-        if (scrollContainer) {
-          distanceFromBottom = Math.max(
-            0,
-            scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight,
-          );
-        }
 
         const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) ?? 0;
 
@@ -235,23 +212,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       } catch {
       } finally {
         if (isCurrentLoad()) {
-          const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-          if (scrollContainer) {
-            settleFrame = requestAnimationFrame(() => {
-              settleFrame = requestAnimationFrame(() => {
-                if (!isCurrentLoad()) return;
-                scrollContainer.scrollTop = Math.max(
-                  0,
-                  scrollContainer.scrollHeight - scrollContainer.clientHeight - distanceFromBottom,
-                );
-                if (backgroundLoadConversationRef.current === conversationToLoad) {
-                  backgroundLoadConversationRef.current = null;
-                }
-              });
-            });
-          } else if (backgroundLoadConversationRef.current === conversationToLoad) {
-            backgroundLoadConversationRef.current = null;
-          }
+          backgroundLoadConversationRef.current = null;
         }
       }
     };
@@ -259,7 +220,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     void loadBackgroundMessages();
     return () => {
       cancelled = true;
-      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
       if (backgroundLoadConversationRef.current === conversationToLoad) {
         backgroundLoadConversationRef.current = null;
       }
@@ -276,14 +236,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       backgroundLoadConversationRef.current === selectedConversation
     ) return;
 
-    const scrollTop = scrollContainer.scrollTop;
-
-    if (scrollTop < SCROLL_THRESHOLD) {
+    if (distanceFromChatTop(scrollContainer) < SCROLL_THRESHOLD) {
       setIsLoadingMore(true);
 
       try {
-        const previousScrollHeight = scrollContainer.scrollHeight;
-        const previousScrollTop = scrollContainer.scrollTop;
         const currentCount = loadedMessagesCountRef.current.get(selectedConversation) ?? 0;
         const moreMessages = await loadMoreMessages(
           selectedConversation,
@@ -297,12 +253,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
         if (moreMessages.length > 0) {
           loadedMessagesCountRef.current.set(selectedConversation, currentCount + moreMessages.length);
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              const addedHeight = scrollContainer.scrollHeight - previousScrollHeight;
-              scrollContainer.scrollTop = previousScrollTop + Math.max(0, addedHeight);
-            });
-          });
         }
       } catch {
       } finally {
@@ -355,11 +305,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const handleScroll = () => {
       void handleLazyLoadScroll(scrollContainer);
 
-      const distanceToBottom = scrollContainer.scrollHeight
-        - scrollContainer.scrollTop
-        - scrollContainer.clientHeight;
+      const distanceToBottom = distanceFromChatBottom(scrollContainer);
       const atBottom = distanceToBottom <= NEAR_BOTTOM_THRESHOLD;
-      shouldStickToBottomRef.current = atBottom;
       if (!atBottom) {
         clearUnloadTimer();
         return;
@@ -381,6 +328,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   useEffect(() => {
     setIsBlockedByUser(false);
   }, [selectedConversation]);
+
+  useEffect(() => {
+    if (!messageActionsDisabled) return;
+    setReplyTo(null);
+    setEditingMessage(null);
+  }, [messageActionsDisabled]);
 
   // Send read receipt for message
   const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
@@ -408,12 +361,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const isNewMessageId = latestMessage && latestMessage.id !== lastMessageIdRef.current;
 
     if (isNewMessage && isNewMessageId && latestMessage) {
-      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
+      const isNearBottom = distanceFromChatBottom(scrollContainer) <= NEAR_BOTTOM_THRESHOLD;
       const isCurrentUserMessage = latestMessage.sender === currentUsername;
 
       if (isNearBottom || isCurrentUserMessage) {
         scrollContainer.scrollTo({
-          top: scrollContainer.scrollHeight,
+          top: 0,
           behavior: 'smooth'
         });
       }
@@ -523,7 +476,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer || isLoadingMore) return;
 
-    const isNearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 100;
+    const isNearBottom = distanceFromChatBottom(scrollContainer) < 100;
 
     if (isNearBottom) {
       scrollToBottom(scrollContainer);
@@ -533,7 +486,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const handleTypingUpdate = useCallback(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
-    const isNearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 100;
+    const isNearBottom = distanceFromChatBottom(scrollContainer) < 100;
     if (isNearBottom) {
       scrollToBottom(scrollContainer);
     }
@@ -584,13 +537,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     messageSignalType: string,
     replyToMsg?: MessageReply | null
   ) => {
+    if (messageActionsDisabled) return;
     await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
 
     if (messageSignalType !== SignalType.TYPING_START && messageSignalType !== SignalType.TYPING_STOP) {
       resetTypingAfterSend();
       setReplyTo(null);
     }
-  }, [onSendMessage, resetTypingAfterSend]);
+  }, [messageActionsDisabled, onSendMessage, resetTypingAfterSend]);
 
   // Handle message deletion
   const handleDeleteMessage = useCallback((message: Message) => {
@@ -599,14 +553,15 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   // Handle message reactions
   const handleReactToMessage = useCallback((targetMessage: Message, emoji: string) => {
+    if (messageActionsDisabled) return;
     const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
     const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
     onSendMessage(targetMessage.wireMessageId || targetMessage.id, emoji, action, null);
-  }, [currentUsername, onSendMessage]);
+  }, [currentUsername, messageActionsDisabled, onSendMessage]);
 
   // Handle message editing
   const handleEditMessage = useCallback(async (newContent: string) => {
-    if (editingMessage) {
+    if (!messageActionsDisabled && editingMessage) {
       await onSendMessage(
         editingMessage.wireMessageId || editingMessage.id,
         newContent,
@@ -615,7 +570,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       );
       setEditingMessage(null);
     }
-  }, [editingMessage, onSendMessage]);
+  }, [editingMessage, messageActionsDisabled, onSendMessage]);
 
   // Handle reply, edit, cancellation
   const handleCancelReply = useCallback(() => setReplyTo(null), []);
@@ -623,15 +578,17 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   // Handle reply to message
   const handleReply = useCallback((message: Message) => {
+    if (messageActionsDisabled) return;
     setEditingMessage(null);
     setReplyTo(message);
-  }, []);
+  }, [messageActionsDisabled]);
 
   // Handle message edit
   const handleEdit = useCallback((message: Message) => {
+    if (messageActionsDisabled) return;
     setReplyTo(null);
     setEditingMessage(message);
-  }, []);
+  }, [messageActionsDisabled]);
 
   // Handle reply click navigation
   const handleReplyClick = useCallback((replyId: string) => {
@@ -651,16 +608,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       >
         <div className="min-w-0 flex-1 pr-3" />
         <div className="flex items-center gap-2">
-          {/* Block Status Indicator */}
-          {(isUserBlocked || isBlockedByUser) && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-900/20 select-none">
-              <ShieldOff className="w-4 h-4 text-red-600 dark:text-red-400" />
-              <span className="text-xs font-medium text-red-600 dark:text-red-400">
-                {isUserBlocked ? 'Blocked' : 'Blocked You'}
-              </span>
-            </div>
-          )}
-
           {selectedConversation && (
             <div className="qor-call-pill" role="group" aria-label="Conversation actions">
               {!keyChangePending && !hasAttachedCall && (
@@ -687,37 +634,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   </Button>
                 </>
               )}
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="qor-call-pill-btn qor-chat-more-btn"
-                    title="Conversation options"
-                    aria-label="Conversation options"
-                  >
-                    <MoreVertical className="w-4 h-4" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-48 p-2 select-none" align="end">
-                  <div className="space-y-1">
-                    <div className="px-2 py-1 text-sm font-medium text-muted-foreground">
-                      Conversation Options
-                    </div>
-                    <div className="w-full">
-                      <BlockUserButton
-                        username={selectedConversation}
-                        getDisplayUsername={getDisplayUsername}
-                        initialBlocked={isUserBlocked}
-                        variant="ghost"
-                        size="sm"
-                        className="w-full cursor-pointer justify-start"
-                        showText={true}
-                      />
-                    </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
+              <ConversationOptionsPopover
+                username={selectedConversation}
+                blocked={isUserBlocked}
+                onToggleBlock={onToggleBlock}
+              />
             </div>
           )}
 
@@ -767,10 +688,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     message={message}
                     smartReceipt={receiptToShow}
                     previousMessage={index > 0 ? messages[index - 1] : undefined}
-                    onReply={handleReply}
+                    onReply={messageActionsDisabled ? undefined : handleReply}
                     onDelete={handleDeleteMessage}
-                    onEdit={handleEdit}
-                    onReact={handleReactToMessage}
+                    onEdit={messageActionsDisabled ? undefined : handleEdit}
+                    onReact={messageActionsDisabled ? undefined : handleReactToMessage}
                     onReplyClick={handleReplyClick}
                     currentUsername={currentUsername}
                     getDisplayUsername={getDisplayUsernameStable}
@@ -813,11 +734,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             selectedConversation={selectedConversation}
             getDisplayUsername={getDisplayUsernameStable}
             disabled={isUserBlocked || isBlockedByUser}
+            disabledPlaceholder={isUserBlocked ? 'You blocked this user' : undefined}
             getKeysOnDemand={getKeysOnDemand}
             getPeerHybridKeys={getPeerHybridKeys}
             findUser={findUser}
             secureDB={secureDB}
             ensurePeerSession={ensurePeerSession}
+            fileSenderOverride={fileSenderOverride}
           />
         )}
       </div>

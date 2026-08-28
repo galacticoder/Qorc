@@ -16,6 +16,7 @@ interface MenuPosition {
 
 interface MessageContextMenuProps {
     anchorRect: MessageAnchorRect;
+    triggerId: string;
     isCurrentUser: boolean;
     onClose: () => void;
     onCopy?: () => void;
@@ -32,6 +33,7 @@ interface MessageContextMenuProps {
 
 export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     anchorRect,
+    triggerId,
     isCurrentUser,
     onClose,
     onCopy,
@@ -52,6 +54,9 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
 
     useLayoutEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const targetTriggerId = target?.closest('[data-emoji-trigger]')?.getAttribute('data-emoji-trigger');
+            if (event.button === 2 && targetTriggerId === triggerId) return;
             if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
                 onClose();
             }
@@ -70,7 +75,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
             window.removeEventListener('scroll', handleScroll, true);
             window.removeEventListener('resize', handleScroll);
         };
-    }, [onClose]);
+    }, [onClose, triggerId]);
 
     useLayoutEffect(() => {
         const menu = menuRef.current;
@@ -130,6 +135,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                 visibility: position ? 'visible' : 'hidden',
             }}
         >
+            {(onReactionSelect || onReact) && (
             <div className="qor-message-context-reactions">
                 {QUICK_REACTIONS.map((emoji) => (
                     <button
@@ -160,8 +166,10 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                     <SmilePlus className="w-5 h-5" />
                 </button>
             </div>
+            )}
 
             <div className="qor-message-context-actions">
+                {onReply && (
                 <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onReply?.(); onClose(); }}
@@ -171,6 +179,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                 >
                     <Reply className="w-5 h-5" />
                 </button>
+                )}
 
                 {onCopy && (
                     <button

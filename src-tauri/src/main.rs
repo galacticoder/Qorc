@@ -272,7 +272,7 @@ pub fn run() {
     }));
 
     install_rustls_provider();
-    info!("Starting Qor-Chat v{}", env!("CARGO_PKG_VERSION"));
+    info!("Starting Qor v{}", env!("CARGO_PKG_VERSION"));
     // Build and run Tauri application
     let builder = tauri::Builder::default().manage(AppState::new());
 
@@ -439,7 +439,6 @@ pub fn run() {
             commands::tor::tor_stop,
             commands::tor::tor_status,
             commands::tor::tor_verify_connection,
-            commands::tor::tor_rotate_circuit,
             commands::tor::tor_info,
             commands::signal::signal_create_prekey_bundle,
             commands::signal::signal_process_prekey_bundle,

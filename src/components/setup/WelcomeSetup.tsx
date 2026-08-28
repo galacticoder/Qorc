@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QorBrandLogo } from '../ui/QorBrandLogo';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
-import { TorIndicator } from '../ui/TorIndicator';
 import { useStartupConnection } from '../../hooks/app/useStartupConnection';
 import {
   humanizeConnectionError,
@@ -116,18 +115,28 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
   return (
     <section className="screen screen-welcome">
       <div className="welcome-scene">
-        <div className="login-screen-brand" aria-label="Qor Chat">
-          <QorBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
-          <span className="login-brand-name">Qor Chat</span>
-        </div>
+        <header className="welcome-topbar">
+          <div className="login-screen-brand" aria-label="Qor">
+            <QorBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
+            <span className="login-brand-name">Qor</span>
+          </div>
+        </header>
 
-        <TorIndicator variant="login" />
         <ThemeToggleButton className="auth-theme-toggle" />
+        {onCancel && (
+          <button
+            type="button"
+            className="welcome-auth-back"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            Sign in / Sign up
+          </button>
+        )}
 
         <main className="welcome-simple" aria-label="Choose a server">
           <header className="welcome-simple-head">
-            <h1>Welcome to Qor</h1>
-            <p>Select a server to use</p>
+            <h1>Choose a server</h1>
           </header>
 
           <form
@@ -172,13 +181,13 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
               aria-expanded={advancedOpen}
               aria-controls="welcome-advanced-panel"
             >
+              <span>Tor settings</span>
               <ChevronIcon />
-              <span>Advanced Tor settings</span>
             </button>
 
             <div className="welcome-advanced-panel" id="welcome-advanced-panel" hidden={!advancedOpen}>
               <p className="welcome-advanced-note">
-                Tor starts automatically. Bridges only help when a network blocks Tor outright.
+                Tor starts automatically. Use bridges only when your network blocks Tor.
               </p>
 
               <button
@@ -188,8 +197,10 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                 onClick={() => setEnableBridges((value) => !value)}
                 disabled={busy}
               >
-                <span className="welcome-toggle-dot" aria-hidden="true" />
-                <span>{enableBridges ? 'Bridges enabled' : 'Use bridges'}</span>
+                <span>Use bridges</span>
+                <span className="welcome-toggle-switch" aria-hidden="true">
+                  <span className="welcome-toggle-dot" />
+                </span>
               </button>
 
               {enableBridges && (
@@ -235,14 +246,6 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
             </div>
           </div>
 
-          {onCancel && (
-            <p className="login-simple-switch">
-              Keeping your current server?{' '}
-              <button type="button" onClick={onCancel} disabled={busy}>
-                Go back
-              </button>
-            </p>
-          )}
         </main>
       </div>
     </section>

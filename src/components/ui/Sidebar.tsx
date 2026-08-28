@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, type PointerEvent } from 'react';
+import { useEffect, useId, useState, useRef, type PointerEvent } from 'react';
 import { LogOut } from 'lucide-react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
 import { cn } from '@/lib/utils/shared-utils';
@@ -18,6 +18,7 @@ interface SidebarProps {
 
 export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: SidebarProps) {
     const { theme, resolvedTheme, setTheme } = useTheme();
+    const themeMaskId = useId();
     const [isCollapsed, setIsCollapsed] = useState(true);
     const logoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const logoutHoldGenerationRef = useRef(0);
@@ -30,7 +31,6 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
     const navItems = [
         { id: 'chats', icon: ChatBubbleIcon, label: 'Chats' },
         { id: 'calls', icon: CallIcon, label: 'Calls' },
-        { id: 'settings', icon: SettingsIcon, label: 'Settings' },
     ] as const;
 
     useEffect(() => {
@@ -151,17 +151,31 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                                 readOnly
                             />
                             <svg
-                                width="18"
-                                height="18"
+                                width="22"
+                                height="22"
                                 viewBox="0 0 20 20"
                                 fill="currentColor"
                                 stroke="none"
                             >
-                                <mask id="moon-mask">
+                                <mask
+                                    id={themeMaskId}
+                                    maskUnits="userSpaceOnUse"
+                                    maskContentUnits="userSpaceOnUse"
+                                    x="-4"
+                                    y="-4"
+                                    width="28"
+                                    height="28"
+                                >
                                     <rect x="0" y="0" width="20" height="20" fill="white"></rect>
                                     <circle cx="11" cy="3" r="8" fill="black"></circle>
                                 </mask>
-                                <circle className="sunMoon" cx="10" cy="10" r="8" mask="url(#moon-mask)"></circle>
+                                <circle
+                                    className="sunMoon"
+                                    cx="10"
+                                    cy="10"
+                                    r="8"
+                                    mask={`url(#${themeMaskId})`}
+                                ></circle>
                                 <g>
                                     <circle className="sunRay sunRay1" cx="18" cy="10" r="1.5"></circle>
                                     <circle className="sunRay sunRay2" cx="14" cy="16.928" r="1.5"></circle>
@@ -174,6 +188,30 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                         </span>
                     </span>
                     <span className="qor-rail-label">Theme</span>
+                </button>
+
+                <button
+                    type="button"
+                    onClick={() => onTabChange('settings')}
+                    className={cn(
+                        "qor-rail-row qor-rail-button",
+                        activeTab === 'settings' && "is-active"
+                    )}
+                    aria-pressed={activeTab === 'settings'}
+                >
+                    <span className="qor-rail-icon-slot">
+                        <SettingsIcon
+                            className={cn(
+                                "qor-rail-icon",
+                                activeTab === 'settings' ? "fill-current" : "fill-none"
+                            )}
+                            width={22}
+                            height={22}
+                            strokeWidth={activeTab === 'settings' ? 2.5 : 2}
+                            aria-hidden="true"
+                        />
+                    </span>
+                    <span className="qor-rail-label">Settings</span>
                 </button>
 
                 {currentUser && (

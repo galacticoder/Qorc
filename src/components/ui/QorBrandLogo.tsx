@@ -13,7 +13,7 @@ export function QorBrandLogo({
   className,
   imageClassName,
   ariaHidden = true,
-  label = 'Qor Chat',
+  label = 'Qor',
 }: QorBrandLogoProps) {
   return (
     <span

@@ -860,18 +860,18 @@ export class SecureCallingService {
 
         const call = this.currentCall;
         const signal: CallSignal = {
-            type: 'decline-call',
+            type: 'end-call',
             callId,
             from: this.localUsername,
             to: call.peer,
             timestamp: Date.now()
         };
 
-        call.status = 'declined';
+        call.status = 'missed';
         call.endTime = Date.now();
         const start = call.startTime ?? this.ringStartAt ?? call.endTime;
         call.duration = Math.max(0, call.endTime - start);
-        call.endReason = 'declined';
+        call.endReason = 'timeout';
         this.notifyCallState(call);
 
         this.cleanup();

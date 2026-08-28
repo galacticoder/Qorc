@@ -1,112 +1,216 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Phone, Video, Search, Clock, Trash2, MoreVertical, ShieldOff } from 'lucide-react';
+import { format, isThisYear, isToday, isYesterday } from 'date-fns';
+import {
+    Clock3,
+    Loader2,
+    MessageCircle,
+    MoreVertical,
+    Search,
+    Trash2,
+    Video,
+    X,
+} from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
-import { Input } from '../../ui/input';
 import { Button } from '../../ui/button';
 import { ScrollArea } from '../../ui/scroll-area';
 import { UserAvatar } from '../../ui/UserAvatar';
+import { CallIcon } from '../assets/icons';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
-import { useBlockStatus } from '../../../hooks/useBlockStatus';
-import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/utils/date-utils';
+import { formatCallDurationSeconds } from '../../../lib/utils/date-utils';
 import { NEAR_BOTTOM_THRESHOLD, SCROLL_THRESHOLD } from '../../../lib/constants';
-
-interface CallLogItemProps {
-    readonly log: CallLogEntry;
-    readonly index: number;
-    readonly totalLogs: number;
-    readonly getDisplayUsername?: (username: string) => Promise<string>;
-    readonly onDelete: (id: string) => void;
-}
-
-const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
-    log,
-    index,
-    totalLogs,
-    onDelete
-}) => {
-    const displayName = useDisplayUsername({
-        username: log.peerUsername
-    });
-
-    const isBlocked = useBlockStatus(log.peerUsername, { load: false });
-
-    return (
-        <React.Fragment>
-            <div className="p-3 flex items-center gap-3 hover:bg-accent/50 rounded-lg transition-colors select-none">
-                <UserAvatar
-                    username={log.peerUsername}
-                    size="md"
-                />
-
-                <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2 overflow-hidden">
-                            <h3 className="font-semibold truncate text-foreground max-w-[180px]">{displayName}</h3>
-                            {isBlocked && (
-                                <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-900/20 shrink-0">
-                                    <ShieldOff className="w-3 h-3 text-red-600 dark:text-red-400" />
-                                    <span className="text-xs font-medium text-red-600 dark:text-red-400">
-                                        Blocked
-                                    </span>
-                                </div>
-                            )}
-                        </div>
-                        <span className="text-xs text-muted-foreground font-medium shrink-0 ml-2">
-                            {formatRelativeAge(log.startTime)}
-                        </span>
-                    </div>
-
-                    <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                        <div className="flex items-center gap-1.5">
-                            {log.type === 'video' ? (
-                                <Video className={`w-4 h-4 ${log.status === 'missed' ? 'text-red-500' : 'text-gray-500'}`} />
-                            ) : (
-                                <Phone className={`w-4 h-4 ${log.status === 'missed' ? 'text-red-500' : 'text-gray-500'}`} />
-                            )}
-                            <span className={log.status === 'missed' ? 'text-red-500 font-medium' : ''}>
-                                {log.status === 'missed' ? 'Missed Call' : (log.direction === 'outgoing' ? 'Outgoing' : 'Incoming')}
-                            </span>
-                        </div>
-
-                        {log.duration !== undefined && log.duration > 0 && (
-                            <>
-                                <span className="w-1 h-1 rounded-full bg-zinc-200" />
-                                <span>
-                                    {formatCallDurationSeconds(log.duration)}
-                                </span>
-                            </>
-                        )}
-                    </div>
-                </div>
-
-                <div className="flex items-center gap-1">
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="rounded-full text-destructive"
-                        onClick={() => onDelete(log.id)}
-                    >
-                        <Trash2 className="w-4 h-4" />
-                    </Button>
-                </div>
-            </div>
-
-            {/* Separator */}
-            {index < totalLogs - 1 && (
-                <div className="h-px my-2 bg-gradient-to-r from-transparent via-border to-transparent opacity-50" />
-            )}
-        </React.Fragment>
-    );
-});
-
-CallLogItem.displayName = 'CallLogItem';
 
 interface CallLogsProps {
     readonly getDisplayUsername?: (username: string) => Promise<string>;
+    readonly onOpenConversation?: (username: string) => void;
+    readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
+    readonly callsDisabled?: boolean;
 }
 
-export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
+interface CallLogGroup {
+    readonly key: string;
+    readonly label: string;
+    readonly logs: CallLogEntry[];
+}
+
+const callDayKey = (timestamp: number): string => format(new Date(timestamp), 'yyyy-MM-dd');
+
+const callDayLabel = (timestamp: number): string => {
+    const date = new Date(timestamp);
+    if (isToday(date)) return 'Today';
+    if (isYesterday(date)) return 'Yesterday';
+    return format(date, isThisYear(date) ? 'EEEE, MMMM d' : 'MMMM d, yyyy');
+};
+
+const callStatusLabel = (log: CallLogEntry): string => {
+    const kind = log.type === 'video' ? 'video' : 'audio';
+    if (log.status !== 'completed') {
+        return log.direction === 'incoming'
+            ? `Missed ${kind} call`
+            : `Unanswered ${kind} call`;
+    }
+    return `${log.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind} call`;
+};
+
+interface CallLogOptionsProps {
+    readonly id: string;
+    readonly displayName: string;
+    readonly onDelete: (id: string) => void;
+}
+
+const CallLogOptions = React.memo(function CallLogOptions({
+    id,
+    displayName,
+    onDelete,
+}: CallLogOptionsProps) {
+    const [open, setOpen] = useState(false);
+
+    const handleDelete = useCallback(() => {
+        onDelete(id);
+        setOpen(false);
+    }, [id, onDelete]);
+
+    return (
+        <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="qor-call-pill-btn"
+                    title="Options"
+                    aria-label={`Options for call with ${displayName}`}
+                >
+                    <MoreVertical className="w-4 h-4" aria-hidden="true" />
+                </Button>
+            </PopoverTrigger>
+            <PopoverContent className="qor-call-log-popover select-none" align="end">
+                <div className="qor-call-log-popover-title">Options</div>
+                <button
+                    type="button"
+                    className="qor-call-log-popover-action is-danger"
+                    onClick={handleDelete}
+                >
+                    <Trash2 aria-hidden="true" />
+                    <span>Delete</span>
+                </button>
+            </PopoverContent>
+        </Popover>
+    );
+});
+
+interface CallLogItemProps {
+    readonly log: CallLogEntry;
+    readonly callsDisabled: boolean;
+    readonly onDelete: (id: string) => void;
+    readonly onOpenConversation?: (username: string) => void;
+    readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
+}
+
+const CallLogItem = React.memo(function CallLogItem({
+    log,
+    callsDisabled,
+    onDelete,
+    onOpenConversation,
+    onStartCall,
+}: CallLogItemProps) {
+    const displayName = useDisplayUsername({ username: log.peerUsername });
+    const isUnanswered = log.status !== 'completed';
+    const hasDistinctDisplayName = displayName.toLowerCase() !== log.peerUsername.toLowerCase();
+
+    return (
+        <article className="qor-call-log-row">
+            <button
+                type="button"
+                className="qor-call-log-person"
+                onClick={() => onOpenConversation?.(log.peerUsername)}
+                disabled={!onOpenConversation}
+                aria-label={onOpenConversation ? `Open conversation with ${displayName}` : undefined}
+            >
+                <UserAvatar username={log.peerUsername} size="lg" className="qor-call-log-avatar" />
+
+                <span className="qor-call-log-copy">
+                    <span className="qor-call-log-name-line">
+                        <span className="qor-call-log-name" title={displayName}>{displayName}</span>
+                        {hasDistinctDisplayName && (
+                            <span className="qor-call-log-handle" title={log.peerUsername}>@{log.peerUsername}</span>
+                        )}
+                    </span>
+
+                    <span className="qor-call-log-detail-line">
+                        <span className={`qor-call-log-result${isUnanswered ? ' is-unanswered' : ''}`}>
+                            {log.type === 'video' ? (
+                                <Video aria-hidden="true" />
+                            ) : (
+                                <CallIcon aria-hidden="true" />
+                            )}
+                            <span>{callStatusLabel(log)}</span>
+                        </span>
+
+                        {log.status === 'completed' && log.duration !== undefined && log.duration > 0 && (
+                            <span className="qor-call-log-duration">
+                                <Clock3 aria-hidden="true" />
+                                <span>{formatCallDurationSeconds(log.duration)}</span>
+                            </span>
+                        )}
+                    </span>
+                </span>
+            </button>
+
+            <time
+                className="qor-call-log-time"
+                dateTime={new Date(log.startTime).toISOString()}
+                title={format(new Date(log.startTime), 'PPpp')}
+            >
+                {format(new Date(log.startTime), 'h:mm a')}
+            </time>
+
+            <div className="qor-call-pill qor-call-log-actions" role="group" aria-label={`Actions for ${displayName}`}>
+                {onOpenConversation && (
+                    <Button
+                        size="sm"
+                        variant="ghost"
+                        className="qor-call-pill-btn"
+                        title="Open chat"
+                        aria-label={`Open chat with ${displayName}`}
+                        onClick={() => onOpenConversation(log.peerUsername)}
+                    >
+                        <MessageCircle className="w-4 h-4" aria-hidden="true" />
+                    </Button>
+                )}
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="qor-call-pill-btn"
+                    title="Audio call"
+                    aria-label={`Audio call ${displayName}`}
+                    disabled={callsDisabled || !onStartCall}
+                    onClick={() => onStartCall?.(log.peerUsername, 'audio')}
+                >
+                    <CallIcon className="w-4 h-4" aria-hidden="true" />
+                </Button>
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="qor-call-pill-btn"
+                    title="Video call"
+                    aria-label={`Video call ${displayName}`}
+                    disabled={callsDisabled || !onStartCall}
+                    onClick={() => onStartCall?.(log.peerUsername, 'video')}
+                >
+                    <Video className="w-4 h-4" aria-hidden="true" />
+                </Button>
+                <CallLogOptions id={log.id} displayName={displayName} onDelete={onDelete} />
+            </div>
+        </article>
+    );
+});
+
+export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
+    getDisplayUsername,
+    onOpenConversation,
+    onStartCall,
+    callsDisabled = false,
+}) {
     const {
         logs,
         hasMoreLogs,
@@ -116,19 +220,26 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
         getAllLogs,
         clearLogs,
         deleteLog,
+        isLoading,
     } = useCallHistory();
     const [searchQuery, setSearchQuery] = useState('');
     const [usernameMap, setUsernameMap] = useState<Record<string, string>>({});
+    const [optionsOpen, setOptionsOpen] = useState(false);
     const scrollAreaRef = useRef<HTMLDivElement>(null);
-    const isSearching = searchQuery.length > 0;
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+    const isSearching = normalizedQuery.length > 0;
     const hasMoreLogsRef = useRef(hasMoreLogs);
     hasMoreLogsRef.current = hasMoreLogs;
     const isSearchingRef = useRef(isSearching);
     isSearchingRef.current = isSearching;
 
+    useEffect(() => {
+        if (!isLoading && logs.length === 0) setSearchQuery('');
+    }, [isLoading, logs.length]);
+
     const searchScopeLogs = useMemo(
         () => (isSearching ? getAllLogs() : logs),
-        [isSearching, logs, getAllLogs],
+        [getAllLogs, isSearching, logs],
     );
 
     useEffect(() => {
@@ -144,7 +255,7 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
         }
         if (viewport.scrollTop < NEAR_BOTTOM_THRESHOLD) scheduleLogRelease();
         else cancelLogRelease();
-    }, [loadMoreLogs, scheduleLogRelease, cancelLogRelease]);
+    }, [cancelLogRelease, loadMoreLogs, scheduleLogRelease]);
 
     useEffect(() => {
         const viewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
@@ -154,109 +265,150 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
         return () => viewport.removeEventListener('scroll', onScroll);
     }, [handleScroll]);
 
-    // Resolve display names for all usernames
     useEffect(() => {
         if (!getDisplayUsername) return;
+        let cancelled = false;
+        const uniqueUsernames = Array.from(new Set(searchScopeLogs.map((log) => log.peerUsername)));
 
-        const resolveUsernames = async () => {
-            const newMap: Record<string, string> = {};
-            const uniqueUsernames = Array.from(new Set(searchScopeLogs.map(log => log.peerUsername)));
+        void Promise.all(uniqueUsernames.map(async (username) => {
+            try {
+                const displayName = await getDisplayUsername(username);
+                return [username, displayName || username] as const;
+            } catch {
+                return [username, username] as const;
+            }
+        })).then((resolvedNames) => {
+            if (!cancelled) setUsernameMap(Object.fromEntries(resolvedNames));
+        });
 
-            await Promise.all(
-                uniqueUsernames.map(async (username) => {
-                    try {
-                        const displayName = await getDisplayUsername(username);
-                        newMap[username] = displayName || username;
-                    } catch {
-                        newMap[username] = username;
-                    }
-                })
-            );
-
-            setUsernameMap(newMap);
-        };
-
-        resolveUsernames();
-    }, [searchScopeLogs, getDisplayUsername]);
+        return () => { cancelled = true; };
+    }, [getDisplayUsername, searchScopeLogs]);
 
     const filteredLogs = useMemo(() => {
-        if (!searchQuery) return searchScopeLogs;
-
-        const query = searchQuery.toLowerCase();
-        return searchScopeLogs.filter(log => {
+        if (!normalizedQuery) return searchScopeLogs;
+        return searchScopeLogs.filter((log) => {
             const displayName = usernameMap[log.peerUsername] || log.peerUsername;
-            return displayName.toLowerCase().includes(query);
+            return displayName.toLowerCase().includes(normalizedQuery)
+                || log.peerUsername.toLowerCase().includes(normalizedQuery)
+                || callStatusLabel(log).toLowerCase().includes(normalizedQuery);
         });
-    }, [searchScopeLogs, searchQuery, usernameMap]);
+    }, [normalizedQuery, searchScopeLogs, usernameMap]);
+
+    const groupedLogs = useMemo<CallLogGroup[]>(() => {
+        const groups: CallLogGroup[] = [];
+        for (const log of filteredLogs) {
+            const key = callDayKey(log.startTime);
+            const existing = groups[groups.length - 1];
+            if (existing?.key === key) {
+                existing.logs.push(log);
+            } else {
+                groups.push({ key, label: callDayLabel(log.startTime), logs: [log] });
+            }
+        }
+        return groups;
+    }, [filteredLogs]);
+
+    const handleClearLogs = useCallback(() => {
+        clearLogs();
+        setSearchQuery('');
+        setOptionsOpen(false);
+    }, [clearLogs]);
 
     return (
-        <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--qor-chat-bg)' }}>
-            <div className="absolute top-0 left-0 right-0 z-10 p-6 space-y-4 bg-gradient-to-b from-background via-background/80 to-transparent">
-                <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                        <Input
-                            placeholder="Search call history..."
-                            className="pl-9 bg-background/50 border-border dark:border-gray-600 focus:border-primary backdrop-blur-sm"
+        <section className="qor-call-log-page">
+            <header className="qor-call-log-header">
+                <div className="qor-call-log-heading">
+                    <h1>Calls</h1>
+                </div>
+
+                <div className="qor-call-log-header-actions">
+                    <div className={`qor-call-log-search${logs.length === 0 ? ' is-disabled' : ''}`}>
+                        <Search aria-hidden="true" />
+                        <input
+                            type="text"
                             value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
+                            onChange={(event) => setSearchQuery(event.target.value)}
+                            placeholder="Search calls"
+                            aria-label="Search call history"
+                            disabled={logs.length === 0}
                         />
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                        {searchQuery.length > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => setSearchQuery('')}
+                                title="Clear search"
+                                aria-label="Clear call search"
+                            >
+                                <X aria-hidden="true" />
+                            </button>
+                        )}
                     </div>
 
-                    {/* Options Menu */}
-                    <Popover>
+                    <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
                         <PopoverTrigger asChild>
                             <Button
                                 size="sm"
-                                variant="outline"
-                                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600 bg-background/50 backdrop-blur-sm"
+                                variant="ghost"
+                                className="qor-icon-btn"
+                                title="Call history options"
+                                aria-label="Call history options"
                             >
-                                <MoreVertical className="w-4 h-4" />
+                                <MoreVertical className="w-4 h-4" aria-hidden="true" />
                             </Button>
                         </PopoverTrigger>
-                        <PopoverContent className="w-48 p-2 select-none" align="end">
-                            <div className="space-y-1">
-                                <div className="px-2 py-1 text-sm font-medium text-muted-foreground">
-                                    Call Options
-                                </div>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                                    onClick={() => clearLogs()}
-                                    disabled={logs.length === 0}
-                                >
-                                    <Trash2 className="w-4 h-4 mr-2" />
-                                    Clear All Calls
-                                </Button>
-                            </div>
+                        <PopoverContent className="qor-call-log-popover select-none" align="end">
+                            <div className="qor-call-log-popover-title">Options</div>
+                            <button
+                                type="button"
+                                className="qor-call-log-popover-action is-danger"
+                                onClick={handleClearLogs}
+                                disabled={logs.length === 0}
+                            >
+                                <Trash2 aria-hidden="true" />
+                                <span>Clear history</span>
+                            </button>
                         </PopoverContent>
                     </Popover>
                 </div>
-            </div>
+            </header>
 
-            <ScrollArea ref={scrollAreaRef} className="absolute inset-0 z-0 h-full w-full">
-                <div className="space-y-2 px-6 pb-4 pt-24">
-                    {filteredLogs.length === 0 ? (
-                        <div className="text-center py-12 text-muted-foreground select-none">
-                            <Clock className="w-12 h-12 mx-auto mb-4 opacity-20" />
-                            <p>No recent calls</p>
+            <ScrollArea ref={scrollAreaRef} className="qor-call-log-scroll">
+                <div className="qor-call-log-content">
+                    {isLoading ? (
+                        <div className="qor-call-log-empty" role="status" aria-label="Loading call history">
+                            <Loader2 className="qor-call-log-loader" aria-hidden="true" />
+                            <strong>Loading calls</strong>
+                        </div>
+                    ) : groupedLogs.length === 0 ? (
+                        <div className="qor-call-log-empty">
+                            <span className="qor-call-log-empty-icon" aria-hidden="true">
+                                {isSearching ? <Search /> : <CallIcon />}
+                            </span>
+                            <strong>{isSearching ? 'No matching calls' : 'No calls yet'}</strong>
+                            <span>{isSearching ? 'Try another name or call type.' : 'Your recent calls will appear here.'}</span>
                         </div>
                     ) : (
-                        filteredLogs.map((log, index) => (
-                            <CallLogItem
-                                key={log.id}
-                                log={log}
-                                index={index}
-                                totalLogs={filteredLogs.length}
-                                getDisplayUsername={getDisplayUsername}
-                                onDelete={deleteLog}
-                            />
+                        groupedLogs.map((group) => (
+                            <section className="qor-call-log-group" key={group.key} aria-labelledby={`call-group-${group.key}`}>
+                                <h2 id={`call-group-${group.key}`}>{group.label}</h2>
+                                <div className="qor-call-log-list">
+                                    {group.logs.map((log) => (
+                                        <CallLogItem
+                                            key={log.id}
+                                            log={log}
+                                            callsDisabled={callsDisabled}
+                                            onDelete={deleteLog}
+                                            onOpenConversation={onOpenConversation}
+                                            onStartCall={onStartCall}
+                                        />
+                                    ))}
+                                </div>
+                            </section>
                         ))
                     )}
                 </div>
             </ScrollArea>
-        </div>
+        </section>
     );
 });
 

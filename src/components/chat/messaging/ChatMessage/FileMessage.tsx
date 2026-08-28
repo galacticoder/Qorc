@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Download, Film, Image as ImageIcon, LoaderCircle, Play } from "lucide-react";
+import { Download } from "lucide-react";
 import { cn } from "../../../../lib/utils/shared-utils";
 import { useFileUrl } from "../../../../hooks/file-handling/useFileUrl";
 import {
@@ -75,7 +75,7 @@ export const FileContent: React.FC<FileContentProps> = ({
           : undefined
     : undefined;
 
-  const { url: resolvedFileUrl, error: fileLoadError, loading: fileLoading } = useFileUrl({
+  const { url: resolvedFileUrl, error: fileLoadError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: message.id,
     mimeType: mimeType || 'application/octet-stream',
@@ -135,37 +135,43 @@ export const FileContent: React.FC<FileContentProps> = ({
     </div>
   );
 
-  const mediaActionIcon = fileLoading && mediaRequested
-    ? <LoaderCircle className="w-[18px] h-[18px] animate-spin" />
-    : isImageFile
-      ? <ImageIcon className="w-[18px] h-[18px]" />
-      : isVideoFile
-        ? <Film className="w-[18px] h-[18px]" />
-        : <Play className="w-[18px] h-[18px]" />;
-
-  const mediaCard = (onClick: () => void, action: React.ReactNode, label: string) => fileCard(
-    <>
-      <div className="qor-file-meta">
-        <span className="qor-file-name" title={filename}>{filename || 'File'}</span>
-        <span className="qor-file-size">{sizeLabel}</span>
-      </div>
-      <div className="qor-file-dl" aria-hidden="true">{action}</div>
-    </>,
-    onClick,
-    label,
+  const mediaCard = (onOpen: () => void, label: string) => (
+    <div className="qor-file-card qor-file-media-card">
+      <button
+        type="button"
+        className="qor-file-preview-trigger"
+        onClick={onOpen}
+        aria-label={label}
+        title={label}
+      >
+        <MaterialFileIcon fileName={filename} className="qor-file-card-icon" />
+        <span className="qor-file-meta">
+          <span className="qor-file-name" title={filename}>{filename || 'File'}</span>
+          <span className="qor-file-size">{sizeLabel}</span>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="qor-file-dl"
+        onClick={downloadFile}
+        disabled={downloadRequested}
+        aria-label="Download file"
+        title="Download file"
+      >
+        <Download className="w-[18px] h-[18px]" aria-hidden="true" />
+      </button>
+    </div>
   );
 
   return (
     <>
       {!isGenericFile && (!mediaRequested || (!effectiveFileUrl && !fileLoadError)) && mediaCard(
         () => setMediaRequested(true),
-        mediaActionIcon,
         `Open ${mediaKind} preview`,
       )}
 
       {!isGenericFile && mediaRequested && fileLoadError && mediaCard(
         downloadFile,
-        <Download className="w-[18px] h-[18px]" />,
         'Download file',
       )}
 

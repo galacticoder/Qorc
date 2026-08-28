@@ -121,6 +121,8 @@ pub async fn message_content_render(
     max_width: u32,
     font_size: f32,
     color: String,
+    single_line: bool,
+    max_lines: u32,
     state: State<'_, AppState>,
 ) -> Result<RenderedMessageContent, String> {
     let lifecycle_lock = state.inner().database_lifecycle_lock.clone();
@@ -140,7 +142,14 @@ pub async fn message_content_render(
                 "Native message content is not valid UTF-8".to_string(),
             )
         })?;
-        render_private_message(plaintext, max_width, font_size, &color)
+        render_private_message(
+            plaintext,
+            max_width,
+            font_size,
+            &color,
+            single_line,
+            max_lines,
+        )
     })
     .await
     .map_err(|_| "Native message rendering failed".to_string())?

@@ -22,7 +22,7 @@ pub async fn init(app_handle: &AppHandle) -> QorResult<()> {
     let app_clone = app.clone();
     let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip("Qor Chat")
+        .tooltip("Qor")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(move |_tray, event| match event {
@@ -79,7 +79,7 @@ fn build_tray_menu(app: &AppHandle) -> QorResult<Menu<tauri::Wry>> {
         &[
             &MenuItem::with_id(app, "unread", &unread_label, false, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "open", "Open Qor Chat", true, None::<&str>)?,
+            &MenuItem::with_id(app, "open", "Open Qor", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
         ],
@@ -98,7 +98,7 @@ fn show_main_window(app: &AppHandle) {
             "main",
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .title("Qor Chat")
+        .title("Qor")
         .inner_size(1200.0, 800.0)
         .min_inner_size(800.0, 600.0)
         .center()

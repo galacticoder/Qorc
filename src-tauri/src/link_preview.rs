@@ -318,7 +318,7 @@ pub async fn fetch_link_preview(
         .use_preconfigured_tls(tls_config.clone())
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
-        .user_agent("Qor-Chat Link Preview")
+        .user_agent("Qor Link Preview")
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(18))
         .build()

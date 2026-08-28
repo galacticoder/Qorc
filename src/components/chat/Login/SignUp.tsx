@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { isValidUsername } from "../../../lib/sanitizers";
 import {
   USERNAME_MIN_LENGTH,

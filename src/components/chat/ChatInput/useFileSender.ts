@@ -61,7 +61,16 @@ interface FileSendOperation {
   canceled: boolean;
 }
 
-type FileSendPhase = 'idle' | 'preparing' | 'sending';
+export type FileSendPhase = 'idle' | 'preparing' | 'sending';
+
+export interface FileSenderController {
+  readonly sendFile: (file: File) => Promise<void>;
+  readonly progress: number;
+  readonly isSendingFile: boolean;
+  readonly fileSendPhase: FileSendPhase;
+  readonly fileName: string;
+  readonly cancelCurrent: () => void;
+}
 
 const MAX_RETAINED_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_FILE_SESSION_PEERS = 512;

@@ -138,12 +138,8 @@ export class BlockingSystem {
         if (
           !isPlainObject(entry) ||
           hasPrototypePollutionKeys(entry) ||
-          Object.keys(entry).sort().join(',') !== 'blockedAt,username' ||
-          typeof entry.username !== 'string' ||
-          typeof entry.blockedAt !== 'number' ||
-          !Number.isSafeInteger(entry.blockedAt) ||
-          entry.blockedAt < 0 ||
-          entry.blockedAt > Date.now() + 5 * 60_000
+          Object.keys(entry).join(',') !== 'username' ||
+          typeof entry.username !== 'string'
         ) {
           throw new Error('Stored block list entry is invalid');
         }
@@ -152,7 +148,7 @@ export class BlockingSystem {
           throw new Error('Stored block list entry is not canonical');
         }
         seen.add(username);
-        return { username, blockedAt: entry.blockedAt };
+        return { username };
       });
 
       this.cachedBlockList = blockList;
@@ -205,10 +201,7 @@ export class BlockingSystem {
         throw new Error('Block list size limit reached');
       }
 
-      const nextBlockList = [...blockList, {
-        username: target,
-        blockedAt: Date.now()
-      }];
+      const nextBlockList = [...blockList, { username: target }];
 
       try {
         await this.saveBlockList(nextBlockList, binding);

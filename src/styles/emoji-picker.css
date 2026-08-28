@@ -17,6 +17,11 @@
   isolation: isolate;
 }
 
+html.light .emoji-picker,
+.light .emoji-picker {
+  --emoji-picker-bg: var(--qor-input-bg, #f7f7f7);
+}
+
 .emoji-picker,
 .emoji-picker * {
   box-sizing: border-box;

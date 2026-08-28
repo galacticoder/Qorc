@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../../contexts/ThemeContext';
-import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { LoaderCircle, RefreshCw } from 'lucide-react';
+import { Ban, Camera, Check, Copy, LoaderCircle, LogOut, RefreshCw, Trash2 } from 'lucide-react';
 import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
@@ -24,6 +23,7 @@ import {
   MAX_PROFILE_IMAGE_SIZE,
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
+import { UserAvatar } from '../ui/UserAvatar';
 import { installAppSettingsStyles } from './sections/AppSettingsStyles';
 import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 
@@ -38,14 +38,6 @@ interface AppSettingsProps {
 
 interface NotificationSettings {
   desktop: boolean;
-}
-
-function IconUse({ id, filled = false }: { id: string; filled?: boolean }) {
-  return (
-    <svg aria-hidden="true">
-      <use href={`#${filled ? `${id}-filled` : id}`} />
-    </svg>
-  );
 }
 
 function SwitchButton({
@@ -83,10 +75,10 @@ const BlockedUserRow = React.memo(function BlockedUserRow({
 
   return (
     <div className="setting-row blocked-user-row">
-      <div className="min-w-0">
-        <div className="blocked-user-name" title={displayName}>{displayName}</div>
-        <div className="setting-description">
-          Blocked {format(new Date(user.blockedAt), "MMM d, yyyy 'at' h:mm a")}
+      <div className="blocked-user-identity">
+        <UserAvatar username={user.username} size="sm" />
+        <div className="min-w-0">
+          <div className="blocked-user-name" title={displayName}>{displayName}</div>
         </div>
       </div>
       <button className="action" type="button" disabled={loading} onClick={() => onUnblock(user.username)}>
@@ -576,11 +568,6 @@ export const AppSettings = React.memo(function AppSettings({
   return (
     <>
       <div className={`qor-settings-host ${themeClass}`}>
-        <svg className="hidden-symbols" aria-hidden="true">
-          <symbol id="icon-copy" viewBox="0 0 24 24"><path d="M8 8h10v12H8zM6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /></symbol>
-          <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M9 5 7.5 7H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2.5L15 5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.8" /></symbol>
-        </svg>
-
         <main className="settings-screen">
           <section className="settings-content">
             <h1 className="settings-brand"><strong>Settings</strong></h1>
@@ -602,9 +589,11 @@ export const AppSettings = React.memo(function AppSettings({
                       onClick={() => avatarInputRef.current?.click()}
                     >
                       <div className={`avatar-preview ${avatarUrl ? 'has-image' : ''}`} aria-hidden="true">
-                        {avatarUrl && <img src={avatarUrl} alt="" />}
+                        {avatarUrl
+                          ? <img src={avatarUrl} alt="" />
+                          : <span className="avatar-preview-fallback">{displayUsername.slice(0, 1).toUpperCase()}</span>}
                         <span className="avatar-hover-overlay">
-                          <IconUse id="icon-camera" />
+                          <Camera aria-hidden="true" />
                         </span>
                       </div>
                     </button>
@@ -624,7 +613,7 @@ export const AppSettings = React.memo(function AppSettings({
                         data-copy-username={copyUsername}
                         onClick={handleCopyUsername}
                       >
-                        <IconUse id="icon-copy" />
+                        {copiedUsername ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
                       </button>
                     </div>
                   </div>
@@ -633,7 +622,7 @@ export const AppSettings = React.memo(function AppSettings({
                     <div className="account-action-row account-danger-row">
                       <div>
                         <div className="setting-label" style={{ color: 'var(--danger)' }}>Clear All Data</div>
-                        <div className="setting-description">Permanently delete messages, conversations, and settings. You will be logged out.</div>
+                        <div className="setting-description">Permanently delete all your local account stored data. You will be logged out.</div>
                       </div>
                       {clearArmed ? (
                         <div className="confirm-inline">
@@ -646,27 +635,32 @@ export const AppSettings = React.memo(function AppSettings({
                         </div>
                       ) : (
                         <button className="danger-action" type="button" disabled={isClearingData} onClick={armClearData}>
-                          Clear All Data
+                          <Trash2 aria-hidden="true" />
+                          <span>Clear Data</span>
                         </button>
                       )}
                     </div>
-                  </div>
-
-                  <div className="logout-row">
-                    {logoutArmed ? (
-                      <div className="confirm-inline">
-                        <button className="action" type="button" onClick={cancelLogout}>
-                          Cancel
-                        </button>
-                        <button className="danger-action is-armed" type="button" onClick={handleLogout}>
-                          Are you sure?
-                        </button>
+                    <div className="account-action-row account-danger-row">
+                      <div>
+                        <div className="setting-label" style={{ color: 'var(--danger)' }}>Log Out</div>
+                        <div className="setting-description">Sign out of your account on this device.</div>
                       </div>
-                    ) : (
-                      <button className="danger-action" type="button" onClick={armLogout}>
-                        Log Out
-                      </button>
-                    )}
+                      {logoutArmed ? (
+                        <div className="confirm-inline">
+                          <button className="action" type="button" onClick={cancelLogout}>
+                            Cancel
+                          </button>
+                          <button className="danger-action is-armed" type="button" onClick={handleLogout}>
+                            Are you sure?
+                          </button>
+                        </div>
+                      ) : (
+                        <button className="danger-action" type="button" onClick={armLogout}>
+                          <LogOut aria-hidden="true" />
+                          <span>Log Out</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -689,11 +683,6 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                     <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
                   </div>
-                </div>
-              </div>
-
-              <div className="settings-section">
-                <div className="settings-list">
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Desktop Notifications</div>
@@ -711,25 +700,20 @@ export const AppSettings = React.memo(function AppSettings({
                   <h2 className="pane-title">Devices</h2>
                   <p className="pane-subtitle">Hardware used for calls.</p>
                 </div>
+                <button
+                  className="settings-icon-action"
+                  type="button"
+                  disabled={devicesLoading}
+                  aria-label="Refresh media devices"
+                  title="Refresh media devices"
+                  onClick={() => { void refreshMediaDevices(); }}
+                >
+                  <RefreshCw className={devicesLoading ? 'animate-spin' : ''} aria-hidden="true" />
+                </button>
               </header>
 
               <div className="settings-section">
                 <div className="settings-list">
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Available devices</div>
-                    </div>
-                    <button
-                      className="action"
-                      type="button"
-                      disabled={devicesLoading}
-                      aria-label="Refresh media devices"
-                      title="Refresh media devices"
-                      onClick={() => { void refreshMediaDevices(); }}
-                    >
-                      <RefreshCw className={devicesLoading ? 'animate-spin' : ''} size={16} />
-                    </button>
-                  </div>
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Microphone</div>
@@ -770,20 +754,18 @@ export const AppSettings = React.memo(function AppSettings({
                   <h2 className="pane-title">Privacy & Safety</h2>
                   <p className="pane-subtitle">Manage who can reach you.</p>
                 </div>
+                <button
+                  className="settings-head-action"
+                  type="button"
+                  disabled={!blockingAvailable}
+                  onClick={openBlockModal}
+                >
+                  <Ban aria-hidden="true" />
+                  <span>Block user</span>
+                </button>
               </header>
 
               <div className="settings-section">
-                <div className="blocked-head">
-                  <button
-                    className="action"
-                    type="button"
-                    disabled={!blockingAvailable}
-                    onClick={openBlockModal}
-                  >
-                    Block a user
-                  </button>
-                </div>
-
                 {blockedUsersError && <div className="settings-error">{blockedUsersError}</div>}
 
                 {blockedUsersLoading && blockedUsers.length === 0 ? (
@@ -844,7 +826,7 @@ export const AppSettings = React.memo(function AppSettings({
               </div>
               <div className="qor-modal-actions">
                 <button className="qor-modal-btn" type="button" onClick={closeBlockModal} disabled={blockChecking}>Cancel</button>
-                <button className="qor-modal-btn primary" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
+                <button className="qor-modal-btn danger" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
                   {blockChecking ? 'Checking…' : 'Block user'}
                 </button>
               </div>

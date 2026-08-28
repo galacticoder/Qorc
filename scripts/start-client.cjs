@@ -469,7 +469,7 @@ function launchApp() {
 
     try { fs.mkdirSync(logsDir, { recursive: true }); } catch { }
     const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
-    logStream.write(`# Qor-Chat client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
+    logStream.write(`# Qor client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
     console.log(`[CLIENT] Launching built app (instance ${instanceId})... logging to ${path.relative(repoRoot, logFilePath)}`);
 
     const runProc = spawn(runPath, [], {
@@ -491,7 +491,7 @@ function launchApp() {
     });
 
     runProc.on('close', (exitCode, signal) => {
-        const line = `# Qor-Chat client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
+        const line = `# Qor client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
         logStream.end(line, () => process.exit(exitCode ?? 1));
     });
 }

@@ -5,6 +5,7 @@ import websocketClient from '../websocket/websocket';
 import { STORAGE_KEYS } from '../database/storage-keys';
 
 export type StartupPhase = 'idle' | 'tor' | 'server' | 'ready' | 'failed';
+export type StartupFailureTarget = 'tor' | 'server' | null;
 
 export interface StartupConnectionState {
   readonly phase: StartupPhase;
@@ -12,6 +13,7 @@ export interface StartupConnectionState {
   readonly step: string;
   readonly error: string;
   readonly serverUrl: string;
+  readonly failureTarget: StartupFailureTarget;
 }
 
 export interface TorPreferences {
@@ -22,6 +24,13 @@ export interface TorPreferences {
 
 const CONNECT_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 2500;
+const SERVER_CONNECTION_TIMEOUT_MS = 10_000;
+
+const serverConnectionTimeoutError = (): Error => {
+  const error = new Error('Server connection timed out after 10 seconds');
+  error.name = 'TimeoutError';
+  return error;
+};
 
 export function normalizeToWss(value: string): string {
   let v = (value || '').trim();
@@ -120,6 +129,7 @@ class StartupConnection {
     step: '',
     error: '',
     serverUrl: '',
+    failureTarget: null,
   };
 
   private readonly listeners = new Set<(state: StartupConnectionState) => void>();
@@ -144,7 +154,8 @@ class StartupConnection {
       next.torProgress === this.state.torProgress &&
       next.step === this.state.step &&
       next.error === this.state.error &&
-      next.serverUrl === this.state.serverUrl
+      next.serverUrl === this.state.serverUrl &&
+      next.failureTarget === this.state.failureTarget
     ) {
       return;
     }
@@ -163,7 +174,7 @@ class StartupConnection {
         return;
       }
       if (websocketClient.isConnectedToServer()) {
-        this.update({ phase: 'ready', step: '', error: '' });
+        this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
       }
     }, 1500);
   }
@@ -195,7 +206,7 @@ class StartupConnection {
       try { await websocket.disconnect(); } catch { }
     }
     await websocket.setServerUrl(normalized);
-    this.update({ serverUrl: normalized, phase: 'idle', error: '', step: '' });
+    this.update({ serverUrl: normalized, phase: 'idle', error: '', step: '', failureTarget: null });
     return normalized;
   }
 
@@ -204,7 +215,12 @@ class StartupConnection {
     if (this.torInFlight) return this.torInFlight;
 
     const run = (async (): Promise<boolean> => {
-      this.update({ phase: this.state.phase === 'ready' ? 'ready' : 'tor', step: 'Starting Tor', error: '' });
+      this.update({
+        phase: this.state.phase === 'ready' ? 'ready' : 'tor',
+        step: 'Starting Tor',
+        error: '',
+        failureTarget: null,
+      });
 
       const current = await getTorAutoSetup().refreshStatus();
       if (current.isRunning && current.isBootstrapped) {
@@ -266,7 +282,7 @@ class StartupConnection {
 
   async ensureConnected(): Promise<void> {
     if (websocketClient.isConnectedToServer()) {
-      this.update({ phase: 'ready', error: '', step: '' });
+      this.update({ phase: 'ready', error: '', step: '', failureTarget: null });
       return;
     }
     if (this.inFlight) return this.inFlight;
@@ -276,42 +292,74 @@ class StartupConnection {
     const run = (async (): Promise<void> => {
       const serverUrl = this.state.serverUrl || await this.loadConfiguredServerUrl();
       if (!serverUrl) {
-        this.update({ phase: 'idle', step: '', error: '' });
+        this.update({ phase: 'idle', step: '', error: '', failureTarget: null });
         throw new Error('No server selected');
       }
 
-      const torReady = await this.ensureTor();
+      let torReady = false;
+      try {
+        torReady = await this.ensureTor();
+      } catch (error) {
+        if (this.generation !== generation) return;
+        const message = 'Tor could not connect. Check your network or bridge settings.';
+        this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
+        throw error instanceof Error ? error : new Error(message);
+      }
       if (this.generation !== generation) return;
       if (!torReady) {
-        const message = this.state.step || 'Tor could not start.';
-        this.update({ phase: 'failed', error: message });
+        const message = this.state.step || 'Tor could not connect. Check your network or bridge settings.';
+        this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
         throw new Error(message);
       }
 
       void anonymousHttp.prewarm().catch(() => { });
 
       let lastError: unknown = null;
+      const connectionDeadline = Date.now() + SERVER_CONNECTION_TIMEOUT_MS;
       for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
         if (this.generation !== generation) return;
-        this.update({ phase: 'server', step: 'Connecting to server', error: '' });
+        this.update({ phase: 'server', step: 'Connecting to server', error: '', failureTarget: null });
+        const remainingMs = connectionDeadline - Date.now();
+        if (remainingMs <= 0) {
+          lastError = serverConnectionTimeoutError();
+          break;
+        }
+
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        let timedOut = false;
         try {
-          await websocketClient.connect({ autoReconnectOnFailure: false });
+          const timeout = new Promise<never>((_resolve, reject) => {
+            timeoutId = setTimeout(() => {
+              timedOut = true;
+              reject(serverConnectionTimeoutError());
+            }, remainingMs);
+          });
+          await Promise.race([
+            websocketClient.connect({ autoReconnectOnFailure: false }),
+            timeout,
+          ]);
           if (this.generation !== generation) return;
-          this.update({ phase: 'ready', step: '', error: '' });
+          this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
           return;
         } catch (error) {
           lastError = error;
+          if (timedOut) {
+            await websocketClient.close().catch(() => { });
+          }
           if (this.generation !== generation) return;
+          if (timedOut || Date.now() >= connectionDeadline) break;
           if (attempt < CONNECT_ATTEMPTS) {
             this.update({ step: 'Retrying connection' });
-            await delay(RETRY_DELAY_MS);
+            await delay(Math.min(RETRY_DELAY_MS, Math.max(0, connectionDeadline - Date.now())));
           }
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
         }
       }
 
       if (this.generation !== generation) return;
       const message = humanizeConnectionError(lastError);
-      this.update({ phase: 'failed', error: message, step: '' });
+      this.update({ phase: 'failed', error: message, step: '', failureTarget: 'server' });
       throw lastError instanceof Error ? lastError : new Error(message);
     })().finally(() => {
       if (this.inFlight === run) this.inFlight = null;
@@ -326,18 +374,29 @@ class StartupConnection {
     this.generation += 1;
     this.inFlight = null;
     this.torInFlight = null;
-    this.update({ phase: 'tor', torProgress: 0, step: 'Restarting Tor', error: '' });
+    this.update({ phase: 'tor', torProgress: 0, step: 'Restarting Tor', error: '', failureTarget: null });
     await getTorAutoSetup().stopTor().catch(() => false);
     await torNetworkManager.shutdown().catch(() => { });
     (window as any).__TOR_MODE__ = false;
-    return this.ensureTor();
+    try {
+      const ready = await this.ensureTor();
+      if (!ready) {
+        const message = this.state.step || 'Tor could not connect. Check your network or bridge settings.';
+        this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
+      }
+      return ready;
+    } catch {
+      const message = 'Tor could not connect. Check your network or bridge settings.';
+      this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
+      return false;
+    }
   }
 
   async retry(): Promise<void> {
     this.generation += 1;
     this.inFlight = null;
     this.torInFlight = null;
-    this.update({ phase: 'idle', error: '', step: '' });
+    this.update({ phase: 'idle', error: '', step: '', failureTarget: null });
     return this.ensureConnected();
   }
 
@@ -345,7 +404,7 @@ class StartupConnection {
     this.generation += 1;
     this.inFlight = null;
     this.stopWatchdog();
-    this.update({ phase: 'idle', error: '', step: '', serverUrl: '' });
+    this.update({ phase: 'idle', error: '', step: '', serverUrl: '', failureTarget: null });
   }
 }
 

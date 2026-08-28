@@ -9,8 +9,7 @@ import {
 } from '../types/tor-types';
 import {
   TOR_DEFAULT_MONITOR_INTERVAL_MS,
-  TOR_MAX_BACKOFF_MS,
-  TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS
+  TOR_MAX_BACKOFF_MS
 } from '../constants';
 import { tor as tauriTor, websocket as tauriWebsocket, anonymousHttp, isTauri } from '../tauri-bindings';
 import type { TorInfo, TorStatus } from '../tauri-bindings';
@@ -24,7 +23,6 @@ export class TorNetworkManager {
   private stats: TorConnectionStats;
   private isInitialized = false;
   private readonly connectionCallbacks = new Set<(connected: boolean) => void>();
-  private circuitRotationTimer: ReturnType<typeof setInterval> | null = null;
   private connectionMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private reinitializationTimer: ReturnType<typeof setTimeout> | null = null;
   private connectionMonitorInFlight = false;
@@ -32,7 +30,6 @@ export class TorNetworkManager {
   private initializePromiseGeneration: number | null = null;
   private lifecycleGeneration = 0;
   private monitorBackoffMs = 0;
-  private lastManualRotation = 0;
   private lastDeepHealthCheckAt = 0;
 
   constructor(config?: Partial<TorConfig>) {
@@ -41,7 +38,6 @@ export class TorNetworkManager {
       socksPort: 9150,
       controlPort: 9151,
       host: '127.0.0.1',
-      circuitRotationInterval: 10,
       maxRetries: 3,
       connectionTimeout: 30_000,
       ...config
@@ -50,8 +46,6 @@ export class TorNetworkManager {
     this.stats = {
       isConnected: false,
       isBootstrapped: false,
-      circuitCount: 0,
-      lastCircuitRotation: 0,
       connectionAttempts: 0,
       failedConnections: 0,
       bytesTransmitted: 0,
@@ -198,9 +192,6 @@ export class TorNetworkManager {
     await this.syncBackendTorState();
     if (generation !== this.lifecycleGeneration) return false;
 
-    if (connected) {
-      this.startCircuitRotation();
-    }
     if (status?.is_running || connected) {
       this.startConnectionMonitoring();
     }
@@ -257,35 +248,6 @@ export class TorNetworkManager {
     }
 
     throw lastError ?? new Error('Unknown Tor operation failure');
-  }
-
-  // Start circuit rotation
-  private startCircuitRotation(): void {
-    if (this.circuitRotationTimer) {
-      clearInterval(this.circuitRotationTimer);
-    }
-
-    if (this.config.circuitRotationInterval <= 0) {
-      this.circuitRotationTimer = null;
-      return;
-    }
-
-    const intervalMs = Math.max(1, this.config.circuitRotationInterval) * 60 * 1000;
-    const generation = this.lifecycleGeneration;
-    const timer = setInterval(async () => {
-      if (generation !== this.lifecycleGeneration) return;
-      await this.rotateCircuit();
-    }, intervalMs);
-
-    this.circuitRotationTimer = timer;
-  }
-
-  // Stop circuit rotation
-  private stopCircuitRotation(): void {
-    if (this.circuitRotationTimer) {
-      clearInterval(this.circuitRotationTimer);
-      this.circuitRotationTimer = null;
-    }
   }
 
   // Start connection monitoring
@@ -378,8 +340,6 @@ export class TorNetworkManager {
       clearTimeout(this.reinitializationTimer);
       this.reinitializationTimer = null;
     }
-
-    this.stopCircuitRotation();
   }
 
   // Check circuit health
@@ -529,7 +489,6 @@ export class TorNetworkManager {
 
         await this.syncBackendTorState();
         if (!isCurrent()) return false;
-        this.startCircuitRotation();
         this.startConnectionMonitoring();
 
         this.testTorConnection(generation).then(verified => {
@@ -596,44 +555,6 @@ export class TorNetworkManager {
       return result.success;
     } catch (_error) {
       console.error('[TOR] Connection test error:', _error);
-      return false;
-    }
-  }
-
-  // Rotate Tor circuit
-  async rotateCircuit(): Promise<boolean> {
-    const generation = this.lifecycleGeneration;
-    if (!this.isInitialized) {
-      console.error('[TOR] Cannot rotate circuit - Tor not initialized');
-      return false;
-    }
-
-    const now = Date.now();
-    if (now - this.lastManualRotation < TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS) {
-      return false;
-    }
-
-    try {
-      const result = await this.retryWithBackoff(
-        () => tauriTor.rotateCircuit(),
-        this.config.maxRetries,
-        () => generation === this.lifecycleGeneration
-      );
-      if (generation !== this.lifecycleGeneration) return false;
-
-      if (!result.success) {
-        console.error('[TOR] Circuit rotation failed');
-        return false;
-      }
-
-      this.stats.circuitCount += 1;
-      this.stats.lastCircuitRotation = now;
-      this.lastManualRotation = now;
-      this.notifyStatsCallbacks();
-
-      return true;
-    } catch (_error) {
-      console.error('[TOR] Circuit rotation error:', _error);
       return false;
     }
   }
@@ -724,9 +645,6 @@ export class TorNetworkManager {
     if (newConfig.host !== undefined && typeof newConfig.host === 'string') {
       validatedConfig.host = newConfig.host;
     }
-    if (newConfig.circuitRotationInterval !== undefined && Number.isInteger(newConfig.circuitRotationInterval) && newConfig.circuitRotationInterval >= 0) {
-      validatedConfig.circuitRotationInterval = newConfig.circuitRotationInterval;
-    }
     if (newConfig.maxRetries !== undefined && Number.isInteger(newConfig.maxRetries) && newConfig.maxRetries >= 0) {
       validatedConfig.maxRetries = newConfig.maxRetries;
     }
@@ -735,10 +653,6 @@ export class TorNetworkManager {
     }
 
     this.config = { ...this.config, ...validatedConfig };
-
-    if (this.isInitialized && validatedConfig.circuitRotationInterval !== undefined) {
-      this.startCircuitRotation();
-    }
   }
 
   // Shutdown Tor network
@@ -751,7 +665,6 @@ export class TorNetworkManager {
     this.markDisconnected();
     await this.syncBackendTorState();
 
-    this.lastManualRotation = 0;
     this.monitorBackoffMs = 0;
   }
 

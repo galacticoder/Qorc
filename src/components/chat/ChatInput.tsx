@@ -3,6 +3,7 @@ import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { Message } from "./messaging/types";
 import { useFileSender } from "./ChatInput/useFileSender";
+import type { FileSenderController } from "./ChatInput/useFileSender";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
@@ -32,11 +33,13 @@ interface ChatInputProps {
   selectedConversation?: string;
   getDisplayUsername?: (username: string) => Promise<string>;
   disabled?: boolean;
+  disabledPlaceholder?: string;
   getKeysOnDemand?: () => Promise<HybridKeys | null>;
   getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
   findUser?: (handle: string) => Promise<any>;
   secureDB?: any;
   ensurePeerSession?: (peerUsername: string) => Promise<void>;
+  fileSenderOverride?: FileSenderController;
 }
 
 const safeReplyDisplayName = (value: string): string => {
@@ -58,11 +61,13 @@ export function ChatInput({
   selectedConversation,
   getDisplayUsername,
   disabled = false,
+  disabledPlaceholder,
   getKeysOnDemand,
   getPeerHybridKeys,
   findUser,
   secureDB,
   ensurePeerSession,
+  fileSenderOverride,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -72,7 +77,7 @@ export function ChatInput({
   const messageInputRef = useRef<HTMLInputElement>(null);
   const editingMessageIdRef = useRef<string | null>(null);
 
-  const { sendFile, progress, isSendingFile, fileSendPhase, fileName, cancelCurrent } = useFileSender(
+  const networkFileSender = useFileSender(
     currentUsername,
     selectedConversation,
     users,
@@ -82,6 +87,14 @@ export function ChatInput({
     secureDB,
     ensurePeerSession,
   );
+  const {
+    sendFile,
+    progress,
+    isSendingFile,
+    fileSendPhase,
+    fileName,
+    cancelCurrent,
+  } = fileSenderOverride ?? networkFileSender;
 
   useEffect(() => {
     if (!editingMessage) {
@@ -353,18 +366,18 @@ export function ChatInput({
             {/* Message Input */}
             <input
               ref={messageInputRef}
-              placeholder={editingMessage
+              placeholder={disabledPlaceholder || (editingMessage
                 ? "Editing message..."
                 : replyTo
                   ? `Replying to ${replyDisplaySender || 'User'}...`
-                  : "Message..."}
+                  : "Message...")}
               type="text"
               id="messageInput"
-              value={message}
+              value={disabledPlaceholder ? '' : message}
               onChange={handleMessageChange}
               onKeyDown={handleKeyDown}
               disabled={disabled}
-              className="qor-message-input"
+              className={`qor-message-input${disabledPlaceholder ? ' is-blocked-placeholder' : ''}`}
             />
 
             {/* Send Button */}

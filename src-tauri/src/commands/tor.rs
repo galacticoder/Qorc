@@ -6,9 +6,7 @@ use tauri::State;
 use tracing::warn;
 
 use crate::state::AppState;
-use crate::tor::{
-    CircuitRotationResult, TorConfig, TorInfo, TorStartResult, TorStatus, TorVerifyResult,
-};
+use crate::tor::{TorConfig, TorInfo, TorStartResult, TorStatus, TorVerifyResult};
 
 /// Configure Tor
 #[tauri::command]
@@ -112,17 +110,4 @@ pub async fn tor_verify_connection(state: State<'_, AppState>) -> Result<TorVeri
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
 
     tor.verify_connection().await.map_err(|e| e.safe_message())
-}
-
-/// Rotate Tor circuit
-#[tauri::command]
-pub async fn tor_rotate_circuit(
-    state: State<'_, AppState>,
-) -> Result<CircuitRotationResult, String> {
-    let tor = state
-        .inner()
-        .tor_manager()
-        .ok_or_else(|| "Tor manager not initialized".to_string())?;
-
-    tor.rotate_circuit().await.map_err(|e| e.safe_message())
 }

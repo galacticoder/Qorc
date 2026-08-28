@@ -71,22 +71,6 @@ export function SignInForm({
       </div>
 
       <div className="login-simple-field">
-        <label htmlFor="passphrase">Encryption passphrase</label>
-        <input
-          className="login-simple-input"
-          id="passphrase"
-          type="password"
-          placeholder="Enter your encryption passphrase"
-          value={passphrase}
-          onChange={(e) => setPassphrase(e.target.value)}
-          disabled={disabled || isSubmitting}
-          required
-          autoComplete="current-password"
-          maxLength={PASSPHRASE_MAX_LENGTH}
-        />
-      </div>
-
-      <div className="login-simple-field">
         <label htmlFor="password">Password</label>
         <input
           className="login-simple-input"
@@ -99,6 +83,22 @@ export function SignInForm({
           required
           autoComplete="current-password"
           maxLength={PASSWORD_MAX_LENGTH}
+        />
+      </div>
+
+      <div className="login-simple-field">
+        <label htmlFor="passphrase">Encryption passphrase</label>
+        <input
+          className="login-simple-input"
+          id="passphrase"
+          type="password"
+          placeholder="Enter your encryption passphrase"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          disabled={disabled || isSubmitting}
+          required
+          autoComplete="current-password"
+          maxLength={PASSPHRASE_MAX_LENGTH}
         />
       </div>
 

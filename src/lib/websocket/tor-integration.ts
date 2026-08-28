@@ -7,9 +7,6 @@ import { torNetworkManager } from '../transport/tor-network';
 export class WebSocketTorIntegration {
   private torReady = false;
   private torListener?: (connected: boolean) => void;
-  private lastTorCircuitRotation: number | null = null;
-  private torCircuitListener?: () => void;
-  private torCircuitInterval?: ReturnType<typeof setInterval>;
 
   constructor(private onTorConnectionChange: (connected: boolean) => void) {}
 
@@ -63,35 +60,6 @@ export class WebSocketTorIntegration {
       this.torReady = false;
       return false;
     }
-  }
-
-  // Attach Tor circuit rotation listener
-  attachCircuitListener(onCircuitRotation: () => void): void {
-    if (!torNetworkManager.isSupported() || this.torCircuitListener) {
-      return;
-    }
-
-    const checkCircuitRotation = () => {
-      try {
-        const stats = torNetworkManager.getStats?.();
-        if (stats && stats.lastCircuitRotation) {
-          if (this.lastTorCircuitRotation &&
-            stats.lastCircuitRotation > this.lastTorCircuitRotation) {
-            this.handleCircuitRotation();
-            onCircuitRotation();
-          }
-          this.lastTorCircuitRotation = stats.lastCircuitRotation;
-        }
-      } catch { }
-    };
-
-    this.torCircuitListener = checkCircuitRotation;
-    this.torCircuitInterval = setInterval(checkCircuitRotation, 10000);
-  }
-
-  // Handle Tor circuit rotation
-  private handleCircuitRotation(): void {
-    this.lastTorCircuitRotation = Date.now();
   }
 
   // Adapt timeouts for Tor network conditions
@@ -176,13 +144,6 @@ export class WebSocketTorIntegration {
 
   // Cleanup resources
   cleanup(): void {
-    if (this.torCircuitInterval) {
-      clearInterval(this.torCircuitInterval);
-      this.torCircuitInterval = undefined;
-    }
-    this.torCircuitListener = undefined;
-    this.lastTorCircuitRotation = null;
-
     if (this.torListener) {
       try {
         torNetworkManager.offConnectionChange(this.torListener);

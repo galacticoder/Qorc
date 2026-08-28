@@ -1345,7 +1345,6 @@ export class WebSocketConnection {
     this.queue.scheduleFlush();
     this.startConnectivityWatchdog();
     this.heartbeat.start();
-    this.torIntegration.attachCircuitListener(() => { if (this.lifecycleState === 'connected') this.heartbeat.reset(); });
   }
 
   // Redeem one unlinkable authorization token on the current socket.

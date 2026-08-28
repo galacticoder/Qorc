@@ -115,11 +115,12 @@ export function useCallEventHandlers({
         });
       }
       if (historyOnly) return;
-      if (!['incoming', 'started', 'missed', 'declined'].includes(eventType)) return;
+      if (!['incoming', 'started', 'ended', 'missed'].includes(eventType)) return;
 
-      const isMissed = eventType === 'missed' || eventType === 'declined';
+      const isMissed = eventType === 'missed';
       const label = eventType === 'incoming' ? `Incoming ${isVideo ? 'video' : 'audio'} call`
         : eventType === 'started' ? `Outgoing ${isVideo ? 'video' : 'audio'} call`
+          : eventType === 'ended' ? `${isVideo ? 'Video' : 'Audio'} call ended`
           : isOutgoing ? `${displayPeerName} missed your call`
             : `You missed ${displayPeerName}'s call`;
 
@@ -134,7 +135,7 @@ export function useCallEventHandlers({
           actionsType: actions ? 'callback' : undefined,
           isError: isMissed,
           callType: isVideo ? 'video' : 'audio',
-          showCallIcon: eventType === 'started' || eventType === 'incoming',
+          showCallIcon: eventType === 'started' || eventType === 'incoming' || eventType === 'ended',
         }),
         sender: peer,
         recipient: currentUsername,

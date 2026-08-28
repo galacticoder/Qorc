@@ -8,56 +8,65 @@ interface BannerMessagePreviewProps {
   readonly fontSize?: number;
   readonly color?: string;
   readonly className?: string;
+  readonly maxLines?: number;
 }
 
 export function BannerMessagePreview({
   messageId,
   contentVersion,
-  maxWidth = 360,
+  maxWidth = 800,
   fontSize = 11,
   color = 'var(--qor-reply-banner-preview-text)',
   className,
+  maxLines = 1,
 }: BannerMessagePreviewProps) {
   const previewRef = useRef<HTMLDivElement>(null);
-  const [truncated, setTruncated] = useState(false);
+  const resizeTimerRef = useRef<number | null>(null);
+  const [renderWidth, setRenderWidth] = useState(maxWidth);
 
   const measure = useCallback(() => {
     const host = previewRef.current;
-    const preview = host?.querySelector<HTMLElement>('.secure-canvas-text');
-    if (!host || !preview) {
-      setTruncated(false);
-      return;
-    }
-    const bounds = preview.getBoundingClientRect();
-    setTruncated(bounds.width > host.clientWidth + 1 || bounds.height > host.clientHeight + 1);
-  }, []);
+    if (!host || host.clientWidth < 20) return;
+    const nextWidth = Math.max(20, Math.min(maxWidth, Math.floor(host.clientWidth)));
+    setRenderWidth((currentWidth) => currentWidth === nextWidth ? currentWidth : nextWidth);
+  }, [maxWidth]);
+
+  const scheduleMeasure = useCallback(() => {
+    if (resizeTimerRef.current !== null) window.clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = null;
+      measure();
+    }, 100);
+  }, [measure]);
 
   useLayoutEffect(() => {
     const host = previewRef.current;
     if (!host || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(measure);
+    const observer = new ResizeObserver(scheduleMeasure);
     observer.observe(host);
-    const preview = host.querySelector<HTMLElement>('.secure-canvas-text');
-    if (preview) observer.observe(preview);
-    const frame = window.requestAnimationFrame(measure);
+    measure();
     return () => {
-      window.cancelAnimationFrame(frame);
+      if (resizeTimerRef.current !== null) {
+        window.clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = null;
+      }
       observer.disconnect();
     };
-  }, [measure, messageId, contentVersion]);
+  }, [contentVersion, measure, messageId, scheduleMeasure]);
 
   return (
     <div
       ref={previewRef}
-      className={`qor-reply-banner-secure-preview${truncated ? ' is-truncated' : ''}${className ? ` ${className}` : ''}`}
+      className={`qor-reply-banner-secure-preview${className ? ` ${className}` : ''}`}
     >
       <SecureCanvasText
         messageId={messageId}
         contentVersion={contentVersion}
-        maxWidth={maxWidth}
+        maxWidth={renderWidth}
         fontSize={fontSize}
         color={color}
-        onRendered={measure}
+        singleLine={maxLines === 1}
+        maxLines={maxLines}
       />
     </div>
   );

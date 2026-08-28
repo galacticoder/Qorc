@@ -16,6 +16,35 @@ import {
   createConversation
 } from "./conversations";
 
+const conversationDiscoveryAbortError = (): Error => {
+  const error = new Error('Conversation discovery was cancelled');
+  error.name = 'AbortError';
+  return error;
+};
+
+const waitForConversationDiscovery = <T,>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> => {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(conversationDiscoveryAbortError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', handleAbort);
+      callback();
+    };
+    const handleAbort = () => finish(() => reject(conversationDiscoveryAbortError()));
+    signal.addEventListener('abort', handleAbort, { once: true });
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+};
+
 export const useConversations = (
   currentUsername: string,
   users: User[],
@@ -60,7 +89,11 @@ export const useConversations = (
     setConversationListLoaded(false);
   }, [secureDB]);
 
-  const addConversation = useCallback(async (username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
+  const addConversation = useCallback(async (
+    username: string,
+    autoSelect: boolean = true,
+    signal?: AbortSignal,
+  ): Promise<Conversation | null> => {
     const owner = currentUsername;
     const generation = accountGenerationRef.current;
     const db = secureDB;
@@ -73,6 +106,7 @@ export const useConversations = (
     if (!db || !isCurrent()) {
       throw new Error('[useConversations] SecureDB is required, cannot add conversation');
     }
+    if (signal?.aborted) throw conversationDiscoveryAbortError();
     const trimmed = username?.trim();
     if (!trimmed) {
       throw new Error('Username cannot be empty');
@@ -100,7 +134,7 @@ export const useConversations = (
 
     const pendingMap = pendingAddsRef.current;
     if (pendingMap.has(discoveryId)) {
-      return pendingMap.get(discoveryId)!;
+      return waitForConversationDiscovery(pendingMap.get(discoveryId)!, signal);
     }
 
     const now = Date.now();
@@ -128,7 +162,8 @@ export const useConversations = (
         if (!shouldAttemptDiscovery(conversationUsername)) {
           throw new Error('User not eligible for discovery');
         }
-        const material = await findUser(conversationUsername);
+        const material = await waitForConversationDiscovery(findUser(conversationUsername), signal);
+        if (signal?.aborted) throw conversationDiscoveryAbortError();
         if (!isCurrent()) throw new Error('Account changed during conversation discovery');
         if (!material) throw new Error('User not found in discovery billboard');
 

@@ -35,7 +35,7 @@ fn spawn_tor_restart_if_dead(app: &AppState) {
     {
         return;
     }
-    warn!("[TOR] managed Tor process is not running; starting it again");
+    warn!("[TOR] managed Tor process not running, starting");
     tauri::async_runtime::spawn(async move {
         match tor.start().await {
             Ok(_) => info!("[TOR] supervised restart completed"),

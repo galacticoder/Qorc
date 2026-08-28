@@ -2,8 +2,8 @@
 
 Qor-Chat keeps account names and passwords on the client. The server stores a
 fixed-size set of opaque credential records and verifies a login across the full
-set. Successful connections move to a fresh Tor circuit and authorize delivery
-with single-use anonymous tokens. Separately, a private append-only transparency
+set. Successful connections authorize delivery with single-use anonymous tokens.
+Separately, a private append-only transparency
 map binds the human handle's OPRF-derived label to the account identity root.
 
 This design reduces account and reconnect linkability. It does not make the
@@ -25,7 +25,6 @@ current rounded size of the authentication set.
   X25519 handshake keys but no transport signing identity.
 - TLS 1.3 client/server key exchange restricted to the hybrid
   `X25519MLKEM768` group, with resumption and early data disabled.
-- Tor circuit rotation at the linked/unlinked authentication boundary.
 - SHA3-512 Merkle map/log proofs and ML-DSA-87-signed transparency heads for the
   account root, with a seven-day recovery activation delay. The recovery signing
   seed is random persistent account material wrapped by the native local vault,

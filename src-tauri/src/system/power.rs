@@ -78,7 +78,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
                 "--inhibit",
                 "idle:suspend",
                 "--reason",
-                "Qor-Chat call in progress",
+                "Qor call in progress",
                 sleep,
                 "infinity",
             ])
@@ -99,7 +99,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
             .args([
                 "--what=idle:sleep",
                 "--mode=block",
-                "--why=Qor-Chat call in progress",
+                "--why=Qor call in progress",
                 sleep,
                 "infinity",
             ])

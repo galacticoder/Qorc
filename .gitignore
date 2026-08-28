@@ -100,6 +100,7 @@ server/config/.haproxy-stats-creds.pqc
 scripts/config
 dump.rdb
 theme-playground.html
+/test-chat/
 
 logs/
 scripts/generate-tauri-icons.py

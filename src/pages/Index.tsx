@@ -69,6 +69,10 @@ import { keyTransparencyClient } from "../lib/key-transparency/client";
 import { getInstanceLocalStorageItem, setInstanceLocalStorageItem } from "../lib/runtime/instance-storage";
 import { boundMessageState, releaseUnretainedVaultEntries } from "../lib/utils/message-state-limits";
 import { hasResumeToken } from "../lib/signals/resume-tokens";
+import {
+  LOCAL_TEST_CHAT_USERNAME,
+  useLocalTestChatFixture,
+} from "../../test-chat/useLocalTestChatFixture";
 
 const COLD_SEND_P2P_DIAL_BUDGET_MS = 3000;
 
@@ -157,6 +161,16 @@ const ChatApp: React.FC = () => {
 
   const Database = useSecureDB({
     Authentication,
+    setMessages,
+  });
+
+  const localTestChat = useLocalTestChatFixture({
+    ready: Authentication.isLoggedIn
+      && Authentication.accountAuthenticated
+      && Authentication.vaultReady
+      && Database.dbInitialized
+      && Database.initialDataLoaded,
+    currentUsername: Authentication.loginUsernameRef.current || '',
     setMessages,
   });
 
@@ -405,7 +419,11 @@ const ChatApp: React.FC = () => {
   }, [Database.discardPreloadedConversationMessages, removeConversation]);
 
   useEffect(() => {
-    if (selectedConversation && typeof messageSender?.prefetchSessionForPeer === 'function') {
+    if (
+      selectedConversation &&
+      selectedConversation !== LOCAL_TEST_CHAT_USERNAME &&
+      typeof messageSender?.prefetchSessionForPeer === 'function'
+    ) {
       try { messageSender.prefetchSessionForPeer(selectedConversation); } catch { }
     }
   }, [selectedConversation, messageSender.prefetchSessionForPeer]);
@@ -479,6 +497,13 @@ const ChatApp: React.FC = () => {
     if (!call) return;
     callingHook.declineCall(call.id);
   }, [callingHook.currentCall?.id, callingHook.declineCall]);
+  const handleOpenCallLogConversation = useCallback((username: string) => {
+    handleSelectConversation(username);
+    setSidebarActiveTab('chats');
+  }, [handleSelectConversation]);
+  const handleStartCallFromLog = useCallback((username: string, type: 'audio' | 'video') => {
+    void callingHook.startCall(username, type);
+  }, [callingHook.startCall]);
 
   // Update P2P sender whenever service becomes ready
   useEffect(() => {
@@ -669,10 +694,15 @@ const ChatApp: React.FC = () => {
   }, [Authentication]);
 
   const handleRetryConnection = useCallback(async () => {
+    const retryingFromServerSetup = showServerSetup || !selectedServerUrl;
     try {
       await startupConnection.retry();
+      if (retryingFromServerSetup && startupConnection.getState().phase === 'ready') {
+        const connectedServerUrl = startupConnection.getState().serverUrl || selectedServerUrl;
+        if (connectedServerUrl) await handleServerSelected(connectedServerUrl);
+      }
     } catch { }
-  }, []);
+  }, [handleServerSelected, selectedServerUrl, showServerSetup]);
 
   const handleKeepCurrentServer = useCallback(() => {
     setShowServerSetup(false);
@@ -756,6 +786,15 @@ const ChatApp: React.FC = () => {
     return <FullscreenSpinner />;
   }
 
+  const connectionIssue = startup.phase === 'failed' ? (
+    <ConnectionIssueSheet
+      error={startup.error}
+      target={startup.failureTarget ?? 'server'}
+      onRetry={handleRetryConnection}
+      onChangeServer={handleChangeServer}
+    />
+  ) : null;
+
   if (showServerSetup || !selectedServerUrl) {
     return (
       <div className="min-h-screen bg-white dark:bg-[hsl(var(--background))]">
@@ -764,18 +803,11 @@ const ChatApp: React.FC = () => {
           onCancel={selectedServerUrl ? handleKeepCurrentServer : undefined}
           initialServerUrl={selectedServerUrl}
         />
+        {connectionIssue}
         <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       </div>
     );
   }
-
-  const connectionIssue = startup.phase === 'failed' ? (
-    <ConnectionIssueSheet
-      error={startup.error}
-      onRetry={handleRetryConnection}
-      onChangeServer={handleChangeServer}
-    />
-  ) : null;
 
   const isFullyAuthenticated = Authentication.isLoggedIn
     && Authentication.accountAuthenticated
@@ -905,8 +937,8 @@ const ChatApp: React.FC = () => {
                     conversations={conversations}
                     selectedConversation={selectedConversation || undefined}
                     onSelectConversation={handleSelectConversation}
-                    onAddConversation={async (username) => {
-                      await addConversation(username);
+                    onAddConversation={async (username, signal) => {
+                      await addConversation(username, true, signal);
                       setShowNewChatInput(false);
                     }}
                     getDisplayUsername={stableGetDisplayUsername}
@@ -940,7 +972,13 @@ const ChatApp: React.FC = () => {
                       markMessageAsRead={markMessageAsRead}
                       getSmartReceiptStatus={getSmartReceiptStatus}
                       secureDB={Database.secureDBRef.current}
-                      onSendMessage={onSendMessage}
+                      onSendMessage={selectedConversation === localTestChat.username
+                        ? localTestChat.onSendMessage
+                        : onSendMessage}
+                      fileSenderOverride={selectedConversation === localTestChat.username
+                        ? localTestChat.fileSender
+                        : undefined}
+                      onToggleBlock={handleToggleBlock}
                       isEncrypted={true}
                       users={Database.users}
                       selectedConversation={selectedConversation}
@@ -956,7 +994,12 @@ const ChatApp: React.FC = () => {
 
           <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
             {sidebarActiveTab === 'calls' && CallLogsPanel && (
-              <CallLogsPanel getDisplayUsername={stableGetDisplayUsername} />
+              <CallLogsPanel
+                getDisplayUsername={stableGetDisplayUsername}
+                onOpenConversation={handleOpenCallLogConversation}
+                onStartCall={handleStartCallFromLog}
+                callsDisabled={Boolean(callingHook.currentCall)}
+              />
             )}
           </div>
 

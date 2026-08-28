@@ -160,6 +160,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   // Handle emoji selection
   const handlePickEmoji = useCallback((emoji: string) => {
+    if (!onReact) return;
     void recordEmojiUsage(emoji, secureDB);
     if (currentUsername && message.reactions) {
       for (const [e, users] of Object.entries(message.reactions)) {
@@ -170,6 +171,11 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     }
     onReact?.(message, emoji);
   }, [currentUsername, message, onReact, secureDB]);
+
+  useEffect(() => {
+    if (onReact || !pickerOpen) return;
+    closePicker();
+  }, [closePicker, onReact, pickerOpen]);
 
   // Handle message copy
   const handleCopyMessage = useCallback(() => {
@@ -221,6 +227,11 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     e.preventDefault();
     e.stopPropagation();
 
+    if (contextMenu) {
+      setContextMenu(null);
+      return;
+    }
+
     const anchor = bubbleRef.current ?? e.currentTarget;
     const rect = anchor.getBoundingClientRect();
     setContextMenu({
@@ -231,11 +242,47 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         left: rect.left,
       },
     });
-  }, []);
+  }, [contextMenu]);
 
   const isDownloadable = useMemo(() => {
     return !!(isFileMessageType && secureDB && message.id);
   }, [isFileMessageType, message.id, secureDB]);
+
+  const reactionEntries = useMemo(() => (
+    Object.entries(message.reactions || {}).filter(([, users]) => users.length > 0)
+  ), [message.reactions]);
+
+  const messageReactions = reactionEntries.length > 0 ? (
+    <div
+      className={cn(
+        "qor-message-reactions",
+        safeIsCurrentUser ? "is-mine" : "is-received",
+      )}
+      role="group"
+      aria-label="Message reactions"
+    >
+      {reactionEntries.map(([emoji, users], index) => {
+        const hasReacted = currentUsername ? users.includes(currentUsername) : false;
+        return (
+          <button
+            key={emoji}
+            type="button"
+            className="qor-message-reaction"
+            style={{ '--qor-reaction-stack': reactionEntries.length - index } as React.CSSProperties}
+            onClick={() => onReact?.(message, emoji)}
+            disabled={!onReact}
+            aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
+            aria-pressed={hasReacted}
+          >
+            <span className="qor-message-reaction-emoji" aria-hidden="true">{emoji}</span>
+            {users.length > 1 && (
+              <span className="qor-message-reaction-count" aria-hidden="true">{users.length}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
 
   if (isSystemMessage) {
     return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} callType={systemCallType} showCallIcon={systemShowCallIcon} timestamp={systemCallType ? timestampDisplay : undefined} />;
@@ -260,7 +307,9 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
       )}
       style={{
-        marginBottom: isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'
+        marginBottom: reactionEntries.length > 0
+          ? `calc(${isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'} + 10px)`
+          : isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'
       }}
     >
       <div className="flex-shrink-0 w-10">
@@ -336,7 +385,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                     <BannerMessagePreview
                       messageId={message.replyTo.secureContentId || message.replyTo.id}
                       contentVersion={message.replyTo.contentVersion}
-                      maxWidth={250}
+                      maxWidth={800}
+                      maxLines={2}
                     />
                   )}
                 </div>
@@ -368,6 +418,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                     loadFile={loadFile}
                   />
                 )}
+                {messageReactions}
               </div>
             ) : (
                 <div
@@ -380,7 +431,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                   <MessageLinkPreviews
                     messageId={message.secureContentId || message.id}
                     contentVersion={message.controlState?.editOperationId}
-                    enabled={isContentRendered}
                     secureDB={secureDB}
                     onContextMenu={handleContextMenu}
                   />
@@ -399,12 +449,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                       contentVersion={message.controlState?.editOperationId}
                       maxWidth={350}
                       fontSize={14}
-                      color="var(--color-on-accent)"
+                      color={safeIsCurrentUser ? 'var(--color-on-accent)' : 'var(--chat-bubble-received-text)'}
                       isCurrentUser={safeIsCurrentUser}
                       onRendered={() => setIsContentRendered(true)}
                       onContextMenu={handleContextMenu}
                     />
                   </div>
+                  {messageReactions}
                 </div>
               )}
           </div>
@@ -428,39 +479,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           )}
         </div>
 
-        {message.reactions && Object.keys(message.reactions).length > 0 && (
-          <div
-            className="flex flex-wrap gap-1 mt-1"
-            role="group"
-            aria-label="Message reactions"
-            style={{ userSelect: 'none' }}
-          >
-            {Object.entries(message.reactions).map(([emoji, users]) => {
-              const hasReacted = currentUsername ? users.includes(currentUsername) : false;
-              return (
-                <button
-                  key={emoji}
-                  className={cn(
-                    "px-2 py-0.5 rounded-full text-xs border",
-                    hasReacted && "font-semibold"
-                  )}
-                  style={{
-                    backgroundColor: hasReacted ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                    borderColor: hasReacted ? 'var(--color-accent-primary)' : 'rgba(255,255,255,0.22)',
-                    color: hasReacted ? 'var(--color-on-accent)' : 'var(--color-text-primary)',
-                    userSelect: 'none'
-                  }}
-                  onClick={() => onReact?.(message, emoji)}
-                  aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
-                >
-                  <span className="mr-1" aria-hidden="true">{emoji}</span>
-                  <span>{users.length}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-
         <MessageReceipt
           receipt={effectiveReceipt}
           isCurrentUser={safeIsCurrentUser}
@@ -482,16 +500,17 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
       {contextMenu && (
         <MessageContextMenu
           anchorRect={contextMenu.anchorRect}
+          triggerId={messageTriggerId}
           isCurrentUser={safeIsCurrentUser}
           onClose={() => setContextMenu(null)}
           onCopy={!isFileMessageType ? handleCopyMessage : undefined}
-          onEdit={!isFileMessageType && safeIsCurrentUser ? handleEdit : undefined}
-          onReply={handleReply}
+          onEdit={!isFileMessageType && safeIsCurrentUser && onEdit ? handleEdit : undefined}
+          onReply={onReply ? handleReply : undefined}
           onDelete={safeIsCurrentUser ? handleDelete : undefined}
-          onReact={(origin) => openPicker(messageTriggerId, origin)}
-          onReactionSelect={handlePickEmoji}
+          onReact={onReact ? (origin) => openPicker(messageTriggerId, origin) : undefined}
+          onReactionSelect={onReact ? handlePickEmoji : undefined}
           onDownload={isDownloadable ? handleDownload : undefined}
-          canEdit={!isFileMessageType && safeIsCurrentUser}
+          canEdit={!isFileMessageType && safeIsCurrentUser && !!onEdit}
           canDelete={safeIsCurrentUser}
           isFile={isFileMessageType}
         />

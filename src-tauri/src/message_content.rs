@@ -206,6 +206,8 @@ pub fn render_private_message(
     max_width: u32,
     font_size: f32,
     color: &str,
+    single_line: bool,
+    max_lines: u32,
 ) -> QorResult<RenderedMessageContent> {
     use base64::Engine as _;
     use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
@@ -214,6 +216,7 @@ pub fn render_private_message(
     if !(20..=MAX_RENDER_WIDTH).contains(&max_width)
         || !font_size.is_finite()
         || !(10.0..=32.0).contains(&font_size)
+        || max_lines > 8
     {
         return Err(QorError::InvalidArgument(
             "Invalid native message render dimensions".to_string(),
@@ -223,12 +226,96 @@ pub fn render_private_message(
     let line_height = (font_size * 1.4).ceil();
     let mut font_system = FontSystem::new();
     let mut swash_cache = SwashCache::new();
+    let measure_single_line = |value: &str, font_system: &mut FontSystem| {
+        let mut measurement = Buffer::new(font_system, Metrics::new(font_size, line_height));
+        {
+            let mut borrowed = measurement.borrow_with(font_system);
+            borrowed.set_wrap(Wrap::None);
+            borrowed.set_size(None, None);
+            borrowed.set_text(value, &Attrs::new(), Shaping::Advanced);
+            borrowed.shape_until_scroll(false);
+        }
+        measurement
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0f32, f32::max)
+    };
+    let render_text = if single_line {
+        let normalized = Zeroizing::new(content.split_whitespace().collect::<Vec<_>>().join(" "));
+        let available_width = (max_width - 4) as f32;
+        if measure_single_line(normalized.as_str(), &mut font_system) <= available_width {
+            normalized
+        } else {
+            let mut boundaries = normalized
+                .char_indices()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            boundaries.push(normalized.len());
+            let mut low = 0usize;
+            let mut high = boundaries.len();
+            while low + 1 < high {
+                let middle = low + (high - low) / 2;
+                let prefix = normalized[..boundaries[middle]].trim_end();
+                let candidate = Zeroizing::new(format!("{prefix}..."));
+                if measure_single_line(candidate.as_str(), &mut font_system) <= available_width {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let prefix = normalized[..boundaries[low]].trim_end();
+            Zeroizing::new(format!("{prefix}..."))
+        }
+    } else if max_lines > 0 {
+        let available_width = (max_width - 4) as f32;
+        let line_limit = max_lines as usize;
+        let fits = |value: &str, font_system: &mut FontSystem| {
+            let mut measurement = Buffer::new(font_system, Metrics::new(font_size, line_height));
+            {
+                let mut borrowed = measurement.borrow_with(font_system);
+                borrowed.set_wrap(Wrap::WordOrGlyph);
+                borrowed.set_size(Some(available_width), None);
+                borrowed.set_text(value, &Attrs::new(), Shaping::Advanced);
+                borrowed.shape_until_scroll(false);
+            }
+            measurement.layout_runs().take(line_limit + 1).count() <= line_limit
+        };
+        if fits(content, &mut font_system) {
+            Zeroizing::new(content.to_owned())
+        } else {
+            let mut boundaries = content
+                .char_indices()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            boundaries.push(content.len());
+            let mut low = 0usize;
+            let mut high = boundaries.len();
+            while low + 1 < high {
+                let middle = low + (high - low) / 2;
+                let prefix = content[..boundaries[middle]].trim_end();
+                let candidate = Zeroizing::new(format!("{prefix}..."));
+                if fits(candidate.as_str(), &mut font_system) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let prefix = content[..boundaries[low]].trim_end();
+            Zeroizing::new(format!("{prefix}..."))
+        }
+    } else {
+        Zeroizing::new(content.to_owned())
+    };
     let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
     {
         let mut borrowed = buffer.borrow_with(&mut font_system);
-        borrowed.set_wrap(Wrap::WordOrGlyph);
+        borrowed.set_wrap(if single_line {
+            Wrap::None
+        } else {
+            Wrap::WordOrGlyph
+        });
         borrowed.set_size(Some((max_width - 4) as f32), None);
-        borrowed.set_text(content, &Attrs::new(), Shaping::Advanced);
+        borrowed.set_text(render_text.as_str(), &Attrs::new(), Shaping::Advanced);
         borrowed.shape_until_scroll(false);
     }
     let mut measured_width = 20.0f32;
@@ -786,9 +873,15 @@ mod tests {
     #[test]
     fn native_renderer_emits_pixels_without_plaintext_metadata() {
         use base64::Engine as _;
-        let rendered =
-            render_private_message("unique-secret-render-sentinel", 320, 14.0, "#ffffff")
-                .expect("message renders");
+        let rendered = render_private_message(
+            "unique-secret-render-sentinel",
+            320,
+            14.0,
+            "#ffffff",
+            false,
+            0,
+        )
+        .expect("message renders");
         let png = base64::engine::general_purpose::STANDARD
             .decode(rendered.png_base64)
             .expect("PNG is base64");

@@ -28,15 +28,12 @@ export interface TorConfig {
   socksPort: number;
   controlPort: number;
   host: string;
-  circuitRotationInterval: number;
   maxRetries: number;
   connectionTimeout: number;
 }
 
 export interface TorConnectionStats {
   isConnected: boolean;
-  circuitCount: number;
-  lastCircuitRotation: number;
   connectionAttempts: number;
   failedConnections: number;
   bytesTransmitted: number;
