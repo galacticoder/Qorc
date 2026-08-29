@@ -12,9 +12,18 @@ const tauriConfig = JSON.parse(fs.readFileSync(path.join(tauriDir, 'tauri.conf.j
 const productName = tauriConfig.productName;
 const version = tauriConfig.version;
 const archNames = {
-    x64: { appImage: 'x86_64', package: 'amd64' },
-    arm64: { appImage: 'aarch64', package: 'aarch64' },
-    ia32: { appImage: 'i686', package: 'i386' }
+    x64: {
+        appImage: 'x86_64',
+        package: 'amd64',
+        target: 'linux-x86_64',
+        libraryTriplet: 'x86_64-linux-gnu'
+    },
+    arm64: {
+        appImage: 'aarch64',
+        package: 'aarch64',
+        target: 'linux-aarch64',
+        libraryTriplet: 'aarch64-linux-gnu'
+    }
 };
 const arch = archNames[process.arch];
 
@@ -58,7 +67,7 @@ const appDirGStreamerLauncher = path.join(appDir, 'usr', 'bin', 'qor-gst-launch-
 const appDirGStreamerPluginScanner = path.join(appDir, 'usr', 'bin', 'qor-gst-plugin-scanner');
 const appDirSpaDir = path.join(appDir, 'usr', 'lib', 'spa-0.2');
 const webKitSourceDir = path.join(tauriDir, 'resources', 'webkitgtk');
-const webKitSourceLibDir = path.join(webKitSourceDir, 'usr', 'lib', 'x86_64-linux-gnu');
+const webKitSourceLibDir = path.join(webKitSourceDir, 'usr', 'lib', arch.libraryTriplet);
 const appDirLibDir = path.join(appDir, 'usr', 'lib');
 const webKitAppMetadataPath = path.join(appDirLibDir, productName, 'webkitgtk-runtime.json');
 const legacyPipeWireAppDir = path.join(appDirLibDir, productName, 'pipewire');
@@ -77,6 +86,8 @@ const webKitHelpers = [
 const cacheMetadataPath = path.join(repoRoot, '.cache', `appimage-${process.arch}.json`);
 const runtimeCachePath = path.join(repoRoot, '.cache', `appimage-runtime-${arch.appImage}`);
 const appImagePluginPath = path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-appimage.AppImage');
+const appImagePluginQemuPath = path.join(path.dirname(appImagePluginPath), '.qor-arm64-appimage-plugin');
+const legacyAppImagePluginQemuPath = `${appImagePluginPath}.qor-arm64-real`;
 const adoptCurrent = process.argv.includes('--adopt-current');
 
 function sha256File(filePath) {
@@ -283,9 +294,10 @@ function computeFingerprint() {
         path.join(repoRoot, 'scripts', 'stage-webkitgtk-runtime.cjs'),
         pluginsDir,
         webKitSourceDir,
-        path.join(os.homedir(), '.cache', 'tauri', 'AppRun-x86_64'),
-        path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-x86_64.AppImage'),
+        path.join(os.homedir(), '.cache', 'tauri', `AppRun-${arch.appImage}`),
+        path.join(os.homedir(), '.cache', 'tauri', `linuxdeploy-${arch.appImage}.AppImage`),
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-appimage.AppImage'),
+        appImagePluginQemuPath,
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-gstreamer.sh'),
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-gtk.sh')
     ];
@@ -326,7 +338,7 @@ function appDirIsComplete() {
     for (const library of webKitLibraries) {
         if (!fs.statSync(path.join(appDirLibDir, library), { throwIfNoEntry: false })?.isFile()) return false;
     }
-    const helperDir = path.join(appDirLibDir, 'x86_64-linux-gnu', 'webkit2gtk-4.1');
+    const helperDir = path.join(appDirLibDir, arch.libraryTriplet, 'webkit2gtk-4.1');
     for (const helper of webKitHelpers) {
         if (!fs.statSync(path.join(helperDir, helper), { throwIfNoEntry: false })?.isFile()) return false;
     }
@@ -387,13 +399,14 @@ function installSharedLibrary(libraryName) {
 function installWebKitGtkRuntime() {
     const metadataPath = path.join(webKitSourceDir, 'runtime-version.json');
     const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-    if (metadata.upstreamVersion !== webKitUpstreamVersion || metadata.target !== 'linux-x86_64') {
+    if (metadata.upstreamVersion !== webKitUpstreamVersion || metadata.target !== arch.target ||
+        metadata.libraryTriplet !== arch.libraryTriplet) {
         throw new Error('staged WebKitGTK runtime does not match the AppImage target');
     }
     fs.mkdirSync(appDirLibDir, { recursive: true });
     const installedLibraries = Object.fromEntries(webKitLibraries.map(library => [library, installSharedLibrary(library)]));
     const helperSourceDir = path.join(webKitSourceLibDir, 'webkit2gtk-4.1');
-    const helperAppDir = path.join(appDirLibDir, 'x86_64-linux-gnu', 'webkit2gtk-4.1');
+    const helperAppDir = path.join(appDirLibDir, arch.libraryTriplet, 'webkit2gtk-4.1');
     fs.rmSync(helperAppDir, { recursive: true, force: true });
     for (const helper of webKitHelpers) {
         const source = path.join(helperSourceDir, helper);
@@ -402,8 +415,8 @@ function installWebKitGtkRuntime() {
         fs.copyFileSync(source, destination);
         fs.chmodSync(destination, fs.statSync(source).mode & 0o777);
     }
-    const executablePath = '/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1';
-    const appImagePath = '././/lib/x86_64-linux-gnu/webkit2gtk-4.1';
+    const executablePath = `/usr/lib/${arch.libraryTriplet}/webkit2gtk-4.1`;
+    const appImagePath = `././/lib/${arch.libraryTriplet}/webkit2gtk-4.1`;
     const patchedOccurrences = replaceBytes(
         path.join(appDirLibDir, installedLibraries['libwebkit2gtk-4.1.so.0']),
         executablePath,
@@ -504,6 +517,43 @@ function installPipeWireRuntime() {
     }, null, 2)}\n`);
 }
 
+function normalizeAppDirSymlinks() {
+    const visit = directory => {
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+            const entryPath = path.join(directory, entry.name);
+            if (entry.isDirectory()) {
+                visit(entryPath);
+                continue;
+            }
+            if (!entry.isSymbolicLink()) continue;
+            const target = fs.readlinkSync(entryPath);
+            if (!path.isAbsolute(target)) continue;
+
+            let appTarget;
+            const appRelative = path.relative(appDir, target);
+            if (!appRelative.startsWith('..') && !path.isAbsolute(appRelative)) {
+                appTarget = target;
+            } else {
+                const webKitRelative = path.relative(webKitSourceDir, target);
+                if (!webKitRelative.startsWith('..') && !path.isAbsolute(webKitRelative)) {
+                    appTarget = path.join(appDir, webKitRelative);
+                } else if (target.startsWith('/usr/')) {
+                    appTarget = path.join(appDir, target.slice(1));
+                } else {
+                    throw new Error(`AppDir contains an external absolute symlink: ${entryPath} -> ${target}`);
+                }
+            }
+            if (!fs.lstatSync(appTarget, { throwIfNoEntry: false })) {
+                throw new Error(`AppDir symlink target is missing: ${entryPath} -> ${appTarget}`);
+            }
+            const relativeTarget = path.relative(path.dirname(entryPath), appTarget) || '.';
+            fs.rmSync(entryPath, { force: true });
+            fs.symlinkSync(relativeTarget, entryPath);
+        }
+    };
+    visit(appDir);
+}
+
 function readCachedFingerprint() {
     try {
         return JSON.parse(fs.readFileSync(cacheMetadataPath, 'utf8')).fingerprint || null;
@@ -520,10 +570,20 @@ function writeCachedFingerprint(fingerprint) {
 }
 
 function cacheRuntimeFromAppImage() {
-    const offset = Number.parseInt(execFileSync(outputPath, ['--appimage-offset'], {
+    const options = {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore']
-    }).trim(), 10);
+    };
+    let offsetOutput;
+    try {
+        offsetOutput = execFileSync(outputPath, ['--appimage-offset'], options);
+    } catch (error) {
+        const qemuPath = '/usr/bin/qemu-aarch64';
+        if (process.arch !== 'arm64' ||
+            !fs.statSync(qemuPath, { throwIfNoEntry: false })?.isFile()) throw error;
+        offsetOutput = execFileSync(qemuPath, [outputPath, '--appimage-offset'], options);
+    }
+    const offset = Number.parseInt(offsetOutput.trim(), 10);
     if (!Number.isInteger(offset) || offset < 65536 || offset > 4 * 1024 * 1024) {
         throw new Error(`unexpected AppImage runtime size: ${offset}`);
     }
@@ -555,15 +615,68 @@ function syncMutableFiles() {
     installWebKitGtkRuntime();
     installPipeWireRuntime();
     prepareAppRun();
+    normalizeAppDirSymlinks();
+}
+
+function bundleAppImageWithTauri(env) {
+    execFileSync('pnpm', ['tauri', 'bundle', '--bundles', 'appimage'], {
+        cwd: repoRoot,
+        stdio: 'inherit',
+        env
+    });
+}
+
+function installArm64PluginQemuWrapper() {
+    const qemuPath = '/usr/bin/qemu-aarch64';
+    if (process.arch !== 'arm64' ||
+        !fs.statSync(qemuPath, { throwIfNoEntry: false })?.isFile() ||
+        !fs.statSync(appImagePluginPath, { throwIfNoEntry: false })?.isFile()) return false;
+
+    if (fs.statSync(legacyAppImagePluginQemuPath, { throwIfNoEntry: false })?.isFile()) {
+        fs.rmSync(appImagePluginQemuPath, { force: true });
+        fs.renameSync(legacyAppImagePluginQemuPath, appImagePluginQemuPath);
+        fs.writeFileSync(
+            appImagePluginPath,
+            '#!/bin/sh\nplugin_path="${0%/*}/.qor-arm64-appimage-plugin"\nexec /usr/bin/qemu-aarch64 "$plugin_path" --appimage-extract-and-run "$@"\n',
+            { mode: 0o755 }
+        );
+        return true;
+    }
+
+    const probeArgs = ['--appimage-extract-and-run', '--plugin-type'];
+    try {
+        execFileSync(appImagePluginPath, probeArgs, { stdio: 'ignore' });
+        return false;
+    } catch { }
+    try {
+        execFileSync(qemuPath, [appImagePluginPath, ...probeArgs], { stdio: 'ignore' });
+    } catch {
+        return false;
+    }
+
+    fs.rmSync(appImagePluginQemuPath, { force: true });
+    fs.renameSync(appImagePluginPath, appImagePluginQemuPath);
+    fs.writeFileSync(
+        appImagePluginPath,
+        '#!/bin/sh\nplugin_path="${0%/*}/.qor-arm64-appimage-plugin"\nexec /usr/bin/qemu-aarch64 "$plugin_path" --appimage-extract-and-run "$@"\n',
+        { mode: 0o755 }
+    );
+    return true;
 }
 
 function rebuildPreparedAppDir() {
     console.log('[appimage] prepared AppDir cache is stale, rebuilding...');
-    execFileSync('pnpm', ['tauri', 'bundle', '--bundles', 'appimage'], {
-        cwd: repoRoot,
-        stdio: 'inherit',
-        env: process.env
-    });
+    const env = {
+        ...process.env,
+        APPIMAGE_EXTRACT_AND_RUN: '1'
+    };
+    try {
+        bundleAppImageWithTauri(env);
+    } catch (error) {
+        if (!installArm64PluginQemuWrapper()) throw error;
+        console.log('[appimage] retrying ARM64 AppImage plugin through qemu-aarch64...');
+        bundleAppImageWithTauri(env);
+    }
     syncMutableFiles();
     if (!appDirIsComplete()) {
         throw new Error('linuxdeploy produced an incomplete AppDir');

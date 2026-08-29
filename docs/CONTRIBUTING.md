@@ -42,8 +42,18 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 `node scripts/start-client.cjs` stages the platform runtimes and PIR sidecar,
 builds release installers, and launches the result. Use
 `node scripts/start-client.cjs --bundle-only` to perform the same build without
-launching. Installer artifacts are written beneath
-`src-tauri/target/release/bundle`.
+launching. Both commands build the host architecture. On x86_64 Linux, use
+`node scripts/start-client.cjs --bundle-only --target arm64` for ARM64-only
+installers or add `--all-architectures` to build native x86_64 and ARM64
+installers sequentially. Native artifacts are written beneath
+`src-tauri/target/release/bundle`; cross-built ARM64 artifacts are written
+beneath `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`.
+
+The ARM64 cross-build uses a secret-free source snapshot and a native ARM64
+Docker build environment. Docker must support `linux/arm64` execution; Linux
+Docker Engine users can run `node scripts/install-deps.cjs --client-arm64` to
+install the appropriate QEMU/binfmt packages, while Docker Desktop normally
+provides the emulation layer.
 
 On Linux, the build downloads and SHA-256-validates the release-pinned WebKitGTK
 packages, stages a curated GStreamer/PipeWire capture runtime from the build

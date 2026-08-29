@@ -112,9 +112,10 @@ Code references:
 ## Runtime And Device Permissions
 
 Calling runs only in the packaged Tauri desktop client. The distributed client
-supports x86_64 Linux and x86_64 Windows, a browser-only session cannot start
-the required native Opus codec or native P2P transport. The renderer must also
-be a secure context before the start or answer action can request media.
+supports x86_64 and ARM64 Linux, plus x86_64 Windows. A browser only session
+cannot start the required native Opus codec or native P2P transport. The
+renderer must also be a secure context before the start or answer action can
+request media.
 
 An incoming offer can ring without activating any capture device. The client
 asks for media access only after the local user starts or answers a call,

@@ -866,6 +866,7 @@ fn resolve_gstreamer_plugins(launcher: &std::path::Path) -> Option<PathBuf> {
     if !require_bundled_gstreamer() {
         candidates.extend([
             PathBuf::from("/usr/lib/x86_64-linux-gnu/gstreamer-1.0"),
+            PathBuf::from("/usr/lib/aarch64-linux-gnu/gstreamer-1.0"),
             PathBuf::from("/usr/lib64/gstreamer-1.0"),
             PathBuf::from("/usr/lib/gstreamer-1.0"),
         ]);
@@ -921,6 +922,7 @@ fn resolve_gstreamer_spa_path(plugin_path: &std::path::Path) -> Option<PathBuf> 
     if !require_bundled_gstreamer() {
         candidates.extend([
             PathBuf::from("/usr/lib/x86_64-linux-gnu/spa-0.2"),
+            PathBuf::from("/usr/lib/aarch64-linux-gnu/spa-0.2"),
             PathBuf::from("/usr/lib64/spa-0.2"),
             PathBuf::from("/usr/lib/spa-0.2"),
         ]);

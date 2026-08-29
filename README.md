@@ -74,7 +74,9 @@ When you run it, the helper:
 2. Creates `.env` when needed. If `SERVER_PASSWORD` is not already configured,
    it asks for that one 12-512-character value with hidden input.
 3. Generates any missing database, Redis, authentication-root, and server
-   identity secrets and saves them in `.env` with restricted permissions.
+   identity secrets and saves them in `.env` with restricted permissions. An
+   existing Redis password is replaced only when it cannot be accepted by the
+   hardened Redis runtime (fewer than 32 characters or not base64url).
 4. Detects occupied host ports and saves available replacements automatically.
 5. Asks whether to run in the background; pressing Enter accepts the normal
    background mode.
@@ -103,9 +105,10 @@ node scripts/start-docker.cjs stop all
 node scripts/start-docker.cjs --help
 ```
 
-Existing `.env` values are preserved and never rotated. The load-balancer logs
-print the onion service address clients connect to. Keep `.env` and the Docker
-volumes backed up; they contain the stable server identity and saved data.
+Existing `.env` values are preserved, except for an invalid Redis password that
+cannot start the service. The load-balancer logs print the onion service address
+clients connect to. Keep `.env` and the Docker volumes backed up; they contain
+the stable server identity and saved data.
 `reset` intentionally removes the Docker volumes and is not a normal restart
 command.
 
@@ -125,7 +128,10 @@ needed for a Docker server or for an installed Qor app:
   complete GStreamer 1.0 installation. The build stages private WebKitGTK and
   screen-capture runtimes from these inputs.
 
-Desktop source builds are supported on x86_64 Linux and x86_64 Windows. An
+Desktop source builds are supported on x86_64 and ARM64 Linux, and x86_64
+Windows. A normal Linux build selects native PIR, Tor, WebKitGTK, GStreamer,
+PipeWire, and AppImage assets for its host architecture. An x86_64 Linux host
+can also produce real ARM64 installers through the Docker ARM64 build path. An
 installed `.deb`, `.rpm`, `.AppImage`, `.msi`, or `.exe` is self-contained from
 the repository and does not need Node.js, pnpm, Rust, Cargo, or the build cache.
 
@@ -153,9 +159,31 @@ without launching the app:
 node scripts/start-client.cjs --bundle-only
 ```
 
-Both modes write installers beneath `src-tauri/target/release/bundle`. To launch
-an already-built AppDir or release executable without rebuilding or restaging
-anything:
+That command builds only the host architecture. On x86_64 Linux, build genuine
+ARM64 installers in an ARM64 Docker environment with:
+
+```bash
+node scripts/start-client.cjs --bundle-only --target arm64
+```
+
+Build both x86_64 and ARM64 release bundles sequentially with:
+
+```bash
+node scripts/start-client.cjs --bundle-only --all-architectures
+```
+
+Native installers are written beneath `src-tauri/target/release/bundle`.
+Cross-built ARM64 installers are written beneath
+`src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`. Docker must be able
+to execute `linux/arm64` containers. Docker Desktop normally provides this. On
+a Linux Docker Engine host, install the appropriate QEMU/binfmt packages with:
+
+```bash
+node scripts/install-deps.cjs --client-arm64
+```
+
+To launch an already built AppDir or release executable without rebuilding or
+restaging anything:
 
 ```bash
 node scripts/start-client.cjs --run-only

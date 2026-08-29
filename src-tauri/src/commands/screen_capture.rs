@@ -1,4 +1,4 @@
-use crate::screen_capture::{ScreenCaptureState, ScreenFrame};
+use crate::screen_capture::ScreenFrame;
 use crate::state::AppState;
 use tauri::{State, ipc::Response};
 

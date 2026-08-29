@@ -1,0 +1,20 @@
+Qor client Tor runtime third-party notices
+==========================================
+
+The Linux ARM64 client archive contains Qor's pinned Tor 0.4.9.11 build and
+its private runtime libraries from the authenticated Qor edge runtime.
+
+Tor 0.4.9.11, with Qor's hidden-service descriptor publication patch
+  Source: https://dist.torproject.org/tor-0.4.9.11.tar.gz
+  Patch: docker/tor/patches/0001-retry-hsdesc-upload.patch
+  License: BSD-3-Clause and other permissive licenses detailed in Tor's LICENSE.
+
+Lyrebird 0.8.1
+  Source: https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird
+  Commit: 0b10edbb61e0ca6fb70c7d57aeaabf315f1fade1
+  License: BSD-2-Clause, with GPL-3.0-or-later components described by the
+  upstream LICENSE and LICENSE-GPL3.txt files.
+
+The private OpenSSL, zlib, libevent, xz/liblzma, and zstd runtime libraries
+originate from the pinned Ubuntu 22.04 edge-runtime build base. Their copyright
+and license records are available from the corresponding Ubuntu source packages.

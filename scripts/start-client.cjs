@@ -15,21 +15,57 @@ const tauriDir = path.join(repoRoot, 'src-tauri');
 const protocVersion = process.env.QOR_PROTOC_VERSION || '33.0';
 const strawberryPerlUrl = process.env.QOR_STRAWBERRY_PERL_URL ||
     'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip';
+const cliArgs = process.argv.slice(2);
 
-if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
-    console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only]');
+function readTargetArgument() {
+    const equalsArgument = cliArgs.find(argument => argument.startsWith('--target='));
+    const targetIndex = cliArgs.indexOf('--target');
+    if (equalsArgument && targetIndex !== -1) {
+        throw new Error('Specify --target only once');
+    }
+    if (equalsArgument) return equalsArgument.slice('--target='.length);
+    if (targetIndex === -1) return null;
+    const value = cliArgs[targetIndex + 1];
+    if (!value || value.startsWith('-')) throw new Error('--target requires x64, arm64, or native');
+    return value;
+}
+
+function normalizeTargetArchitecture(value) {
+    if (!value || value === 'native') return process.arch;
+    const normalized = value.toLowerCase();
+    if (['x64', 'x86_64', 'amd64', 'x86_64-unknown-linux-gnu'].includes(normalized)) return 'x64';
+    if (['arm64', 'aarch64', 'aarch64-unknown-linux-gnu'].includes(normalized)) return 'arm64';
+    throw new Error(`Unsupported client target '${value}'; use x64, arm64, or native`);
+}
+
+if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
+    console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only] [--target <architecture>] [--all-architectures]');
     console.log('  --run-only     Skip the rebuild and just launch the already built binary.');
     console.log('  --bundle-only  Build native installer bundles and exit without launching.');
-    console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
-    console.log('Bundles are written to src-tauri/target/release/bundle for the current OS.');
+    console.log('  --target       Build x64 or arm64 bundles; a non-native Linux target uses Docker.');
+    console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
+    console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
+    console.log('For x86-to-ARM64 builds, run `node scripts/install-deps.cjs --client-arm64`.');
+    console.log('Native bundles are written to src-tauri/target/release/bundle.');
+    console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
     console.log('Logs are mirrored to logs/instance-<QOR_INSTANCE_ID>-logs.txt');
     process.exit(0);
 }
 
 process.chdir(repoRoot);
 
-const runOnly = process.argv.slice(2).some(arg => arg === '--run-only' || arg === '--no-build');
-const bundleOnly = process.argv.slice(2).some(arg => arg === '--bundle-only' || arg === '--no-launch');
+const runOnly = cliArgs.some(arg => arg === '--run-only' || arg === '--no-build');
+const bundleOnly = cliArgs.some(arg => arg === '--bundle-only' || arg === '--no-launch');
+const allArchitectures = cliArgs.includes('--all-architectures');
+let requestedTarget;
+let targetArchitecture;
+try {
+    requestedTarget = readTargetArgument();
+    targetArchitecture = normalizeTargetArchitecture(requestedTarget);
+} catch (error) {
+    logErr(error.message);
+    process.exit(1);
+}
 
 if (process.platform !== 'linux' && process.platform !== 'win32') {
     logErr('Qor desktop supports only Linux and Windows.');
@@ -38,6 +74,30 @@ if (process.platform !== 'linux' && process.platform !== 'win32') {
 
 if (runOnly && bundleOnly) {
     logErr('--run-only and --bundle-only cannot be used together.');
+    process.exit(1);
+}
+if (runOnly && (requestedTarget || allArchitectures)) {
+    logErr('--run-only cannot be combined with --target or --all-architectures.');
+    process.exit(1);
+}
+if (allArchitectures && (!bundleOnly || requestedTarget)) {
+    logErr('--all-architectures requires --bundle-only and cannot be combined with --target.');
+    process.exit(1);
+}
+if ((requestedTarget || allArchitectures) && process.platform !== 'linux') {
+    logErr('Architecture selection is currently supported only for Linux bundles.');
+    process.exit(1);
+}
+if (allArchitectures && process.arch !== 'x64') {
+    logErr('--all-architectures currently requires an x86-64 Linux build host.');
+    process.exit(1);
+}
+if (requestedTarget && targetArchitecture !== process.arch && !bundleOnly) {
+    logErr('A non-native --target requires --bundle-only because it cannot be launched on this host.');
+    process.exit(1);
+}
+if (requestedTarget && targetArchitecture !== process.arch && !(process.arch === 'x64' && targetArchitecture === 'arm64')) {
+    logErr(`Cross-building from ${process.arch} to ${targetArchitecture} is not supported.`);
     process.exit(1);
 }
 
@@ -571,7 +631,7 @@ function buildPirSidecars() {
     const buildScript = path.join(repoRoot, 'scripts', 'build-pir-sidecars.cjs');
     console.log('[CLIENT] Building and staging PIR sidecars...');
     try {
-        execFileSync(process.execPath, [buildScript], {
+        execFileSync(process.execPath, [buildScript, '--client-only'], {
             cwd: repoRoot,
             stdio: 'inherit',
             env: clientRuntimeEnv(),
@@ -639,9 +699,31 @@ function buildAppImage() {
     }
 }
 
+function buildLinuxArm64Bundles() {
+    const buildScript = path.join(repoRoot, 'scripts', 'build-client-linux-arm64.cjs');
+    try {
+        execFileSync(process.execPath, [buildScript], {
+            cwd: repoRoot,
+            stdio: 'inherit',
+            env: clientRuntimeEnv(),
+            windowsHide: true
+        });
+    } catch (error) {
+        const code = Number.isInteger(error?.status) ? error.status : 1;
+        logErr(`Linux ARM64 bundle build failed with code ${code}`);
+        process.exit(code || 1);
+    }
+}
+
 if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
+} else if (requestedTarget && targetArchitecture !== process.arch) {
+    console.log('[CLIENT] Building Linux ARM64 bundles from the x86-64 host...');
+    acquireBuildLock();
+    buildLinuxArm64Bundles();
+    console.log('[CLIENT] --bundle-only: ARM64 build complete.');
+    process.exit(0);
 } else {
     console.log('[CLIENT] Building Tauri app...');
     acquireBuildLock();
@@ -668,6 +750,7 @@ if (runOnly) {
         }
         buildAppImage();
         printBundleArtifacts();
+        if (allArchitectures) buildLinuxArm64Bundles();
         if (bundleOnly) {
             console.log('[CLIENT] --bundle-only: build complete.');
             process.exit(0);

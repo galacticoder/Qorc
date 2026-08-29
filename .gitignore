@@ -113,6 +113,11 @@ server/test/
 workers/ypir/tests/
 scripts/test-*.cjs
 **/__tests__/
+
+# Rust executable sources are not generated build output.
+!workers/ypir/src/bin/
+!workers/ypir/src/bin/qor-pir-client.rs
+!workers/ypir/src/bin/qor-pir-worker.rs
 **/*.test.*
 **/*.spec.*
 commit-message.txt

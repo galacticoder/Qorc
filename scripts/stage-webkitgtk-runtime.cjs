@@ -7,35 +7,63 @@ const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { execFileSync } = require('node:child_process');
 
+if (process.platform !== 'linux') process.exit(0);
+
 const version = '2.52.6-1ubuntu1';
 const upstreamVersion = '2.52.6';
-const target = 'linux-x86_64';
-const architecture = 'amd64';
+const runtimeTargets = {
+  x64: {
+    target: 'linux-x86_64',
+    architecture: 'amd64',
+    libraryTriplet: 'x86_64-linux-gnu',
+    packageBaseUrl: 'https://archive.ubuntu.com/ubuntu/pool/main/w/webkit2gtk',
+    checksums: {
+      'libwebkit2gtk-4.1-0': '91d1e6678db6b6cd5dd586b1cddc8e693aa1f706ef9964f98bfc374e31ffac6a',
+      'libjavascriptcoregtk-4.1-0': '6894a5b1384e82d7c520d4a0888c05da91ac2e133901eff4b6779d6909cc96a5'
+    }
+  },
+  arm64: {
+    target: 'linux-aarch64',
+    architecture: 'arm64',
+    libraryTriplet: 'aarch64-linux-gnu',
+    packageBaseUrl: 'https://ports.ubuntu.com/ubuntu-ports/pool/main/w/webkit2gtk',
+    checksums: {
+      'libwebkit2gtk-4.1-0': 'c81951e87c4f25475780a6fda3588b974243297347dadd71ad9730651a17f05f',
+      'libjavascriptcoregtk-4.1-0': 'b65c4216dd51ec1236e04c7a2e9a8ca67715cf422fdb347d788db9785cafcb02'
+    }
+  }
+};
+const runtimeTarget = runtimeTargets[process.arch];
+if (!runtimeTarget) {
+  console.error(`[webkitgtk] No bundled WebKitGTK runtime is available for Linux ${process.arch}`);
+  process.exit(1);
+}
+const { target, architecture, libraryTriplet, packageBaseUrl } = runtimeTarget;
 const repoRoot = path.resolve(__dirname, '..');
 const cacheDir = path.join(repoRoot, '.cache', `webkitgtk-${target}-${version}`);
 const resourcesDir = path.join(repoRoot, 'src-tauri', 'resources');
 const runtimeDir = path.join(resourcesDir, 'webkitgtk');
+const bundleResourceDir = path.join(resourcesDir, 'webkitgtk-bundle');
 const stagingDir = path.join(resourcesDir, `.webkitgtk-staging-${process.pid}`);
-const packageBaseUrl = 'https://archive.ubuntu.com/ubuntu/pool/main/w/webkit2gtk';
 const packages = [
   {
     name: 'libwebkit2gtk-4.1-0',
     file: `libwebkit2gtk-4.1-0_${version}_${architecture}.deb`,
-    sha256: '91d1e6678db6b6cd5dd586b1cddc8e693aa1f706ef9964f98bfc374e31ffac6a'
+    sha256: runtimeTarget.checksums['libwebkit2gtk-4.1-0']
   },
   {
     name: 'libjavascriptcoregtk-4.1-0',
     file: `libjavascriptcoregtk-4.1-0_${version}_${architecture}.deb`,
-    sha256: '6894a5b1384e82d7c520d4a0888c05da91ac2e133901eff4b6779d6909cc96a5'
+    sha256: runtimeTarget.checksums['libjavascriptcoregtk-4.1-0']
   }
 ];
 const requiredFiles = [
-  'usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0',
-  'usr/lib/x86_64-linux-gnu/libjavascriptcoregtk-4.1.so.0',
-  'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitGPUProcess',
-  'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
-  'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess',
-  'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so'
+  `usr/lib/${libraryTriplet}/libwebkit2gtk-4.1.so.0`,
+  `usr/lib/${libraryTriplet}/libjavascriptcoregtk-4.1.so.0`,
+  `usr/lib/${libraryTriplet}/webkit2gtk-4.1/WebKitGPUProcess`,
+  `usr/lib/${libraryTriplet}/webkit2gtk-4.1/WebKitNetworkProcess`,
+  `usr/lib/${libraryTriplet}/webkit2gtk-4.1/WebKitWebProcess`,
+  `usr/lib/${libraryTriplet}/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so`
 ];
 
 function sha256(filePath) {
@@ -84,6 +112,7 @@ function runtimeIsCurrent() {
     return metadata.version === version
       && metadata.upstreamVersion === upstreamVersion
       && metadata.target === target
+      && metadata.libraryTriplet === libraryTriplet
       && requiredFiles.every(relative => fs.statSync(path.join(runtimeDir, relative), { throwIfNoEntry: false })?.isFile());
   } catch {
     return false;
@@ -91,10 +120,7 @@ function runtimeIsCurrent() {
 }
 
 async function main() {
-  if (process.platform !== 'linux') return;
-  if (process.arch !== 'x64') {
-    throw new Error(`No bundled WebKitGTK runtime is available for Linux ${process.arch}`);
-  }
+  fs.mkdirSync(bundleResourceDir, { recursive: true });
   if (runtimeIsCurrent()) {
     console.log(`[webkitgtk] staged runtime ${upstreamVersion} is current`);
     return;
@@ -129,6 +155,7 @@ async function main() {
       upstreamVersion,
       target,
       architecture,
+      libraryTriplet,
       packages: packages.map(({ name, file, sha256: checksum }) => ({ name, file, sha256: checksum }))
     };
     fs.writeFileSync(path.join(stagingDir, 'runtime-version.json'), `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o644 });

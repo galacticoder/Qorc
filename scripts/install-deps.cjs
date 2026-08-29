@@ -4,6 +4,7 @@
  * Usage:
  *   node scripts/install-deps.cjs <component...>
  *   node scripts/install-deps.cjs --client
+ *   node scripts/install-deps.cjs --client-arm64
  *   node scripts/install-deps.cjs --server
  * Components:
  *   jq, redis, postgres, docker
@@ -217,6 +218,42 @@ async function installRedisTlsLocal() {
   }
 
   return true;
+}
+
+async function dockerCanRunArm64() {
+  if (!findInPath('docker')) return false;
+  return await tryExec('docker', ['run', '--rm', '--platform', 'linux/arm64', 'ubuntu:26.04', 'true'], {
+    stdio: 'ignore'
+  });
+}
+
+async function installArm64ContainerEmulation() {
+  if (await dockerCanRunArm64()) return true;
+  if (process.platform !== 'linux' || !pmHas('apt-get')) {
+    console.log('[INFO] Install ARM64 binfmt/QEMU support for your Docker host, or use Docker Desktop.');
+    return false;
+  }
+
+  await trySudo(['apt-get', 'update']);
+  let installed = await trySudo(['apt-get', 'install', '-y', 'qemu-user', 'qemu-user-binfmt']);
+  if (!installed) {
+    installed = await trySudo(['apt-get', 'install', '-y', 'qemu-user-static', 'binfmt-support']);
+  }
+  if (!installed) {
+    console.log('[INFO] Failed to install an ARM64 QEMU/binfmt implementation.');
+    return false;
+  }
+
+  if (findInPath('systemctl')) {
+    await trySudo(['systemctl', 'restart', 'systemd-binfmt.service']);
+  }
+  if (findInPath('update-binfmts')) {
+    await trySudo(['update-binfmts', '--enable']);
+  }
+  if (await dockerCanRunArm64()) return true;
+
+  console.log('[INFO] ARM64 emulation packages were installed, but Docker still cannot execute linux/arm64 containers. Restart Docker or reboot once, then retry.');
+  return false;
 }
 
 async function installComponent(name) {
@@ -433,6 +470,9 @@ async function installComponent(name) {
       console.log('[INFO] Install Docker from https://docs.docker.com/get-docker/');
       return false;
     }
+    case 'arm64-emulation': {
+      return await installArm64ContainerEmulation();
+    }
     case 'rust': {
       if (findInPath('cargo')) return true;
 
@@ -475,19 +515,22 @@ async function installComponent(name) {
   if (args.length === 0 || args.some(a => a === '-h' || a === '--help')) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
+    console.log('       node scripts/install-deps.cjs --client-arm64');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, pnpm, tauri, libevent, rust');
+    console.log('Components: jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, pnpm, tauri, libevent, rust, arm64-emulation');
     console.log('Presets:');
     console.log('  all      - Server build and runtime dependencies');
     console.log('  server   - Server runtime dependencies');
     console.log('  client   - Client runtime dependencies');
+    console.log('  client-arm64 - Client dependencies plus ARM64 Docker emulation');
     process.exit(args.length === 0 ? 1 : 0);
   }
 
   const presets = {
     all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'jq', 'docker'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
-    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri']
+    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri'],
+    'client-arm64': ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri', 'docker', 'arm64-emulation']
   };
 
   const expanded = [];

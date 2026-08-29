@@ -25,8 +25,11 @@ behind the same logical server identity must use the same values.
 
 For the single-host Docker deployment, `scripts/start-docker.cjs` also fills
 missing container connection defaults and generates independent
-`DATABASE_PASSWORD` and `REDIS_PASSWORD` values. It preserves every value that
-is already present in `.env`.
+`DATABASE_PASSWORD` and `REDIS_PASSWORD` values. Existing values are preserved
+except when `REDIS_PASSWORD` cannot satisfy the bundled Redis ACL policy. A
+Redis password shorter than 32 characters or containing characters outside the
+base64url alphabet is replaced before the containers start so Redis cannot be
+left permanently unhealthy by an incompatible saved credential.
 
 ## Server and HTTPS
 
@@ -101,7 +104,7 @@ is already present in `.env`.
 | ---- | --------------- | ----- | ------- |
 | `REDIS_CLUSTER_NODES` | Unset | `server/session/redis-client.js` | Comma separated `host:port` seed nodes. When set, the client uses Redis Cluster with the same verified TLS policy. |
 | `REDIS_USERNAME` | Unset | Redis clients | Redis ACL username. |
-| `REDIS_PASSWORD` | Unset | Redis clients and Docker Redis | Redis ACL password. |
+| `REDIS_PASSWORD` | Unset; bundled Docker requires at least 32 base64url characters | Redis clients and Docker Redis | Redis ACL password. The Docker startup helper generates a compatible value when this is missing and repairs an incompatible saved value before Redis starts. |
 | `REDIS_TLS_SERVERNAME` | `redis` | Redis clients | SNI and certificate-verification name. |
 | `REDIS_CA_CERT_PATH` | System roots when unset | Redis clients | Explicit Redis CA bundle. |
 | `REDIS_CLIENT_CERT_PATH` | Unset | Redis clients | Client certificate for Redis mutual TLS. |

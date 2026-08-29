@@ -177,6 +177,7 @@ function promptForHiddenInput(prompt) {
 
 async function checkDockerEnvironment(env, needsServerPassword) {
     const updates = {};
+    let redisPasswordChanged = false;
     const defaults = {
         DB_PORT: '5432',
         DB_NAME: 'Qor',
@@ -200,7 +201,13 @@ async function checkDockerEnvironment(env, needsServerPassword) {
         if (!env[key]) updates[key] = value;
     }
     if (!env.DATABASE_PASSWORD) updates.DATABASE_PASSWORD = randomBytes(32).toString('base64url');
-    if (!env.REDIS_PASSWORD) updates.REDIS_PASSWORD = randomBytes(32).toString('base64url');
+    if (!env.REDIS_PASSWORD || env.REDIS_PASSWORD.length < 32 || !/^[A-Za-z0-9_-]+$/.test(env.REDIS_PASSWORD)) {
+        if (env.REDIS_PASSWORD) {
+            console.warn('[WARN] REDIS_PASSWORD is incompatible with the hardened Redis runtime, generating a 256-bit replacement.');
+        }
+        updates.REDIS_PASSWORD = randomBytes(32).toString('base64url');
+        redisPasswordChanged = true;
+    }
 
     if (needsServerPassword && !env.SERVER_PASSWORD) {
         let password = '';
@@ -217,6 +224,8 @@ async function checkDockerEnvironment(env, needsServerPassword) {
         updateEnvFile(updates);
         Object.assign(env, updates);
     }
+
+    return { redisPasswordChanged };
 }
 
 function checkSupportedDockerRuntime() {
@@ -437,7 +446,7 @@ async function main() {
 
         console.log('[INFO] Checking for port conflicts...');
         const env = readEnv();
-        await checkDockerEnvironment(env, command === 'server' || command === 'all');
+        const environmentChanges = await checkDockerEnvironment(env, command === 'server' || command === 'all');
         checkDockerIdentitySeeds(env);
         const updates = {};
 
@@ -523,7 +532,7 @@ async function main() {
                     execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildServices}`, { cwd: repoRoot, stdio: 'inherit' });
                 }
 
-                const sharedRecreateFlag = shouldBuild ? '' : '--no-recreate';
+                const sharedRecreateFlag = shouldBuild || environmentChanges.redisPasswordChanged ? '' : '--no-recreate';
                 execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans ${sharedRecreateFlag} ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
 
                 if (runDetached) {

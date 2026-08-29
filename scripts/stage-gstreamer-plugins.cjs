@@ -17,6 +17,10 @@ const requiredSpaPaths = [
     'spa-0.2/support/libspa-support.so',
     'spa-0.2/videoconvert/libspa-videoconvert.so'
 ];
+const linuxLibraryTriplets = {
+    x64: 'x86_64-linux-gnu',
+    arm64: 'aarch64-linux-gnu'
+};
 
 const plugins = [
     'libgstadaptivedemux2.so',
@@ -218,11 +222,12 @@ function resolvePluginsDir() {
         }).trim();
         if (resolved) return resolved;
     } catch { }
+    const libraryTriplet = linuxLibraryTriplets[process.arch];
     const candidates = [
-        `/usr/lib/${process.arch === 'x64' ? 'x86_64' : process.arch}-linux-gnu/gstreamer-1.0`,
+        libraryTriplet ? `/usr/lib/${libraryTriplet}/gstreamer-1.0` : null,
         '/usr/lib64/gstreamer-1.0',
         '/usr/lib/gstreamer-1.0'
-    ];
+    ].filter(Boolean);
     return candidates.find(candidate => fs.existsSync(candidate)) || null;
 }
 

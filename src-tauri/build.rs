@@ -24,6 +24,12 @@ fn embedded_tor_bundle(target: &str) -> (&'static str, &'static str, &'static st
             "linux-x86_64",
             "4621e1573dbd6d5d6f4bb4121b37652a8b7204ae5abea600fb6b9e05e5695696",
         ),
+        "aarch64-unknown-linux-gnu" => (
+            "linux",
+            "aarch64",
+            "linux-aarch64",
+            "a529a053d39c24dcbe53afe961b0d284b2c739d1f9ad54211ce6e5b76a50cf4f",
+        ),
         "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => (
             "windows",
             "x86_64",
@@ -31,7 +37,7 @@ fn embedded_tor_bundle(target: &str) -> (&'static str, &'static str, &'static st
             "5f91e9426bf641dfe539dc28029088c72bed0b1d8f1c79104a0f89273cb3ebe1",
         ),
         _ => panic!(
-            "no embedded Tor Expert Bundle is vendored for target {target}; supported client targets are x86_64 Linux GNU and x86_64 Windows"
+            "no embedded Tor Expert Bundle is vendored for target {target}; supported client targets are x86_64 and aarch64 Linux GNU, plus x86_64 Windows"
         ),
     }
 }

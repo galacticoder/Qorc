@@ -70,7 +70,17 @@ rm -f /certs/redis-ca.key /certs/redis-ca.srl /certs/redis.csr \
   /certs/redis-client.csr /certs/redis-san.cnf
 
 umask 077
-printf 'user default on >%s ~* &* +@all\n' "$REDIS_PASSWORD" > /data/users.acl
+redis_version="$(redis-server --version | sed -n 's/.* v=\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')"
+set -- $redis_version
+if [ "$#" -ne 2 ]; then
+  echo "[REDIS-ENTRYPOINT] Unable to determine the Redis version" >&2
+  exit 1
+fi
+channel_rule=''
+if [ "$1" -gt 6 ] || { [ "$1" -eq 6 ] && [ "$2" -ge 2 ]; }; then
+  channel_rule=' &*'
+fi
+printf 'user default on >%s ~*%s +@all\n' "$REDIS_PASSWORD" "$channel_rule" > /data/users.acl
 chown redis:redis /data/users.acl
 chmod 600 /data/users.acl
 

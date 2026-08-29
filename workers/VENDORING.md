@@ -111,16 +111,26 @@ The portable path costs roughly 1.8× end to end and ~6× on packing alone. That
 is the price of running on hardware that lacks AVX-512, and it is still far
 faster than downloading the whole spool.
 
-The ARM64 server worker is crossbuilt as an AArch64 ELF during portability
-verification. Under AArch64 emulation, the portable NTT round trip tests and all
-three portable `m512` operation tests pass. The Docker server does the same
-build natively when its Linux container runtime reports `arm64`.
+Both PIR sidecars cross-build as AArch64 executables. Under AArch64 emulation,
+the portable NTT round-trip tests, all three portable `m512` operation tests,
+and a real client-side query-generation round trip pass. The Docker server
+builds its worker natively when its Linux container runtime reports `arm64`,
+while the desktop build stages the client matching its Rust target triple.
+
+The desktop build requests only `qor-pir-client`, the server worker is not
+linked a second time during every app build. Release builders can stage a
+specific architecture explicitly, for example:
+
+```sh
+node scripts/build-pir-sidecars.cjs --client-only \
+  --target aarch64-unknown-linux-gnu
+```
 
 To recheck after any change to the shim or its call sites:
 
 ```sh
 cd workers/ypir
-for CPU in x86-64-v3 native, do
+for CPU in x86-64-v3 native; do
   RUSTFLAGS="-C target-cpu=$CPU" cargo test --release --offline m512
   RUSTFLAGS="-C target-cpu=$CPU" cargo test --release --offline kernel
   RUSTFLAGS="-C target-cpu=$CPU" cargo test --release --offline ypir_basic

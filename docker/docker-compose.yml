@@ -27,8 +27,6 @@ services:
       context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.postgres
     hostname: postgres
-    env_file:
-      - ../.env
     environment:
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
       POSTGRES_DB: ${DB_NAME}

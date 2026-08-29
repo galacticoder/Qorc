@@ -7,7 +7,12 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 if (process.platform !== 'linux') process.exit(0);
-if (process.arch !== 'x64') {
+const runtimeTargets = {
+  x64: { target: 'linux-x86_64', libraryTriplet: 'x86_64-linux-gnu' },
+  arm64: { target: 'linux-aarch64', libraryTriplet: 'aarch64-linux-gnu' }
+};
+const runtimeTarget = runtimeTargets[process.arch];
+if (!runtimeTarget) {
   console.error(`[webkitgtk-bundle] unsupported architecture: ${process.arch}`);
   process.exit(1);
 }
@@ -17,7 +22,7 @@ const tauriDir = path.join(repoRoot, 'src-tauri');
 const tauriConfig = JSON.parse(fs.readFileSync(path.join(tauriDir, 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName;
 const sourceDir = path.join(tauriDir, 'resources', 'webkitgtk');
-const sourceLibDir = path.join(sourceDir, 'usr', 'lib', 'x86_64-linux-gnu');
+const sourceLibDir = path.join(sourceDir, 'usr', 'lib', runtimeTarget.libraryTriplet);
 const resourcesDir = path.join(tauriDir, 'resources');
 const outputDir = path.join(resourcesDir, 'webkitgtk-bundle');
 const stagingDir = path.join(resourcesDir, `.webkitgtk-bundle-staging-${process.pid}`);
@@ -224,7 +229,8 @@ function main() {
     throw new Error(`release binary not found: ${binaryPath}`);
   }
   const metadata = JSON.parse(fs.readFileSync(path.join(sourceDir, 'runtime-version.json'), 'utf8'));
-  if (metadata.upstreamVersion !== '2.52.6' || metadata.target !== 'linux-x86_64') {
+  if (metadata.upstreamVersion !== '2.52.6' || metadata.target !== runtimeTarget.target ||
+      metadata.libraryTriplet !== runtimeTarget.libraryTriplet) {
     throw new Error('staged WebKitGTK runtime does not match the Linux bundle target');
   }
 
@@ -290,7 +296,7 @@ function main() {
       fs.chmodSync(destination, fs.statSync(source).mode & 0o777);
     }
 
-    const sourceExecutablePath = '/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1';
+    const sourceExecutablePath = `/usr/lib/${runtimeTarget.libraryTriplet}/webkit2gtk-4.1`;
     const executablePrefix = `/usr/lib/${productName}/webkitgtk/`;
     const executableDirectoryName = 'helpers';
     const packagedExecutablePath = `${executablePrefix}${'/'.repeat(sourceExecutablePath.length - executablePrefix.length - executableDirectoryName.length)}${executableDirectoryName}`;
