@@ -4,8 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
+const { parseActiveServers } = require('./loadbalancer-tui-state.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
@@ -13,6 +14,12 @@ const edgeRuntimeRoot = '/opt/qor-edge';
 const edgeRuntimeLibDir = path.join(edgeRuntimeRoot, 'lib');
 const bundledHaproxyBin = path.join(edgeRuntimeRoot, 'bin', 'haproxy');
 const bundledOqsModule = path.join(edgeRuntimeLibDir, 'ossl-modules', 'oqsprovider.so');
+const redisClientModuleUrl = pathToFileURL(
+  path.join(repoRoot, 'server', 'session', 'redis-client.js')
+).href;
+const redisKeysModuleUrl = pathToFileURL(
+  path.join(repoRoot, 'server', 'config', 'redis-keys.js')
+).href;
 
 if (process.platform !== 'linux') {
   console.error('[LB] Native load-balancer deployment supports only Linux.');
@@ -49,6 +56,10 @@ const CONFIG = {
   NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true',
   HAPROXY_HTTPS_PORT: process.env.HAPROXY_HTTPS_PORT || '8443',
   HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT || '8404',
+  SERVER_ACTIVE_TIMEOUT_MS: Math.min(
+    Math.max(parseInt(process.env.LB_SERVER_ACTIVE_TIMEOUT_MS || '45000', 10) || 45000, 10000),
+    300000
+  ),
 };
 
 if (!process.env.REDIS_QUIET_ERRORS) {
@@ -61,6 +72,88 @@ function logErr(...args) { console.error('[LB]', ...args); }
 class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } len() { return this.a.length; } }
 class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
+
+const ANSI_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+
+function ansiWidth(value) {
+  return Array.from(String(value).replace(ANSI_SEQUENCE, '')).length;
+}
+
+function truncateAnsi(value, maxWidth) {
+  if (maxWidth <= 0) return '';
+  const input = String(value);
+  let result = '';
+  let width = 0;
+  let offset = 0;
+
+  while (offset < input.length && width < maxWidth) {
+    if (input[offset] === '\x1b' && input[offset + 1] === '[') {
+      const match = input.slice(offset).match(/^\x1b\[[0-?]*[ -/]*[@-~]/);
+      if (match) {
+        result += match[0];
+        offset += match[0].length;
+        continue;
+      }
+    }
+
+    const codePoint = input.codePointAt(offset);
+    const character = String.fromCodePoint(codePoint);
+    result += character;
+    offset += character.length;
+    width += 1;
+  }
+
+  return result;
+}
+
+function fitAnsi(value, width) {
+  const content = truncateAnsi(value, width);
+  return `${content}\x1b[0m${' '.repeat(Math.max(0, width - ansiWidth(content)))}`;
+}
+
+function joinAnsiEdges(left, right, width, gap = 2) {
+  if (width <= 0) return '';
+  const rightWidth = ansiWidth(right);
+  if (rightWidth >= width) return truncateAnsi(right, width);
+
+  const leftWidth = Math.max(0, width - rightWidth - gap);
+  const fittedLeft = truncateAnsi(left, leftWidth);
+  const padding = Math.max(1, width - ansiWidth(fittedLeft) - rightWidth);
+  return `${fittedLeft}${' '.repeat(padding)}${right}`;
+}
+
+function createLineCollector(onLine) {
+  let pending = '';
+  return {
+    push(chunk) {
+      const parts = (pending + String(chunk)).split(/\r\n|\n|\r/);
+      pending = parts.pop() || '';
+      for (const line of parts) onLine(line);
+    },
+    flush() {
+      if (pending.length > 0) onLine(pending);
+      pending = '';
+    },
+  };
+}
+
+function readProcessMetrics(pid) {
+  return new Promise((resolve) => {
+    execFile(
+      'ps',
+      ['-p', String(pid), '-o', '%cpu=,%mem='],
+      { encoding: 'utf8', timeout: 500 },
+      (error, stdout) => {
+        if (error) {
+          resolve(null);
+          return;
+        }
+        const values = stdout.trim().split(/\s+/);
+        resolve(values.length >= 2 ? { cpu: values[0], mem: values[1] } : null);
+      }
+    );
+  });
+}
 
 async function runNodeScript(scriptPath, args = [], env = process.env) {
   return new Promise((resolve, reject) => {
@@ -163,7 +256,19 @@ class LBTUI {
     this.h = process.stdout.rows || 24;
     this.renderDeb = new Debouncer(() => this.renderFrame(), 50);
     this.metrics = new RateLimiter(1000);
-    this.stats = { cpu: '?', mem: '?', servers: 0, serverList: [], url: null, lbPort: CONFIG.HAPROXY_HTTPS_PORT };
+    this.stats = {
+      cpu: '?',
+      mem: '?',
+      servers: null,
+      serverList: [],
+      onionUrl: null,
+      lbPort: CONFIG.HAPROXY_HTTPS_PORT,
+      dataState: 'connecting',
+      updatedAt: null,
+    };
+    this.pollInFlight = null;
+    this.redisModulesPromise = null;
+    this.needsFullClear = true;
 
     this.cmdMode = false;
     this.cmdInput = '';
@@ -186,6 +291,7 @@ class LBTUI {
     process.stdout.on('resize', () => {
       this.w = process.stdout.columns || 80;
       this.h = process.stdout.rows || 24;
+      this.needsFullClear = true;
       this.renderDeb.call();
     });
 
@@ -219,7 +325,11 @@ class LBTUI {
       const parts = line.split('\r');
       line = parts[parts.length - 1];
     }
+    const keepViewportAnchored = this.scroll > 0;
     this.buf.push(line);
+    if (keepViewportAnchored) {
+      this.scroll = Math.min(this.scroll + 1, Math.max(0, this.buf.len() - 1));
+    }
     this.renderDeb.call();
   }
 
@@ -274,6 +384,27 @@ class LBTUI {
     } catch (error) {
       throw new Error(`Failed to unlock keypair: ${error.message}`);
     }
+  }
+
+  async getRedisModules() {
+    if (!this.redisModulesPromise) {
+      this.redisModulesPromise = Promise.all([
+        import(redisClientModuleUrl),
+        import(redisKeysModuleUrl),
+      ]).then(([redis, keys]) => ({
+        withRedisClient: redis.withRedisClient,
+        redisKeys: keys.REDIS_KEYS,
+      })).catch((error) => {
+        this.redisModulesPromise = null;
+        throw error;
+      });
+    }
+    return this.redisModulesPromise;
+  }
+
+  async withRedisClient(operation) {
+    const { withRedisClient } = await this.getRedisModules();
+    return withRedisClient(operation);
   }
 
   async sendEncryptedCommand(commandObj) {
@@ -333,10 +464,9 @@ class LBTUI {
         algorithm: 'ML-KEM-1024 + X25519 + PostQuantumAEAD + ML-DSA-87',
       };
 
-      const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
-      const { withRedisClient } = mod;
-      await withRedisClient(async (client) => {
-        await client.publish('lb:command:encrypted', JSON.stringify(payload));
+      const { redisKeys } = await this.getRedisModules();
+      await this.withRedisClient(async (client) => {
+        await client.publish(redisKeys.LB_ENCRYPTED_COMMAND_CHANNEL, JSON.stringify(payload));
       });
     } catch (error) {
       throw new Error(`Failed to send encrypted command: ${error.message}`);
@@ -553,7 +683,7 @@ class LBTUI {
       return;
     }
 
-    const vis = Math.max(1, this.h - 7);
+    const vis = Math.max(1, this.h - 6);
     const max = Math.max(0, this.buf.len() - vis);
 
     if (k === '\x1b[A' || k === 'k') {
@@ -577,79 +707,70 @@ class LBTUI {
     }
   }
   poll() {
-    if (!this.metrics.ok()) return;
-    try {
-      const out = execFileSync(
-        'ps',
-        ['-p', String(this.pid), '-o', '%cpu=,%mem='],
-        { encoding: 'utf8', timeout: 500 }
-      ).trim().split(/\s+/);
-      if (out.length >= 2) {
-        this.stats.cpu = out[0];
-        this.stats.mem = out[1];
-      }
-    } catch { }
-    this.getActiveServers().then(servers => { this.stats.servers = servers.length; this.stats.serverList = servers; this.renderDeb.call(); }).catch(() => { });
-    this.getLbPort().then(port => { if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(() => { });
-    this.getOnionUrl().then(url => { if (url) this.stats.onionUrl = url; this.renderDeb.call(); }).catch(() => { });
+    if (this.pollInFlight || !this.metrics.ok()) return this.pollInFlight;
+    this.pollInFlight = this.pollOnce().finally(() => {
+      this.pollInFlight = null;
+      this.renderDeb.call();
+    });
+    return this.pollInFlight;
   }
 
-  async getOnionUrl() {
+  async pollOnce() {
+    const metricsPromise = readProcessMetrics(this.pid);
+
     try {
-      const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
-      const { withRedisClient } = mod;
-      return await withRedisClient(async (client) => {
-        return await client.get('cluster:lb:onionAddress');
-      });
-    } catch (e) {
-      return null;
+      const snapshot = await this.getStatusSnapshot();
+      this.stats.servers = snapshot.servers.length;
+      this.stats.serverList = snapshot.servers;
+      this.stats.onionUrl = snapshot.onionUrl;
+      if (snapshot.lbPort) this.stats.lbPort = snapshot.lbPort;
+      this.stats.dataState = 'live';
+      this.stats.updatedAt = Date.now();
+    } catch {
+      this.stats.dataState = this.stats.updatedAt === null ? 'unavailable' : 'stale';
+    }
+
+    const processMetrics = await metricsPromise;
+    if (processMetrics) {
+      this.stats.cpu = processMetrics.cpu;
+      this.stats.mem = processMetrics.mem;
     }
   }
 
-  async getActiveServers() {
-    try {
-      const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
-      const { withRedisClient } = mod;
-      return await withRedisClient(async (client) => {
-        const servers = await client.hgetall('cluster:servers');
-        const now = Date.now();
-        const active = [];
-        for (const [id, data] of Object.entries(servers || {})) {
-          try {
-            const info = JSON.parse(data);
-            if (now - (info.lastHeartbeat || 0) < 10000) {
-              active.push({ id, host: info.host || '127.0.0.1', port: info.port || '?' });
-            }
-          } catch { }
+  async getStatusSnapshot() {
+    const { redisKeys } = await this.getRedisModules();
+    return this.withRedisClient(async (client) => {
+      const [storedServers, onionUrl, storedPort] = await Promise.all([
+        client.hgetall(redisKeys.CLUSTER_SERVERS),
+        client.get(redisKeys.LB_ONION_ADDRESS),
+        client.get(redisKeys.LB_HTTPS_PORT),
+      ]);
+      const servers = parseActiveServers(
+        storedServers,
+        Date.now(),
+        CONFIG.SERVER_ACTIVE_TIMEOUT_MS
+      );
+
+      let lbPort = null;
+      if (storedPort) {
+        const parsedPort = Number(storedPort);
+        if (Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535) {
+          lbPort = String(parsedPort);
         }
-        return active;
-      });
-    } catch (e) {
-      return [];
-    }
-  }
-
-  async getLbPort() {
-    try {
-      const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
-      const { withRedisClient } = mod;
-      return await withRedisClient(async (client) => {
-        const val = await client.get('cluster:lb:httpsPort');
-        if (!val) return null;
-        const num = Number(val);
-        if (!Number.isFinite(num) || num <= 0 || num > 65535) return String(val);
-        return String(num);
-      });
-    } catch (e) {
-      return null;
-    }
+      }
+      return {
+        servers,
+        onionUrl: typeof onionUrl === 'string' && onionUrl.length > 0 ? onionUrl : null,
+        lbPort,
+      };
+    });
   }
 
   start() {
     this.renderDeb.call();
+    void this.poll();
     this.interval = setInterval(() => {
-      this.poll();
-      this.renderDeb.call();
+      void this.poll();
     }, 1000);
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
@@ -657,83 +778,64 @@ class LBTUI {
 
   renderFrame() {
     if (!this.run) return;
-    const w = this.w, h = this.h;
+    const w = Math.max(1, this.w);
+    const h = Math.max(1, this.h);
     const lines = [];
+    const dataStatus = {
+      connecting: '\x1b[36m● CONNECTING\x1b[0m',
+      live: '',
+      stale: '\x1b[33m● STALE\x1b[0m',
+      unavailable: '\x1b[31m● REDIS OFFLINE\x1b[0m',
+    }[this.stats.dataState] || '\x1b[90m● UNKNOWN\x1b[0m';
+    const serverCount = this.stats.servers === null ? '—' : String(this.stats.servers);
+    const serverLabel = this.stats.servers === 1 ? 'SERVER' : 'SERVERS';
+    const title = '\x1b[1;36m QOR\x1b[0m  \x1b[1mLOAD BALANCER\x1b[0m';
+    const statusPrefix = dataStatus ? `${dataStatus}  ` : '';
+    const topRight = `${statusPrefix}\x1b[1m${serverCount} ${serverLabel}\x1b[0m `;
 
-    // Header
-    const left = ` Load Balancer `;
-    const center = ` PID ${this.pid} | CPU ${this.stats.cpu}% | MEM ${this.stats.mem}% `;
-    const urlShort = this.stats.onionUrl ? this.stats.onionUrl : 'pending...';
-    const right = ` ${urlShort} `;
-    const leftLen = left.length, centerLen = center.length, rightLen = right.length;
-    let cst = Math.max(leftLen + 1, Math.floor((w - centerLen) / 2));
-    let rst = Math.max(cst + centerLen + 1, w - rightLen);
-    let hdr = '';
-    hdr += left;
-    hdr += ' '.repeat(Math.max(0, cst - leftLen));
-    if (cst + centerLen < rst) {
-      hdr += center;
-      hdr += ' '.repeat(Math.max(0, rst - cst - centerLen));
+    if (h < 8 || w < 34) {
+      lines.push(joinAnsiEdges(title, `${serverCount} ${serverLabel}`, w));
+      lines.push(joinAnsiEdges(dataStatus, `PID ${this.pid}`, w));
+      if (h > 2) lines.push('\x1b[90mResize the terminal for the activity view\x1b[0m');
+      this.writeFrame(lines, w, h);
+      return;
     }
-    if (rst + rightLen <= w) {
-      hdr += right.substring(0, w - rst);
-    }
-    hdr = hdr.substring(0, w);
-    hdr += ' '.repeat(Math.max(0, w - hdr.length));
-    lines.push('\x1b[30;46;1m' + hdr + '\x1b[0m');
 
-    // Stats line
+    lines.push(joinAnsiEdges(title, topRight, w));
+
     const httpsPort = this.stats.lbPort || CONFIG.HAPROXY_HTTPS_PORT;
-    const statsLeft = `\x1b[36mStats: http://localhost:${CONFIG.HAPROXY_STATS_PORT}/haproxy-stats\x1b[0m  \x1b[36mHTTPS :${httpsPort}\x1b[0m`;
-    const serverInfo = `\x1b[33mServers: ${this.stats.servers}\x1b[0m`;
-    const statsLeftClean = statsLeft.replace(/\x1b\[[^m]*m/g, '');
-    const serverInfoClean = serverInfo.replace(/\x1b\[[^m]*m/g, '');
-    const padding = ' '.repeat(Math.max(0, w - statsLeftClean.length - serverInfoClean.length));
-    lines.push(statsLeft + padding + serverInfo);
+    const ports = ` \x1b[90mHTTPS\x1b[0m :${httpsPort}   \x1b[90mSTATS\x1b[0m :${CONFIG.HAPROXY_STATS_PORT}`;
+    const processStats = `PID ${this.pid}   CPU ${this.stats.cpu}%   MEM ${this.stats.mem}% `;
+    lines.push(joinAnsiEdges(ports, processStats, w));
 
-    // Log area
-    lines.push('┌' + '─'.repeat(Math.max(0, w - 2)) + '┐');
+    let edgeLabel = 'Waiting for Tor publication';
+    if (this.stats.onionUrl) edgeLabel = this.stats.onionUrl;
+    if (this.stats.dataState === 'unavailable') edgeLabel = 'Redis status unavailable';
+    const freshness = this.stats.dataState === 'stale'
+      ? 'showing last known state '
+      : `heartbeat window ${Math.round(CONFIG.SERVER_ACTIVE_TIMEOUT_MS / 1000)}s `;
+    lines.push(joinAnsiEdges(` \x1b[90mEDGE\x1b[0m  ${edgeLabel}`, `\x1b[90m${freshness}\x1b[0m`, w));
 
-    const truncateWithAnsi = (s, len) => {
-      let visualLen = 0;
-      let result = '';
-      let i = 0;
-      while (i < s.length && visualLen < len) {
-        if (s[i] === '\x1b' && s[i + 1] === '[') {
-          const start = i;
-          i += 2;
-          while (i < s.length && !/[a-zA-Z]/.test(s[i])) i++;
-          result += s.substring(start, i + 1);
-          i++;
-        } else {
-          result += s[i];
-          visualLen++;
-          i++;
-        }
-      }
-      return { text: result, visualLen };
-    };
+    const activityTitle = this.scroll > 0
+      ? ` ACTIVITY · ${this.scroll} NEWER `
+      : ' ACTIVITY ';
+    lines.push(`┌─${activityTitle}${'─'.repeat(Math.max(0, w - activityTitle.length - 3))}┐`);
 
-    const vis = Math.max(1, h - 7);
+    const vis = Math.max(1, h - 6);
     const start = Math.max(0, this.buf.len() - vis - this.scroll);
     const end = this.buf.len() - this.scroll;
     const slice = this.buf.get().slice(start, end);
+    const contentWidth = Math.max(0, w - 4);
     for (let i = 0; i < vis; i++) {
-      const ln = slice[i] || '';
-      const { text: tr, visualLen } = truncateWithAnsi(ln, Math.max(0, w - 4));
-      const pad = tr + ' '.repeat(Math.max(0, w - 4 - visualLen));
-      const sb = i === 0 && this.scroll > 0 ? '▲' : (i === vis - 1 && (this.buf.len() - end) > 0 ? '▼' : '│');
-      lines.push('│ ' + pad + ' ' + sb);
+      lines.push(`│ ${fitAnsi(slice[i] || '', contentWidth)}\x1b[0m │`);
     }
     lines.push('└' + '─'.repeat(Math.max(0, w - 2)) + '┘');
 
-    // Command area
     if (this.cmdMode) {
-      const cmdPrefix = 'Command: ';
-      const maxInputWidth = w - cmdPrefix.length - 2;
-      const cmdDisplay = this.cmdInput.substring(0, maxInputWidth);
-      const cursorPos = Math.min(this.cmdCursor, cmdDisplay.length);
-
+      const maxInputWidth = Math.max(1, w - 3);
+      const inputStart = Math.max(0, this.cmdCursor - maxInputWidth + 1);
+      const cmdDisplay = this.cmdInput.slice(inputStart, inputStart + maxInputWidth);
+      const cursorPos = Math.max(0, Math.min(this.cmdCursor - inputStart, cmdDisplay.length));
       let inlineSuggestion = '';
       if (this.cmdSuggestions.length > 0 && this.cmdInput.length > 0 && this.cmdCursor === this.cmdInput.length) {
         const firstSuggestion = this.cmdSuggestions[0];
@@ -741,29 +843,26 @@ class LBTUI {
           inlineSuggestion = firstSuggestion.substring(this.cmdInput.length);
         }
       }
-
       const beforeCursor = cmdDisplay.substring(0, cursorPos);
       const atCursor = cmdDisplay[cursorPos] || (inlineSuggestion ? inlineSuggestion[0] : ' ');
       const afterCursor = cmdDisplay.substring(cursorPos + 1);
-
-      let cmdLine = cmdPrefix + beforeCursor + '\x1b[7m' + atCursor + '\x1b[0m\x1b[30;43m' + afterCursor;
-      if (cursorPos === this.cmdInput.length && inlineSuggestion.length > 0) {
-        cmdLine += '\x1b[90m' + inlineSuggestion.substring(cursorPos === cmdDisplay.length ? 1 : 0) + '\x1b[0m\x1b[30;43m';
+      let cmdLine = `\x1b[36m›\x1b[0m ${beforeCursor}\x1b[7m${atCursor}\x1b[0m${afterCursor}`;
+      if (this.cmdCursor === this.cmdInput.length && inlineSuggestion.length > 0) {
+        cmdLine += `\x1b[90m${inlineSuggestion.substring(1)}\x1b[0m`;
       }
-
-      const totalLen = cmdPrefix.length + cmdDisplay.length + (inlineSuggestion.length > 0 ? inlineSuggestion.length : 0);
-      const cmdLinePad = ' '.repeat(Math.max(0, w - totalLen));
-      lines.push('\x1b[30;43m' + cmdLine + cmdLinePad + '\x1b[0m');
-
-      lines.push(' '.repeat(w));
+      lines.push(cmdLine);
     } else {
-      const footer = ' /: command  q: quit  Arrows PgUp/PgDn Home/End';
-      const foot = footer + ' '.repeat(Math.max(0, w - footer.length));
-      lines.push('\x1b[30;46m' + foot.substring(0, w) + '\x1b[0m');
-      lines.push(' '.repeat(w));
+      lines.push(' \x1b[36m/\x1b[0m command   \x1b[90m↑↓\x1b[0m scroll   \x1b[90mPgUp/PgDn\x1b[0m page   \x1b[90mG\x1b[0m latest   \x1b[90mq\x1b[0m quit');
     }
 
-    const out = '\x1b[H' + lines.join('\n');
+    this.writeFrame(lines, w, h);
+  }
+
+  writeFrame(lines, width, height) {
+    const fittedLines = lines.slice(0, height).map((line) => `\x1b[2K${fitAnsi(line, width)}`);
+    const clearPrefix = this.needsFullClear ? '\x1b[2J' : '';
+    this.needsFullClear = false;
+    const out = `${clearPrefix}\x1b[H${fittedLines.join('\n')}\x1b[J`;
     try {
       process.stdout.write(out);
     } catch { }
@@ -1032,19 +1131,20 @@ async function checkStatsCredentials() {
   const ui = new LBTUI(child.pid);
 
   const last = []; const MAX = 200; const push = (l) => { last.push(l); if (last.length > MAX) last.shift(); };
-  const onData = (d) => {
-    String(d).split('\n').forEach((ln) => {
-      if (ln.trim()) {
-        ui.add(ln);
-        push(ln);
-        if (exitedImmediately) capturedOutput.push(ln);
-      }
-    });
+  const collectLine = (line) => {
+    if (!line.trim()) return;
+    ui.add(line);
+    push(line);
+    if (exitedImmediately) capturedOutput.push(line);
   };
-  child.stdout.on('data', onData);
-  child.stderr.on('data', onData);
+  const stdoutLines = createLineCollector(collectLine);
+  const stderrLines = createLineCollector(collectLine);
+  child.stdout.on('data', (chunk) => stdoutLines.push(chunk));
+  child.stderr.on('data', (chunk) => stderrLines.push(chunk));
   child.on('exit', (code) => {
     clearTimeout(immediateCheck);
+    stdoutLines.flush();
+    stderrLines.flush();
     ui.stop();
 
     if (code === 0 && exitedImmediately !== false) {
@@ -1063,10 +1163,29 @@ async function checkStatsCredentials() {
               const restartChild = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
               const restartUi = new LBTUI(restartChild.pid);
               const restartLast = [];
-              const restartOnData = (d) => { String(d).split('\n').forEach((ln) => { if (ln.trim()) { restartUi.add(ln); restartLast.push(ln); if (restartLast.length > MAX) restartLast.shift(); } }); };
-              restartChild.stdout.on('data', restartOnData);
-              restartChild.stderr.on('data', restartOnData);
-              restartChild.on('exit', (c) => { restartUi.stop(); if (c !== 0) { console.error(`\n[ERROR] Load balancer exited with code ${c}`); if (restartLast.length) { console.error('[ERROR] Last output:'); for (const l of restartLast) console.error('  ' + l); } } process.exit(c || 0); });
+              const collectRestartLine = (line) => {
+                if (!line.trim()) return;
+                restartUi.add(line);
+                restartLast.push(line);
+                if (restartLast.length > MAX) restartLast.shift();
+              };
+              const restartStdoutLines = createLineCollector(collectRestartLine);
+              const restartStderrLines = createLineCollector(collectRestartLine);
+              restartChild.stdout.on('data', (chunk) => restartStdoutLines.push(chunk));
+              restartChild.stderr.on('data', (chunk) => restartStderrLines.push(chunk));
+              restartChild.on('exit', (c) => {
+                restartStdoutLines.flush();
+                restartStderrLines.flush();
+                restartUi.stop();
+                if (c !== 0) {
+                  console.error(`\n[ERROR] Load balancer exited with code ${c}`);
+                  if (restartLast.length) {
+                    console.error('[ERROR] Last output:');
+                    for (const l of restartLast) console.error('  ' + l);
+                  }
+                }
+                process.exit(c || 0);
+              });
               restartUi.start();
             }, 500);
             return;

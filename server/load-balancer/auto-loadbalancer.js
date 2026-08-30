@@ -20,7 +20,7 @@ import {
   TEMP_DIRECTORY,
   haproxyStatsDashboardUrl,
 } from '../config/infrastructure.js';
-import { CLUSTER_SERVERS_KEY } from '../config/redis-keys.js';
+import { CLUSTER_SERVERS_KEY, REDIS_KEYS } from '../config/redis-keys.js';
 
 const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (IS_ROOT ? '443' : '8443'), 10);
 const SERVER_ACTIVE_TIMEOUT_MS = Math.min(
@@ -165,7 +165,7 @@ class AutoLoadBalancer {
 
     try {
       await withRedisClient(async (client) => {
-        await client.set('cluster:lb:httpsPort', String(listenPort));
+        await client.set(REDIS_KEYS.LB_HTTPS_PORT, String(listenPort));
       });
     } catch {
     }
@@ -269,13 +269,12 @@ class AutoLoadBalancer {
 
       await this.torManager.monitor(this.listenPort);
 
-      // Periodically update the onion address in Redis for the TUI to display
       const onionAddr = await this.torManager.getOnionAddress();
       await withRedisClient(async (client) => {
         if (onionAddr && this.torManager.isPublished()) {
-          await client.set('cluster:lb:onionAddress', `https://${onionAddr}`);
+          await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`);
         } else {
-          await client.del('cluster:lb:onionAddress');
+          await client.del(REDIS_KEYS.LB_ONION_ADDRESS);
         }
       });
 

@@ -3,10 +3,18 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execFileSync } = require('child_process');
-const { URL } = require('url');
+const { X509Certificate } = require('crypto');
+const { spawn, execFile, execFileSync } = require('child_process');
+const { URL, pathToFileURL } = require('url');
+const {
+  parseRegistration,
+} = require('./server-tui-state.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
+const redisKeysModuleUrl = pathToFileURL(
+  path.join(repoRoot, 'server', 'config', 'redis-keys.js')
+).href;
+let redisKeysPromise = null;
 
 if (process.platform !== 'linux') {
   console.error('[ERROR] Native server deployment supports only Linux. Use Docker instead:');
@@ -147,6 +155,9 @@ function buildRedisCliInvocation(redisUrl, args) {
   }
 
   const cliArgs = ['-h', hostname, '-p', port, '--tls'];
+  if ((process.env.REDIS_CLUSTER_NODES || '').trim().length > 0) {
+    cliArgs.push('-c');
+  }
 
   if (url.username) {
     try {
@@ -198,48 +209,74 @@ function runRedisCli(redisUrl, args, options = {}) {
   });
 }
 
-function countEstablishedTcpConnections(portValue) {
-  const port = Number(portValue);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return 0;
-
-  const countOutput = (output, source) => {
-    let count = 0;
-    for (const line of output.split(/\r?\n/)) {
-      const columns = line.trim().split(/\s+/);
-      if (columns.length < 4) continue;
-
-      const state = columns[columns.length - 1];
-      const isEstablished = source === 'ss'
-        ? columns[0] === 'ESTAB'
-        : /^tcp/i.test(columns[0]) && state === 'ESTABLISHED';
-      if (!isEstablished) continue;
-
-      const localEndpoint = columns[3];
-      if (localEndpoint.endsWith(`:${port}`) || localEndpoint.endsWith(`.${port}`)) {
-        count += 1;
+function execFileOutput(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, {
+      encoding: 'utf8',
+      timeout: 1000,
+      maxBuffer: 1024 * 1024,
+      ...options,
+    }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
       }
-    }
-    return count;
-  };
-
-  try {
-    const output = execFileSync('ss', ['-H', '-t', '-a', '-n'], {
-      encoding: 'utf8',
-      timeout: 500,
-      stdio: ['ignore', 'pipe', 'ignore']
+      resolve(String(stdout || ''));
     });
-    return countOutput(output, 'ss');
-  } catch { }
+  });
+}
 
+async function runRedisCliAsync(redisUrl, args, options = {}) {
+  const { cliArgs, env } = buildRedisCliInvocation(redisUrl, args);
+  return execFileOutput('redis-cli', cliArgs, {
+    ...options,
+    env: { ...process.env, ...(options.env || {}), ...env },
+  });
+}
+
+async function getRedisKeys() {
+  if (!redisKeysPromise) {
+    redisKeysPromise = import(redisKeysModuleUrl)
+      .then((module) => module.REDIS_KEYS)
+      .catch((error) => {
+        redisKeysPromise = null;
+        throw error;
+      });
+  }
+  return redisKeysPromise;
+}
+
+async function readProcessMetrics(pid) {
   try {
-    const output = execFileSync('netstat', ['-t', '-a', '-n'], {
-      encoding: 'utf8',
-      timeout: 500,
-      stdio: ['ignore', 'pipe', 'ignore']
-    });
-    return countOutput(output, 'netstat');
+    const output = await execFileOutput(
+      'ps',
+      ['-p', String(pid), '-o', '%cpu=,%mem='],
+      { timeout: 500 }
+    );
+    const values = output.trim().split(/\s+/);
+    return values.length >= 2 ? { cpu: values[0], mem: values[1] } : null;
   } catch {
-    return 0;
+    return null;
+  }
+}
+
+async function readTlsCertificate(certPath) {
+  if (!certPath) return { state: 'missing', cn: null, days: null };
+  try {
+    const pem = await fs.promises.readFile(certPath);
+    const certificate = new X509Certificate(pem);
+    const expiresAt = Date.parse(certificate.validTo);
+    const cnMatch = certificate.subject.match(/(?:^|\n)CN\s*=\s*([^\n,]+)/);
+    const days = Number.isFinite(expiresAt)
+      ? Math.ceil((expiresAt - Date.now()) / (1000 * 60 * 60 * 24))
+      : null;
+    return {
+      state: days !== null && days < 0 ? 'expired' : 'valid',
+      cn: cnMatch ? cnMatch[1].trim() : null,
+      days,
+    };
+  } catch {
+    return { state: 'unavailable', cn: null, days: null };
   }
 }
 
@@ -311,6 +348,77 @@ class RateLimiter {
     }
     return false;
   }
+}
+
+const ANSI_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const NON_SGR_ANSI_SEQUENCE = /\x1b\[(?![0-9;]*m)[0-?]*[ -/]*[@-~]/g;
+
+function sanitizeTerminalLog(value) {
+  return String(value)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    .replace(NON_SGR_ANSI_SEQUENCE, '')
+    .replace(/\t/g, '  ')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, '');
+}
+
+function ansiWidth(value) {
+  return Array.from(String(value).replace(ANSI_SEQUENCE, '')).length;
+}
+
+function truncateAnsi(value, maxWidth) {
+  if (maxWidth <= 0) return '';
+  const input = String(value);
+  let result = '';
+  let width = 0;
+  let offset = 0;
+
+  while (offset < input.length && width < maxWidth) {
+    if (input[offset] === '\x1b' && input[offset + 1] === '[') {
+      const match = input.slice(offset).match(/^\x1b\[[0-?]*[ -/]*[@-~]/);
+      if (match) {
+        result += match[0];
+        offset += match[0].length;
+        continue;
+      }
+    }
+    const codePoint = input.codePointAt(offset);
+    const character = String.fromCodePoint(codePoint);
+    result += character;
+    offset += character.length;
+    width += 1;
+  }
+
+  return result;
+}
+
+function fitAnsi(value, width) {
+  const content = truncateAnsi(value, width);
+  return `${content}\x1b[0m${' '.repeat(Math.max(0, width - ansiWidth(content)))}`;
+}
+
+function joinAnsiEdges(left, right, width, gap = 2) {
+  if (width <= 0) return '';
+  const rightWidth = ansiWidth(right);
+  if (rightWidth >= width) return truncateAnsi(right, width);
+  const leftWidth = Math.max(0, width - rightWidth - gap);
+  const fittedLeft = truncateAnsi(left, leftWidth);
+  const padding = Math.max(1, width - ansiWidth(fittedLeft) - rightWidth);
+  return `${fittedLeft}${' '.repeat(padding)}${right}`;
+}
+
+function createLineCollector(onLine) {
+  let pending = '';
+  return {
+    push(chunk) {
+      const parts = (pending + String(chunk)).split(/\r\n|\n|\r/);
+      pending = parts.pop() || '';
+      for (const line of parts) onLine(line);
+    },
+    flush() {
+      if (pending.length > 0) onLine(pending);
+      pending = '';
+    },
+  };
 }
 
 // Port checking
@@ -544,89 +652,88 @@ async function validatePostgresBootstrap() {
 }
 
 class ServerUI {
-  constructor(serverPid, config) {
-    this.serverPid = serverPid;
+  constructor(serverProcess, config) {
+    this.serverProcess = serverProcess;
+    this.serverPid = serverProcess.pid;
     this.config = config;
+    this.clusteringEnabled = String(config.ENABLE_CLUSTERING).toLowerCase() === 'true';
     this.logBuffer = new CircularBuffer(1000);
     this.scrollOffset = 0;
     this.running = true;
+    this.shutdownRequested = false;
     this.startTime = Date.now();
-    this.lastMetrics = null;
+    this.lastMetrics = {
+      cpu: null,
+      mem: null,
+      registration: this.clusteringEnabled ? 'checking' : 'standalone',
+      heartbeatAge: null,
+      redisState: 'checking',
+      updatedAt: null,
+    };
     this.metricsLimiter = new RateLimiter(1000);
-    this.selfServerId = null;
-    this.tlsCache = null;
+    this.metricsInFlight = null;
+    this.lastRegistrationCheck = 0;
+    this.registrationCheckInterval = 2000;
+    this.tlsCache = { state: 'checking', cn: null, days: null };
     this.lastTlsCheck = 0;
+    this.needsFullClear = true;
 
     this.width = process.stdout.columns || 80;
-    this.height = (process.stdout.rows || 24) - 1;
+    this.height = process.stdout.rows || 24;
+    this.renderDebouncer = new Debouncer(() => this._doRender(), 50);
 
-    this.renderDebouncer = new Debouncer(() => this._doRender(), 100);
-
-    process.stdout.on('resize', () => {
+    this.resizeHandler = () => {
       this.width = process.stdout.columns || 80;
-      this.height = (process.stdout.rows || 24) - 1;
+      this.height = process.stdout.rows || 24;
+      this.needsFullClear = true;
       this.renderDebouncer.call();
-    });
+    };
+    process.stdout.on('resize', this.resizeHandler);
 
+    this.inputHandler = (key) => this._handleInput(key);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
-      process.stdin.on('data', (key) => this._handleInput(key));
+      process.stdin.resume();
+      process.stdin.on('data', this.inputHandler);
     }
 
     process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
   }
 
+  _visibleLogLines() {
+    return Math.max(1, this.height - 7);
+  }
+
   _handleInput(key) {
     const code = key.charCodeAt(0);
-
-    // q or Ctrl+C to quit
     if (key === 'q' || key === 'Q' || code === 3) {
       this.stop();
       return;
     }
 
-    const visibleLines = Math.max(1, this.height - 6);
+    const visibleLines = this._visibleLogLines();
     const maxOffset = Math.max(0, this.logBuffer.length() - visibleLines);
-
-    // Arrow keys and scrolling
-    if (key === '\x1b[A') { // Up arrow
+    if (key === '\x1b[A' || key === 'k') {
       this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
-      this.renderDebouncer.call();
-    } else if (key === '\x1b[B') { // Down arrow
+    } else if (key === '\x1b[B' || key === 'j') {
       this.scrollOffset = Math.max(this.scrollOffset - 1, 0);
-      this.renderDebouncer.call();
-    } else if (key === '\x1b[5~') { // Page Up
+    } else if (key === '\x1b[5~') {
       this.scrollOffset = Math.min(this.scrollOffset + visibleLines, maxOffset);
-      this.renderDebouncer.call();
-    } else if (key === '\x1b[6~') { // Page Down
+    } else if (key === '\x1b[6~') {
       this.scrollOffset = Math.max(this.scrollOffset - visibleLines, 0);
-      this.renderDebouncer.call();
-    } else if (key === '\x1b[H') { // Home
+    } else if (key === '\x1b[H' || key === 'g') {
       this.scrollOffset = maxOffset;
-      this.renderDebouncer.call();
-    } else if (key === '\x1b[F') { // End
+    } else if (key === '\x1b[F' || key === 'G') {
       this.scrollOffset = 0;
-      this.renderDebouncer.call();
-    } else if (key === 'g') {
-      this.scrollOffset = maxOffset;
-      this.renderDebouncer.call();
-    } else if (key === 'G') {
-      this.scrollOffset = 0;
-      this.renderDebouncer.call();
-    } else if (key === 'k') {
-      this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
-      this.renderDebouncer.call();
-    } else if (key === 'j') {
-      this.scrollOffset = Math.max(this.scrollOffset - 1, 0);
-      this.renderDebouncer.call();
-    } else if (code === 21) { // Ctrl-U
+    } else if (code === 21) {
       this.scrollOffset = Math.min(this.scrollOffset + Math.floor(visibleLines / 2), maxOffset);
-      this.renderDebouncer.call();
-    } else if (code === 4) { // Ctrl-D
+    } else if (code === 4) {
       this.scrollOffset = Math.max(this.scrollOffset - Math.floor(visibleLines / 2), 0);
-      this.renderDebouncer.call();
+    } else {
+      return;
     }
+    this.renderDebouncer.call();
   }
 
   addLog(line) {
@@ -634,296 +741,261 @@ class ServerUI {
       const parts = line.split('\r');
       line = parts[parts.length - 1];
     }
+    line = sanitizeTerminalLog(line);
+    const keepViewportAnchored = this.scrollOffset > 0;
     this.logBuffer.push(line);
+    if (keepViewportAnchored) {
+      this.scrollOffset = Math.min(
+        this.scrollOffset + 1,
+        Math.max(0, this.logBuffer.length() - 1)
+      );
+    }
     this.renderDebouncer.call();
   }
 
-  async updateMetrics() {
-    if (!this.metricsLimiter.canCall()) return;
-
-    try {
-      const metrics = {};
-
-      try {
-        const out = execFileSync(
-          'ps',
-          ['-p', String(this.serverPid), '-o', '%cpu=,%mem='],
-          { encoding: 'utf8', timeout: 500 }
-        ).trim();
-        const parts = out.split(/\s+/);
-        if (parts.length >= 2) {
-          metrics.cpu = parts[0];
-          metrics.mem = parts[1];
-        }
-      } catch { }
-      // Connection count
-      try {
-        metrics.connections = countEstablishedTcpConnections(this.config.PORT);
-      } catch { }
-
-      // Redis cluster info
-      try {
-        if (!this.selfServerId) {
-          const keys = runRedisCli(this.config.REDIS_URL, ['hkeys', 'cluster:servers'], {
-            encoding: 'utf8',
-            timeout: 700
-          }).trim().split('\n');
-
-          for (const key of keys) {
-            const val = runRedisCli(this.config.REDIS_URL, ['hget', 'cluster:servers', key], {
-              encoding: 'utf8',
-              timeout: 700
-            }).trim();
-            try {
-              const data = JSON.parse(val);
-              if (data.port == this.config.PORT || data.pid == this.serverPid) {
-                this.selfServerId = key;
-                break;
-              }
-            } catch { }
-          }
-        }
-
-        if (this.selfServerId) {
-          const val = runRedisCli(this.config.REDIS_URL, ['hget', 'cluster:servers', this.selfServerId], {
-            encoding: 'utf8',
-            timeout: 700
-          }).trim();
-          const data = JSON.parse(val);
-          metrics.heartbeatAge = Math.floor((Date.now() - (data.lastHeartbeat || 0)) / 1000);
-          metrics.registered = true;
-        } else {
-          metrics.registered = false;
-        }
-      } catch { }
-
-      if (Date.now() - this.lastTlsCheck > 10000) {
-        this.lastTlsCheck = Date.now();
-        try {
-          if (this.config.TLS_CERT_PATH && fs.existsSync(this.config.TLS_CERT_PATH)) {
-            const subj = execFileSync(
-              'openssl',
-              ['x509', '-in', this.config.TLS_CERT_PATH, '-noout', '-subject'],
-              { encoding: 'utf8', timeout: 600 }
-            ).trim();
-            const end = execFileSync(
-              'openssl',
-              ['x509', '-in', this.config.TLS_CERT_PATH, '-noout', '-enddate'],
-              { encoding: 'utf8', timeout: 600 }
-            ).trim();
-
-            let cn = null;
-            const cnMatch = subj.match(/CN\s*=\s*([^,/]+)/);
-            if (cnMatch) cn = cnMatch[1].trim();
-
-            let days = null;
-            const dateMatch = end.match(/notAfter=(.+)/);
-            if (dateMatch) {
-              const expiry = new Date(dateMatch[1]);
-              days = Math.floor((expiry - Date.now()) / (1000 * 60 * 60 * 24));
-            }
-
-            this.tlsCache = { cn, days };
-          }
-        } catch { }
-      }
-
-      this.lastMetrics = metrics;
-    } catch { }
+  updateMetrics() {
+    if (this.metricsInFlight || !this.metricsLimiter.canCall()) return this.metricsInFlight;
+    this.metricsInFlight = this._updateMetricsOnce().finally(() => {
+      this.metricsInFlight = null;
+      if (this.running) this.render();
+    });
+    return this.metricsInFlight;
   }
 
-  _truncate(str, maxLen) {
-    if (!str) return 'unknown';
-    str = String(str);
-    if (str.length <= maxLen) return str;
-    const head = Math.floor(maxLen / 2);
-    const tail = maxLen - head - 1;
-    return str.substring(0, head) + '…' + str.substring(str.length - tail);
+  async _updateMetricsOnce() {
+    const now = Date.now();
+    const tasks = [
+      readProcessMetrics(this.serverPid).then((metrics) => {
+        if (!metrics) return;
+        this.lastMetrics.cpu = metrics.cpu;
+        this.lastMetrics.mem = metrics.mem;
+      }),
+    ];
+
+    if (now - this.lastRegistrationCheck >= this.registrationCheckInterval) {
+      this.lastRegistrationCheck = now;
+      tasks.push(this.clusteringEnabled ? this._refreshRegistration() : this._refreshRedisStatus());
+    }
+    if (now - this.lastTlsCheck >= 60000) {
+      this.lastTlsCheck = now;
+      tasks.push(readTlsCertificate(this.config.TLS_CERT_PATH).then((tls) => {
+        this.tlsCache = tls;
+      }));
+    }
+
+    await Promise.allSettled(tasks);
+    this.lastMetrics.updatedAt = Date.now();
+  }
+
+  async _refreshRegistration() {
+    try {
+      const redisKeys = await getRedisKeys();
+      const rawValue = await runRedisCliAsync(
+        this.config.REDIS_URL,
+        ['hget', redisKeys.CLUSTER_SERVERS, String(this.config.SERVER_ID)],
+        { timeout: 900 }
+      );
+      const registration = parseRegistration(rawValue.trim(), Date.now());
+      this.lastMetrics.registration = registration.registration;
+      this.lastMetrics.heartbeatAge = registration.heartbeatAge;
+      this.lastMetrics.redisState = 'live';
+    } catch {
+      const hadLiveState = ['live', 'stale'].includes(this.lastMetrics.redisState);
+      this.lastMetrics.redisState = hadLiveState ? 'stale' : 'unavailable';
+      if (!hadLiveState) this.lastMetrics.registration = 'unavailable';
+    }
+  }
+
+  async _refreshRedisStatus() {
+    try {
+      const response = await runRedisCliAsync(this.config.REDIS_URL, ['PING'], { timeout: 900 });
+      if (!/PONG/i.test(response)) throw new Error('Unexpected Redis PING response');
+      this.lastMetrics.redisState = 'live';
+    } catch {
+      const hadLiveState = ['live', 'stale'].includes(this.lastMetrics.redisState);
+      this.lastMetrics.redisState = hadLiveState ? 'stale' : 'unavailable';
+    }
+  }
+
+  _truncate(value, maxLength) {
+    const text = value ? String(value) : 'unknown';
+    if (maxLength <= 1) return text.slice(0, Math.max(0, maxLength));
+    if (text.length <= maxLength) return text;
+    const head = Math.floor((maxLength - 1) / 2);
+    const tail = maxLength - head - 1;
+    return `${text.slice(0, head)}…${text.slice(-tail)}`;
+  }
+
+  _databaseDisplay(maxLength) {
+    try {
+      const rawUrl = process.env.DATABASE_URL;
+      let display = null;
+      if (typeof rawUrl === 'string' && rawUrl.length > 0) {
+        try {
+          const url = new URL(rawUrl);
+          const protocol = url.protocol.replace(/:$/, '') || 'postgres';
+          const host = url.hostname || 'localhost';
+          const port = url.port ? `:${url.port}` : '';
+          const database = url.pathname ? url.pathname.replace(/^\//, '') : '';
+          display = `${protocol}://${host}${port}${database ? `/${database}` : ''}`;
+        } catch {
+          display = '[invalid DATABASE_URL]';
+        }
+      }
+      if (!display) {
+        const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
+        const port = process.env.PGPORT || '5432';
+        const database = process.env.PGDATABASE || process.env.DB_NAME || 'Qor';
+        display = `postgres://${host}:${port}/${database}`;
+      }
+      return this._truncate(display, maxLength);
+    } catch {
+      return 'postgres://unknown';
+    }
+  }
+
+  _formatUptime(totalSeconds) {
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (days) return `${days}d ${hours}h ${minutes}m`;
+    if (hours) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  _registrationLabel() {
+    const registration = this.lastMetrics.registration;
+    const redisState = this.lastMetrics.redisState;
+    if (registration === 'standalone') return '\x1b[36mSTANDALONE\x1b[0m';
+    if (registration === 'registered') {
+      const suffix = redisState === 'stale' ? ' · STALE' : '';
+      return `\x1b[32mREGISTERED${suffix}\x1b[0m`;
+    }
+    if (registration === 'pending' || registration === 'checking') {
+      return '\x1b[33mPENDING\x1b[0m';
+    }
+    if (registration === 'corrupt') return '\x1b[31mINVALID ENTRY\x1b[0m';
+    return '\x1b[31mUNAVAILABLE\x1b[0m';
+  }
+
+  _tlsLabel() {
+    const tls = this.tlsCache;
+    if (tls.state === 'checking') return '\x1b[33mTLS CHECKING\x1b[0m';
+    if (tls.state === 'missing') return '\x1b[31mTLS MISSING\x1b[0m';
+    if (tls.state === 'unavailable') return '\x1b[31mTLS UNREADABLE\x1b[0m';
+    if (tls.state === 'expired') return '\x1b[31mTLS EXPIRED\x1b[0m';
+    const color = tls.days === null || tls.days >= 14 ? 32 : (tls.days >= 3 ? 33 : 31);
+    const identity = tls.cn ? ` ${this._truncate(tls.cn, 24)}` : '';
+    const remaining = tls.days === null ? '' : ` · ${tls.days}d`;
+    return `\x1b[${color}mTLS${identity}${remaining}\x1b[0m`;
+  }
+
+  _overallStatus() {
+    const metrics = this.lastMetrics;
+    if (metrics.redisState === 'checking') return '\x1b[33m● STARTING\x1b[0m';
+    if (
+      this.tlsCache.state === 'expired' ||
+      this.tlsCache.state === 'missing' ||
+      this.tlsCache.state === 'unavailable' ||
+      (this.tlsCache.days !== null && this.tlsCache.days < 3)
+    ) {
+      return '\x1b[31m● DEGRADED\x1b[0m';
+    }
+    if (metrics.registration === 'standalone') {
+      return metrics.redisState === 'live' ? '' : '\x1b[31m● DEGRADED\x1b[0m';
+    }
+    if (metrics.registration === 'checking' || metrics.registration === 'pending') {
+      return '\x1b[33m● STARTING\x1b[0m';
+    }
+    if (
+      metrics.registration !== 'registered' ||
+      metrics.redisState !== 'live' ||
+      metrics.heartbeatAge === null ||
+      metrics.heartbeatAge >= 30
+    ) {
+      return '\x1b[31m● DEGRADED\x1b[0m';
+    }
+    return '';
   }
 
   _doRender() {
     if (!this.running) return;
-
-    const lines = [];
-    const w = this.width;
-    const h = this.height;
-
-    let alive = false;
-    try {
-      process.kill(this.serverPid, 0);
-      alive = true;
-    } catch { }
-
-    if (!alive && this.running) {
-      this.stop();
+    if (this.serverProcess.exitCode !== null || this.serverProcess.signalCode !== null) {
+      this.stop(false);
       return;
     }
 
-    const m = this.lastMetrics || {};
-    const cpu = m.cpu || '?';
-    const mem = m.mem || '?';
-    const conns = m.connections !== undefined ? m.connections : '?';
-    const uptime = Math.floor((Date.now() - this.startTime) / 1000);
-    const hbAge = m.heartbeatAge !== undefined ? m.heartbeatAge : null;
-    const registered = m.registered || false;
+    const w = Math.max(1, this.width);
+    const h = Math.max(1, this.height);
+    const lines = [];
+    const metrics = this.lastMetrics;
+    const serverId = this.config.SERVER_ID || 'unknown';
+    const title = `\x1b[1;36m QOR\x1b[0m  \x1b[1mSERVER\x1b[0m  ${serverId}`;
+    const overallStatus = this._overallStatus();
+    const topRight = overallStatus ? `${overallStatus} ` : '';
 
-    const dbDisplay = (() => {
-      try {
-        const rawUrl = process.env.DATABASE_URL;
-        let display = null;
-        if (rawUrl && typeof rawUrl === 'string') {
-          try {
-            const u = new URL(rawUrl);
-            const protocol = u.protocol || 'postgres:';
-            const user = u.username || '';
-            const hostName = u.hostname || 'localhost';
-            const port = u.port || '';
-            const dbName = u.pathname ? u.pathname.replace(/^\//, '') : '';
-            const proto = protocol.replace(/:$/, '');
-            const auth = user ? `${user}@` : '';
-            const hostPort = port ? `${hostName}:${port}` : hostName;
-            display = `${proto}://${auth}${hostPort}${dbName ? '/' + dbName : ''}`;
-          } catch {
-            display = '[invalid DATABASE_URL]';
-          }
-        }
-        if (!display) {
-          const hostName = process.env.PGHOST || '127.0.0.1';
-          const port = process.env.PGPORT || '5432';
-          const dbName = process.env.PGDATABASE || 'Qor';
-          const user = process.env.DATABASE_USER || process.env.PGUSER || '';
-          const auth = user ? `${user}@` : '';
-          display = `postgres://${auth}${hostName}:${port}/${dbName}`;
-        }
-        const maxLen = Math.max(16, Math.floor(w / 2));
-        return this._truncate(display, maxLen);
-      } catch {
-        return 'postgres://unknown';
-      }
-    })();
-
-    // Format uptime
-    const fmtTime = (s) => {
-      const d = Math.floor(s / 86400);
-      const h = Math.floor((s % 86400) / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = s % 60;
-      if (d) return `${d}d ${h}h ${m}m`;
-      if (h) return `${h}h ${m}m ${sec}s`;
-      if (m) return `${m}m ${sec}s`;
-      return `${sec}s`;
-    };
-
-    // Header
-    const serverId = this._truncate(this.selfServerId || this.config.SERVER_ID || 'unknown', 24);
-    const host = this.config.SERVER_HOST || '127.0.0.1';
-    const port = this.config.PORT;
-    const leftTxt = ` Server: ${serverId} `;
-    const centerTxt = ` PID ${this.serverPid} | CPU ${cpu}% | MEM ${mem}% `;
-    const rightTxt = ` Host: ${host}:${port} `;
-
-    let headerLine = '';
-    const leftLen = leftTxt.length;
-    const rightLen = rightTxt.length;
-    const centerLen = centerTxt.length;
-    const centerStart = Math.max(leftLen + 1, Math.floor((w - centerLen) / 2));
-    const rightStart = Math.max(centerStart + centerLen + 1, w - rightLen);
-
-    headerLine += leftTxt;
-    headerLine += ' '.repeat(Math.max(0, centerStart - leftLen));
-    if (centerStart + centerLen < rightStart) {
-      headerLine += centerTxt;
-      headerLine += ' '.repeat(Math.max(0, rightStart - centerStart - centerLen));
-    }
-    if (rightStart + rightLen <= w) {
-      headerLine += rightTxt.substring(0, w - rightStart);
-    }
-    headerLine = headerLine.substring(0, w);
-    headerLine += ' '.repeat(Math.max(0, w - headerLine.length));
-    lines.push('\x1b[30;46;1m' + headerLine + '\x1b[0m');
-
-    // Stats line
-    const uptimeTxt = `UP ${fmtTime(uptime)}`;
-    const connTxt = `CONN ${conns}`;
-    const hbPlain = hbAge !== null ? `HB ${hbAge}s` : 'HB ?';
-    const rightStatsPlain = `${hbPlain}   ${uptimeTxt}   ${connTxt}`;
-    const rightStatsStart = Math.max(1, w - rightStatsPlain.length - 1);
-
-    let statsLine = '';
-    // Redis
-    statsLine += `\x1b[36mRedis: ${safeUrlEndpointForDisplay(this.config.REDIS_URL, 'REDIS_URL')}\x1b[0m`;
-    statsLine += '\x1b[36m  •  \x1b[0m';
-    statsLine += '\x1b[36mDB: \x1b[0m';
-    statsLine += `\x1b[36m${dbDisplay}\x1b[0m`;
-    statsLine += '\x1b[36m  •  \x1b[0m';
-    statsLine += '\x1b[36mStatus: \x1b[0m';
-    if (registered) {
-      statsLine += '\x1b[32mregistered\x1b[0m';
-    } else {
-      statsLine += '\x1b[33mpending\x1b[0m';
-    }
-    statsLine += '\x1b[36m  •  \x1b[0m';
-    // TLS
-    if (this.tlsCache) {
-      const cn = this.tlsCache.cn || '';
-      const days = this.tlsCache.days;
-      const tlsColor = days >= 14 ? '32' : (days >= 3 ? '33' : '31');
-      statsLine += `\x1b[${tlsColor}mTLS ${cn} (${days}d)\x1b[0m`;
-    } else {
-      statsLine += '\x1b[33mTLS none\x1b[0m';
+    if (h < 9 || w < 40) {
+      lines.push(joinAnsiEdges(title, '', w));
+      lines.push(joinAnsiEdges(overallStatus, `PID ${this.serverPid}`, w));
+      if (h > 2) lines.push('\x1b[90mResize the terminal for the activity view\x1b[0m');
+      this._writeFrame(lines, w, h);
+      return;
     }
 
-    const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]+m/g, '');
-    const statsPlain = stripAnsi(statsLine);
-    if (statsPlain.length < rightStatsStart) {
-      statsLine += ' '.repeat(rightStatsStart - statsPlain.length);
-      let hbColored;
-      if (hbAge !== null) {
-        const hbColor = hbAge < 5 ? '32' : (hbAge < 15 ? '33' : '31');
-        hbColored = `HB \x1b[${hbColor}m${hbAge}s\x1b[36m`;
-      } else {
-        hbColored = 'HB \x1b[33m?\x1b[36m';
-      }
-      const rightStatsColored = `\x1b[36m${hbColored}   ${uptimeTxt}   ${connTxt}\x1b[0m`;
-      statsLine += rightStatsColored;
+    lines.push(joinAnsiEdges(title, topRight, w));
+    const uptime = this._formatUptime(Math.floor((Date.now() - this.startTime) / 1000));
+    const endpoint = ` \x1b[90mHTTPS\x1b[0m  ${this.config.SERVER_HOST || '127.0.0.1'}:${this.config.PORT}`;
+    const processStats = `PID ${this.serverPid}   CPU ${metrics.cpu || '?'}%   MEM ${metrics.mem || '?'}%   UP ${uptime} `;
+    lines.push(joinAnsiEdges(endpoint, processStats, w));
+
+    let heartbeat = 'HB —';
+    if (metrics.heartbeatAge !== null) {
+      const color = metrics.heartbeatAge < 10 ? 32 : (metrics.heartbeatAge < 30 ? 33 : 31);
+      heartbeat = `HB \x1b[${color}m${metrics.heartbeatAge}s\x1b[0m`;
     }
-    lines.push(statsLine);
+    lines.push(joinAnsiEdges(
+      ` \x1b[90mCLUSTER\x1b[0m  ${this._registrationLabel()}   ${heartbeat}`,
+      `${this._tlsLabel()} `,
+      w
+    ));
 
-    // Box top
-    lines.push('┌' + '─'.repeat(w - 2) + '┐');
+    const redisDisplay = safeUrlEndpointForDisplay(this.config.REDIS_URL, 'REDIS_URL');
+    const dbDisplay = this._databaseDisplay(Math.max(16, Math.floor(w / 2) - 5));
+    lines.push(joinAnsiEdges(
+      ` \x1b[90mREDIS\x1b[0m  ${redisDisplay}`,
+      `\x1b[90mDB\x1b[0m  ${dbDisplay} `,
+      w
+    ));
 
-    // Log content
-    const logHeight = Math.max(1, h - 5); // header + stats + box borders + footer = total h lines
-    const visibleLines = Math.max(1, logHeight);
+    const activityTitle = this.scrollOffset > 0
+      ? ` ACTIVITY · ${this.scrollOffset} NEWER `
+      : ' ACTIVITY ';
+    lines.push(`┌─${activityTitle}${'─'.repeat(Math.max(0, w - activityTitle.length - 3))}┐`);
+
+    const logHeight = Math.max(1, h - 7);
     const logs = this.logBuffer.getAll();
-    const maxOffset = Math.max(0, logs.length - visibleLines);
-    if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset;
-
-    const startIdx = Math.max(0, logs.length - visibleLines - this.scrollOffset);
-    const endIdx = logs.length - this.scrollOffset;
-    const visibleLogs = logs.slice(startIdx, endIdx);
-
-    for (let i = 0; i < logHeight; i++) {
-      const line = visibleLogs[i] || '';
-      const truncated = line.substring(0, w - 4);
-      const padded = truncated + ' '.repeat(Math.max(0, w - 4 - truncated.length));
-      const scrollbar = i === 0 && this.scrollOffset > 0 ? '▲' :
-        i === logHeight - 1 && this.scrollOffset < maxOffset ? '▼' : '│';
-      lines.push('│ ' + padded + ' ' + scrollbar);
+    const maxOffset = Math.max(0, logs.length - logHeight);
+    this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
+    const start = Math.max(0, logs.length - logHeight - this.scrollOffset);
+    const end = logs.length - this.scrollOffset;
+    const visibleLogs = logs.slice(start, end);
+    const contentWidth = Math.max(0, w - 4);
+    for (let index = 0; index < logHeight; index += 1) {
+      lines.push(`│ ${fitAnsi(visibleLogs[index] || '', contentWidth)}\x1b[0m │`);
     }
+    lines.push('└' + '─'.repeat(Math.max(0, w - 2)) + '┘');
+    lines.push(' \x1b[90m↑↓\x1b[0m scroll   \x1b[90mPgUp/PgDn\x1b[0m page   \x1b[90mG\x1b[0m latest   \x1b[90mq\x1b[0m stop server');
+    this._writeFrame(lines, w, h);
+  }
 
-    // Box bottom
-    lines.push('└' + '─'.repeat(w - 2) + '┘');
-
-    // Footer
-    const scrollIndicator = this.scrollOffset > 0 ? ' [SCROLL]' : '';
-    const footerTxt = ' q: quit  Arrows PgUp/PgDn Home/End' + scrollIndicator;
-    const footerPadded = footerTxt + ' '.repeat(Math.max(0, w - footerTxt.length));
-    lines.push('\x1b[30;46m' + footerPadded.substring(0, w) + '\x1b[0m');
-
-    const output = '\x1b[?25l' + '\x1b[H' + lines.join('\n');
+  _writeFrame(lines, width, height) {
+    const fittedLines = lines.slice(0, height).map((line) => `\x1b[2K${fitAnsi(line, width)}`);
+    const clearPrefix = this.needsFullClear ? '\x1b[2J' : '';
+    this.needsFullClear = false;
     try {
-      process.stdout.write(output);
+      process.stdout.write(`${clearPrefix}\x1b[H${fittedLines.join('\n')}\x1b[J`);
     } catch { }
   }
 
@@ -931,40 +1003,48 @@ class ServerUI {
     this.renderDebouncer.call();
   }
 
-  stop(preserve = false) {
+  stop(terminateServer = true) {
     if (!this.running) return;
+    if (terminateServer) this.shutdownRequested = true;
     this.running = false;
     this.renderDebouncer.flush();
-
-    if (this.metricsInterval) {
-      clearInterval(this.metricsInterval);
-      this.metricsInterval = null;
-    }
-
+    if (this.metricsInterval) clearInterval(this.metricsInterval);
+    this.metricsInterval = null;
+    process.stdout.removeListener('resize', this.resizeHandler);
+    if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler);
+    if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler);
     if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
+      process.stdin.removeListener('data', this.inputHandler);
+      try { process.stdin.setRawMode(false); } catch { }
+      try { process.stdin.pause(); } catch { }
     }
-    if (!preserve) {
-      process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
-    } else {
-      process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
-    }
+    process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
 
-    try {
-      process.kill(this.serverPid, 'SIGTERM');
-      setTimeout(() => {
-        try { process.kill(this.serverPid, 'SIGKILL'); } catch { }
+    if (
+      terminateServer &&
+      this.serverProcess.exitCode === null &&
+      this.serverProcess.signalCode === null
+    ) {
+      try { this.serverProcess.kill('SIGTERM'); } catch { }
+      this.forceKillTimer = setTimeout(() => {
+        if (this.serverProcess.exitCode === null && this.serverProcess.signalCode === null) {
+          try { this.serverProcess.kill('SIGKILL'); } catch { }
+        }
       }, 2000);
-    } catch { }
+      this.forceKillTimer.unref?.();
+    }
   }
 
   start() {
     this.render();
+    void this.updateMetrics();
     this.metricsInterval = setInterval(() => {
-      this.updateMetrics().then(() => this.render());
+      void this.updateMetrics();
     }, 1000);
-    process.on('SIGINT', () => this.stop());
-    process.on('SIGTERM', () => this.stop());
+    this.sigintHandler = () => this.stop();
+    this.sigtermHandler = () => this.stop();
+    process.on('SIGINT', this.sigintHandler);
+    process.on('SIGTERM', this.sigtermHandler);
   }
 }
 
@@ -1076,7 +1156,7 @@ async function validateRedisTls() {
   }
 
   if (urlObj.protocol !== 'rediss:') {
-    logErr('ERROR: REDIS_URL must use rediss:// and TLS; plaintext redis:// is not supported.');
+    logErr('ERROR: REDIS_URL must use rediss:// and TLS.');
     process.exit(1);
   }
 
@@ -1161,7 +1241,7 @@ async function validateRedisTls() {
       logErr('[START] ERROR: No available port found for Redis TLS: ' + e.message);
       process.exit(1);
     }
-  } else if (isPortInUse(port)) {
+  } else if (await isPortInUse(port)) {
     try {
       const altPort = await findAvailablePort(port + 1, 100);
       log(`[START] Port ${port} already in use; auto-selecting Redis TLS port ${altPort}`);
@@ -1180,7 +1260,7 @@ async function validateRedisTls() {
   try {
     execFileSync(REDIS_SERVER_BIN, ['--version'], { stdio: 'ignore' });
   } catch {
-    logErr(`ERROR: ${REDIS_SERVER_BIN} not found or not executable; install Redis with TLS support or set TLS_REDIS_SERVER to a TLS-capable binary.`);
+    logErr(`ERROR: ${REDIS_SERVER_BIN} not found or not executable, install Redis with TLS support or set TLS_REDIS_SERVER to a TLS-capable binary.`);
     process.exit(1);
   }
 
@@ -1211,7 +1291,8 @@ async function validateRedisTls() {
 
 
 async function main() {
-  if (!CONFIG.NO_GUI) {
+  const useTui = !CONFIG.NO_GUI && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (useTui) {
     console.log("Starting Server...");
   }
 
@@ -1298,8 +1379,9 @@ async function main() {
     CONFIG.SERVER_ID = `server-${os.hostname()}-${Date.now()}`;
   }
 
-  // Auto-allocate port if not set
-  if (!CONFIG.PORT) {
+  // Auto-allocate port if unset or explicitly requested as dynamic.
+  const configuredPort = Number(CONFIG.PORT);
+  if (!CONFIG.PORT || configuredPort === 0) {
     log('Auto-allocating port...');
     try {
       CONFIG.PORT = String(await findAvailablePort(8443, 100));
@@ -1309,6 +1391,10 @@ async function main() {
       process.exit(1);
     }
   } else {
+    if (!Number.isSafeInteger(configuredPort) || configuredPort < 1 || configuredPort > 65535) {
+      logErr(`ERROR: Invalid server port: ${CONFIG.PORT}`);
+      process.exit(1);
+    }
     if (await isPortInUse(CONFIG.PORT)) {
       logErr(`ERROR: Port ${CONFIG.PORT} is already in use`);
       logErr('Try specifying a different port: PORT=<number> node scripts/start-server.cjs');
@@ -1356,7 +1442,7 @@ async function main() {
 
   log('Starting server ...');
 
-  if (CONFIG.NO_GUI) {
+  if (!useTui) {
     const child = spawn(process.execPath, [serverJs], {
       cwd: repoRoot,
       env: serverEnv,
@@ -1407,10 +1493,6 @@ async function main() {
     return;
   }
 
-  const tmpD = os.tmpdir();
-  const logF = path.join(tmpD, `server-ui-${Date.now()}.log`);
-  const logS = fs.createWriteStream(logF, { flags: 'a' });
-
   const childServer = spawn(process.execPath, [serverJs], {
     cwd: repoRoot,
     env: serverEnv,
@@ -1418,7 +1500,7 @@ async function main() {
   });
 
   // Setup TUI
-  const uiTui = new ServerUI(childServer.pid, CONFIG);
+  const uiTui = new ServerUI(childServer, CONFIG);
 
   const lastLinesArr = [];
   const MAX_LAST_LOG = 80;
@@ -1426,26 +1508,29 @@ async function main() {
     lastLinesArr.push(line);
     if (lastLinesArr.length > MAX_LAST_LOG) lastLinesArr.shift();
   };
-  const processOutputLog = (data) => {
-    const lines = data.toString().split('\n');
-    for (const line of lines) {
-      if (line.trim()) {
-        logS.write(line + '\n');
-        uiTui.addLog(line);
-        pushLastLog(line);
-      }
-    }
+  const processOutputLine = (line) => {
+    if (!line.trim()) return;
+    uiTui.addLog(line);
+    pushLastLog(sanitizeTerminalLog(line));
   };
+  const stdoutLines = createLineCollector(processOutputLine);
+  const stderrLines = createLineCollector(processOutputLine);
 
-  childServer.stdout.on('data', processOutputLog);
-  childServer.stderr.on('data', processOutputLog);
+  childServer.stdout.on('data', (chunk) => stdoutLines.push(chunk));
+  childServer.stderr.on('data', (chunk) => stderrLines.push(chunk));
 
-  childServer.on('exit', (code) => {
+  childServer.on('close', (code, signal) => {
+    stdoutLines.flush();
+    stderrLines.flush();
+    const expectedShutdown = uiTui.shutdownRequested;
     uiTui.stop(false);
-    logS.end();
 
-    if (code !== 0) {
-      console.error(`\n[ERROR] Server exited with code ${code}`);
+    const failed = typeof code === 'number'
+      ? code !== 0
+      : Boolean(signal && !expectedShutdown);
+    if (failed) {
+      const reason = typeof code === 'number' ? `code ${code}` : `signal ${signal}`;
+      console.error(`\n[ERROR] Server exited with ${reason}`);
       if (lastLinesArr.length) {
         console.error('[ERROR] Last server log lines:');
         for (const l of lastLinesArr) console.error('  ' + l);
@@ -1454,7 +1539,8 @@ async function main() {
       }
     }
 
-    setTimeout(() => process.exit(code || 0), 200);
+    const exitCode = typeof code === 'number' ? code : (expectedShutdown ? 0 : 1);
+    setTimeout(() => process.exit(exitCode), 200);
   });
 
   uiTui.start();
