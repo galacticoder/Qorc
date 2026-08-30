@@ -480,6 +480,10 @@ export const websocket = {
     rotateSocksIdentity: () => invoke<void>('ws_rotate_socks_identity'),
     send: (payloadJson: string, connectionToken: number) =>
         invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send', { payloadJson, connectionToken }),
+    sendBinary: (cell: Uint8Array, connectionToken: number) =>
+        invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send_binary', cell, {
+            headers: { 'x-qor-ws-token': String(connectionToken) },
+        }),
     setServerUrl: (url: string) => invoke<void>('ws_set_server_url', { url }),
     getServerUrl: () => invoke<string | null>('ws_get_server_url'),
     getState: () => invoke<{ connected: boolean; connecting: boolean; queue_size: number; connectionToken?: number }>('ws_get_state'),
@@ -680,6 +684,25 @@ export const tray = {
 export const events = {
     onWsMessage: (callback: (data: unknown) => void) => listen('ws-message', (e) => callback(e.payload)),
     onWsLifecycle: (callback: (data: unknown) => void) => listen('ws-lifecycle', (e) => callback(e.payload)),
+    onWsBinary: async (callback: (data: ArrayBuffer) => void) => {
+        let active = true;
+        let consecutiveFailures = 0;
+        void (async () => {
+            while (active) {
+                try {
+                    const data = await invoke<ArrayBuffer>('ws_receive_binary');
+                    consecutiveFailures = 0;
+                    if (active && data.byteLength > 0) callback(data);
+                } catch {
+                    if (!active) return;
+                    consecutiveFailures += 1;
+                    if (consecutiveFailures >= 3) return;
+                    await new Promise(resolve => setTimeout(resolve, 250));
+                }
+            }
+        })();
+        return () => { active = false; };
+    },
     onP2PMessage: async (callback: (data: unknown) => void) => {
         const subscriptionId = crypto.randomUUID();
         let active = true;

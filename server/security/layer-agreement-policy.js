@@ -11,10 +11,7 @@ export const REQUIRED_WS_PQ_HANDSHAKE = Object.freeze({
 });
 
 export function validateWsWireProtection({ hasPqSession, isPqProtected, messageType } = {}) {
-  if (isPqProtected && messageType === 'pq-envelope') {
-    return { valid: false, reason: 'nested_pq_envelope' };
-  }
-  if (hasPqSession && !isPqProtected && messageType !== 'pq-envelope') {
+  if (hasPqSession && !isPqProtected) {
     return { valid: false, reason: 'plaintext_after_pq_session' };
   }
   if (!hasPqSession && isPqProtected) {

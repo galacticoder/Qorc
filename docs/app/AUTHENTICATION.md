@@ -19,7 +19,7 @@ current rounded size of the authentication set.
 - ML-KEM-1024 oblivious record transfer for login.
 - Privacy Pass VOPRF tokens with separate `account-auth` and `server-entry`
   issuer keys.
-- `pq-ws-7` WebSocket handshake with initiator and responder ML-KEM-1024
+- `pq-ws-8` WebSocket handshake with initiator and responder ML-KEM-1024
   contributions, X25519, an ML-DSA-87-signed server acknowledgement, and
   encrypted bidirectional key confirmation. The client creates fresh KEM and
   X25519 handshake keys but no transport signing identity.
@@ -102,7 +102,7 @@ credential database.
 ## Authentication Channel Binding
 
 Private account login and server-entry OPAQUE requests include a 64-byte
-SHA3-512 binding over the exact `pq-ws-7` session ID, authenticated server
+SHA3-512 binding over the exact `pq-ws-8` session ID, authenticated server
 fingerprint, and request UUID. The PQ envelope layer verifies the value before
 the authentication handler can consume it. The same binding is included in the
 OPAQUE transcript and retained with the one-time server nonce through finalize.
@@ -154,7 +154,7 @@ Resume is deliberately split from account authentication:
 
 1. The account/setup socket is closed.
 2. The client requests a fresh Tor circuit and waits randomized jitter.
-3. A new WebSocket performs a new `pq-ws-7` handshake with fresh client ML-KEM
+3. A new WebSocket performs a new `pq-ws-8` handshake with fresh client ML-KEM
    and X25519 material, then completes encrypted key confirmation.
 4. `TOKEN_VALIDATION` redeems one `account-auth` token on that unlinked socket.
 5. The client activates global-mix delivery.

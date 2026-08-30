@@ -1,72 +1,65 @@
 /**
- * WebSocket Encryption/Decryption
+ * Fixed-cell WebSocket encryption.
+ *
+ * Every post-handshake WebSocket frame is one authenticated 64 KiB binary
+ * cell. Large logical messages are split before encryption and reassembled
+ * only after every cell authenticates.
  */
 
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
-import { SignalType } from '../types/signal-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import type { EncryptionContext } from '../types/websocket-types';
-import { canonicalBase64Shape } from '../transport/envelope-shape';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import {
-  MAX_MESSAGE_AAD_LENGTH,
   MAX_REPLAY_WINDOW_MS,
-  MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES,
-  MAX_PQ_ENVELOPE_AAD_BYTES,
+  PQ_AEAD_CIPHERTEXT_OVERHEAD,
   PQ_AEAD_MAC_SIZE,
   PQ_AEAD_NONCE_SIZE,
   WS_FIXED_MESSAGE_SIZE_BYTES,
 } from '../constants';
 
-const UNPADDED_CONTROL_TYPES = new Set<string>([
-  SignalType.PQ_HEARTBEAT_PING,
-  SignalType.PQ_HEARTBEAT_PONG,
-  SignalType.SECURE_CHUNK,
-]);
+const CELL_MAGIC = new Uint8Array([0x51, 0x4f, 0x52, 0x43]);
+const CELL_VERSION = 1;
+const CELL_FLAGS = 0;
+const CELL_SESSION_OFFSET = 8;
+const CELL_FINGERPRINT_OFFSET = 24;
+const CELL_MESSAGE_ID_OFFSET = 56;
+const CELL_COUNTER_OFFSET = 72;
+const CELL_TIMESTAMP_OFFSET = 80;
+const CELL_CHUNK_INDEX_OFFSET = 88;
+const CELL_CHUNK_COUNT_OFFSET = 92;
+const CELL_TOTAL_LENGTH_OFFSET = 96;
+const CELL_PLAINTEXT_LENGTH_OFFSET = 100;
+const CELL_NONCE_OFFSET = 104;
+const CELL_TAG_OFFSET = CELL_NONCE_OFFSET + PQ_AEAD_NONCE_SIZE;
+const CELL_CIPHERTEXT_OFFSET = CELL_TAG_OFFSET + PQ_AEAD_MAC_SIZE;
+const CELL_HEADER_BYTES = CELL_CIPHERTEXT_OFFSET;
+const CELL_PLAINTEXT_BYTES = WS_FIXED_MESSAGE_SIZE_BYTES
+  - CELL_HEADER_BYTES
+  - PQ_AEAD_CIPHERTEXT_OVERHEAD;
+const CELL_MAX_LOGICAL_BYTES = 24 * 1024 * 1024;
+const CELL_MAX_CHUNKS = Math.ceil(CELL_MAX_LOGICAL_BYTES / CELL_PLAINTEXT_BYTES);
+const CELL_MAX_CONCURRENT = 4;
+const CELL_MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
+const CELL_REASSEMBLY_TIMEOUT_MS = 200_000;
+const CELL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.WS_PQ_CELL_AAD);
 
-const validServerEnvelopeShape = (envelope: unknown): envelope is Record<string, any> => {
-  if (!isPlainObject(envelope) || hasPrototypePollutionKeys(envelope)) return false;
-  const requiredKeys = [
-    'aad', 'ciphertext', 'counter', 'messageId', 'nonce', 'sessionFingerprint',
-    'sessionId', 'tag', 'timestamp', 'type', 'version'
-  ];
-  const actualShape = Object.keys(envelope).sort().join(',');
-  if (
-    actualShape !== requiredKeys.join(',') &&
-    actualShape !== [...requiredKeys, '_pad'].sort().join(',')
-  ) return false;
-  if (
-    envelope.type !== SignalType.PQ_ENVELOPE ||
-    envelope.version !== PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION ||
-    typeof envelope.sessionId !== 'string' ||
-    !/^[a-f0-9]{32}$/.test(envelope.sessionId) ||
-    typeof envelope.sessionFingerprint !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(envelope.sessionFingerprint) ||
-    typeof envelope.messageId !== 'string' ||
-    !/^[A-Za-z0-9_-]{22}$/.test(envelope.messageId) ||
-    typeof envelope.counter !== 'number' ||
-    !Number.isSafeInteger(envelope.counter) ||
-    envelope.counter <= 0 ||
-    typeof envelope.timestamp !== 'number' ||
-    !Number.isSafeInteger(envelope.timestamp)
-  ) return false;
-  if (
-    Object.prototype.hasOwnProperty.call(envelope, '_pad') &&
-    (typeof envelope._pad !== 'string' ||
-      envelope._pad.length > WS_FIXED_MESSAGE_SIZE_BYTES ||
-      !/^[A-Za-z0-9+/_-]*$/.test(envelope._pad))
-  ) return false;
+export type CellDecryptResult =
+  | { status: 'pending' }
+  | { status: 'complete'; payload: Record<string, any> }
+  | { status: 'invalid' };
 
-  return canonicalBase64Shape(envelope.ciphertext, {
-    minBytes: 32,
-    maxBytes: MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES
-  }) &&
-    canonicalBase64Shape(envelope.nonce, { exactBytes: PQ_AEAD_NONCE_SIZE }) &&
-    canonicalBase64Shape(envelope.tag, { exactBytes: PQ_AEAD_MAC_SIZE }) &&
-    canonicalBase64Shape(envelope.aad, { maxBytes: MAX_PQ_ENVELOPE_AAD_BYTES });
-};
+interface CellReassembly {
+  totalLength: number;
+  chunkCount: number;
+  parts: Array<Uint8Array | undefined>;
+  received: number;
+  receivedBytes: number;
+  createdAt: number;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 const safeJsonPayloadShape = (root: unknown): boolean => {
   const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
@@ -86,82 +79,91 @@ const safeJsonPayloadShape = (root: unknown): boolean => {
   return true;
 };
 
-// WebSocket Encryption/Decryption
+function writeSafeU64(view: DataView, offset: number, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid fixed-cell integer');
+  view.setUint32(offset, Math.floor(value / 0x1_0000_0000), false);
+  view.setUint32(offset + 4, value >>> 0, false);
+}
+
+function readSafeU64(view: DataView, offset: number): number | null {
+  const high = view.getUint32(offset, false);
+  const low = view.getUint32(offset + 4, false);
+  const value = high * 0x1_0000_0000 + low;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && PostQuantumUtils.timingSafeEqual(left, right);
+}
+
+function concatenate(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
 export class WebSocketEncryption {
   private sessionNonceCounter = 0;
   private expectedRemoteNonceCounter = 0;
+  private cellReassemblies = new Map<string, CellReassembly>();
+  private cellBufferedBytes = 0;
 
   constructor(
     private context: EncryptionContext,
     private getTrustedNow: () => number = () => Date.now()
   ) { }
 
-  // Increment session nonce counter
   private incrementSessionNonceCounter(): number {
+    if (this.sessionNonceCounter >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Post-quantum session counter exhausted');
+    }
     return ++this.sessionNonceCounter;
   }
 
-  // Reset nonce counters
   resetCounters(): void {
     this.sessionNonceCounter = 0;
     this.expectedRemoteNonceCounter = 0;
+    this.clearCellReassemblies();
   }
 
   private isNonceSequenceFresh(counter: number): boolean {
-    if (!Number.isSafeInteger(counter) || counter <= this.expectedRemoteNonceCounter) {
-      return false;
-    }
-
-    return true;
+    return Number.isSafeInteger(counter) && counter > this.expectedRemoteNonceCounter;
   }
 
   private commitNonceSequence(counter: number): void {
     this.expectedRemoteNonceCounter = counter;
   }
 
-  // Validate timestamp with skew tolerance
   validateTimestamp(timestamp: number): boolean {
-    const now = this.getTrustedNow();
-    const skew = Math.abs(now - timestamp);
-
-    if (skew > MAX_REPLAY_WINDOW_MS) {
-      return false;
-    }
-
-    return true;
+    return Math.abs(this.getTrustedNow() - timestamp) <= MAX_REPLAY_WINDOW_MS;
   }
 
-  // Normalize payload for processing
   private normalizePayload(data: unknown): { type: string; body: any } {
     if (data && typeof data === 'object') {
       const body = this.sanitize(data);
       const type = typeof body.type === 'string' ? String(body.type) : 'generic';
-      if (typeof body.type !== 'string') {
-        body.type = type;
-      }
+      if (typeof body.type !== 'string') body.type = type;
       return { type, body };
     }
-
     if (typeof data === 'string') {
       try {
         const parsed = JSON.parse(data);
         if (parsed && typeof parsed === 'object') {
           const body = this.sanitize(parsed);
           const type = typeof body.type === 'string' ? String(body.type) : 'raw-string';
-          if (typeof body.type !== 'string') {
-            body.type = type;
-          }
+          if (typeof body.type !== 'string') body.type = type;
           return { type, body };
         }
-      } catch {
-      }
+      } catch { }
       return { type: 'raw-string', body: { type: 'raw-string', data } };
     }
-
     return { type: 'raw-scalar', body: { type: 'raw-scalar', data: String(data) } };
   }
 
-  // Sanitize input for processing
   private sanitize(input: any): any {
     try {
       return JSON.parse(JSON.stringify(input));
@@ -170,229 +172,302 @@ export class WebSocketEncryption {
     }
   }
 
-  // Build AAD for encryption
-  private buildEnvelopeAAD(messageId: string, timestamp: number, counter: number): Uint8Array {
-    const encoder = new TextEncoder();
-    const parts = `${PROTOCOL_KEYS.WS_PQ_AAD}|${messageId}|${timestamp}|${counter}`;
-    const bytes = encoder.encode(parts);
-    if (bytes.length <= MAX_MESSAGE_AAD_LENGTH) {
-      return bytes;
-    }
-    return bytes.slice(0, MAX_MESSAGE_AAD_LENGTH);
-  }
-
-  // Prepare secure envelope for sending
-  async prepareSecureEnvelope(data: unknown): Promise<string> {
+  async prepareSecureEnvelope(data: unknown): Promise<Uint8Array[]> {
     const session = this.context.sessionKeyMaterial;
-    if (!session) {
-      throw new Error('Post-quantum session not established');
-    }
+    if (!session) throw new Error('Post-quantum session not established');
 
     const canonical = this.normalizePayload(data);
-    const messageIdBytes = PostQuantumRandom.randomBytes(16);
-    const messageId = PostQuantumUtils.bytesToHex(messageIdBytes);
-    messageIdBytes.fill(0);
+    if (typeof canonical.body.type !== 'string') canonical.body.type = canonical.type;
+    const payloadBytes = new TextEncoder().encode(JSON.stringify(canonical.body));
+    if (payloadBytes.length < 1 || payloadBytes.length > CELL_MAX_LOGICAL_BYTES) {
+      payloadBytes.fill(0);
+      throw new Error('Secure WebSocket payload exceeds fixed-cell limit');
+    }
+
+    const sessionId = PostQuantumUtils.hexToBytes(session.sessionId);
+    const fingerprint = PostQuantumUtils.hexToBytes(session.fingerprint);
+    const messageId = PostQuantumRandom.randomBytes(16);
+    if (sessionId.length !== 16 || fingerprint.length !== 32) {
+      payloadBytes.fill(0);
+      sessionId.fill(0);
+      fingerprint.fill(0);
+      messageId.fill(0);
+      throw new Error('Invalid post-quantum session identity');
+    }
+
+    const chunkCount = Math.ceil(payloadBytes.length / CELL_PLAINTEXT_BYTES);
     const timestamp = this.getTrustedNow();
-    const counter = this.incrementSessionNonceCounter();
-
-    if (typeof canonical.body.type !== 'string') {
-      canonical.body.type = canonical.type;
-    }
-
-    const isSealedEnvelope = canonical.type === SignalType.SEALED_ENVELOPE;
-    let payloadToEncrypt: any;
-
-    if (isSealedEnvelope && canonical.body.envelope) {
-      payloadToEncrypt = {
-        type: canonical.type,
-        envelope: canonical.body.envelope,
-        messageId: canonical.body.messageId
-      };
-    } else {
-      payloadToEncrypt = canonical.body;
-    }
-
-    let payloadBytes: Uint8Array | null = null;
-    let nonce: Uint8Array | null = null;
-    let aadBytes: Uint8Array | null = null;
-    let ciphertext: Uint8Array | null = null;
-    let tag: Uint8Array | null = null;
+    const cells: Uint8Array[] = [];
     try {
-      payloadBytes = new TextEncoder().encode(JSON.stringify(payloadToEncrypt));
-      nonce = PostQuantumRandom.randomBytes(PQ_AEAD_NONCE_SIZE);
-      aadBytes = this.buildEnvelopeAAD(messageId, timestamp, counter);
+      for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+        const start = chunkIndex * CELL_PLAINTEXT_BYTES;
+        const end = Math.min(payloadBytes.length, start + CELL_PLAINTEXT_BYTES);
+        const plaintext = payloadBytes.subarray(start, end);
+        const counter = this.incrementSessionNonceCounter();
+        const nonce = PostQuantumRandom.randomBytes(PQ_AEAD_NONCE_SIZE);
+        const cell = PostQuantumRandom.randomBytes(WS_FIXED_MESSAGE_SIZE_BYTES);
+        const view = new DataView(cell.buffer, cell.byteOffset, cell.byteLength);
+        let aad: Uint8Array | null = null;
+        let ciphertext: Uint8Array | null = null;
+        let tag: Uint8Array | null = null;
+        try {
+          cell.set(CELL_MAGIC, 0);
+          view.setUint8(4, CELL_VERSION);
+          view.setUint8(5, CELL_FLAGS);
+          view.setUint16(6, CELL_HEADER_BYTES, false);
+          cell.set(sessionId, CELL_SESSION_OFFSET);
+          cell.set(fingerprint, CELL_FINGERPRINT_OFFSET);
+          cell.set(messageId, CELL_MESSAGE_ID_OFFSET);
+          writeSafeU64(view, CELL_COUNTER_OFFSET, counter);
+          writeSafeU64(view, CELL_TIMESTAMP_OFFSET, timestamp);
+          view.setUint32(CELL_CHUNK_INDEX_OFFSET, chunkIndex, false);
+          view.setUint32(CELL_CHUNK_COUNT_OFFSET, chunkCount, false);
+          view.setUint32(CELL_TOTAL_LENGTH_OFFSET, payloadBytes.length, false);
+          view.setUint32(CELL_PLAINTEXT_LENGTH_OFFSET, plaintext.length, false);
+          cell.set(nonce, CELL_NONCE_OFFSET);
 
-      const encrypted = await PostQuantumAEAD.encryptAsync(
-        payloadBytes,
-        session.sendKey,
-        aadBytes,
-        nonce
-      );
-      ciphertext = encrypted.ciphertext;
-      tag = encrypted.tag;
-
-      const envelope = {
-        type: SignalType.PQ_ENVELOPE,
-        version: PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION,
-        sessionId: session.sessionId,
-        sessionFingerprint: session.fingerprint,
-        messageId,
-        counter,
-        timestamp,
-        nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),
-        ciphertext: PostQuantumUtils.uint8ArrayToBase64(ciphertext),
-        tag: PostQuantumUtils.uint8ArrayToBase64(tag),
-        aad: PostQuantumUtils.uint8ArrayToBase64(aadBytes)
-      };
-
-      if (this.shouldPadEnvelope(canonical.type)) {
-        this.applyEnvelopeFixedPadding(envelope);
+          const ciphertextEnd = CELL_CIPHERTEXT_OFFSET
+            + plaintext.length
+            + PQ_AEAD_CIPHERTEXT_OVERHEAD;
+          aad = concatenate(
+            CELL_DOMAIN,
+            cell.subarray(0, CELL_TAG_OFFSET),
+            cell.subarray(ciphertextEnd)
+          );
+          const encrypted = await PostQuantumAEAD.encryptAsync(
+            plaintext,
+            session.sendKey,
+            aad,
+            nonce
+          );
+          ciphertext = encrypted.ciphertext;
+          tag = encrypted.tag;
+          if (
+            ciphertext.length !== plaintext.length + PQ_AEAD_CIPHERTEXT_OVERHEAD ||
+            tag.length !== PQ_AEAD_MAC_SIZE ||
+            CELL_CIPHERTEXT_OFFSET + ciphertext.length > cell.length
+          ) throw new Error('Fixed-cell encryption length mismatch');
+          cell.set(tag, CELL_TAG_OFFSET);
+          cell.set(ciphertext, CELL_CIPHERTEXT_OFFSET);
+          cells.push(cell);
+        } catch (error) {
+          cell.fill(0);
+          throw error;
+        } finally {
+          nonce.fill(0);
+          aad?.fill(0);
+          ciphertext?.fill(0);
+          tag?.fill(0);
+        }
       }
-
-      return JSON.stringify(envelope);
+      return cells;
+    } catch (error) {
+      for (const cell of cells) cell.fill(0);
+      throw error;
     } finally {
-      payloadBytes?.fill(0);
-      nonce?.fill(0);
-      aadBytes?.fill(0);
-      ciphertext?.fill(0);
-      tag?.fill(0);
+      payloadBytes.fill(0);
+      sessionId.fill(0);
+      fingerprint.fill(0);
+      messageId.fill(0);
     }
   }
 
-  private shouldPadEnvelope(type: string): boolean {
-    return !UNPADDED_CONTROL_TYPES.has(type);
-  }
-
-  private applyEnvelopeFixedPadding(envelope: Record<string, unknown>): boolean {
-    const targetBytes = WS_FIXED_MESSAGE_SIZE_BYTES;
-    const encoder = new TextEncoder();
-    if (!targetBytes || targetBytes <= 0) return false;
-
-    const base = { ...envelope, _pad: '' as string };
-    const baseJson = JSON.stringify(base);
-    const baseSize = encoder.encode(baseJson).length;
-
-    if (baseSize > targetBytes) {
-      return false;
-    }
-
-    const padNeeded = targetBytes - baseSize;
-    if (padNeeded === 0) {
-      (envelope as any)._pad = '';
-      return true;
-    }
-
-    const paddingBytes = PostQuantumRandom.randomBytes(Math.ceil(padNeeded * 0.75));
-    const padding = PostQuantumUtils.uint8ArrayToBase64(paddingBytes).slice(0, padNeeded);
-    paddingBytes.fill(0);
-    (envelope as any)._pad = padding;
-
-    const finalJson = JSON.stringify(envelope);
-    const finalSize = encoder.encode(finalJson).length;
-    if (finalSize !== targetBytes) {
-      delete (envelope as any)._pad;
-      throw new Error(`Fixed size padding mismatch: ${finalSize} !== ${targetBytes}`);
-    }
-
-    return true;
-  }
-
-  // Decrypt incoming envelope
-  async decryptEnvelope(envelope: any): Promise<any | null> {
+  async decryptCell(cell: Uint8Array): Promise<CellDecryptResult> {
     const session = this.context.sessionKeyMaterial;
-    if (!session?.recvKey) {
-      return null;
+    if (!session?.recvKey || !(cell instanceof Uint8Array) || cell.length !== WS_FIXED_MESSAGE_SIZE_BYTES) {
+      return { status: 'invalid' };
     }
 
-    if (!validServerEnvelopeShape(envelope)) {
-      return null;
-    }
+    const view = new DataView(cell.buffer, cell.byteOffset, cell.byteLength);
+    if (
+      !bytesEqual(cell.subarray(0, CELL_MAGIC.length), CELL_MAGIC) ||
+      view.getUint8(4) !== CELL_VERSION ||
+      view.getUint8(5) !== CELL_FLAGS ||
+      view.getUint16(6, false) !== CELL_HEADER_BYTES
+    ) return { status: 'invalid' };
 
-    if (envelope.sessionFingerprint !== session.fingerprint) {
-      return null;
-    }
-
-    if (envelope.sessionId !== session.sessionId) {
-      console.warn('[Encryption] decryptEnvelope: rejected, unknown session');
-      return null;
-    }
-
-    const messageId = typeof envelope.messageId === 'string' ? envelope.messageId : '';
-    if (!messageId) {
-      return null;
-    }
-
-    if (!this.validateTimestamp(envelope.timestamp)) {
-      return null;
-    }
-
-    if (typeof envelope.counter !== 'number' || !this.isNonceSequenceFresh(envelope.counter)) {
-      console.warn('[Encryption] decryptEnvelope: rejected - nonce sequence invalid');
-      return null;
-    }
-
-    let nonce: Uint8Array | null = null;
-    let ciphertext: Uint8Array | null = null;
-    let tag: Uint8Array | null = null;
-    let aadBytes: Uint8Array | null = null;
-    let decrypted: Uint8Array | null = null;
-    let expectedAad: Uint8Array | null = null;
+    const sessionId = PostQuantumUtils.hexToBytes(session.sessionId);
+    const fingerprint = PostQuantumUtils.hexToBytes(session.fingerprint);
     try {
-      nonce = PostQuantumUtils.base64ToUint8Array(envelope.nonce);
-      ciphertext = PostQuantumUtils.base64ToUint8Array(envelope.ciphertext);
-      tag = PostQuantumUtils.base64ToUint8Array(envelope.tag);
-      aadBytes = PostQuantumUtils.base64ToUint8Array(envelope.aad);
+      if (
+        sessionId.length !== 16 ||
+        fingerprint.length !== 32 ||
+        !bytesEqual(cell.subarray(CELL_SESSION_OFFSET, CELL_FINGERPRINT_OFFSET), sessionId) ||
+        !bytesEqual(cell.subarray(CELL_FINGERPRINT_OFFSET, CELL_MESSAGE_ID_OFFSET), fingerprint)
+      ) return { status: 'invalid' };
+    } finally {
+      sessionId.fill(0);
+      fingerprint.fill(0);
+    }
 
-      decrypted = await PostQuantumAEAD.decryptAsync(
+    const counter = readSafeU64(view, CELL_COUNTER_OFFSET);
+    const timestamp = readSafeU64(view, CELL_TIMESTAMP_OFFSET);
+    const chunkIndex = view.getUint32(CELL_CHUNK_INDEX_OFFSET, false);
+    const chunkCount = view.getUint32(CELL_CHUNK_COUNT_OFFSET, false);
+    const totalLength = view.getUint32(CELL_TOTAL_LENGTH_OFFSET, false);
+    const plaintextLength = view.getUint32(CELL_PLAINTEXT_LENGTH_OFFSET, false);
+    if (
+      counter === null || timestamp === null ||
+      !this.isNonceSequenceFresh(counter) || !this.validateTimestamp(timestamp) ||
+      totalLength < 1 || totalLength > CELL_MAX_LOGICAL_BYTES ||
+      chunkCount < 1 || chunkCount > CELL_MAX_CHUNKS ||
+      chunkCount !== Math.ceil(totalLength / CELL_PLAINTEXT_BYTES) ||
+      chunkIndex >= chunkCount
+    ) return { status: 'invalid' };
+
+    const expectedPlaintextLength = chunkIndex + 1 === chunkCount
+      ? totalLength - chunkIndex * CELL_PLAINTEXT_BYTES
+      : CELL_PLAINTEXT_BYTES;
+    if (plaintextLength !== expectedPlaintextLength) return { status: 'invalid' };
+    const ciphertextLength = plaintextLength + PQ_AEAD_CIPHERTEXT_OVERHEAD;
+    if (CELL_CIPHERTEXT_OFFSET + ciphertextLength > cell.length) return { status: 'invalid' };
+
+    const nonce = cell.slice(CELL_NONCE_OFFSET, CELL_TAG_OFFSET);
+    const tag = cell.slice(CELL_TAG_OFFSET, CELL_CIPHERTEXT_OFFSET);
+    const ciphertext = cell.slice(
+      CELL_CIPHERTEXT_OFFSET,
+      CELL_CIPHERTEXT_OFFSET + ciphertextLength
+    );
+    const aad = concatenate(
+      CELL_DOMAIN,
+      cell.subarray(0, CELL_TAG_OFFSET),
+      cell.subarray(CELL_CIPHERTEXT_OFFSET + ciphertextLength)
+    );
+    let plaintext: Uint8Array | null = null;
+    try {
+      plaintext = await PostQuantumAEAD.decryptAsync(
         ciphertext,
         nonce,
         tag,
         session.recvKey,
-        aadBytes
+        aad
       );
-
-      const decodedText = new TextDecoder('utf-8', { fatal: true }).decode(decrypted);
-
-      const canonical = JSON.parse(decodedText);
-      if (
-        !isPlainObject(canonical) ||
-        !safeJsonPayloadShape(canonical) ||
-        typeof canonical.type !== 'string' ||
-        canonical.type.length === 0 ||
-        canonical.type.length > 100
-      ) return null;
-      expectedAad = this.buildEnvelopeAAD(envelope.messageId, envelope.timestamp, envelope.counter);
-      if (!PostQuantumUtils.timingSafeEqual(aadBytes, expectedAad)) {
-        return null;
-      }
-      if (!this.hasValidPadding(envelope, canonical.type)) {
-        return null;
-      }
-
-      this.commitNonceSequence(envelope.counter);
-
-      return canonical;
+      if (plaintext.length !== plaintextLength) return { status: 'invalid' };
+      this.commitNonceSequence(counter);
+      return this.ingestCellPlaintext(
+        cell.subarray(CELL_MESSAGE_ID_OFFSET, CELL_COUNTER_OFFSET),
+        chunkIndex,
+        chunkCount,
+        totalLength,
+        plaintext
+      );
     } catch {
-      console.error('[Encryption] Encrypted envelope decryption failed');
-      return null;
+      return { status: 'invalid' };
     } finally {
-      nonce?.fill(0);
-      ciphertext?.fill(0);
-      tag?.fill(0);
-      aadBytes?.fill(0);
-      decrypted?.fill(0);
-      expectedAad?.fill(0);
+      nonce.fill(0);
+      tag.fill(0);
+      ciphertext.fill(0);
+      aad.fill(0);
+      plaintext?.fill(0);
     }
   }
 
-  private hasValidPadding(envelope: Record<string, unknown>, type: string): boolean {
-    const hasPadding = Object.prototype.hasOwnProperty.call(envelope, '_pad');
-    const shouldPad = this.shouldPadEnvelope(type);
-    if (hasPadding) {
-      return shouldPad && new TextEncoder().encode(JSON.stringify(envelope)).length === WS_FIXED_MESSAGE_SIZE_BYTES;
+  private ingestCellPlaintext(
+    messageIdBytes: Uint8Array,
+    chunkIndex: number,
+    chunkCount: number,
+    totalLength: number,
+    plaintext: Uint8Array
+  ): CellDecryptResult {
+    if (chunkCount === 1) return this.decodeLogicalPayload(plaintext);
+
+    const messageId = PostQuantumUtils.bytesToHex(messageIdBytes);
+    let assembly = this.cellReassemblies.get(messageId);
+    if (!assembly) {
+      while (
+        this.cellReassemblies.size >= CELL_MAX_CONCURRENT ||
+        this.cellBufferedBytes + totalLength > CELL_MAX_BUFFERED_BYTES
+      ) {
+        const oldest = Array.from(this.cellReassemblies.entries())
+          .sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
+        if (!oldest) return { status: 'invalid' };
+        this.discardCellReassembly(oldest[0]);
+      }
+      const timer = setTimeout(
+        () => this.discardCellReassembly(messageId),
+        CELL_REASSEMBLY_TIMEOUT_MS
+      );
+      assembly = {
+        totalLength,
+        chunkCount,
+        parts: new Array(chunkCount),
+        received: 0,
+        receivedBytes: 0,
+        createdAt: Date.now(),
+        timer,
+      };
+      this.cellReassemblies.set(messageId, assembly);
+      this.cellBufferedBytes += totalLength;
+    } else if (assembly.totalLength !== totalLength || assembly.chunkCount !== chunkCount) {
+      this.discardCellReassembly(messageId);
+      return { status: 'invalid' };
     }
-    if (!shouldPad) return true;
-    const paddedBase = { ...envelope, _pad: '' };
-    return new TextEncoder().encode(JSON.stringify(paddedBase)).length > WS_FIXED_MESSAGE_SIZE_BYTES;
+
+    if (assembly.parts[chunkIndex] !== undefined) {
+      this.discardCellReassembly(messageId);
+      return { status: 'invalid' };
+    }
+    assembly.parts[chunkIndex] = plaintext.slice();
+    assembly.received += 1;
+    assembly.receivedBytes += plaintext.length;
+    if (assembly.received < assembly.chunkCount) return { status: 'pending' };
+
+    const complete = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of assembly.parts) {
+      if (!part || offset + part.length > complete.length) {
+        complete.fill(0);
+        this.discardCellReassembly(messageId);
+        return { status: 'invalid' };
+      }
+      complete.set(part, offset);
+      offset += part.length;
+    }
+    this.discardCellReassembly(messageId);
+    if (offset !== complete.length || assembly.receivedBytes !== complete.length) {
+      complete.fill(0);
+      return { status: 'invalid' };
+    }
+    try {
+      return this.decodeLogicalPayload(complete);
+    } finally {
+      complete.fill(0);
+    }
+  }
+
+  private decodeLogicalPayload(bytes: Uint8Array): CellDecryptResult {
+    try {
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      const payload = JSON.parse(decoded);
+      if (
+        !isPlainObject(payload) ||
+        hasPrototypePollutionKeys(payload) ||
+        !safeJsonPayloadShape(payload) ||
+        typeof payload.type !== 'string' ||
+        payload.type.length < 1 ||
+        payload.type.length > 100
+      ) return { status: 'invalid' };
+      return { status: 'complete', payload };
+    } catch {
+      return { status: 'invalid' };
+    }
+  }
+
+  private discardCellReassembly(messageId: string): void {
+    const assembly = this.cellReassemblies.get(messageId);
+    if (!assembly) return;
+    clearTimeout(assembly.timer);
+    for (const part of assembly.parts) part?.fill(0);
+    this.cellReassemblies.delete(messageId);
+    this.cellBufferedBytes = Math.max(0, this.cellBufferedBytes - assembly.totalLength);
+  }
+
+  private clearCellReassemblies(): void {
+    for (const messageId of Array.from(this.cellReassemblies.keys())) {
+      this.discardCellReassembly(messageId);
+    }
   }
 }
+
+export const WS_BINARY_CELL_PLAINTEXT_BYTES = CELL_PLAINTEXT_BYTES;
+export const WS_BINARY_CELL_BYTES = WS_FIXED_MESSAGE_SIZE_BYTES;

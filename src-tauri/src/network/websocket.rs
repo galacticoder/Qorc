@@ -39,6 +39,7 @@ const MAX_WS_JSON_STRUCTURAL_TOKENS: usize = 16 * 1024;
 const MAX_WS_WRITE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WS_PENDING_WRITES: usize = 1024;
 const MAX_WS_PENDING_WRITE_BYTES: usize = 64 * 1024 * 1024;
+const PQ_WS_FIXED_CELL_BYTES: usize = 64 * 1024;
 
 fn connection_failure_diagnostic(error: &QorError) -> (&'static str, &'static str) {
     let QorError::Network(message) = error else {
@@ -261,6 +262,25 @@ pub enum WsEvent {
     },
 }
 
+pub struct WsBinaryMessage {
+    connection_token: u64,
+    data: Vec<u8>,
+    byte_len: usize,
+}
+
+impl WsBinaryMessage {
+    pub fn reserved_byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    pub fn into_bridge_bytes(mut self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + self.data.len());
+        bytes.extend_from_slice(&self.connection_token.to_be_bytes());
+        bytes.append(&mut self.data);
+        bytes
+    }
+}
+
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 type WsStream = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
@@ -318,6 +338,7 @@ pub struct WebSocketHandler {
     socks_isolation_username: RwLock<String>,
     tx: Arc<RwLock<Option<WsSenderEntry>>>,
     event_tx: Arc<RwLock<Option<mpsc::Sender<WsEvent>>>>,
+    binary_tx: Arc<RwLock<Option<mpsc::Sender<WsBinaryMessage>>>>,
     connecting_started_at: RwLock<Option<Instant>>,
     connecting_attempt: RwLock<Option<ConnectingAttempt>>,
     connect_attempt_id: AtomicU64,
@@ -351,6 +372,7 @@ impl WebSocketHandler {
             socks_isolation_username: RwLock::new(Self::new_socks_isolation_username()),
             tx: Arc::new(RwLock::new(None)),
             event_tx: Arc::new(RwLock::new(None)),
+            binary_tx: Arc::new(RwLock::new(None)),
             connecting_started_at: RwLock::new(None),
             connecting_attempt: RwLock::new(None),
             connect_attempt_id: AtomicU64::new(0),
@@ -449,6 +471,10 @@ impl WebSocketHandler {
     /// Set event handler
     pub fn set_event_handler(&self, tx: mpsc::Sender<WsEvent>) {
         *self.event_tx.write() = Some(tx);
+    }
+
+    pub fn set_binary_handler(&self, tx: mpsc::Sender<WsBinaryMessage>) {
+        *self.binary_tx.write() = Some(tx);
     }
 
     fn abort_transport_now(&self) {
@@ -776,6 +802,7 @@ impl WebSocketHandler {
 
         // Spawn tasks
         let event_tx = self.event_tx.clone();
+        let binary_tx = self.binary_tx.clone();
         let state = self.state.clone();
         let tx_handle = self.tx.clone();
 
@@ -791,6 +818,7 @@ impl WebSocketHandler {
                 read,
                 attempt_id,
                 event_tx_read,
+                binary_tx,
                 state_read,
                 tx_handle_read,
                 pending_writes_read,
@@ -831,6 +859,7 @@ impl WebSocketHandler {
         mut read: WsStream,
         connection_token: u64,
         event_tx: Arc<RwLock<Option<mpsc::Sender<WsEvent>>>>,
+        binary_tx: Arc<RwLock<Option<mpsc::Sender<WsBinaryMessage>>>>,
         state: Arc<RwLock<ConnectionState>>,
         tx_handle: Arc<RwLock<Option<WsSenderEntry>>>,
         pending_writes: Arc<PendingWriteBudget>,
@@ -906,6 +935,35 @@ impl WebSocketHandler {
                                 warn!("[WS-BRIDGE] received non-json text message");
                                 Self::queue_connection_error(&event_tx, connection_token);
                                 break 'read_loop;
+                            }
+                        }
+                        Message::Binary(data) => {
+                            let byte_len = data.len();
+                            if byte_len != PQ_WS_FIXED_CELL_BYTES {
+                                warn!("[WS-BRIDGE] received invalid binary cell size");
+                                Self::queue_connection_error(&event_tx, connection_token);
+                                break 'read_loop;
+                            }
+                            if let Some(ref tx) = *binary_tx.read() {
+                                if !try_reserve_ws_inbound(byte_len) {
+                                    warn!(
+                                        "[WS-BRIDGE] inbound buffer budget exhausted; dropping frame"
+                                    );
+                                    Self::queue_connection_error(&event_tx, connection_token);
+                                    break 'read_loop;
+                                }
+                                if let Err(e) = tx.try_send(WsBinaryMessage {
+                                    connection_token,
+                                    data: data.to_vec(),
+                                    byte_len,
+                                }) {
+                                    release_ws_inbound_bytes(byte_len);
+                                    warn!(
+                                        "[WS-BRIDGE] failed to forward binary ws-message event: {}",
+                                        e
+                                    );
+                                    break 'read_loop;
+                                }
                             }
                         }
                         Message::Ping(payload) => {
@@ -1170,6 +1228,65 @@ impl WebSocketHandler {
             success: false,
             queued: None,
             error: Some("Not connected".to_string()),
+        })
+    }
+
+    pub async fn send_binary(
+        &self,
+        payload: Vec<u8>,
+        expected_connection_token: u64,
+    ) -> QorResult<SendResult> {
+        if payload.len() != PQ_WS_FIXED_CELL_BYTES {
+            return Ok(SendResult {
+                success: false,
+                queued: None,
+                error: Some("Invalid encrypted WebSocket cell size".to_string()),
+            });
+        }
+        if *self.state.read() != ConnectionState::Connected {
+            return Ok(SendResult {
+                success: false,
+                queued: Some(false),
+                error: Some("WebSocket not connected".to_string()),
+            });
+        }
+        let Some(entry) = self.tx.read().clone() else {
+            return Ok(SendResult {
+                success: false,
+                queued: None,
+                error: Some("Not connected".to_string()),
+            });
+        };
+        if entry.connection_token != expected_connection_token
+            || *entry.cancel_tx.borrow()
+            || entry.local_closing.load(Ordering::Acquire)
+        {
+            return Ok(SendResult {
+                success: false,
+                queued: Some(false),
+                error: Some("WebSocket connection generation changed".to_string()),
+            });
+        }
+        let Some(queued) =
+            QueuedWsMessage::reserved(Message::Binary(payload.into()), entry.pending_writes)
+        else {
+            return Ok(SendResult {
+                success: false,
+                queued: None,
+                error: Some("Outbound WebSocket queue full".to_string()),
+            });
+        };
+        if entry.sender.send(queued).is_err() {
+            return Ok(SendResult {
+                success: false,
+                queued: None,
+                error: Some("Failed to queue message (channel closed)".to_string()),
+            });
+        }
+        Ok(SendResult {
+            success: true,
+            queued: Some(false),
+            error: None,
         })
     }
 

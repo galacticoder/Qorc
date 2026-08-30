@@ -31,7 +31,6 @@ export enum SignalType {
   CALL_SIGNAL = 'call-signal',
 
   // Post-Quantum
-  PQ_ENVELOPE = 'pq-envelope',
   PQ_HANDSHAKE_INIT = 'pq-handshake-init',
   PQ_HANDSHAKE_ACK = 'pq-handshake-ack',
   PQ_HANDSHAKE_CONFIRM = 'pq-handshake-confirm',

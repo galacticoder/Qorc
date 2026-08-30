@@ -58,20 +58,14 @@ left permanently unhealthy by an incompatible saved credential.
 | `WS_FRAME_MAX_PER_WINDOW` | `500`, 50-100000 | same | Per connection inbound frame count. |
 | `WS_FRAME_WINDOW_MS` | `60000`, 5000-600000 | same | Frame count window. |
 | `WS_HEARTBEAT_MISSED_LIMIT` | `6`, 3-20 | `server/websocket/gateway.js` | Missed heartbeat limit before disconnect. |
-| `WS_LARGE_FRAME_WINDOW_MS` | `60000`, 1000-600000 | same | Large frame admission window. |
-| `WS_LARGE_FRAME_MAX_COUNT` | `64`, 1-10000 | same | Large frames admitted in one window. |
-| `WS_LARGE_FRAME_MAX_BYTES` | 32 MiB, 1 MiB-1 GiB | same | Aggregate large frame bytes in one window. |
 | `WS_PENDING_MESSAGE_MAX_COUNT` | `64`, 4-4096 | same | Messages waiting behind the ordered per-socket handler. |
 | `WS_PENDING_MESSAGE_MAX_BYTES` | 16 MiB, 1-256 MiB | same | Bytes waiting behind the ordered per-socket handler. |
 | `WS_MAX_CONCURRENT_CONNECTIONS` | `4096`, 64-100000 | same | Per process websocket ceiling. |
 | `WS_MESSAGE_HANDLER_TIMEOUT_MS` | `30000`, 1000-120000 | same | Timeout for one ordered application message handler. |
-| `WS_MAX_ENCRYPTED_RESPONSE_BYTES` | 12 MiB, 1-64 MiB | `server/messaging/pq-envelope-handler.js` | Maximum serialized encrypted server response. |
-| `WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES` | 8 MiB, 1-16 MiB | same | Maximum request ciphertext before decode/decryption. |
+| `WS_MAX_ENCRYPTED_RESPONSE_BYTES` | 12 MiB, 1-64 MiB | `server/messaging/pq-envelope-handler.js` | Maximum serialized logical server response before fragmentation into authenticated 64 KiB binary cells. The fixed-cell protocol also caps one logical message at 24 MiB. |
 | `WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT` | `64`, 4-1024 | same | Per socket encrypted response queue count. |
 | `WS_ENCRYPTED_SEND_QUEUE_MAX_BYTES` | 24 MiB, 4-256 MiB | same | Per socket encrypted response queue bytes. |
 | `WS_DELIVERY_TIMEOUT_MS` | `30000`, 1000-120000 | same | Maximum wait for encrypted websocket delivery/drain. |
-| `SECURE_CHUNK_BYTES` | 1 MiB, 256 KiB-6 MiB | same | Chunk target for oversized encrypted responses. |
-| `SECURE_CHUNK_SINGLE_MAX_BYTES` | 4 MiB, 64 KiB-8 MiB | same | Largest response sent without chunking. |
 | `PQ_HANDSHAKE_MAX_PER_MIN` | `20`, 1-600 | same | Per connection PQ handshake/rehandshake ceiling. |
 | `PQ_HANDSHAKE_MAX_CONCURRENCY` | `2`, 1-16 | same | Process level concurrent ML-KEM handshake work. |
 | `PQ_HANDSHAKE_MAX_QUEUE` | `16`, 0-64 | same | Bounded handshake waiters. |

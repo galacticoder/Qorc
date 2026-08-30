@@ -279,8 +279,6 @@ export const MAX_MISSED_HEARTBEATS = 4;
 
 
 
-export const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
-export const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;
 
 export const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 export const MAX_AVATAR_DIMENSION = 512;

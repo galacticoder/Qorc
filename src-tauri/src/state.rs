@@ -11,7 +11,7 @@ use crate::camera_capture::CameraCaptureState;
 use crate::database::DatabaseManager;
 use crate::microphone_capture::MicrophoneCaptureState;
 use crate::network::p2p::{P2PEvent, P2PTransportHandler};
-use crate::network::websocket::WebSocketHandler;
+use crate::network::websocket::{WebSocketHandler, WsBinaryMessage};
 use crate::screen_capture::ScreenCaptureState;
 use crate::signal_protocol::SignalHandler;
 use crate::storage::SecureStorage;
@@ -30,6 +30,8 @@ pub struct AppState {
     pub tor_manager: RwLock<Option<Arc<TorManager>>>,
     pub pir_tor_manager: RwLock<Option<Arc<TorManager>>>,
     pub websocket_handler: RwLock<Option<Arc<WebSocketHandler>>>,
+    pub websocket_binary_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<WsBinaryMessage>>>,
+    pub websocket_binary_receive_active: AtomicBool,
     pub p2p_handler: RwLock<Option<Arc<P2PTransportHandler>>>,
     pub p2p_event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<P2PEvent>>>,
     pub p2p_subscription: RwLock<Option<String>>,
@@ -56,6 +58,8 @@ impl AppState {
             tor_manager: RwLock::new(None),
             pir_tor_manager: RwLock::new(None),
             websocket_handler: RwLock::new(None),
+            websocket_binary_receiver: tokio::sync::Mutex::new(None),
+            websocket_binary_receive_active: AtomicBool::new(false),
             p2p_handler: RwLock::new(None),
             p2p_event_receiver: tokio::sync::Mutex::new(None),
             p2p_subscription: RwLock::new(None),

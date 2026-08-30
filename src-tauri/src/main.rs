@@ -458,6 +458,8 @@ pub fn run() {
             commands::websocket::ws_disconnect,
             commands::websocket::ws_rotate_socks_identity,
             commands::websocket::ws_send,
+            commands::websocket::ws_send_binary,
+            commands::websocket::ws_receive_binary,
             commands::websocket::ws_set_server_url,
             commands::websocket::ws_get_server_url,
             commands::websocket::ws_get_state,
@@ -560,9 +562,12 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
         }
     }
     let (ws_tx, mut ws_rx) = mpsc::channel(network::websocket::WS_EVENT_CHANNEL_CAPACITY);
+    let (ws_binary_tx, ws_binary_rx) = mpsc::channel(network::websocket::WS_EVENT_CHANNEL_CAPACITY);
     ws_handler.set_event_handler(ws_tx);
+    ws_handler.set_binary_handler(ws_binary_tx);
     let ws_handler_for_bridge = Arc::downgrade(&ws_handler);
     *state.websocket_handler.write() = Some(ws_handler);
+    *state.websocket_binary_receiver.lock().await = Some(ws_binary_rx);
     info!("WebSocket handler initialized");
 
     // Start WebSocket event bridge

@@ -45,13 +45,6 @@ const WS_MAX_ENCRYPTED_RESPONSE_BYTES = envInt(
   1024 * 1024,
   64 * 1024 * 1024
 );
-const WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES = envInt(
-  'WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES',
-  8 * 1024 * 1024,
-  1024 * 1024,
-  16 * 1024 * 1024
-);
-const WS_ENVELOPE_MAX_AAD_BYTES = 512;
 const WS_ENVELOPE_MAX_JSON_DEPTH = 32;
 const WS_ENVELOPE_MAX_JSON_NODES = 20_000;
 const WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT = envInt('WS_ENCRYPTED_SEND_QUEUE_MAX_COUNT', 64, 4, 1024);
@@ -65,11 +58,32 @@ const WS_DELIVERY_TIMEOUT_MS = envInt('WS_DELIVERY_TIMEOUT_MS', 30_000, 1_000, 1
 const WS_OPEN = 1;
 const WS_CLOSING = 2;
 const WS_CLOSED = 3;
-const UNPADDED_CONTROL_TYPES = new Set([
-  SignalType.PQ_HEARTBEAT_PING,
-  SignalType.PQ_HEARTBEAT_PONG,
-  SignalType.SECURE_CHUNK,
-]);
+const WS_CELL_MAGIC = Buffer.from('QORC', 'ascii');
+const WS_CELL_VERSION = 1;
+const WS_CELL_FLAGS = 0;
+const WS_CELL_SESSION_OFFSET = 8;
+const WS_CELL_FINGERPRINT_OFFSET = 24;
+const WS_CELL_MESSAGE_ID_OFFSET = 56;
+const WS_CELL_COUNTER_OFFSET = 72;
+const WS_CELL_TIMESTAMP_OFFSET = 80;
+const WS_CELL_CHUNK_INDEX_OFFSET = 88;
+const WS_CELL_CHUNK_COUNT_OFFSET = 92;
+const WS_CELL_TOTAL_LENGTH_OFFSET = 96;
+const WS_CELL_PLAINTEXT_LENGTH_OFFSET = 100;
+const WS_CELL_NONCE_OFFSET = 104;
+const WS_CELL_TAG_OFFSET = WS_CELL_NONCE_OFFSET + WS_ENVELOPE_NONCE_BYTES;
+const WS_CELL_CIPHERTEXT_OFFSET = WS_CELL_TAG_OFFSET + WS_ENVELOPE_TAG_BYTES;
+const WS_CELL_HEADER_BYTES = WS_CELL_CIPHERTEXT_OFFSET;
+const WS_CELL_CIPHERTEXT_OVERHEAD_BYTES = 32;
+const WS_CELL_PLAINTEXT_BYTES = SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES
+  - WS_CELL_HEADER_BYTES
+  - WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+const WS_CELL_MAX_LOGICAL_BYTES = 24 * 1024 * 1024;
+const WS_CELL_MAX_CHUNKS = Math.ceil(WS_CELL_MAX_LOGICAL_BYTES / WS_CELL_PLAINTEXT_BYTES);
+const WS_CELL_MAX_CONCURRENT = 4;
+const WS_CELL_MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
+const WS_CELL_REASSEMBLY_TIMEOUT_MS = 200_000;
+const WS_CELL_AAD_DOMAIN = UTF8_ENCODER.encode(PROTOCOL_KEYS.WS_PQ_CELL_AAD);
 const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map([
   [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
   [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
@@ -100,52 +114,6 @@ class WebSocketDeliveryClosedError extends Error {
   }
 }
 
-export function validateIncomingEnvelopeShape(envelope) {
-  if (
-    !envelope ||
-    typeof envelope !== 'object' ||
-    Array.isArray(envelope) ||
-    Object.getPrototypeOf(envelope) !== Object.prototype
-  ) return false;
-
-  const requiredKeys = [
-    'aad', 'ciphertext', 'counter', 'messageId', 'nonce', 'sessionFingerprint',
-    'sessionId', 'tag', 'timestamp', 'type', 'version'
-  ];
-  const actualKeys = Object.keys(envelope).sort();
-  const unpaddedShape = requiredKeys.join(',');
-  const paddedShape = [...requiredKeys, '_pad'].sort().join(',');
-  const actualShape = actualKeys.join(',');
-  if (actualShape !== unpaddedShape && actualShape !== paddedShape) return false;
-  if (
-    envelope.type !== SignalType.PQ_ENVELOPE ||
-    envelope.version !== REQUIRED_WS_PQ_HANDSHAKE.version ||
-    typeof envelope.sessionId !== 'string' ||
-    !HEX_32_RE.test(envelope.sessionId) ||
-    typeof envelope.sessionFingerprint !== 'string' ||
-    !HEX_64_RE.test(envelope.sessionFingerprint) ||
-    typeof envelope.messageId !== 'string' ||
-    !HEX_32_RE.test(envelope.messageId) ||
-    !Number.isSafeInteger(envelope.counter) ||
-    envelope.counter <= 0 ||
-    !Number.isSafeInteger(envelope.timestamp)
-  ) return false;
-  if (
-    Object.hasOwn(envelope, '_pad') &&
-    (typeof envelope._pad !== 'string' ||
-      envelope._pad.length > SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES ||
-      !/^[A-Za-z0-9+/_-]*$/.test(envelope._pad))
-  ) return false;
-
-  return canonicalBase64Shape(envelope.ciphertext, {
-    minBytes: 32,
-    maxBytes: WS_MAX_ENCRYPTED_REQUEST_CIPHERTEXT_BYTES
-  }) &&
-    canonicalBase64Shape(envelope.nonce, { exactBytes: WS_ENVELOPE_NONCE_BYTES }) &&
-    canonicalBase64Shape(envelope.tag, { exactBytes: WS_ENVELOPE_TAG_BYTES }) &&
-    canonicalBase64Shape(envelope.aad, { maxBytes: WS_ENVELOPE_MAX_AAD_BYTES });
-}
-
 function byteSizeClass(bytes) {
   const n = Math.max(0, Number(bytes) || 0);
   if (n <= 1024 * 1024) return 'lte-1m';
@@ -174,7 +142,7 @@ function isWebSocketDeliveryClosedError(error) {
     || /WebSocket (?:is )?(?:not open|closed|closing|CLOSED)/i.test(String(error?.message || ''));
 }
 
-function sendWebSocketTextWithDeadline(ws, text, timeoutMs = WS_DELIVERY_TIMEOUT_MS) {
+function sendWebSocketFrameWithDeadline(ws, frame, timeoutMs = WS_DELIVERY_TIMEOUT_MS) {
   const boundedTimeoutMs = Number.isSafeInteger(timeoutMs)
     ? Math.min(WS_DELIVERY_TIMEOUT_MS, Math.max(1, timeoutMs))
     : WS_DELIVERY_TIMEOUT_MS;
@@ -201,7 +169,7 @@ function sendWebSocketTextWithDeadline(ws, text, timeoutMs = WS_DELIVERY_TIMEOUT
     timer.unref?.();
 
     try {
-      ws.send(text, (error) => {
+      ws.send(frame, (error) => {
         if (!error) {
           finish(resolve, true);
           return;
@@ -226,8 +194,44 @@ function wipeSession(session) {
   try { session?.sendKey?.fill(0); } catch { }
 }
 
+function writeSafeU64(buffer, offset, value) {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid fixed-cell integer');
+  buffer.writeUInt32BE(Math.floor(value / 0x1_0000_0000), offset);
+  buffer.writeUInt32BE(value >>> 0, offset + 4);
+}
+
+function readSafeU64(buffer, offset) {
+  const value = buffer.readUInt32BE(offset) * 0x1_0000_0000 + buffer.readUInt32BE(offset + 4);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function discardSocketCellAssembly(ws, messageId) {
+  const assemblies = ws?._pqCellAssemblies;
+  const assembly = assemblies?.get(messageId);
+  if (!assembly) return;
+  clearTimeout(assembly.timer);
+  for (const part of assembly.parts) part?.fill(0);
+  assemblies.delete(messageId);
+  ws._pqCellBufferedBytes = Math.max(
+    0,
+    Number(ws._pqCellBufferedBytes || 0) - assembly.totalLength
+  );
+}
+
+function clearSocketCellAssemblies(ws) {
+  const assemblies = ws?._pqCellAssemblies;
+  if (assemblies instanceof Map) {
+    for (const messageId of Array.from(assemblies.keys())) {
+      discardSocketCellAssembly(ws, messageId);
+    }
+  }
+  ws._pqCellAssemblies = undefined;
+  ws._pqCellBufferedBytes = 0;
+}
+
 export function clearSocketPQSession(ws) {
   if (!ws) return false;
+  clearSocketCellAssemblies(ws);
   const session = ws._pqSessionData;
   const pendingSession = ws._pqPendingSessionData;
   wipeSession(session);
@@ -421,17 +425,13 @@ async function acquireSocketSendTurn(ws, session, plaintextBytes) {
 }
 
 function getEncryptedResponsePlaintextBudgetBytes() {
-  const envelopeSlackBytes = 8 * 1024;
-  return Math.max(
-    1024,
-    Math.floor((WS_MAX_ENCRYPTED_RESPONSE_BYTES - envelopeSlackBytes) * 0.7)
-  );
+  return Math.min(WS_MAX_ENCRYPTED_RESPONSE_BYTES, WS_CELL_MAX_LOGICAL_BYTES);
 }
 
-// Chunked secure transport for messages too large for a single PQ envelope
-const SECURE_CHUNK_BYTES = envInt('SECURE_CHUNK_BYTES', 1024 * 1024, 256 * 1024, 6 * 1024 * 1024);
-const SECURE_CHUNK_SINGLE_MAX_BYTES = envInt('SECURE_CHUNK_SINGLE_MAX_BYTES', 4 * 1024 * 1024, 64 * 1024, 8 * 1024 * 1024);
-const SECURE_CHUNK_MAX_TOTAL = 128;
+// Application-level progress chunks, each carried by authenticated fixed cells.
+const SECURE_CHUNK_BYTES = 48 * 1024;
+const SECURE_CHUNK_SINGLE_MAX_BYTES = SECURE_CHUNK_BYTES;
+const SECURE_CHUNK_MAX_TOTAL = 512;
 const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
 const SECURE_CHUNK_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
@@ -449,7 +449,7 @@ async function waitForWsDrain(ws, maxBufferedBytes, timeoutMs = 30000) {
 }
 
 /**
- * Send message splitting it into reassemblable chunks if it is too large for a single PQ envelope
+ * Split a large authentication response into bounded progress chunks.
  */
 export async function sendSecureAuthResponse(ws, payload) {
   if (payload?.type !== SignalType.AUTH_OT_RESPONSE) return false;
@@ -605,59 +605,6 @@ function timestampInvalidPayload(validation, code, message) {
     timestampSkewMs: Number.isFinite(validation.skewMs) ? validation.skewMs : undefined,
     requiresFreshHandshake: true
   };
-}
-
-function applyEnvelopeFixedPadding(envelope) {
-  const targetBytes = SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
-  if (!targetBytes || targetBytes <= 0) {
-    return false;
-  }
-
-  const base = { ...envelope, _pad: '' };
-  const baseJson = JSON.stringify(base);
-  const baseSize = Buffer.byteLength(baseJson);
-  if (baseSize > targetBytes) {
-    console.log('[PQ-ENCRYPT] Fixed-size response exceeded target. sending unpadded', {
-      baseSize,
-      targetBytes
-    });
-    return false;
-  }
-
-  const padNeeded = targetBytes - baseSize;
-  if (padNeeded === 0) {
-    envelope._pad = '';
-    return true;
-  }
-
-  const paddingBytes = crypto.randomBytes(Math.ceil(padNeeded * 0.75));
-  try {
-    envelope._pad = paddingBytes.toString('base64url').slice(0, padNeeded);
-  } finally {
-    paddingBytes.fill(0);
-  }
-  const finalJson = JSON.stringify(envelope);
-  const finalSize = Buffer.byteLength(finalJson);
-  if (finalSize !== targetBytes) {
-    delete envelope._pad;
-    throw new Error(`Fixed-size response padding mismatch: ${finalSize} !== ${targetBytes}`);
-  }
-  return true;
-}
-
-function shouldPadEnvelopePayload(payload) {
-  const type = payload?.type || 'unknown';
-  return !UNPADDED_CONTROL_TYPES.has(type);
-}
-
-function hasValidEnvelopePadding(envelope, payload) {
-  const hasPadding = Object.hasOwn(envelope, '_pad');
-  const shouldPad = shouldPadEnvelopePayload(payload);
-  if (hasPadding) {
-    return shouldPad && Buffer.byteLength(JSON.stringify(envelope)) === SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
-  }
-  if (!shouldPad) return true;
-  return Buffer.byteLength(JSON.stringify({ ...envelope, _pad: '' })) > SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES;
 }
 
 async function sendOversizedResponseError(ws, session, messageType, sizeBytes) {
@@ -1037,427 +984,420 @@ export async function handlePQHandshake({ ws, parsed, serverHybridKeyPair }) {
   }
 }
 
-// Handle incoming PQ-encrypted envelope
-export async function handlePQEnvelope({ ws, envelope, context, handleInnerMessage }) {
-  const rejectUnboundEnvelope = async (payload) => {
-    if (ws?._pqRekeyGate) {
-      clearSocketPQSession(ws);
-      if (isWebSocketOpen(ws)) ws.close(1008, 'Invalid PQ activation envelope');
-      return false;
-    }
-    return await sendSecureMessage(ws, payload);
-  };
-  if (!validateIncomingEnvelopeShape(envelope)) {
-    console.warn('[PQ-ENVELOPE] Invalid envelope schema');
-    return await rejectUnboundEnvelope({
-      type: SignalType.ERROR,
-      message: 'Invalid PQ envelope'
-    });
-  }
-  const pqSessionId = envelope.sessionId;
-  if (!pqSessionId) {
-    console.warn('[PQ-ENVELOPE] No session ID provided');
-    return await rejectUnboundEnvelope({
-      type: SignalType.ERROR,
-      message: 'No PQ session ID provided'
-    });
-  }
-
-  if (ws._pqSessionId !== pqSessionId && ws._pqPendingSessionId !== pqSessionId) {
-    console.warn('[PQ-ENVELOPE] Session is not bound to this socket');
-    return await rejectUnboundEnvelope({
-      type: SignalType.ERROR,
-      message: 'Unknown PQ session'
-    });
-  }
-
-  const session = getSocketPQSession(ws, pqSessionId);
-  if (!session) {
-    console.warn('[PQ-ENVELOPE] Unknown PQ session');
-    return await rejectUnboundEnvelope({
-      type: SignalType.ERROR,
-      message: 'Unknown PQ session'
-    });
-  }
-
-  if (ws._pqPendingSessionData && session === ws._pqSessionData) {
-    try {
-      await sendPQEncryptedResponse(ws, session, {
-        type: SignalType.ERROR,
-        message: 'PQ rekey confirmation required'
-      });
-    } finally {
-      clearSocketPQSession(ws);
-      if (isWebSocketOpen(ws)) ws.close(1008, 'PQ rekey confirmation required');
-    }
-    return false;
-  }
-
-  const sendForEnvelopeSession = (payload) => (
+async function dispatchAuthenticatedCellPayload({
+  ws,
+  session,
+  innerPayload,
+  context,
+  handleInnerMessage,
+}) {
+  const sendForSession = (payload) => (
     ws._pqPendingSessionData === session || session.confirmed !== true
       ? sendPQEncryptedResponse(ws, session, payload)
       : sendSecureMessage(ws, payload)
   );
 
-  if (envelope.sessionFingerprint !== session.fingerprint) {
-    console.error('[PQ-ENVELOPE] Session fingerprint mismatch');
-    return await sendForEnvelopeSession({
-      type: SignalType.ERROR,
-      message: 'Session fingerprint mismatch'
-    });
+  if (session.confirmed !== true) {
+    if (
+      Object.keys(innerPayload).sort().join(',') !== 'requestDigest,sessionId,type,version' ||
+      innerPayload.type !== SignalType.PQ_HANDSHAKE_CONFIRM ||
+      innerPayload.version !== REQUIRED_WS_PQ_HANDSHAKE.version ||
+      innerPayload.sessionId !== session.sessionId ||
+      innerPayload.requestDigest !== session.confirmationDigest
+    ) {
+      await sendForSession({ type: SignalType.ERROR, message: 'PQ key confirmation required' });
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1008, 'PQ key confirmation required');
+      return false;
+    }
+    if (session.confirmationInFlight === true) {
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1008, 'Concurrent PQ key confirmation');
+      return false;
+    }
+    session.confirmationInFlight = true;
+    let delivered = false;
+    try {
+      delivered = await sendPQEncryptedResponse(ws, session, {
+        type: SignalType.PQ_HANDSHAKE_CONFIRMED,
+        version: REQUIRED_WS_PQ_HANDSHAKE.version,
+        sessionId: session.sessionId,
+        requestDigest: innerPayload.requestDigest
+      });
+    } finally {
+      if (getSocketPQSession(ws, session.sessionId) === session) {
+        session.confirmationInFlight = false;
+      }
+    }
+    if (!delivered) {
+      clearSocketPQSession(ws);
+      if (isWebSocketOpen(ws)) ws.close(1011, 'PQ key confirmation delivery failed');
+      return false;
+    }
+    session.confirmed = true;
+    session.confirmationDigest = null;
+    if (session.confirmationTimer) clearTimeout(session.confirmationTimer);
+    session.confirmationTimer = null;
+    if (ws._pqPendingSessionData === session) promoteStagedSocketPQSession(ws, session);
+    else resolveSocketPQActivationGate(ws);
+    return true;
   }
 
-  const envelopeTimestamp = getEnvelopeTimestampValidation(envelope.timestamp);
-  if (!envelopeTimestamp.valid) {
-    console.warn('[PQ-ENVELOPE] Timestamp outside replay window', {
-      skewClass: skewSizeClass(envelopeTimestamp.skewMs),
-      direction: envelopeTimestamp.direction
-    });
-    return await sendForEnvelopeSession(
-      timestampInvalidPayload(envelopeTimestamp, 'ENVELOPE_TIMESTAMP_INVALID', 'Envelope timestamp invalid')
+  if (innerPayload.type === SignalType.PQ_HANDSHAKE_CONFIRM) {
+    clearSocketPQSession(ws);
+    if (isWebSocketOpen(ws)) ws.close(1008, 'Repeated PQ key confirmation');
+    return false;
+  }
+
+  const authRequestField = AUTH_CHANNEL_BOUND_REQUEST_FIELDS.get(innerPayload.type);
+  if (authRequestField) {
+    let expectedBinding = null;
+    let suppliedBinding = null;
+    try {
+      const requestId = innerPayload[authRequestField];
+      if (!canonicalBase64Shape(innerPayload.authChannelBinding, {
+        exactBytes: AUTH_CHANNEL_BINDING_BYTES
+      })) throw new Error('Authentication channel binding is malformed');
+      expectedBinding = createAuthChannelBinding({
+        sessionId: session.sessionId,
+        sessionFingerprint: session.fingerprint,
+        requestId,
+      });
+      suppliedBinding = CryptoUtils.Hash.base64ToUint8Array(innerPayload.authChannelBinding);
+      if (
+        suppliedBinding.length !== AUTH_CHANNEL_BINDING_BYTES ||
+        !crypto.timingSafeEqual(expectedBinding, suppliedBinding)
+      ) throw new Error('Authentication channel binding does not match the PQ session');
+      Object.defineProperty(innerPayload, VERIFIED_AUTH_CHANNEL_BINDING, {
+        configurable: true,
+        enumerable: false,
+        value: expectedBinding,
+        writable: false,
+      });
+      expectedBinding = null;
+    } catch {
+      await sendForSession({
+        type: SignalType.AUTH_ERROR,
+        code: 'AUTH_CHANNEL_BINDING_INVALID',
+        message: 'Authentication channel binding invalid',
+        [authRequestField]: innerPayload[authRequestField],
+      });
+      if (isWebSocketOpen(ws)) ws.close(1008, 'Authentication channel binding invalid');
+      return false;
+    } finally {
+      expectedBinding?.fill(0);
+      suppliedBinding?.fill(0);
+    }
+  }
+
+  await handleInnerMessage({
+    ws,
+    parsed: innerPayload,
+    context,
+    isPqProtected: true
+  });
+  return true;
+}
+
+function ingestSocketCellPlaintext(ws, messageId, chunkIndex, chunkCount, totalLength, plaintext) {
+  if (chunkCount === 1) return Buffer.from(plaintext);
+  if (!(ws._pqCellAssemblies instanceof Map)) ws._pqCellAssemblies = new Map();
+  let assembly = ws._pqCellAssemblies.get(messageId);
+  if (!assembly) {
+    while (
+      ws._pqCellAssemblies.size >= WS_CELL_MAX_CONCURRENT ||
+      Number(ws._pqCellBufferedBytes || 0) + totalLength > WS_CELL_MAX_BUFFERED_BYTES
+    ) {
+      const oldest = Array.from(ws._pqCellAssemblies.entries())
+        .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
+      if (!oldest) throw new Error('Fixed-cell reassembly capacity exceeded');
+      discardSocketCellAssembly(ws, oldest[0]);
+    }
+    const timer = setTimeout(
+      () => discardSocketCellAssembly(ws, messageId),
+      WS_CELL_REASSEMBLY_TIMEOUT_MS
     );
+    timer.unref?.();
+    assembly = {
+      totalLength,
+      chunkCount,
+      parts: new Array(chunkCount),
+      received: 0,
+      receivedBytes: 0,
+      createdAt: Date.now(),
+      timer,
+    };
+    ws._pqCellAssemblies.set(messageId, assembly);
+    ws._pqCellBufferedBytes = Number(ws._pqCellBufferedBytes || 0) + totalLength;
+  } else if (assembly.totalLength !== totalLength || assembly.chunkCount !== chunkCount) {
+    discardSocketCellAssembly(ws, messageId);
+    throw new Error('Inconsistent fixed-cell metadata');
   }
-
-  if (!isSocketRemoteCounterFresh(session, envelope.counter)) {
-    console.warn('[PQ-ENVELOPE] Remote counter rejected', {
-      receivedCounter: envelope?.counter
-    });
-    return await sendForEnvelopeSession({
-      type: SignalType.ERROR,
-      message: 'Envelope counter invalid'
-    });
+  if (assembly.parts[chunkIndex] !== undefined) {
+    discardSocketCellAssembly(ws, messageId);
+    throw new Error('Duplicate fixed-cell fragment');
   }
+  assembly.parts[chunkIndex] = Buffer.from(plaintext);
+  assembly.received += 1;
+  assembly.receivedBytes += plaintext.length;
+  if (assembly.received < assembly.chunkCount) return null;
 
-  let ciphertext = null;
+  const complete = Buffer.allocUnsafe(totalLength);
+  let offset = 0;
+  for (const part of assembly.parts) {
+    if (!Buffer.isBuffer(part) || offset + part.length > complete.length) {
+      complete.fill(0);
+      discardSocketCellAssembly(ws, messageId);
+      throw new Error('Incomplete fixed-cell message');
+    }
+    part.copy(complete, offset);
+    offset += part.length;
+  }
+  discardSocketCellAssembly(ws, messageId);
+  if (offset !== totalLength || assembly.receivedBytes !== totalLength) {
+    complete.fill(0);
+    throw new Error('Fixed-cell length mismatch');
+  }
+  return complete;
+}
+
+export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage }) {
   let nonce = null;
   let tag = null;
+  let ciphertext = null;
   let aad = null;
   let plaintext = null;
+  let logicalBytes = null;
   try {
-    // Decode envelope components
-    ciphertext = CryptoUtils.Hash.base64ToUint8Array(envelope.ciphertext);
-    nonce = CryptoUtils.Hash.base64ToUint8Array(envelope.nonce);
-    tag = CryptoUtils.Hash.base64ToUint8Array(envelope.tag);
-    aad = CryptoUtils.Hash.base64ToUint8Array(envelope.aad);
+    if (!Buffer.isBuffer(cell) || cell.length !== SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES) {
+      throw new Error('Invalid fixed-cell size');
+    }
+    if (
+      !cell.subarray(0, WS_CELL_MAGIC.length).equals(WS_CELL_MAGIC) ||
+      cell.readUInt8(4) !== WS_CELL_VERSION ||
+      cell.readUInt8(5) !== WS_CELL_FLAGS ||
+      cell.readUInt16BE(6) !== WS_CELL_HEADER_BYTES
+    ) throw new Error('Invalid fixed-cell header');
 
-    // Decrypt
+    const sessionId = cell.subarray(WS_CELL_SESSION_OFFSET, WS_CELL_FINGERPRINT_OFFSET).toString('hex');
+    const session = getSocketPQSession(ws, sessionId);
+    if (!session) throw new Error('Fixed cell is not bound to this socket');
+    if (ws._pqPendingSessionData && session === ws._pqSessionData) {
+      try {
+        await sendPQEncryptedResponse(ws, session, {
+          type: SignalType.ERROR,
+          message: 'PQ rekey confirmation required'
+        });
+      } finally {
+        clearSocketPQSession(ws);
+        if (isWebSocketOpen(ws)) ws.close(1008, 'PQ rekey confirmation required');
+      }
+      return false;
+    }
+    if (!crypto.timingSafeEqual(
+      cell.subarray(WS_CELL_FINGERPRINT_OFFSET, WS_CELL_MESSAGE_ID_OFFSET),
+      Buffer.from(session.fingerprint, 'hex')
+    )) throw new Error('Fixed-cell session fingerprint mismatch');
+
+    const counter = readSafeU64(cell, WS_CELL_COUNTER_OFFSET);
+    const timestamp = readSafeU64(cell, WS_CELL_TIMESTAMP_OFFSET);
+    const chunkIndex = cell.readUInt32BE(WS_CELL_CHUNK_INDEX_OFFSET);
+    const chunkCount = cell.readUInt32BE(WS_CELL_CHUNK_COUNT_OFFSET);
+    const totalLength = cell.readUInt32BE(WS_CELL_TOTAL_LENGTH_OFFSET);
+    const plaintextLength = cell.readUInt32BE(WS_CELL_PLAINTEXT_LENGTH_OFFSET);
+    if (
+      counter === null || timestamp === null ||
+      !isSocketRemoteCounterFresh(session, counter) ||
+      !getEnvelopeTimestampValidation(timestamp).valid ||
+      totalLength < 1 || totalLength > WS_CELL_MAX_LOGICAL_BYTES ||
+      chunkCount < 1 || chunkCount > WS_CELL_MAX_CHUNKS ||
+      chunkCount !== Math.ceil(totalLength / WS_CELL_PLAINTEXT_BYTES) ||
+      chunkIndex >= chunkCount
+    ) throw new Error('Invalid fixed-cell metadata');
+    const expectedPlaintextLength = chunkIndex + 1 === chunkCount
+      ? totalLength - chunkIndex * WS_CELL_PLAINTEXT_BYTES
+      : WS_CELL_PLAINTEXT_BYTES;
+    if (plaintextLength !== expectedPlaintextLength) throw new Error('Invalid fixed-cell fragment length');
+    const ciphertextLength = plaintextLength + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+    if (WS_CELL_CIPHERTEXT_OFFSET + ciphertextLength > cell.length) {
+      throw new Error('Invalid fixed-cell ciphertext length');
+    }
+
+    nonce = Buffer.from(cell.subarray(WS_CELL_NONCE_OFFSET, WS_CELL_TAG_OFFSET));
+    tag = Buffer.from(cell.subarray(WS_CELL_TAG_OFFSET, WS_CELL_CIPHERTEXT_OFFSET));
+    ciphertext = Buffer.from(cell.subarray(
+      WS_CELL_CIPHERTEXT_OFFSET,
+      WS_CELL_CIPHERTEXT_OFFSET + ciphertextLength
+    ));
+    aad = Buffer.concat([
+      WS_CELL_AAD_DOMAIN,
+      cell.subarray(0, WS_CELL_TAG_OFFSET),
+      cell.subarray(WS_CELL_CIPHERTEXT_OFFSET + ciphertextLength)
+    ]);
     const pqAead = new CryptoUtils.PostQuantumAEAD(session.recvKey);
     plaintext = pqAead.decrypt(ciphertext, nonce, tag, aad);
-    if (!consumeSocketRemoteCounter(session, envelope.counter)) {
-      throw new Error('Envelope counter changed during authentication');
+    if (plaintext.length !== plaintextLength || !consumeSocketRemoteCounter(session, counter)) {
+      throw new Error('Fixed-cell authentication state changed');
     }
-    const decrypted = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    const messageId = cell.subarray(WS_CELL_MESSAGE_ID_OFFSET, WS_CELL_COUNTER_OFFSET).toString('hex');
+    logicalBytes = ingestSocketCellPlaintext(
+      ws,
+      messageId,
+      chunkIndex,
+      chunkCount,
+      totalLength,
+      plaintext
+    );
+    if (!logicalBytes) return true;
+
+    const innerPayload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(logicalBytes));
     if (
-      !decrypted ||
-      typeof decrypted !== 'object' ||
-      Array.isArray(decrypted) ||
-      typeof decrypted.type !== 'string' ||
-      decrypted.type.length === 0 ||
-      decrypted.type.length > 64 ||
-      !isSafeJsonTree(decrypted, {
+      !innerPayload || typeof innerPayload !== 'object' || Array.isArray(innerPayload) ||
+      typeof innerPayload.type !== 'string' || innerPayload.type.length < 1 ||
+      innerPayload.type.length > 64 ||
+      !isSafeJsonTree(innerPayload, {
         maxDepth: WS_ENVELOPE_MAX_JSON_DEPTH,
         maxNodes: WS_ENVELOPE_MAX_JSON_NODES,
         maxKeyLength: 256
       })
-    ) {
-      throw new Error('Invalid encrypted payload schema');
-    }
-
-    const innerPayload = decrypted;
-
-    const innerType = innerPayload?.type || decrypted?.type || 'unknown';
-    const expectedAad = `${PROTOCOL_KEYS.WS_PQ_AAD}|${envelope.messageId}|${envelope.timestamp}|${envelope.counter}`;
-    const aadString = new TextDecoder().decode(aad);
-    if (aadString !== expectedAad) {
-      console.warn('[PQ-ENVELOPE] AAD mismatch after decrypt', {
-        expectedType: innerType,
-        messageId: envelope.messageId
-      });
-      return await sendForEnvelopeSession({
-        type: SignalType.ERROR,
-        message: 'Envelope AAD invalid'
-      });
-    }
-    if (!hasValidEnvelopePadding(envelope, innerPayload)) {
-      return await sendForEnvelopeSession({
-        type: SignalType.ERROR,
-        message: 'Envelope padding invalid'
-      });
-    }
-
-    if (session.confirmed !== true) {
-      if (
-        Object.keys(innerPayload).sort().join(',') !== 'requestDigest,sessionId,type,version' ||
-        innerPayload.type !== SignalType.PQ_HANDSHAKE_CONFIRM ||
-        innerPayload.version !== REQUIRED_WS_PQ_HANDSHAKE.version ||
-        innerPayload.sessionId !== session.sessionId ||
-        innerPayload.requestDigest !== session.confirmationDigest
-      ) {
-        console.warn('[PQ-HANDSHAKE] Application data arrived before key confirmation');
-        await sendForEnvelopeSession({
-          type: SignalType.ERROR,
-          message: 'PQ key confirmation required'
-        });
-        clearSocketPQSession(ws);
-        if (isWebSocketOpen(ws)) ws.close(1008, 'PQ key confirmation required');
-        return;
-      }
-      if (session.confirmationInFlight === true) {
-        clearSocketPQSession(ws);
-        if (isWebSocketOpen(ws)) ws.close(1008, 'Concurrent PQ key confirmation');
-        return;
-      }
-      session.confirmationInFlight = true;
-      let confirmationDelivered = false;
-      try {
-        confirmationDelivered = await sendPQEncryptedResponse(ws, session, {
-          type: SignalType.PQ_HANDSHAKE_CONFIRMED,
-          version: REQUIRED_WS_PQ_HANDSHAKE.version,
-          sessionId: session.sessionId,
-          requestDigest: innerPayload.requestDigest
-        });
-      } catch {
-        confirmationDelivered = false;
-      } finally {
-        if (getSocketPQSession(ws, session.sessionId) === session) {
-          session.confirmationInFlight = false;
-        }
-      }
-      if (!confirmationDelivered) {
-        console.warn('[PQ-HANDSHAKE] Encrypted key confirmation delivery failed');
-        clearSocketPQSession(ws);
-        if (isWebSocketOpen(ws)) ws.close(1011, 'PQ key confirmation delivery failed');
-        return;
-      }
-      session.confirmed = true;
-      session.confirmationDigest = null;
-      if (session.confirmationTimer) clearTimeout(session.confirmationTimer);
-      session.confirmationTimer = null;
-      if (ws._pqPendingSessionData === session) {
-        promoteStagedSocketPQSession(ws, session);
-      } else {
-        resolveSocketPQActivationGate(ws);
-      }
-      return;
-    }
-    if (innerPayload.type === SignalType.PQ_HANDSHAKE_CONFIRM) {
-      clearSocketPQSession(ws);
-      if (isWebSocketOpen(ws)) ws.close(1008, 'Repeated PQ key confirmation');
-      return;
-    }
-
-    const authRequestField = AUTH_CHANNEL_BOUND_REQUEST_FIELDS.get(innerPayload.type);
-    if (authRequestField) {
-      let expectedBinding = null;
-      let suppliedBinding = null;
-      try {
-        const requestId = innerPayload[authRequestField];
-        if (!canonicalBase64Shape(innerPayload.authChannelBinding, {
-          exactBytes: AUTH_CHANNEL_BINDING_BYTES
-        })) {
-          throw new Error('Authentication channel binding is malformed');
-        }
-        expectedBinding = createAuthChannelBinding({
-          sessionId: session.sessionId,
-          sessionFingerprint: session.fingerprint,
-          requestId,
-        });
-        suppliedBinding = CryptoUtils.Hash.base64ToUint8Array(innerPayload.authChannelBinding);
-        if (
-          suppliedBinding.length !== AUTH_CHANNEL_BINDING_BYTES ||
-          !crypto.timingSafeEqual(expectedBinding, suppliedBinding)
-        ) {
-          throw new Error('Authentication channel binding does not match the PQ session');
-        }
-        Object.defineProperty(innerPayload, VERIFIED_AUTH_CHANNEL_BINDING, {
-          configurable: true,
-          enumerable: false,
-          value: expectedBinding,
-          writable: false,
-        });
-        expectedBinding = null;
-      } catch {
-        await sendForEnvelopeSession({
-          type: SignalType.AUTH_ERROR,
-          code: 'AUTH_CHANNEL_BINDING_INVALID',
-          message: 'Authentication channel binding invalid',
-          [authRequestField]: innerPayload[authRequestField],
-        });
-        if (isWebSocketOpen(ws)) ws.close(1008, 'Authentication channel binding invalid');
-        return;
-      } finally {
-        expectedBinding?.fill(0);
-        suppliedBinding?.fill(0);
-      }
-    }
-
-    await handleInnerMessage({
+    ) throw new Error('Invalid fixed-cell payload schema');
+    return await dispatchAuthenticatedCellPayload({
       ws,
-      parsed: innerPayload,
+      session,
+      innerPayload,
       context,
-      isPqProtected: true
+      handleInnerMessage,
     });
   } catch (error) {
-    console.error('[PQ-ENVELOPE] Decryption failed', {
-      error: error.message
-    });
-    await sendForEnvelopeSession({
-      type: SignalType.ERROR,
-      message: 'Failed to decrypt envelope'
-    });
+    console.warn('[PQ-CELL] Rejected encrypted WebSocket cell', { error: error.message });
+    clearSocketCellAssemblies(ws);
+    if (isWebSocketOpen(ws)) ws.close(1008, 'Invalid encrypted cell');
+    return false;
   } finally {
-    ciphertext?.fill(0);
     nonce?.fill(0);
     tag?.fill(0);
+    ciphertext?.fill(0);
     aad?.fill(0);
     plaintext?.fill(0);
+    logicalBytes?.fill(0);
   }
 }
 
-// Send PQ-encrypted response to client
+
+// Send a logical message as one or more authenticated fixed-size binary cells.
 export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, options = {}) {
-  const payloadTypeForClosedSocket = payload?.type || 'unknown';
-  if (!isWebSocketOpen(ws)) {
-    const readyState = wsReadyState(ws);
-    if (isClosedWebSocketState(readyState)) {
-      console.log('[PQ-ENCRYPT] Skipping encrypted response for closed socket', {
-        payloadType: payloadTypeForClosedSocket,
-        readyState
-      });
-      return false;
-    }
-  }
+  const payloadType = payload?.type || 'unknown';
+  if (!isWebSocketOpen(ws)) return false;
 
+  const requestedSessionId = typeof pqSessionIdOrData === 'string'
+    ? pqSessionIdOrData
+    : pqSessionIdOrData?.sessionId;
+  const session = getSocketPQSession(ws, requestedSessionId);
+  if (!session) throw new Error('PQ session is not bound to this socket');
+
+  let plaintext = null;
+  let sessionId = null;
+  let fingerprint = null;
+  let messageId = null;
+  let releaseSendTurn = null;
   try {
-    const requestedSessionId = typeof pqSessionIdOrData === 'string'
-      ? pqSessionIdOrData
-      : pqSessionIdOrData?.sessionId;
-    const session = getSocketPQSession(ws, requestedSessionId);
-    if (!session) throw new Error('PQ session is not bound to this socket');
-
-    const innerMessage = payload;
-
-    const messageType = innerMessage?.type || payload?.type || 'unknown';
-    const plaintextBudgetBytes = getEncryptedResponsePlaintextBudgetBytes();
-
-    const innerJson = JSON.stringify(innerMessage);
-    if (typeof innerJson !== 'string') {
-      throw new Error('Invalid encrypted response payload');
+    const innerJson = JSON.stringify(payload);
+    if (typeof innerJson !== 'string') throw new Error('Invalid encrypted response payload');
+    plaintext = Buffer.from(innerJson, 'utf8');
+    if (plaintext.length < 1 || plaintext.length > getEncryptedResponsePlaintextBudgetBytes()) {
+      return await sendOversizedResponseError(ws, session, payloadType, plaintext.length);
     }
 
-    const plaintextBytes = Buffer.byteLength(innerJson, 'utf8');
-    if (plaintextBytes > plaintextBudgetBytes) {
-      return sendOversizedResponseError(
-        ws,
-        session,
-        messageType,
-        plaintextBytes
-      );
+    releaseSendTurn = await acquireSocketSendTurn(ws, session, plaintext.length);
+    sessionId = Buffer.from(session.sessionId, 'hex');
+    fingerprint = Buffer.from(session.fingerprint, 'hex');
+    messageId = crypto.randomBytes(16);
+    if (sessionId.length !== 16 || fingerprint.length !== 32) {
+      throw new Error('Invalid PQ session identity');
     }
+    const chunkCount = Math.ceil(plaintext.length / WS_CELL_PLAINTEXT_BYTES);
+    const timestamp = Date.now();
+    const pqAead = new CryptoUtils.PostQuantumAEAD(session.sendKey);
 
-    const releaseSendTurn = await acquireSocketSendTurn(ws, session, plaintextBytes);
-    let aad = null;
-    let plaintext = null;
-    let nonce = null;
-    let ciphertext = null;
-    let tag = null;
-    try {
-      const messageIdBytes = crypto.randomBytes(16);
-      const messageId = messageIdBytes.toString('base64url');
-      messageIdBytes.fill(0);
-      const counter = incrementSocketSendCounter(session);
-
-      const timestamp = Date.now();
-      const aadString = `${PROTOCOL_KEYS.WS_PQ_AAD}|${messageId}|${timestamp}|${counter}`;
-      aad = UTF8_ENCODER.encode(aadString);
-
-      plaintext = UTF8_ENCODER.encode(innerJson);
-
-      const pqAead = new CryptoUtils.PostQuantumAEAD(session.sendKey);
-      nonce = crypto.randomBytes(WS_ENVELOPE_NONCE_BYTES);
-      const encrypted = pqAead.encrypt(plaintext, nonce, aad);
-      ciphertext = encrypted.ciphertext;
-      tag = encrypted.tag;
-
-      const envelope = {
-        type: SignalType.PQ_ENVELOPE,
-        version: REQUIRED_WS_PQ_HANDSHAKE.version,
-        sessionId: session.sessionId,
-        sessionFingerprint: session.fingerprint,
-        messageId,
-        counter,
-        timestamp,
-        ciphertext: encodeBase64AndWipeCopy(ciphertext),
-        nonce: encodeBase64AndWipeCopy(nonce),
-        tag: encodeBase64AndWipeCopy(tag),
-        aad: encodeBase64AndWipeCopy(aad)
-      };
-
-      if (shouldPadEnvelopePayload(innerMessage)) {
-        applyEnvelopeFixedPadding(envelope);
-      }
-
-      const serialized = JSON.stringify(envelope);
-      const serializedBytes = Buffer.byteLength(serialized);
-
-      if (serializedBytes > WS_MAX_ENCRYPTED_RESPONSE_BYTES) {
-        console.warn('[PQ-ENCRYPT] Refusing oversized encrypted response', {
-          payloadType: messageType,
-          responseSizeClass: byteSizeClass(serializedBytes),
-          limitClass: byteSizeClass(WS_MAX_ENCRYPTED_RESPONSE_BYTES)
-        });
-        throw new Error('encrypted_response_too_large');
-      }
-
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
       if (getSocketPQSession(ws, session.sessionId) !== session || !isWebSocketOpen(ws)) {
-        const readyState = wsReadyState(ws);
-        if (isClosedWebSocketState(readyState) || session.invalidated === true) {
-          console.log('[PQ-ENCRYPT] Skipping encrypted response for closed or replaced session', {
-            payloadType: messageType,
-            readyState
-          });
-          return false;
-        }
-        throw new WebSocketDeliveryClosedError(readyState, messageType);
+        return false;
       }
-
-      const delivered = await sendWebSocketTextWithDeadline(
-        ws,
-        serialized,
-        options.deliveryTimeoutMs
-      );
-
-      if (!delivered) {
-        console.log('[PQ-ENCRYPT] Encrypted response dropped because socket closed during send', {
-          payloadType: messageType,
-          readyState: wsReadyState(ws)
-        });
+      const start = chunkIndex * WS_CELL_PLAINTEXT_BYTES;
+      const end = Math.min(plaintext.length, start + WS_CELL_PLAINTEXT_BYTES);
+      const chunk = plaintext.subarray(start, end);
+      const counter = incrementSocketSendCounter(session);
+      const nonce = crypto.randomBytes(WS_ENVELOPE_NONCE_BYTES);
+      const cell = crypto.randomBytes(SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES);
+      let aad = null;
+      let ciphertext = null;
+      let tag = null;
+      try {
+        WS_CELL_MAGIC.copy(cell, 0);
+        cell.writeUInt8(WS_CELL_VERSION, 4);
+        cell.writeUInt8(WS_CELL_FLAGS, 5);
+        cell.writeUInt16BE(WS_CELL_HEADER_BYTES, 6);
+        sessionId.copy(cell, WS_CELL_SESSION_OFFSET);
+        fingerprint.copy(cell, WS_CELL_FINGERPRINT_OFFSET);
+        messageId.copy(cell, WS_CELL_MESSAGE_ID_OFFSET);
+        writeSafeU64(cell, WS_CELL_COUNTER_OFFSET, counter);
+        writeSafeU64(cell, WS_CELL_TIMESTAMP_OFFSET, timestamp);
+        cell.writeUInt32BE(chunkIndex, WS_CELL_CHUNK_INDEX_OFFSET);
+        cell.writeUInt32BE(chunkCount, WS_CELL_CHUNK_COUNT_OFFSET);
+        cell.writeUInt32BE(plaintext.length, WS_CELL_TOTAL_LENGTH_OFFSET);
+        cell.writeUInt32BE(chunk.length, WS_CELL_PLAINTEXT_LENGTH_OFFSET);
+        nonce.copy(cell, WS_CELL_NONCE_OFFSET);
+        const ciphertextEnd = WS_CELL_CIPHERTEXT_OFFSET
+          + chunk.length
+          + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+        aad = Buffer.concat([
+          WS_CELL_AAD_DOMAIN,
+          cell.subarray(0, WS_CELL_TAG_OFFSET),
+          cell.subarray(ciphertextEnd)
+        ]);
+        const encrypted = pqAead.encrypt(chunk, nonce, aad);
+        ciphertext = encrypted.ciphertext;
+        tag = encrypted.tag;
+        if (
+          ciphertext.length !== chunk.length + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES ||
+          tag.length !== WS_ENVELOPE_TAG_BYTES ||
+          WS_CELL_CIPHERTEXT_OFFSET + ciphertext.length > cell.length
+        ) throw new Error('Fixed-cell encryption length mismatch');
+        tag.copy(cell, WS_CELL_TAG_OFFSET);
+        ciphertext.copy(cell, WS_CELL_CIPHERTEXT_OFFSET);
+        const delivered = await sendWebSocketFrameWithDeadline(
+          ws,
+          cell,
+          options.deliveryTimeoutMs
+        );
+        if (!delivered) return false;
+      } finally {
+        nonce.fill(0);
+        cell.fill(0);
+        aad?.fill(0);
+        ciphertext?.fill(0);
+        tag?.fill(0);
       }
-
-      return delivered;
-    } finally {
-      aad?.fill(0);
-      plaintext?.fill(0);
-      nonce?.fill(0);
-      ciphertext?.fill(0);
-      tag?.fill(0);
-      releaseSendTurn();
     }
+    return true;
   } catch (error) {
-    if (isWebSocketDeliveryClosedError(error)) {
-      console.log('[PQ-ENCRYPT] Encrypted response skipped after socket closed', {
-        payloadType: payloadTypeForClosedSocket,
-        readyState: wsReadyState(ws)
-      });
+    if (isWebSocketDeliveryClosedError(error) || isClosedWebSocketState(wsReadyState(ws))) {
       return false;
     }
-
-    console.error('[PQ-ENCRYPT] Failed to send encrypted response', {
+    console.error('[PQ-CELL] Failed to send encrypted response', {
+      payloadType,
       error: error.message
     });
     throw error;
+  } finally {
+    plaintext?.fill(0);
+    sessionId?.fill(0);
+    fingerprint?.fill(0);
+    messageId?.fill(0);
+    releaseSendTurn?.();
   }
 }
+
 
 export async function sendSecureMessage(ws, payload, options = {}) {
   if (!options.sessionOverride && !await waitForSocketPQActivation(ws, payload)) {
@@ -1548,7 +1488,7 @@ export async function sendSecureMessage(ws, payload, options = {}) {
   }
 
   try {
-    const delivered = await sendWebSocketTextWithDeadline(ws, payloadString);
+    const delivered = await sendWebSocketFrameWithDeadline(ws, payloadString);
 
     if (!delivered) {
       console.log('[SECURE-MSG] Plaintext message dropped because socket closed', {

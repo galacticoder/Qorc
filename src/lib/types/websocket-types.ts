@@ -1,5 +1,4 @@
 import { SignalType } from "./signal-types";
-import { PROTOCOL_KEYS } from "../config/protocol-keys";
 
 export interface WebSocketMessageSchema {
   validate: (message: BaseMessage) => boolean;
@@ -16,7 +15,6 @@ export interface BaseMessage {
 }
 
 export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
-  SignalType.PQ_ENVELOPE,
   SignalType.PQ_HANDSHAKE_ACK,
   SignalType.PQ_HANDSHAKE_CONFIRMED,
   SignalType.PQ_HEARTBEAT_PONG,
@@ -29,26 +27,10 @@ export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
 ]);
 
 export const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
-  SignalType.PQ_ENVELOPE,
   SignalType.SEALED_ENVELOPE,
 ]);
 
-export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
-  [SignalType.PQ_ENVELOPE]: {
-    validate: (message) =>
-      typeof (message as any).version === 'string' &&
-      (message as any).version === PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION &&
-      typeof (message as any).sessionId === 'string' &&
-      typeof (message as any).sessionFingerprint === 'string' &&
-      typeof (message as any).messageId === 'string' &&
-      typeof (message as any).counter === 'number' &&
-      typeof (message as any).timestamp === 'number' &&
-      typeof (message as any).nonce === 'string' &&
-      typeof (message as any).ciphertext === 'string' &&
-      typeof (message as any).tag === 'string' &&
-      typeof (message as any).aad === 'string',
-  },
-};
+export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {};
 
 export interface PendingSend {
   id: string;

@@ -11,7 +11,7 @@ P2P protocols. `docs/app/MESSAGING.md` describes delivery and durability.
 | End-to-end outer envelope | `hybrid-envelope-v2` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
 | Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
 | Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and call-stream subkeys |
-| WebSocket session | `pq-ws-7` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD |
+| WebSocket session | `pq-ws-8` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
 | Anonymous HTTP tunnel | `qor-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
 | Account-root transparency | `qor-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
 | Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 key establishment, no classical KEX fallback |
@@ -176,7 +176,7 @@ Code:
 
 ## WebSocket Session
 
-`pq-ws-7` derives each connection from an initiator encapsulation to the server's
+`pq-ws-8` derives each connection from an initiator encapsulation to the server's
 ML-KEM-1024 key, an ephemeral-client/static-server X25519 agreement, and a second
 server encapsulation to the client's fresh ML-KEM-1024 key. The server's
 ML-DSA-87-signed acknowledgement binds the request digest and responder KEM
@@ -185,12 +185,15 @@ application traffic is released.
 
 There is no client transport signing identity. After the authenticated server
 handshake, ordinary frames use directional symmetric keys so they do not add a
-transferable client signature. Envelopes bind session ID, fingerprint, message
-ID, timestamp, counter, and exact AAD. AEAD must authenticate before the receive
-counter is committed, preventing corrupted frames from burning valid sequence
-numbers. Rekeying is staged: the active session remains current until encrypted
-confirmation succeeds, queued sends are bounded, and abandoned candidate keys
-are wiped on every terminal path.
+transferable client signature. After confirmation, application traffic is sent
+only in exact 65,536-byte binary cells. Each cell binds the session ID,
+fingerprint, logical message ID, timestamp, counter, fragment position,
+ciphertext, and random remainder padding under AEAD. Large logical messages are
+reassembled only after every cell authenticates. The receive counter is
+committed only after authentication, preventing corrupted cells from burning
+valid sequence numbers. Rekeying is staged: the active session remains current
+until encrypted confirmation succeeds, queued sends are bounded, and abandoned
+candidate keys are wiped on every terminal path.
 
 Server-bound WebSocket traffic is carried over Tor. Tor provides network-path
 separation, the post-quantum handshake provides application server identity.

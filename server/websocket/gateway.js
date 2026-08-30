@@ -8,7 +8,6 @@ import {
   unregisterLocalSocket
 } from '../routing/blind-router.js';
 import { envInt } from '../utils/env.js';
-import { createWindowBudget } from '../utils/window-budget.js';
 import { awaitMessageHandlerWithDeadline } from './message-handler-deadline.js';
 
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -60,6 +59,7 @@ export function attachGateway({
   logger = console,
   config,
   onMessage,
+  onBinaryMessage,
   onConnectionClosed,
 }) {
   if (!wss) {
@@ -79,9 +79,6 @@ export function attachGateway({
   } = config || {};
 
   const HEARTBEAT_MISSED_LIMIT = envInt('WS_HEARTBEAT_MISSED_LIMIT', 6, 3, 20);
-  const LARGE_FRAME_WINDOW_MS = envInt('WS_LARGE_FRAME_WINDOW_MS', 60_000, 1_000, 10 * 60_000);
-  const LARGE_FRAME_MAX_COUNT = envInt('WS_LARGE_FRAME_MAX_COUNT', 64, 1, 10_000);
-  const LARGE_FRAME_MAX_BYTES = envInt('WS_LARGE_FRAME_MAX_BYTES', 32 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
   const PENDING_MESSAGE_MAX_COUNT = envInt('WS_PENDING_MESSAGE_MAX_COUNT', 64, 4, 4096);
   const PENDING_MESSAGE_MAX_BYTES = envInt(
     'WS_PENDING_MESSAGE_MAX_BYTES',
@@ -96,12 +93,6 @@ export function attachGateway({
     1_000,
     120_000
   );
-
-  const consumeLargeFrameBudget = createWindowBudget({
-    windowMs: LARGE_FRAME_WINDOW_MS,
-    maxCount: LARGE_FRAME_MAX_COUNT,
-    maxBytes: LARGE_FRAME_MAX_BYTES
-  });
 
   let cachedPublicKeyPayload = null;
   const getCachedPublicKeyPayload = async () => {
@@ -181,6 +172,19 @@ export function attachGateway({
         throw error;
       }
     }
+    return { handled: true };
+  };
+
+  const handleBinaryMessage = async ({ ws, frame }) => {
+    if (typeof onBinaryMessage !== 'function') {
+      throw new WsIngressFrameError(1003, 'Binary frames are unsupported', 'BINARY_FRAME');
+    }
+    if (ws._connectionAbortSignal?.aborted) return { handled: false };
+    const handlerPromise = onBinaryMessage({ ws, frame });
+    await awaitMessageHandlerWithDeadline(handlerPromise, {
+      signal: ws._connectionAbortSignal,
+      timeoutMs: MESSAGE_HANDLER_TIMEOUT_MS
+    });
     return { handled: true };
   };
 
@@ -312,9 +316,7 @@ export function attachGateway({
 
     ws.on('message', async (messageBuffer, isBinary) => {
       try {
-        if (isBinary === true) {
-          throw new WsIngressFrameError(1003, 'Binary frames are unsupported', 'BINARY_FRAME');
-        }
+      const binaryFrame = isBinary === true;
       const receivedAt = Date.now();
       ws.isAlive = true;
       ws._missedHeartbeats = 0;
@@ -366,38 +368,16 @@ export function attachGateway({
 
         const now = receivedAt;
 
-        if (fixedMessageSizeBytes && ws._pqSessionId) {
-          if (messageBytes !== fixedMessageSizeBytes) {
-            const maxAllowed = Math.max(fixedMessageSizeBytes * 2, 8 * 1024 * 1024);
-            if (messageBytes > maxAllowed) {
-              logger.warn('[WS] Invalid fixed message size', {
-                bytes: messageBytes,
-                expected: fixedMessageSizeBytes,
-                maxAllowed,
-                code: 1009
-              });
-              ws.close(1009, 'Invalid message size');
-              return;
-            }
-            if (messageBytes > fixedMessageSizeBytes) {
-              logger.warn('[WS] Non-standard message size', {
-                bytes: messageBytes,
-                expected: fixedMessageSizeBytes,
-                maxAllowed
-              });
-              if (!consumeLargeFrameBudget(ws, messageBytes)) {
-                logger.warn('[WS] Large-frame budget exceeded', {
-                  count: Number(ws._largeFrameWindowCount || 0),
-                  bytes: Number(ws._largeFrameWindowBytes || 0),
-                  windowMs: LARGE_FRAME_WINDOW_MS,
-                  code: 1008
-                });
-                ws.close(1008, 'Large message rate exceeded');
-                return;
-              }
-            }
-          }
-        } else if (fixedMessageSizeBytes && messageBytes > fixedMessageSizeBytes) {
+        if (binaryFrame && !ws._pqSessionId && !ws._pqPendingSessionId) {
+          throw new WsIngressFrameError(1003, 'Binary frame before secure session', 'EARLY_BINARY_FRAME');
+        }
+        if (!binaryFrame && (ws._pqSessionId || ws._pqPendingSessionId)) {
+          throw new WsIngressFrameError(1003, 'Encrypted binary cell required', 'TEXT_AFTER_PQ_SESSION');
+        }
+        if (binaryFrame && fixedMessageSizeBytes && messageBytes !== fixedMessageSizeBytes) {
+          throw new WsIngressFrameError(1009, 'Invalid encrypted cell size', 'INVALID_BINARY_CELL_SIZE');
+        }
+        if (fixedMessageSizeBytes && messageBytes > fixedMessageSizeBytes) {
           logger.warn('[WS] Message too large (pre-handshake)', {
             bytes: messageBytes,
             max: fixedMessageSizeBytes,
@@ -438,9 +418,15 @@ export function attachGateway({
 
         bandwidthUsed += messageBytes;
 
-        const messageString = decodeTextFrame(messageBuffer, messageBytes);
-
         try {
+          if (binaryFrame) {
+            const frame = Buffer.isBuffer(messageBuffer)
+              ? messageBuffer
+              : Buffer.from(messageBuffer);
+            await handleBinaryMessage({ ws, frame });
+            return;
+          }
+          const messageString = decodeTextFrame(messageBuffer, messageBytes);
           let parsed;
           try {
             parsed = JSON.parse(messageString);

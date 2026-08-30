@@ -108,7 +108,7 @@ export const useWebSocket = (
       const sessionEstablished = websocketClient.isPQSessionEstablished();
       const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
         data.type === SignalType.PQ_HANDSHAKE_ACK;
-      const isEncryptedTransport = data.type === SignalType.PQ_ENVELOPE || data.type === SignalType.PQ_HEARTBEAT_PONG;
+      const isEncryptedTransport = isSecure;
       const isErrorMessage = data.type === SignalType.ERROR;
       const isSafeControl = false; // Hardened: all control messages should be encrypted once session exists
 

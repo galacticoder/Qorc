@@ -310,15 +310,17 @@ Code references:
 ## WebSocket Transport
 
 Server traffic runs through Tor and a pinned TLS endpoint. After bootstrap, the
-WebSocket uses `pq-ws-7`. Session establishment combines an initiator
+WebSocket uses `pq-ws-8`. Session establishment combines an initiator
 ML-KEM-1024 secret, X25519, and a responder ML-KEM-1024 secret. An
 ML-DSA-87-signed server acknowledgement binds the complete exchange, followed by
 encrypted confirmation in both directions. Rekeys remain staged until that
 confirmation completes, and activation queues are count/byte bounded. Ordinary
-traffic then uses deniable keyed AEAD envelopes rather than a fresh client
-signature on every frame. Replay counters are committed only after authenticated
-decryption. Ordinary message envelopes are fixed-size padded, control traffic is
-encrypted but not all control classes have identical sizes.
+traffic then uses deniable keyed AEAD rather than a fresh client signature on
+every frame. Every protected application frame is an exact 65,536-byte binary
+cell, including `SECURE_CHUNK` traffic; larger logical messages use multiple
+authenticated cells. Replay counters are committed only after authenticated
+decryption. The cell count still exposes coarse traffic volume even though each
+protected frame has a constant size.
 
 The client-facing TLS 1.3 layer also permits only `X25519MLKEM768`, with session
 resumption and early data disabled. The hybrid TLS KEX protects transport keys,

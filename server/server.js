@@ -48,7 +48,7 @@ import { POW_SEED_BYTES, SHA_256_ALGORITHM } from './utils/crypto-consts.js';
 
 import {
   handlePQHandshake,
-  handlePQEnvelope,
+  handlePQBinaryCell,
   sendSecureMessage,
   initializeEnvelopeHandler,
   destroyEnvelopeHandler
@@ -430,6 +430,14 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
     onMessage: async ({ ws, parsed }) => {
       await handleWebSocketMessage({ ws, parsed, context });
     },
+    onBinaryMessage: async ({ ws, frame }) => {
+      await handlePQBinaryCell({
+        ws,
+        cell: frame,
+        context,
+        handleInnerMessage: handleWebSocketMessage
+      });
+    },
     onConnectionClosed: (ws) => context.authHandler.clearConnectionState(ws)
   });
 
@@ -580,8 +588,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
 
     const isTransportSignal = [
       SignalType.REQUEST_SERVER_PUBLIC_KEY,
-      SignalType.PQ_HANDSHAKE_INIT,
-      SignalType.PQ_ENVELOPE
+      SignalType.PQ_HANDSHAKE_INIT
     ].includes(normalizedMessage.type);
 
     const isPreEntryLivenessSignal = normalizedMessage.type === SignalType.PQ_HEARTBEAT_PING;
@@ -1144,15 +1151,6 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             timestamp: Date.now()
           });
         }
-        break;
-
-      case SignalType.PQ_ENVELOPE:
-        await handlePQEnvelope({
-          ws,
-          envelope: normalizedMessage,
-          context,
-          handleInnerMessage: handleWebSocketMessage
-        });
         break;
 
       case SignalType.PING:

@@ -24,7 +24,7 @@ import { WebSocketRateLimiter } from './rate-limiter';
 import { WebSocketHeartbeat } from './heartbeat';
 import { WebSocketTorIntegration } from './tor-integration';
 import { WebSocketQueue } from './queue';
-import { WebSocketEncryption } from './encryption';
+import { WebSocketEncryption, WS_BINARY_CELL_BYTES } from './encryption';
 import { WebSocketHandshake } from './handshake';
 import { WebSocketMessageHandler } from './message-handler';
 import { websocket, events } from '../tauri-bindings';
@@ -57,7 +57,7 @@ interface SecureControlSendOptions extends DispatchOptions {
 
 const SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS = 30_000;
 
-const SECURE_CHUNK_MAX_TOTAL_CHUNKS = 128;
+const SECURE_CHUNK_MAX_TOTAL_CHUNKS = 512;
 const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
 const SECURE_CHUNK_MAX_DATA_LENGTH = 8 * 1024 * 1024;
 const SECURE_CHUNK_MAX_CONCURRENT = 4;
@@ -87,8 +87,7 @@ const ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE = 1;
 const SECURE_CHUNK_TIMEOUT_MS = 200_000;
 const PLAINTEXT_WIRE_TYPES = new Set<string>([
   SignalType.SERVER_PUBLIC_KEY,
-  SignalType.PQ_HANDSHAKE_ACK,
-  SignalType.PQ_ENVELOPE
+  SignalType.PQ_HANDSHAKE_ACK
 ]);
 const UNLINKED_FORBIDDEN_ACCOUNT_TYPES = new Set<string>([
   SignalType.AUTH_OT_REGISTER_REQUEST,
@@ -194,7 +193,8 @@ interface SecureChunkBuffer {
 }
 
 interface InboundWsMessage {
-  payload: unknown;
+  payload: unknown | Uint8Array;
+  binary: boolean;
   bytes: number;
   generation: number;
   connectionToken: number;
@@ -418,8 +418,7 @@ export class WebSocketConnection {
           await this.transmit(JSON.stringify(message));
           return;
         }
-        const envelope = await this.encryption.prepareSecureEnvelope(message);
-        await this.transmit(envelope);
+        await this.transmitSecurePayload(message);
       },
       runOnSecureSendLane: (operation) => this.runOnSecureSendLane(operation),
       registerMessageHandler: (type, handler) => this.messageHandler.registerHandler(type, handler),
@@ -637,6 +636,7 @@ export class WebSocketConnection {
   private invalidateInboundMessages(): void {
     this.inboundGeneration += 1;
     for (const entry of this.inboundMessages) {
+      if (entry.binary && entry.payload instanceof Uint8Array) entry.payload.fill(0);
       this.inboundMessageCount = Math.max(0, this.inboundMessageCount - 1);
       this.inboundMessageBytes = Math.max(0, this.inboundMessageBytes - entry.bytes);
     }
@@ -680,6 +680,32 @@ export class WebSocketConnection {
 
     this.inboundMessages.push({
       payload,
+      binary: false,
+      bytes,
+      generation: this.inboundGeneration,
+      connectionToken,
+    });
+    this.inboundMessageCount += 1;
+    this.inboundMessageBytes += bytes;
+    void this.drainInboundMessages();
+  }
+
+  private enqueueInboundCell(cell: Uint8Array, connectionToken: number): void {
+    const bytes = cell.byteLength;
+    if (
+      bytes !== 64 * 1024 ||
+      this.inboundMessageCount + 1 > WS_INBOUND_PENDING_MAX_COUNT ||
+      this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES
+    ) {
+      cell.fill(0);
+      this.invalidateInboundMessages();
+      this.handleConnectionError();
+      void websocket.disconnect(connectionToken).catch(() => { });
+      return;
+    }
+    this.inboundMessages.push({
+      payload: cell,
+      binary: true,
       bytes,
       generation: this.inboundGeneration,
       connectionToken,
@@ -700,7 +726,19 @@ export class WebSocketConnection {
             entry.generation === this.inboundGeneration &&
             entry.connectionToken === this.nativeConnectionToken
           ) {
-            await this.handleEdgeServerMessage(entry.payload, false, entry.connectionToken);
+            if (entry.binary) {
+              const cell = entry.payload as Uint8Array;
+              const result = await this.encryption.decryptCell(cell);
+              cell.fill(0);
+              if (result.status === 'invalid') {
+                throw new Error('Invalid encrypted WebSocket cell');
+              }
+              if (result.status === 'complete') {
+                await this.handleEdgeServerMessage(result.payload, true, entry.connectionToken);
+              }
+            } else {
+              await this.handleEdgeServerMessage(entry.payload, false, entry.connectionToken);
+            }
           }
         } catch {
           this.handleConnectionError();
@@ -748,11 +786,45 @@ export class WebSocketConnection {
         if (
           !isPlainObject(payload) ||
           hasPrototypePollutionKeys(payload) ||
-          Object.keys(payload).sort().join(',') !== 'connectionToken,data' ||
           !isNativeWsConnectionToken(payload.connectionToken) ||
           payload.connectionToken !== this.nativeConnectionToken
         ) return;
-        this.enqueueInboundMessage(payload.data, payload.connectionToken);
+        const shape = Object.keys(payload).sort().join(',');
+        if (shape === 'connectionToken,data') {
+          this.enqueueInboundMessage(payload.data, payload.connectionToken);
+          return;
+        }
+      });
+      await events.onWsBinary((frame) => {
+        let bridgeBytes: Uint8Array | null = new Uint8Array(frame);
+        let cell: Uint8Array | null = null;
+        try {
+          if (bridgeBytes.length !== 8 + WS_BINARY_CELL_BYTES) {
+            throw new Error('Invalid native WebSocket binary bridge frame');
+          }
+          const token = Number(new DataView(
+            bridgeBytes.buffer,
+            bridgeBytes.byteOffset,
+            8,
+          ).getBigUint64(0, false));
+          if (
+            !isNativeWsConnectionToken(token) ||
+            token !== this.nativeConnectionToken
+          ) return;
+          cell = bridgeBytes.slice(8);
+          this.enqueueInboundCell(cell, token);
+          cell = null;
+        } catch {
+          cell?.fill(0);
+          this.handleConnectionError();
+          const token = this.nativeConnectionToken;
+          if (isNativeWsConnectionToken(token)) {
+            void websocket.disconnect(token).catch(() => { });
+          }
+        } finally {
+          bridgeBytes.fill(0);
+          bridgeBytes = null;
+        }
       });
       await events.onWsLifecycle((payload) => {
         this.handleNativeLifecycleEvent(payload);
@@ -936,28 +1008,6 @@ export class WebSocketConnection {
       if (!isCurrent()) return true;
       this.serverBootstrapConnectionToken = expectedConnectionToken;
       this.dispatchToFrontend(bootstrap, false);
-      return true;
-    }
-
-    // Handle PQ envelope internally
-    if (messageType === SignalType.PQ_ENVELOPE) {
-      const decrypted = await this.decryptIncomingEnvelope(message);
-      if (decrypted) {
-        return await this.handleEdgeServerMessage(decrypted, true, expectedConnectionToken);
-      }
-      console.warn('[WebSocket] PQ envelope decryption FAILED (returned null)', {
-        hasReceivedFingerprint: typeof message.sessionFingerprint === 'string',
-        hasReceivedSessionId: typeof message.sessionId === 'string',
-        hasCurrentFingerprint: !!this.sessionKeyMaterial?.fingerprint,
-        hasCurrentSession: !!this.sessionKeyMaterial?.sessionId
-      });
-      if (this.isGatekeeperFlowActive) {
-        this.dispatchToFrontend({
-          type: SignalType.ERROR,
-          code: 'SERVER_ENTRY_DECRYPT_FAILED',
-          message: 'Failed to decrypt server entry response'
-        }, true);
-      }
       return true;
     }
 
@@ -2113,10 +2163,18 @@ export class WebSocketConnection {
           };
         }
 
-        const message = await this.encryption.prepareSecureEnvelope(boundData);
+        const cells = await this.encryption.prepareSecureEnvelope(boundData);
         throwIfOperationAborted(options.signal);
         this.assertOutboundTransportContextCurrent(outboundContext);
-        await this.transmit(message);
+        try {
+          for (const cell of cells) {
+            throwIfOperationAborted(options.signal);
+            this.assertOutboundTransportContextCurrent(outboundContext);
+            await this.transmit(cell);
+          }
+        } finally {
+          for (const cell of cells) cell.fill(0);
+        }
         return authChannelBinding;
       });
     } catch (err: any) {
@@ -2210,7 +2268,16 @@ export class WebSocketConnection {
     return await this.checkUnlinkedDeliveryReady().catch(() => false);
   }
 
-  async transmit(message: string): Promise<void> {
+  private async transmitSecurePayload(message: unknown): Promise<void> {
+    const cells = await this.encryption.prepareSecureEnvelope(message);
+    try {
+      for (const cell of cells) await this.transmit(cell);
+    } finally {
+      for (const cell of cells) cell.fill(0);
+    }
+  }
+
+  async transmit(message: string | Uint8Array): Promise<void> {
     if (this.isManualClose) {
       console.warn('[WebSocket] Suppressing transmit during manual close to avoid write errors', { messageLength: message.length });
       throw new Error('WebSocket is manually closing');
@@ -2220,7 +2287,9 @@ export class WebSocketConnection {
       throw new Error('Native WebSocket connection unavailable');
     }
     try {
-      const result = await websocket.send(message, connectionToken);
+      const result = message instanceof Uint8Array
+        ? await websocket.sendBinary(message, connectionToken)
+        : await websocket.send(message, connectionToken);
       if (this.nativeConnectionToken !== connectionToken) {
         throw new Error('WebSocket connection generation changed during send');
       }
@@ -3269,7 +3338,6 @@ export class WebSocketConnection {
     } : null;
   }
 
-  async decryptIncomingEnvelope(envelope: any): Promise<any | null> { return this.encryption.decryptEnvelope(envelope); }
   async flushPendingQueue(): Promise<void> { return this.queue.flush(); }
   async reserveServerEntryAuthorization(): Promise<Record<string, any> | null> {
     const gatekeeper = await this.getGatekeeper();

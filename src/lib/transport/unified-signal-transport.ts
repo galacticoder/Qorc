@@ -499,8 +499,11 @@ class UnifiedSignalTransport {
 
     private durableAckEntryExpired(entry: DurableAckEntry, now: number = Date.now()): boolean {
         const routingTimestamp = entry.envelopeToSend?.envelope?.routing?.timestamp;
-        const oldestRoutingTimestamp = now - OUTBOUND_RETRY_MAX_AGE_MS - CERT_CLOCK_SKEW_MS;
-        const oldestCreatedAt = now - OUTBOUND_RETRY_MAX_AGE_MS;
+        const retentionMs = entry.type === SignalType.FILE_MESSAGE_CHUNK
+            ? FILE_RETRANSMIT_RETENTION_MS
+            : OUTBOUND_RETRY_MAX_AGE_MS;
+        const oldestRoutingTimestamp = now - retentionMs - CERT_CLOCK_SKEW_MS;
+        const oldestCreatedAt = now - retentionMs;
         const newestAllowed = now + CERT_CLOCK_SKEW_MS;
         return !Number.isSafeInteger(routingTimestamp) ||
             !Number.isSafeInteger(entry.createdAt) ||
@@ -558,6 +561,14 @@ class UnifiedSignalTransport {
             if (encodedBytes > MAX_DURABLE_ACK_BYTES) {
                 await discardMalformedJournal();
                 return;
+            }
+            // File transfer state is intentionally live-only. The source bytes,
+            // receiver state, and NACK window do not survive an account/app
+            // restart, so replaying a persisted chunk cannot resume the transfer.
+            if (candidate.type === SignalType.FILE_MESSAGE_CHUNK) {
+                journalChanged = true;
+                this.queueRecoveryClear(candidate.to, candidate.messageId);
+                continue;
             }
             if (this.durableAckEntryExpired(candidate, now)) {
                 journalChanged = true;
@@ -1428,14 +1439,15 @@ class UnifiedSignalTransport {
         if (initialPolicyError) throw new Error(initialPolicyError);
         const generation = this.accountGeneration;
         const deliveryGeneration = this.deliveryAckGeneration;
-        await this.durableAckRestore;
+        const isLiveFileChunk = type === SignalType.FILE_MESSAGE_CHUNK;
+        if (!isLiveFileChunk) await this.durableAckRestore;
         if (
             generation !== this.accountGeneration ||
             deliveryGeneration !== this.deliveryAckGeneration
         ) throw new Error('Account transition');
         const restoredPolicyError = this.recipientPolicyError(to, sendPolicy);
         if (restoredPolicyError) throw new Error(restoredPolicyError);
-        if (this.durableAckStoreState !== 'ready') {
+        if (!isLiveFileChunk && this.durableAckStoreState !== 'ready') {
             throw new Error('Delivery acknowledgement store unavailable');
         }
         const messageId = envelopeToSend?.messageId;
@@ -1474,12 +1486,16 @@ class UnifiedSignalTransport {
             }
         }
 
-        this.scheduleP2PRecoveryRedelivery(to, { ...envelopeToSend }, type, { reconnectOnly: true });
+        if (!isLiveFileChunk) {
+            this.scheduleP2PRecoveryRedelivery(to, { ...envelopeToSend }, type, { reconnectOnly: true });
+        }
 
         if (this.awaitingDeliveryAck.has(trackingKey)) return;
         if (
             this.awaitingDeliveryAck.size >= MAX_AWAITING_ACK ||
-            (!this.durableAckEntries.has(trackingKey) && this.durableAckEntries.size >= MAX_AWAITING_ACK)
+            (!isLiveFileChunk &&
+                !this.durableAckEntries.has(trackingKey) &&
+                this.durableAckEntries.size >= MAX_AWAITING_ACK)
         ) {
             throw new Error('Delivery acknowledgement capacity reached');
         }
@@ -1491,9 +1507,20 @@ class UnifiedSignalTransport {
             const entry = this.awaitingDeliveryAck.get(trackingKey);
             if (!entry) return;
             this.awaitingDeliveryAck.delete(trackingKey);
+            if (entry.type === SignalType.FILE_MESSAGE_CHUNK) {
+                this.queueRecoveryClear(entry.to, entry.envelopeToSend.messageId);
+                return;
+            }
             this.enqueueAckSpool(entry.to, entry.envelopeToSend);
         }, DELIVERY_ACK_TIMEOUT_MS);
         const awaitingEntry = { to, envelopeToSend, timer, type };
+        this.awaitingDeliveryAck.set(trackingKey, awaitingEntry);
+
+        // File chunks use the transfer protocol's bounded in-memory retransmit
+        // and NACK state. Persisting them here made abandoned transfers replay
+        // after login for the general one-hour message retry window.
+        if (isLiveFileChunk) return;
+
         const durableEntry = {
             messageId,
             to,
@@ -1501,7 +1528,6 @@ class UnifiedSignalTransport {
             type,
             createdAt: Date.now()
         };
-        this.awaitingDeliveryAck.set(trackingKey, awaitingEntry);
         this.durableAckEntries.set(trackingKey, durableEntry);
         try {
             await this.persistDurableAckSnapshot();

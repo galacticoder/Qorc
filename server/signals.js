@@ -17,7 +17,6 @@ export const SignalType = {
   PQ_HANDSHAKE_CONFIRMED: "pq-handshake-confirmed",
   PQ_HEARTBEAT_PING: "pq-heartbeat-ping",
   PQ_HEARTBEAT_PONG: "pq-heartbeat-pong",
-  PQ_ENVELOPE: "pq-envelope",
 
   // Misc
   PING: "ping",
