@@ -126,6 +126,12 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [accountAuthenticated, isGeneratingKeys]);
 
+  useEffect(() => {
+    if (!showPasswordPrompt) return;
+    setIsSubmitting(false);
+    setIsRateLimited(false);
+  }, [showPasswordPrompt]);
+
   const handleModeToggle = useCallback((): void => {
     setMode((prev) => {
       const newMode = prev === 'login' ? 'register' : 'login';

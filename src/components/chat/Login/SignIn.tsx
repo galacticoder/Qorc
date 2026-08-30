@@ -87,12 +87,12 @@ export function SignInForm({
       </div>
 
       <div className="login-simple-field">
-        <label htmlFor="passphrase">Encryption passphrase</label>
+        <label htmlFor="passphrase">Passphrase</label>
         <input
           className="login-simple-input"
           id="passphrase"
           type="password"
-          placeholder="Enter your encryption passphrase"
+          placeholder="Enter your passphrase"
           value={passphrase}
           onChange={(e) => setPassphrase(e.target.value)}
           disabled={disabled || isSubmitting}

@@ -1,4 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import websocketClient from '../../lib/websocket/websocket';
+import {
+  humanizeConnectionError,
+  startupConnection,
+  type StartupFailureTarget,
+} from '../../lib/transport/startup-connection';
+import type { AuthRecoveryResult } from '../auth/recovery';
+
+export interface RecoveryConnectionIssue {
+  readonly error: string;
+  readonly target: Exclude<StartupFailureTarget, null>;
+  readonly serverUrl: string;
+}
 
 interface TokenValidationProps {
   Authentication: {
@@ -7,8 +20,11 @@ interface TokenValidationProps {
     accountAuthenticated: boolean;
     showPasswordPrompt: boolean;
     attemptAuthRecovery: () => Promise<boolean>;
+    attemptAuthRecoveryDetailed: () => Promise<AuthRecoveryResult>;
     setTokenValidationInProgress: (value: boolean) => void;
     setAuthStatus: (status: string) => void;
+    setLoginError: (error: string) => void;
+    setShowPasswordPrompt: (value: boolean) => void;
   };
   setupComplete: boolean;
   selectedServerUrl: string;
@@ -21,10 +37,28 @@ export function useTokenValidation({
 }: TokenValidationProps) {
 
   const validationGenerationRef = useRef(0);
+  const [connectionIssue, setConnectionIssue] = useState<RecoveryConnectionIssue | null>(null);
+
+  useEffect(() => {
+    setConnectionIssue((current) => (
+      current && current.serverUrl !== selectedServerUrl ? null : current
+    ));
+  }, [selectedServerUrl]);
+
+  const retryRecovery = useCallback(() => {
+    setConnectionIssue(null);
+    Authentication.setLoginError('');
+    Authentication.setAuthStatus('Reconnecting...');
+    Authentication.setTokenValidationInProgress(true);
+  }, [
+    Authentication.setAuthStatus,
+    Authentication.setLoginError,
+    Authentication.setTokenValidationInProgress,
+  ]);
+  const clearConnectionIssue = useCallback(() => setConnectionIssue(null), []);
+
   useEffect(() => {
     const generation = ++validationGenerationRef.current;
-    let attempts = 0;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let inFlight = false;
     let cancelled = false;
     const isCurrent = () => !cancelled && validationGenerationRef.current === generation;
@@ -42,32 +76,62 @@ export function useTokenValidation({
     const tryRecover = async () => {
       if (!isCurrent() || inFlight) return;
       inFlight = true;
-      attempts += 1;
-      const attempt = attempts;
       try {
-        const recovered = await Authentication.attemptAuthRecovery();
-        if (!isCurrent()) return;
-        if (recovered) return;
-        if (attempt >= 2) {
+        try {
+          await startupConnection.prepareRecoveryTransport();
+        } catch (error) {
+          if (!isCurrent()) return;
+          const startupState = startupConnection.getState();
+          setConnectionIssue({
+            target: 'tor',
+            error: startupState.step || humanizeConnectionError(error),
+            serverUrl: selectedServerUrl,
+          });
           Authentication.setTokenValidationInProgress(false);
           Authentication.setAuthStatus('');
-        } else {
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            void tryRecover();
-          }, 15000);
+          return;
         }
-      } catch {
         if (!isCurrent()) return;
-        if (attempt >= 2) {
+        const result = await Authentication.attemptAuthRecoveryDetailed();
+        if (!isCurrent()) return;
+        if (result.outcome === 'recovered') {
+          setConnectionIssue(null);
+          return;
+        }
+        if (result.outcome === 'cancelled') return;
+        if (result.outcome === 'transport-unavailable') {
+          setConnectionIssue({
+            target: 'server',
+            error: humanizeConnectionError(result.error),
+            serverUrl: selectedServerUrl,
+          });
           Authentication.setTokenValidationInProgress(false);
           Authentication.setAuthStatus('');
-        } else {
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            void tryRecover();
-          }, 15000);
+          return;
         }
+        setConnectionIssue(null);
+        if (result.outcome === 'server-entry-required') {
+          if (
+            websocketClient.isServerPasswordRequired()
+            && !websocketClient.isServerAuthGranted()
+          ) {
+            websocketClient.setServerEntryPromptPending(true);
+            Authentication.setLoginError('');
+            Authentication.setShowPasswordPrompt(true);
+          }
+          return;
+        }
+        Authentication.setTokenValidationInProgress(false);
+        Authentication.setAuthStatus('');
+      } catch (error) {
+        if (!isCurrent()) return;
+        setConnectionIssue({
+          target: 'server',
+          error: humanizeConnectionError(error),
+          serverUrl: selectedServerUrl,
+        });
+        Authentication.setTokenValidationInProgress(false);
+        Authentication.setAuthStatus('');
       } finally {
         if (isCurrent()) inFlight = false;
       }
@@ -77,14 +141,20 @@ export function useTokenValidation({
 
     return () => {
       cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [
     Authentication.tokenValidationInProgress,
     Authentication.isLoggedIn,
     Authentication.accountAuthenticated,
     Authentication.showPasswordPrompt,
+    Authentication.attemptAuthRecoveryDetailed,
+    Authentication.setAuthStatus,
+    Authentication.setLoginError,
+    Authentication.setShowPasswordPrompt,
+    Authentication.setTokenValidationInProgress,
     setupComplete,
     selectedServerUrl,
   ]);
+
+  return { connectionIssue, retryRecovery, clearConnectionIssue };
 }

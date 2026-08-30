@@ -15,12 +15,14 @@ const archNames = {
     x64: {
         appImage: 'x86_64',
         package: 'amd64',
+        debian: 'amd64',
         target: 'linux-x86_64',
         libraryTriplet: 'x86_64-linux-gnu'
     },
     arm64: {
         appImage: 'aarch64',
         package: 'aarch64',
+        debian: 'arm64',
         target: 'linux-aarch64',
         libraryTriplet: 'aarch64-linux-gnu'
     }
@@ -85,9 +87,12 @@ const webKitHelpers = [
 ];
 const cacheMetadataPath = path.join(repoRoot, '.cache', `appimage-${process.arch}.json`);
 const runtimeCachePath = path.join(repoRoot, '.cache', `appimage-runtime-${arch.appImage}`);
-const appImagePluginPath = path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-appimage.AppImage');
-const appImagePluginQemuPath = path.join(path.dirname(appImagePluginPath), '.qor-arm64-appimage-plugin');
-const legacyAppImagePluginQemuPath = `${appImagePluginPath}.qor-arm64-real`;
+const tauriToolsDir = path.join(os.homedir(), '.cache', 'tauri');
+const appRunToolPath = path.join(tauriToolsDir, `AppRun-${arch.appImage}`);
+const linuxDeployPath = path.join(tauriToolsDir, `linuxdeploy-${arch.appImage}.AppImage`);
+const gtkPluginPath = path.join(tauriToolsDir, 'linuxdeploy-plugin-gtk.sh');
+const gStreamerPluginPath = path.join(tauriToolsDir, 'linuxdeploy-plugin-gstreamer.sh');
+const appImagePluginPath = path.join(tauriToolsDir, 'linuxdeploy-plugin-appimage.AppImage');
 const adoptCurrent = process.argv.includes('--adopt-current');
 
 function sha256File(filePath) {
@@ -257,6 +262,61 @@ function commandOutput(command, args) {
     }
 }
 
+function downloadTool(target, url) {
+    if (fs.statSync(target, { throwIfNoEntry: false })?.isFile()) return;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temporaryPath = `${target}.${process.pid}.tmp`;
+    fs.rmSync(temporaryPath, { force: true });
+    console.log(`[appimage] downloading ${path.basename(target)}...`);
+    try {
+        execFileSync('curl', [
+            '--fail', '--location', '--silent', '--show-error',
+            '--proto', '=https', '--tlsv1.2',
+            '--output', temporaryPath,
+            url
+        ], { cwd: repoRoot, stdio: 'inherit' });
+        if (!fs.statSync(temporaryPath, { throwIfNoEntry: false })?.size) {
+            throw new Error(`downloaded tool is empty: ${path.basename(target)}`);
+        }
+        fs.chmodSync(temporaryPath, 0o755);
+        fs.renameSync(temporaryPath, target);
+    } finally {
+        fs.rmSync(temporaryPath, { force: true });
+    }
+}
+
+function ensureAppImageTools() {
+    downloadTool(
+        appRunToolPath,
+        `https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-${arch.appImage}`
+    );
+    const linuxDeployExisted = fs.statSync(linuxDeployPath, { throwIfNoEntry: false })?.isFile();
+    downloadTool(
+        linuxDeployPath,
+        `https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-${arch.appImage}.AppImage`
+    );
+    if (!linuxDeployExisted) {
+        const descriptor = fs.openSync(linuxDeployPath, 'r+');
+        try {
+            fs.writeSync(descriptor, Buffer.alloc(3), 0, 3, 8);
+        } finally {
+            fs.closeSync(descriptor);
+        }
+    }
+    downloadTool(
+        gtkPluginPath,
+        'https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh'
+    );
+    downloadTool(
+        gStreamerPluginPath,
+        'https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh'
+    );
+    downloadTool(
+        appImagePluginPath,
+        `https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${arch.appImage}.AppImage`
+    );
+}
+
 function filesAreIdentical(leftPath, rightPath) {
     const leftStat = fs.statSync(leftPath, { throwIfNoEntry: false });
     const rightStat = fs.statSync(rightPath, { throwIfNoEntry: false });
@@ -297,7 +357,6 @@ function computeFingerprint() {
         path.join(os.homedir(), '.cache', 'tauri', `AppRun-${arch.appImage}`),
         path.join(os.homedir(), '.cache', 'tauri', `linuxdeploy-${arch.appImage}.AppImage`),
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-appimage.AppImage'),
-        appImagePluginQemuPath,
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-gstreamer.sh'),
         path.join(os.homedir(), '.cache', 'tauri', 'linuxdeploy-plugin-gtk.sh')
     ];
@@ -574,15 +633,7 @@ function cacheRuntimeFromAppImage() {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore']
     };
-    let offsetOutput;
-    try {
-        offsetOutput = execFileSync(outputPath, ['--appimage-offset'], options);
-    } catch (error) {
-        const qemuPath = '/usr/bin/qemu-aarch64';
-        if (process.arch !== 'arm64' ||
-            !fs.statSync(qemuPath, { throwIfNoEntry: false })?.isFile()) throw error;
-        offsetOutput = execFileSync(qemuPath, [outputPath, '--appimage-offset'], options);
-    }
+    const offsetOutput = execFileSync(outputPath, ['--appimage-offset'], options);
     const offset = Number.parseInt(offsetOutput.trim(), 10);
     if (!Number.isInteger(offset) || offset < 65536 || offset > 4 * 1024 * 1024) {
         throw new Error(`unexpected AppImage runtime size: ${offset}`);
@@ -618,65 +669,88 @@ function syncMutableFiles() {
     normalizeAppDirSymlinks();
 }
 
-function bundleAppImageWithTauri(env) {
-    execFileSync('pnpm', ['tauri', 'bundle', '--bundles', 'appimage'], {
+function findDebBundle() {
+    const debDirectory = path.join(tauriDir, 'target', 'release', 'bundle', 'deb');
+    if (!fs.statSync(debDirectory, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new Error('the Debian bundle directory is missing; build the .deb before the AppImage');
+    }
+    const candidates = fs.readdirSync(debDirectory)
+        .filter(name => name.toLowerCase().endsWith('.deb'))
+        .map(name => path.join(debDirectory, name))
+        .filter(candidate => commandOutput('dpkg-deb', ['--field', candidate, 'Architecture']).trim() === arch.debian)
+        .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
+    if (candidates.length === 0) {
+        throw new Error(`no ${arch.debian} Debian bundle is available for AppImage preparation`);
+    }
+    return candidates[0];
+}
+
+function findAppIcon() {
+    const iconsRoot = path.join(appDir, 'usr', 'share', 'icons');
+    const candidates = [];
+    const pending = [iconsRoot];
+    while (pending.length > 0) {
+        const directory = pending.pop();
+        if (!fs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) continue;
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+            const candidate = path.join(directory, entry.name);
+            if (entry.isDirectory()) pending.push(candidate);
+            else if (entry.isFile() && entry.name.toLowerCase() === 'qor.png') candidates.push(candidate);
+        }
+    }
+    candidates.sort((left, right) => fs.statSync(right).size - fs.statSync(left).size);
+    if (candidates.length === 0) throw new Error('the Debian bundle contains no Qor application icon');
+    return candidates[0];
+}
+
+function replaceRootSymlink(linkPath, target) {
+    fs.rmSync(linkPath, { recursive: true, force: true });
+    fs.symlinkSync(target, linkPath);
+}
+
+function populatePreparedAppDir() {
+    ensureAppImageTools();
+    const debBundle = findDebBundle();
+    fs.rmSync(appDir, { recursive: true, force: true });
+    fs.mkdirSync(appDir, { recursive: true });
+    execFileSync('dpkg-deb', ['--extract', debBundle, appDir], {
+        cwd: repoRoot,
+        stdio: 'inherit'
+    });
+
+    fs.copyFileSync(appRunToolPath, path.join(appDir, 'AppRun'));
+    fs.chmodSync(path.join(appDir, 'AppRun'), 0o755);
+    fs.copyFileSync(findAppIcon(), path.join(appDir, `${productName}.png`));
+    replaceRootSymlink(path.join(appDir, '.DirIcon'), `${productName}.png`);
+    replaceRootSymlink(
+        path.join(appDir, `${productName}.desktop`),
+        path.posix.join('usr', 'share', 'applications', `${productName}.desktop`)
+    );
+
+    const env = {
+        ...process.env,
+        APPIMAGE_EXTRACT_AND_RUN: '1',
+        ARCH: arch.appImage,
+        PATH: `${tauriToolsDir}${path.delimiter}${process.env.PATH || ''}`
+    };
+    delete env.DEBUG;
+    console.log('[appimage] populating AppDir dependencies without compressing...');
+    execFileSync(linuxDeployPath, [
+        '--appimage-extract-and-run',
+        '--verbosity', '1',
+        '--appdir', appDir,
+        '--plugin', 'gtk',
+        '--plugin', 'gstreamer'
+    ], {
         cwd: repoRoot,
         stdio: 'inherit',
         env
     });
 }
 
-function installArm64PluginQemuWrapper() {
-    const qemuPath = '/usr/bin/qemu-aarch64';
-    if (process.arch !== 'arm64' ||
-        !fs.statSync(qemuPath, { throwIfNoEntry: false })?.isFile() ||
-        !fs.statSync(appImagePluginPath, { throwIfNoEntry: false })?.isFile()) return false;
-
-    if (fs.statSync(legacyAppImagePluginQemuPath, { throwIfNoEntry: false })?.isFile()) {
-        fs.rmSync(appImagePluginQemuPath, { force: true });
-        fs.renameSync(legacyAppImagePluginQemuPath, appImagePluginQemuPath);
-        fs.writeFileSync(
-            appImagePluginPath,
-            '#!/bin/sh\nplugin_path="${0%/*}/.qor-arm64-appimage-plugin"\nexec /usr/bin/qemu-aarch64 "$plugin_path" --appimage-extract-and-run "$@"\n',
-            { mode: 0o755 }
-        );
-        return true;
-    }
-
-    const probeArgs = ['--appimage-extract-and-run', '--plugin-type'];
-    try {
-        execFileSync(appImagePluginPath, probeArgs, { stdio: 'ignore' });
-        return false;
-    } catch { }
-    try {
-        execFileSync(qemuPath, [appImagePluginPath, ...probeArgs], { stdio: 'ignore' });
-    } catch {
-        return false;
-    }
-
-    fs.rmSync(appImagePluginQemuPath, { force: true });
-    fs.renameSync(appImagePluginPath, appImagePluginQemuPath);
-    fs.writeFileSync(
-        appImagePluginPath,
-        '#!/bin/sh\nplugin_path="${0%/*}/.qor-arm64-appimage-plugin"\nexec /usr/bin/qemu-aarch64 "$plugin_path" --appimage-extract-and-run "$@"\n',
-        { mode: 0o755 }
-    );
-    return true;
-}
-
 function rebuildPreparedAppDir() {
     console.log('[appimage] prepared AppDir cache is stale, rebuilding...');
-    const env = {
-        ...process.env,
-        APPIMAGE_EXTRACT_AND_RUN: '1'
-    };
-    try {
-        bundleAppImageWithTauri(env);
-    } catch (error) {
-        if (!installArm64PluginQemuWrapper()) throw error;
-        console.log('[appimage] retrying ARM64 AppImage plugin through qemu-aarch64...');
-        bundleAppImageWithTauri(env);
-    }
+    populatePreparedAppDir();
     syncMutableFiles();
     if (!appDirIsComplete()) {
         throw new Error('linuxdeploy produced an incomplete AppDir');
@@ -699,11 +773,11 @@ function packPreparedAppDir(message) {
     delete env.DEBUG;
     if (fs.existsSync(runtimeCachePath)) env.LDAI_RUNTIME_FILE = runtimeCachePath;
     console.log(message);
-    execFileSync(appImagePluginPath, ['--appimage-extract-and-run', '--appdir', appDir], {
-        cwd: repoRoot,
-        stdio: 'inherit',
-        env
-    });
+    execFileSync(
+        appImagePluginPath,
+        ['--appimage-extract-and-run', '--appdir', appDir],
+        { cwd: repoRoot, stdio: 'inherit', env }
+    );
     cacheRuntimeFromAppImage();
 }
 

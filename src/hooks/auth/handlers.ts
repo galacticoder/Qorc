@@ -341,7 +341,7 @@ export const createHandleAccountSubmit = (
         passphrase.length === 0 ||
         passphrase.length > PASSPHRASE_MAX_LENGTH
       ) {
-        setters.setLoginError('Enter your password and encryption passphrase');
+        setters.setLoginError('Enter your password and passphrase');
         return;
       }
     }

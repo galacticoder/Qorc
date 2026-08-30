@@ -183,8 +183,8 @@ export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
   'isVideo',
   'isOutgoing'
 ]);
-export const CALL_TIMEOUT = 60_000;
-export const CALL_RING_TIMEOUT = 60_000;
+export const CALL_RING_TIMEOUT = 20_000;
+export const CALL_TIMEOUT = CALL_RING_TIMEOUT;
 export const CALL_DEVICE_SETTLE_MS = 800;
 export const MAX_BLOCK_LIST_SIZE = 10000;
 export const BLOCK_STATUS_CACHE_TTL_MS = 30000;

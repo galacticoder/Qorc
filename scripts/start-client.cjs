@@ -42,10 +42,11 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only] [--target <architecture>] [--all-architectures]');
     console.log('  --run-only     Skip the rebuild and just launch the already built binary.');
     console.log('  --bundle-only  Build native installer bundles and exit without launching.');
-    console.log('  --target       Build x64 or arm64 bundles; a non-native Linux target uses Docker.');
+    console.log('  --target       Build x64 or arm64 bundles; a non-native Linux target uses Docker Buildx.');
     console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
     console.log('For x86-to-ARM64 builds, run `node scripts/install-deps.cjs --client-arm64`.');
+    console.log('QOR_ARM64_BUILDER must select a native ARM64 Buildx builder; emulation is unsupported.');
     console.log('Native bundles are written to src-tauri/target/release/bundle.');
     console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
     console.log('Logs are mirrored to logs/instance-<QOR_INSTANCE_ID>-logs.txt');
@@ -715,18 +716,37 @@ function buildLinuxArm64Bundles() {
     }
 }
 
+function pruneClientTargetCache() {
+    const pruneScript = path.join(repoRoot, 'scripts', 'prune-client-target.cjs');
+    try {
+        execFileSync(process.execPath, [pruneScript], {
+            cwd: repoRoot,
+            stdio: 'inherit',
+            env: clientRuntimeEnv(),
+            windowsHide: true
+        });
+    } catch (error) {
+        const code = Number.isInteger(error?.status) ? error.status : 1;
+        logErr(`Client target-cache cleanup failed with code ${code}`);
+        process.exit(code || 1);
+    }
+}
+
 if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
 } else if (requestedTarget && targetArchitecture !== process.arch) {
     console.log('[CLIENT] Building Linux ARM64 bundles from the x86-64 host...');
     acquireBuildLock();
+    pruneClientTargetCache();
     buildLinuxArm64Bundles();
+    pruneClientTargetCache();
     console.log('[CLIENT] --bundle-only: ARM64 build complete.');
     process.exit(0);
 } else {
     console.log('[CLIENT] Building Tauri app...');
     acquireBuildLock();
+    pruneClientTargetCache();
     checkProtocEnv();
     checkWindowsPerlEnv();
     stageWebKitGtkRuntime();
@@ -751,6 +771,7 @@ if (runOnly) {
         buildAppImage();
         printBundleArtifacts();
         if (allArchitectures) buildLinuxArm64Bundles();
+        pruneClientTargetCache();
         if (bundleOnly) {
             console.log('[CLIENT] --bundle-only: build complete.');
             process.exit(0);

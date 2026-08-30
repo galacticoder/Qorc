@@ -51,6 +51,7 @@ export const useCalling = (
 
   const [callingService, setCallingService] = useState<SecureCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
+  const [pendingIncomingCalls, setPendingIncomingCalls] = useState<CallState[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoCanvas, setLocalVideoCanvas] = useState<HTMLCanvasElement | null>(null);
   const [localScreenCanvas, setLocalScreenCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -79,6 +80,7 @@ export const useCalling = (
 
   const callbackSetters: CallbackSetters = {
     setCurrentCall,
+    setPendingIncomingCalls,
     setLocalStream,
     setLocalVideoCanvas,
     setLocalScreenCanvas,
@@ -159,6 +161,7 @@ export const useCalling = (
         serviceRef.current = null;
         setCallingService(null);
         setCurrentCall(null);
+        setPendingIncomingCalls([]);
         setLocalStream(null);
         setLocalVideoCanvas(null);
         setLocalScreenCanvas(null);
@@ -181,6 +184,7 @@ export const useCalling = (
       }
       setCallingService(null);
       setCurrentCall(null);
+      setPendingIncomingCalls([]);
       setIsScreenSharing(false);
       clearCallMediaState(callbackRefs, callbackSetters);
       everConnectedRef.current.clear();
@@ -222,6 +226,7 @@ export const useCalling = (
 
   return {
     currentCall,
+    pendingIncomingCalls,
     localStream,
     localVideoCanvas,
     localScreenCanvas,

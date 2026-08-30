@@ -18,6 +18,7 @@ const ROOT_DIRECTORIES = Object.freeze([
     'workers'
 ]);
 const ROOT_FILES = Object.freeze([
+    'LICENSE',
     'index.html',
     'package.json',
     'pnpm-lock.yaml',

@@ -89,6 +89,11 @@ type PendingScreenShareReady = {
     timeoutId: ReturnType<typeof setTimeout>;
     finish: (ready: boolean) => void;
 };
+type PendingIncomingCall = {
+    call: CallState;
+    receivedAt: number;
+    timeoutId: ReturnType<typeof setTimeout>;
+};
 
 const OPUS_FRAME_SAMPLES = 960;
 const OPUS_PCM_BYTES = OPUS_FRAME_SAMPLES * Float32Array.BYTES_PER_ELEMENT;
@@ -119,6 +124,7 @@ const CALL_OFFER_RATE_WINDOW_MS = 60_000;
 const MAX_CALL_OFFERS_PER_PEER = 4;
 const MAX_CALL_OFFERS_GLOBAL = 16;
 const MAX_CALL_OFFER_RATE_PEERS = 128;
+const MAX_PENDING_INCOMING_CALLS = 6;
 const MAX_SCREEN_SOURCES = 128;
 const MAX_SCREEN_SOURCE_NAME_LENGTH = 256;
 const SCREEN_CAPTURE_REQUEST_TIMEOUT_MS = 30_000;
@@ -269,6 +275,7 @@ export class SecureCallingService {
     private screenCaptureVideoEl: HTMLVideoElement | null = null;
     private screenCaptureSessionId: string | null = null;
     private currentCall: CallState | null = null;
+    private pendingIncomingCalls = new Map<string, PendingIncomingCall>();
     private isScreenSharing: boolean = false;
     private screenSharePending: boolean = false;
     private videoEnabled: boolean = false;
@@ -327,7 +334,7 @@ export class SecureCallingService {
 
     // Callbacks
     private onIncomingCallCallback: ((call: CallState) => void) | null = null;
-    private onCallStateChangeCallback: ((call: CallState) => void) | null = null;
+    private onCallStateChangeCallback: ((call: CallState, isActive: boolean) => void) | null = null;
     private onRemoteVideoCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
     private onRemoteScreenCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
     private onLocalVideoCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
@@ -344,6 +351,7 @@ export class SecureCallingService {
         if (this.currentCall && this.currentCall.status !== 'ended') {
             void this.endCall('shutdown');
         }
+        this.clearPendingIncomingCalls('shutdown');
     };
 
     private readonly callSignalHandler = (event: Event): void => {
@@ -360,10 +368,23 @@ export class SecureCallingService {
             Object.keys(detail).sort().join(',') !== 'username' ||
             typeof detail.username !== 'string' ||
             !isValidCallingUsername(detail.username) ||
-            detail.username !== detail.username.trim().toLowerCase() ||
-            this.currentCall?.peer !== detail.username
+            detail.username !== detail.username.trim().toLowerCase()
         ) return;
-        void this.endCall('blocked');
+        if (this.currentCall?.peer === detail.username) {
+            void this.endCall('blocked');
+        }
+        for (const [callId, pending] of Array.from(this.pendingIncomingCalls.entries())) {
+            if (pending.call.peer !== detail.username) continue;
+            const call = this.finishPendingIncomingCall(callId, 'ended', 'blocked');
+            if (!call) continue;
+            void this.sendCallSignalBestEffort({
+                type: 'end-call',
+                callId: call.id,
+                from: this.localUsername,
+                to: call.peer,
+                timestamp: Date.now()
+            });
+        }
     };
 
     private readonly keyTransparencySecurityIncidentHandler = (): void => {
@@ -380,6 +401,8 @@ export class SecureCallingService {
             call.endReason = 'shutdown';
             this.notifyCallState(call);
         }
+
+        this.clearPendingIncomingCalls('shutdown');
 
         this.cleanup();
     };
@@ -403,10 +426,67 @@ export class SecureCallingService {
 
     private notifyCallState(call: CallState): void {
         try {
-            this.onCallStateChangeCallback?.({ ...call });
+            this.onCallStateChangeCallback?.({ ...call }, this.currentCall?.id === call.id);
         } catch (error) {
             console.error('[SecureCall] Call state observer failed:', error);
         }
+    }
+
+    getCallState(callId: string): CallState | null {
+        if (this.currentCall?.id === callId) return { ...this.currentCall };
+        const pending = this.pendingIncomingCalls.get(callId);
+        return pending ? { ...pending.call } : null;
+    }
+
+    private takePendingIncomingCall(callId: string): PendingIncomingCall | null {
+        const pending = this.pendingIncomingCalls.get(callId);
+        if (!pending) return null;
+        clearTimeout(pending.timeoutId);
+        this.pendingIncomingCalls.delete(callId);
+        return pending;
+    }
+
+    private finishPendingIncomingCall(
+        callId: string,
+        status: 'ended' | 'missed',
+        endReason: CallState['endReason']
+    ): CallState | null {
+        const pending = this.takePendingIncomingCall(callId);
+        if (!pending) return null;
+        const endTime = Date.now();
+        pending.call.status = status;
+        pending.call.endTime = endTime;
+        pending.call.duration = Math.max(0, endTime - pending.receivedAt);
+        pending.call.endReason = endReason;
+        this.notifyCallState(pending.call);
+        return pending.call;
+    }
+
+    private clearPendingIncomingCalls(endReason: CallState['endReason']): void {
+        for (const callId of Array.from(this.pendingIncomingCalls.keys())) {
+            this.finishPendingIncomingCall(callId, 'ended', endReason);
+        }
+    }
+
+    private queueIncomingCall(signal: Extract<CallSignal, { type: 'offer' }>): boolean {
+        if (this.pendingIncomingCalls.has(signal.callId)) return true;
+        if (this.pendingIncomingCalls.size >= MAX_PENDING_INCOMING_CALLS) return false;
+
+        const receivedAt = Date.now();
+        const call: CallState = {
+            id: signal.callId,
+            type: signal.data.callType,
+            direction: 'incoming',
+            status: 'ringing',
+            peer: signal.from
+        };
+        const timeoutId = setTimeout(() => {
+            this.finishPendingIncomingCall(signal.callId, 'missed', 'timeout');
+        }, CALL_RING_TIMEOUT);
+        this.pendingIncomingCalls.set(signal.callId, { call, receivedAt, timeoutId });
+        this.notifyIncomingCall(call);
+        this.notifyCallState(call);
+        return true;
     }
 
     private notifyRemoteVideoCanvas(canvas: HTMLCanvasElement | null): void {
@@ -786,13 +866,21 @@ export class SecureCallingService {
         if (this.securityQuarantined || keyTransparencyClient.isSecurityIncidentActive()) {
             throw new Error('Calling is disabled by key-transparency quarantine');
         }
-        if (
-            !this.currentCall ||
-            this.currentCall.id !== callId ||
-            this.currentCall.direction !== 'incoming'
-        ) { throw new Error('No matching incoming call found'); }
+        const queuedCall = this.pendingIncomingCalls.get(callId);
+        if (!queuedCall || queuedCall.call.status !== 'ringing') {
+            throw new Error('No matching incoming call found');
+        }
 
-        if (this.currentCall.status !== 'ringing') { return; }
+        if (this.currentCall) {
+            await this.endCall('user');
+        }
+
+        const selected = this.takePendingIncomingCall(callId);
+        if (!selected || selected.call.status !== 'ringing') {
+            throw new Error('Incoming call ended before it could be answered');
+        }
+        this.currentCall = selected.call;
+        this.ringStartAt = selected.receivedAt;
 
         const peer = this.currentCall.peer;
         if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peer)) {
@@ -855,10 +943,10 @@ export class SecureCallingService {
 
     // Decline incoming call
     async declineCall(callId: string): Promise<void> {
-        if (!this.currentCall || this.currentCall.id !== callId) { return; }
-        if (this.currentCall.direction !== 'incoming' || this.currentCall.status !== 'ringing') { return; }
-
-        const call = this.currentCall;
+        const queued = this.pendingIncomingCalls.get(callId);
+        if (!queued || queued.call.status !== 'ringing') return;
+        const call = this.finishPendingIncomingCall(callId, 'missed', 'timeout');
+        if (!call) return;
         const signal: CallSignal = {
             type: 'end-call',
             callId,
@@ -867,14 +955,6 @@ export class SecureCallingService {
             timestamp: Date.now()
         };
 
-        call.status = 'missed';
-        call.endTime = Date.now();
-        const start = call.startTime ?? this.ringStartAt ?? call.endTime;
-        call.duration = Math.max(0, call.endTime - start);
-        call.endReason = 'timeout';
-        this.notifyCallState(call);
-
-        this.cleanup();
         await this.sendCallSignalBestEffort(signal);
     }
 
@@ -3325,16 +3405,27 @@ export class SecureCallingService {
         if (signal.type === 'offer') {
             if (!this.allowIncomingOffer(signal.from)) return;
         } else {
-            if (
-                !this.currentCall ||
-                this.currentCall.id !== signal.callId ||
-                this.currentCall.peer !== signal.from
-            ) {
+            const matchesCurrent = Boolean(
+                this.currentCall
+                && this.currentCall.id === signal.callId
+                && this.currentCall.peer === signal.from
+            );
+            const pending = this.pendingIncomingCalls.get(signal.callId);
+            const matchesPendingEnd = Boolean(
+                signal.type === 'end-call'
+                && pending
+                && pending.call.peer === signal.from
+            );
+            if (!matchesCurrent && !matchesPendingEnd) {
                 return;
             }
             if (
                 signal.type === 'answer' &&
-                (this.currentCall.direction !== 'outgoing' || this.currentCall.status !== 'ringing')
+                (
+                    !this.currentCall
+                    || this.currentCall.direction !== 'outgoing'
+                    || this.currentCall.status !== 'ringing'
+                )
             ) return;
             if (
                 (
@@ -3342,7 +3433,7 @@ export class SecureCallingService {
                     signal.type === 'screen-share-ready' ||
                     signal.type === 'screen-share-stop'
                 ) &&
-                this.currentCall.status !== 'connected'
+                (!this.currentCall || this.currentCall.status !== 'connected')
             ) return;
         }
 
@@ -3407,16 +3498,14 @@ export class SecureCallingService {
 
     // Handle incoming call offer
     private async handleCallOffer(signal: Extract<CallSignal, { type: 'offer' }>): Promise<void> {
+        if (this.pendingIncomingCalls.has(signal.callId)) return;
         if (this.currentCall) {
-            if (
-                this.currentCall.direction === 'incoming' &&
-                this.currentCall.id === signal.callId &&
-                this.currentCall.peer === signal.from
-            ) {
-                return;
-            }
             // Collision Detection
-            if (this.currentCall.peer === signal.from && (this.currentCall.status === 'connecting' || this.currentCall.status === 'ringing')) {
+            if (
+                this.currentCall.direction === 'outgoing' &&
+                this.currentCall.peer === signal.from &&
+                (this.currentCall.status === 'connecting' || this.currentCall.status === 'ringing')
+            ) {
                 // Lexicographical Arbitration lower username stays as initiator
                 if (this.localUsername < signal.from) {
                     await this.sendCallSignal({
@@ -3438,44 +3527,17 @@ export class SecureCallingService {
                     this.notifyCallState(supersededCall);
                     this.cleanup();
                 }
-            } else {
-                await this.sendCallSignal({
-                    type: 'decline-call',
-                    callId: signal.callId,
-                    from: this.localUsername,
-                    to: signal.from,
-                    timestamp: Date.now()
-                });
-                return;
             }
         }
 
-        const callType = signal.data.callType;
-        this.currentCall = {
-            id: signal.callId,
-            type: callType,
-            direction: 'incoming',
-            status: 'ringing',
-            peer: signal.from
-        };
-
-        this.ringStartAt = Date.now();
-        this.notifyIncomingCall(this.currentCall);
-        this.notifyCallState(this.currentCall);
-
-        const activeCallId = signal.callId;
-        const activePeer = signal.from;
-        this.callTimeoutId = setTimeout(() => {
-            if (
-                this.currentCall?.id === activeCallId &&
-                this.currentCall.peer === activePeer &&
-                this.currentCall.status === 'ringing'
-            ) {
-                this.currentCall.status = 'missed';
-                this.notifyCallState(this.currentCall);
-                this.cleanup();
-            }
-        }, CALL_RING_TIMEOUT);
+        if (this.queueIncomingCall(signal)) return;
+        await this.sendCallSignalBestEffort({
+            type: 'end-call',
+            callId: signal.callId,
+            from: this.localUsername,
+            to: signal.from,
+            timestamp: Date.now()
+        });
     }
 
     // Handle incoming call answer
@@ -3512,6 +3574,11 @@ export class SecureCallingService {
 
     // Handle incoming call end
     private async handleCallEnd(signal: CallSignal): Promise<void> {
+        const pending = this.pendingIncomingCalls.get(signal.callId);
+        if (pending && pending.call.peer === signal.from) {
+            this.finishPendingIncomingCall(signal.callId, 'ended', 'remote');
+            return;
+        }
         if (!this.currentCall || this.currentCall.id !== signal.callId) return;
 
         this.currentCall.status = 'ended';
@@ -3637,7 +3704,7 @@ export class SecureCallingService {
     }
 
     // Set call state change callback
-    onCallStateChange(callback: (call: CallState) => void): void {
+    onCallStateChange(callback: (call: CallState, isActive: boolean) => void): void {
         this.onCallStateChangeCallback = callback;
     }
 
@@ -3724,6 +3791,7 @@ export class SecureCallingService {
             );
         }
         this.initialized = false;
+        this.clearPendingIncomingCalls('shutdown');
         this.cleanup();
 
         this.closeAudioContext(this.sharedReceiveAudioContext);

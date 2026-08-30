@@ -5,7 +5,7 @@
   "identifier": "com.qor.chat",
   "build": {
     "frontendDist": "../dist",
-    "beforeBuildCommand": "node scripts/stage-webkitgtk-runtime.cjs && pnpm run build",
+    "beforeBuildCommand": "node scripts/prepare-tauri-frontend.cjs",
     "beforeBundleCommand": "node scripts/prepare-linux-webkitgtk-bundle.cjs"
   },
   "app": {
@@ -17,7 +17,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Qor",
+        "title": "qor",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

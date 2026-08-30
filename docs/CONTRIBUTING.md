@@ -49,11 +49,20 @@ installers sequentially. Native artifacts are written beneath
 `src-tauri/target/release/bundle`; cross-built ARM64 artifacts are written
 beneath `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`.
 
-The ARM64 cross-build uses a secret-free source snapshot and a native ARM64
-Docker build environment. Docker must support `linux/arm64` execution; Linux
-Docker Engine users can run `node scripts/install-deps.cjs --client-arm64` to
-install the appropriate QEMU/binfmt packages, while Docker Desktop normally
-provides the emulation layer.
+The ARM64 cross-build uses a secret-free source snapshot and an ARM64-capable
+Docker Buildx builder. It keeps persistent pnpm, Cargo, downloaded-runtime, and
+BuildKit layer caches, and the frontend has a separate stage so UI edits retain
+compiled Rust dependencies. Linux Docker Engine users can run
+`node scripts/install-deps.cjs --client-arm64` to install Buildx. ARM64 builds
+must run on a native ARM64 host or through a native remote builder selected by
+`QOR_ARM64_BUILDER`; QEMU and binfmt emulation are intentionally unsupported.
+On a native ARM64 host,
+`node scripts/start-client.cjs --bundle-only --target arm64` builds directly.
+
+Linux AppImages are prepared from the Debian payload, populated by linuxdeploy,
+then compressed once after Qor's private WebKitGTK and GStreamer runtimes are
+installed. The old intermediate compressed AppImage pass is not part of the
+build path.
 
 On Linux, the build downloads and SHA-256-validates the release-pinned WebKitGTK
 packages, stages a curated GStreamer/PipeWire capture runtime from the build

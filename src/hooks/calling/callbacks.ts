@@ -19,6 +19,7 @@ export interface CallbackRefs {
 
 export interface CallbackSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<CallState | null>>;
+  setPendingIncomingCalls: React.Dispatch<React.SetStateAction<CallState[]>>;
   setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
   setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setLocalScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
@@ -33,7 +34,11 @@ export const setupIncomingCallCallback = (
   account: string
 ) => {
   service.onIncomingCall((call) => {
-    setters.setCurrentCall({ ...call });
+    setters.setPendingIncomingCalls(previous => (
+      previous.some(candidate => candidate.id === call.id)
+        ? previous.map(candidate => candidate.id === call.id ? { ...call } : candidate)
+        : [...previous, { ...call }]
+    ));
     if (document.hidden || !document.hasFocus()) {
       void notifications.show().catch(() => { });
       void tray.incrementUnread().catch(() => { });
@@ -56,7 +61,7 @@ export const setupCallStateChangeCallback = (
   setters: CallbackSetters,
   account: string
 ) => {
-  service.onCallStateChange((call) => {
+  service.onCallStateChange((call, isActive) => {
     const previousType = refs.lastCallTypeRef.current.get(call.id);
     if (previousType && previousType !== call.type && previousType === 'video' && call.type === 'audio') {
       toast.warning('Video unavailable', {
@@ -90,7 +95,7 @@ export const setupCallStateChangeCallback = (
         isVideo: call.type === 'video',
         isOutgoing: call.direction === 'outgoing'
       });
-    } else if (call.status === 'connected') {
+    } else if (call.status === 'connected' && isActive) {
       try { refs.everConnectedRef.current.add(call.id); } catch { }
       power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
@@ -105,7 +110,7 @@ export const setupCallStateChangeCallback = (
     }
 
     if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
-      power.stop().catch(() => { });
+      if (isActive) power.stop().catch(() => { });
 
       refs.lastCallTypeRef.current.delete(call.id);
 
@@ -181,14 +186,24 @@ export const setupCallStateChangeCallback = (
       }
 
       unstable_batchedUpdates(() => {
-        setters.setCurrentCall(null);
-        clearCallMediaState(refs, setters);
+        setters.setPendingIncomingCalls(previous => previous.filter(candidate => candidate.id !== call.id));
+        if (isActive) {
+          setters.setCurrentCall(previous => previous?.id === call.id ? null : previous);
+          clearCallMediaState(refs, setters);
+        }
       });
       try { refs.everConnectedRef.current.delete(call.id); } catch { }
-    } else {
+    } else if (isActive) {
       unstable_batchedUpdates(() => {
+        setters.setPendingIncomingCalls(previous => previous.filter(candidate => candidate.id !== call.id));
         setters.setCurrentCall({ ...call });
       });
+    } else if (call.direction === 'incoming' && call.status === 'ringing') {
+      setters.setPendingIncomingCalls(previous => (
+        previous.some(candidate => candidate.id === call.id)
+          ? previous.map(candidate => candidate.id === call.id ? { ...call } : candidate)
+          : [...previous, { ...call }]
+      ));
     }
   });
 };

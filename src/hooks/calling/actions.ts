@@ -189,10 +189,10 @@ export const createAnswerCall = (refs: ActionRefs, currentUsername: string) => {
       throw new Error('Invalid call ID format');
     }
 
-    const currentCall = (service as any).currentCall;
+    const incomingCall = service.getCallState(callId);
 
     try {
-      const peerUsername = String(currentCall?.peer || '').trim();
+      const peerUsername = String(incomingCall?.peer || '').trim();
       if (!isValidCallingUsername(peerUsername)) {
         throw new Error('Missing peer identity for call answer');
       }

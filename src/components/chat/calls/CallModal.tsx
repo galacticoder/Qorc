@@ -30,6 +30,9 @@ interface CallModalProps {
   readonly onStopScreenShare?: () => Promise<void>;
   readonly isScreenSharing?: boolean;
   readonly isAttached?: boolean;
+  readonly isForeground?: boolean;
+  readonly floatingPosition?: { x: number; bottom: number };
+  readonly onFloatingPositionChange?: (position: { x: number; bottom: number }) => void;
 }
 
 const CanvasDisplay = memo(({
@@ -299,7 +302,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   onStartScreenShare,
   onStopScreenShare,
   isScreenSharing = false,
-  isAttached = false
+  isAttached = false,
+  isForeground = false,
+  floatingPosition,
+  onFloatingPositionChange,
 }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
@@ -331,10 +337,18 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     height: number;
   } | null>(null);
 
-  const [position, setPosition] = useState<{ x: number, bottom: number }>({
+  const [internalPosition, setInternalPosition] = useState<{ x: number, bottom: number }>({
     x: 20,
     bottom: 20
   });
+  const position = floatingPosition ?? internalPosition;
+  const setPosition = useCallback((next: { x: number; bottom: number }) => {
+    if (onFloatingPositionChange) {
+      onFloatingPositionChange(next);
+      return;
+    }
+    setInternalPosition(next);
+  }, [onFloatingPositionChange]);
 
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ x: number, y: number } | null>(null);
@@ -517,7 +531,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging]);
+  }, [isDragging, setPosition]);
 
   const handleCameraChange = async (deviceId: string) => {
     try {
@@ -639,22 +653,42 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         height: attachmentBounds.height
       }
       : { left: position.x, bottom: position.bottom };
+  const callModalStyle = {
+    ...modalStyle,
+    '--qor-call-ring-color': peerAvatarColor,
+  } as React.CSSProperties;
 
   return (
     <div
       ref={wrapperRef}
       className={cn(
-        'fixed z-50 select-none overflow-hidden bg-background shadow-xl [&_button]:cursor-pointer',
+        'fixed select-none bg-background shadow-xl [&_button]:cursor-pointer',
+        isForeground ? 'z-[60]' : 'z-50',
+        isRinging ? 'qor-call-modal-ringing isolate overflow-visible' : 'overflow-hidden',
         isExpandedScreenShare && 'left-[5vw] top-[5vh] h-[90vh] w-[90vw] rounded-2xl border border-border',
         !isExpandedScreenShare && !isDocked && 'aspect-video w-[min(92vw,520px)] rounded-2xl border border-border',
         isDocked && 'rounded-xl border border-border shadow-none',
         isAttached && !attachmentBounds && !isExpandedScreenShare && 'pointer-events-none opacity-0'
       )}
-      style={modalStyle}
+      style={callModalStyle}
     >
+      {isRinging && (
+        <>
+          <span className="qor-call-ring-wave is-left" aria-hidden="true">
+            <svg viewBox="0 0 30 100" preserveAspectRatio="none">
+              <polyline points="21,0 9,5 21,10 9,15 21,20 9,25 21,30 9,35 21,40 9,45 21,50 9,55 21,60 9,65 21,70 9,75 21,80 9,85 21,90 9,95 21,100" />
+            </svg>
+          </span>
+          <span className="qor-call-ring-wave is-right" aria-hidden="true">
+            <svg viewBox="0 0 30 100" preserveAspectRatio="none">
+              <polyline points="9,0 21,5 9,10 21,15 9,20 21,25 9,30 21,35 9,40 21,45 9,50 21,55 9,60 21,65 9,70 21,75 9,80 21,85 9,90 21,95 9,100" />
+            </svg>
+          </span>
+        </>
+      )}
       <div
         ref={mainStageRef}
-        className="relative h-full w-full overflow-hidden bg-background"
+        className="relative h-full w-full overflow-hidden bg-background [border-radius:inherit]"
         onMouseEnter={revealControls}
         onMouseMove={handleStageMouseMove}
         onMouseLeave={revealControls}

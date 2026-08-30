@@ -14,15 +14,26 @@ import {
   isStaleAuthOperation,
   wipeStaleAuthResult,
 } from "../../lib/auth/auth-lifecycle";
-import { hasResumeToken } from "../../lib/signals/resume-tokens";
+import { clearResumePool, hasResumeToken } from "../../lib/signals/resume-tokens";
 import { computeBlindUserId } from "../../lib/utils/auth-utils";
 import { getBlindRoutingClient } from "../../lib/transport/blind-routing-client";
 
 export interface RecoveryRefs {
   loginUsernameRef: RefObject<string>;
   originalUsernameRef: RefObject<string>;
-  recoveryInFlightRef: RefObject<Promise<boolean> | null>;
+  recoveryInFlightRef: RefObject<Promise<AuthRecoveryResult> | null>;
 }
+
+export type AuthRecoveryResult = Readonly<
+  | { outcome: 'recovered' }
+  | { outcome: 'credential-unavailable' }
+  | { outcome: 'credential-rejected' }
+  | { outcome: 'server-entry-required' }
+  | { outcome: 'transport-unavailable'; error: string }
+  | { outcome: 'cancelled' }
+>;
+
+const recoveryResult = <T extends AuthRecoveryResult>(result: T): T => Object.freeze(result);
 
 export interface RecoverySetters {
   setUsername: (v: string) => void;
@@ -39,7 +50,7 @@ export const createAttemptAuthRecovery = (
   lifecycle: AuthLifecycle,
   completeAuthorization: (response: ResumeAuthorizationResponse) => Promise<void>
 ) => {
-  return async (): Promise<boolean> => {
+  return async (): Promise<AuthRecoveryResult> => {
     if (refs.recoveryInFlightRef.current) return refs.recoveryInFlightRef.current;
     const operation = lifecycle.capture();
     const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
@@ -53,11 +64,11 @@ export const createAttemptAuthRecovery = (
       return result;
     };
 
-    const recovery = (async (): Promise<boolean> => {
+    const recovery = (async (): Promise<AuthRecoveryResult> => {
       if (await awaitCurrent(isExplicitlyLoggedOut())) {
         setters.setAuthStatus('');
         try { setters.setTokenValidationInProgress(false); } catch { }
-        return false;
+        return recoveryResult({ outcome: 'credential-unavailable' });
       }
 
       let storedUsername = refs.loginUsernameRef.current;
@@ -72,12 +83,12 @@ export const createAttemptAuthRecovery = (
           if (!storedUsername) storedUsername = recoveringUsername;
           if (!storedDisplayName) storedDisplayName = recoveringDisplayName || storedUsername;
         } catch (error) {
-          if (isStaleAuthOperation(error)) return false;
+          if (isStaleAuthOperation(error)) return recoveryResult({ outcome: 'cancelled' });
         }
       }
 
       if (!storedUsername || (operation.account && operation.account !== storedUsername)) {
-        return false;
+        return recoveryResult({ outcome: 'credential-unavailable' });
       }
 
       if (!await awaitCurrent(hasResumeToken(storedUsername))) {
@@ -85,7 +96,7 @@ export const createAttemptAuthRecovery = (
           setters.setAuthStatus('');
           try { setters.setTokenValidationInProgress(false); } catch { }
         }
-        return false;
+        return recoveryResult({ outcome: 'credential-unavailable' });
       }
 
       const alreadyAuthenticated = accountAuthenticated && isLoggedIn;
@@ -113,7 +124,8 @@ export const createAttemptAuthRecovery = (
           lifecycle.assertCurrent(operation);
           getBlindRoutingClient(storedUsername);
         } catch (error) {
-          if (isStaleAuthOperation(error)) return false;
+          if (isStaleAuthOperation(error)) return recoveryResult({ outcome: 'cancelled' });
+          throw error;
         }
 
         const response = await awaitCurrent(websocketClient.switchToUnlinkedMode(operation.signal));
@@ -121,28 +133,53 @@ export const createAttemptAuthRecovery = (
         if (ready && !alreadyAuthenticated) {
           await awaitCurrent(completeAuthorization(response));
         }
-        return ready;
+        return ready
+          ? recoveryResult({ outcome: 'recovered' })
+          : recoveryResult({
+              outcome: 'transport-unavailable',
+              error: 'Anonymous session recovery did not become ready.',
+            });
       } catch (error) {
-        if (isStaleAuthOperation(error) || !lifecycle.isCurrent(operation)) return false;
+        if (isStaleAuthOperation(error) || !lifecycle.isCurrent(operation)) {
+          return recoveryResult({ outcome: 'cancelled' });
+        }
         if (error instanceof UnlinkedAuthorizationError) {
+          if (!error.response.valid) {
+            try {
+              await awaitCurrent(clearResumePool(storedUsername));
+            } catch (clearError) {
+              if (isStaleAuthOperation(clearError) || !lifecycle.isCurrent(operation)) {
+                return recoveryResult({ outcome: 'cancelled' });
+              }
+              console.warn('[Auth] Rejected recovery credential could not be cleared:', clearError);
+            }
+          }
           try {
             await awaitCurrent(completeAuthorization(error.response));
           } catch (completionError) {
-            if (isStaleAuthOperation(completionError) || !lifecycle.isCurrent(operation)) return false;
+            if (isStaleAuthOperation(completionError) || !lifecycle.isCurrent(operation)) {
+              return recoveryResult({ outcome: 'cancelled' });
+            }
           }
+          return error.response.valid
+            ? recoveryResult({ outcome: 'server-entry-required' })
+            : recoveryResult({ outcome: 'credential-rejected' });
         }
-        if (!alreadyAuthenticated) {
-          setters.setAuthStatus('');
-          try { setters.setTokenValidationInProgress(false); } catch { }
-        }
-        return false;
+        return recoveryResult({
+          outcome: 'transport-unavailable',
+          error: error instanceof Error && error.message
+            ? error.message
+            : 'The recovery connection is unavailable.',
+        });
       }
-    })().catch((error): boolean => {
+    })().catch((error): AuthRecoveryResult => {
       if (!isStaleAuthOperation(error) && lifecycle.isCurrent(operation)) {
         setters.setAuthStatus('');
         try { setters.setTokenValidationInProgress(false); } catch { }
       }
-      return false;
+      return isStaleAuthOperation(error) || !lifecycle.isCurrent(operation)
+        ? recoveryResult({ outcome: 'cancelled' })
+        : recoveryResult({ outcome: 'credential-unavailable' });
     });
 
     refs.recoveryInFlightRef.current = recovery;

@@ -159,8 +159,15 @@ without launching the app:
 node scripts/start-client.cjs --bundle-only
 ```
 
-That command builds only the host architecture. On x86_64 Linux, build genuine
-ARM64 installers in an ARM64 Docker environment with:
+That command builds only the host architecture. On a native ARM64 Linux host,
+the same command builds ARM64 directly without emulation:
+
+```bash
+node scripts/start-client.cjs --bundle-only --target arm64
+```
+
+On x86_64 Linux, build genuine ARM64 installers through an ARM64-capable
+Docker Buildx builder with:
 
 ```bash
 node scripts/start-client.cjs --bundle-only --target arm64
@@ -175,12 +182,31 @@ node scripts/start-client.cjs --bundle-only --all-architectures
 Native installers are written beneath `src-tauri/target/release/bundle`.
 Cross-built ARM64 installers are written beneath
 `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`. Docker must be able
-to execute `linux/arm64` containers. Docker Desktop normally provides this. On
-a Linux Docker Engine host, install the appropriate QEMU/binfmt packages with:
+to build `linux/arm64` images. The ARM build keeps persistent BuildKit layers
+and named Cargo, pnpm, Tauri-tool, and runtime-download caches; exported layer
+metadata is kept in `.cache/buildkit/client-linux-arm64`.
+
+For the fastest x86_64-hosted path, point the command at a native remote ARM64
+Docker context and select its Buildx builder:
+
+```bash
+docker buildx create --name qor-arm64 --driver docker-container arm64-host
+QOR_ARM64_BUILDER=qor-arm64 node scripts/start-client.cjs --bundle-only --target arm64
+```
+
+On an x86_64 host, `QOR_ARM64_BUILDER` is required and must point to a native
+ARM64 node. Install the
+client tooling and Buildx with:
 
 ```bash
 node scripts/install-deps.cjs --client-arm64
 ```
+
+The frontend is built in its own Docker stage. UI-only edits reuse the pnpm
+dependency layer and all previously compiled Rust dependencies; only the final
+application crate/link and package assembly are invalidated. AppImage assembly
+also reuses the already-built Debian payload and compresses the prepared AppDir
+once instead of first creating and then recompressing an intermediate AppImage.
 
 To launch an already built AppDir or release executable without rebuilding or
 restaging anything:

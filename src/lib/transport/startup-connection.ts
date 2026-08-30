@@ -173,7 +173,7 @@ class StartupConnection {
         this.stopWatchdog();
         return;
       }
-      if (websocketClient.isConnectedToServer()) {
+      if (websocketClient.isConnectedToServer() && this.isTorRouteReady()) {
         this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
       }
     }, 1500);
@@ -183,6 +183,12 @@ class StartupConnection {
     if (!this.watchdog) return;
     clearInterval(this.watchdog);
     this.watchdog = null;
+  }
+
+  private isTorRouteReady(): boolean {
+    return !torNetworkManager.isSupported() || (
+      torNetworkManager.isConnected() && torNetworkManager.isBootstrapped()
+    );
   }
 
   async loadConfiguredServerUrl(): Promise<string> {
@@ -229,7 +235,9 @@ class StartupConnection {
           socksPort: current.socksPort || 9150,
           controlPort: current.controlPort || 9151,
         });
-        const synced = await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize();
+        const synced = (
+          await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize()
+        ) && this.isTorRouteReady();
         await websocket.syncTorState().catch(() => false);
         (window as any).__TOR_MODE__ = synced;
         this.update({ torProgress: 100, step: 'Tor ready' });
@@ -264,7 +272,10 @@ class StartupConnection {
         controlPort: refreshed.controlPort || 9151,
       });
       const ready = started
-        && (await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize());
+        && refreshed.isRunning
+        && refreshed.isBootstrapped
+        && (await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize())
+        && this.isTorRouteReady();
       await websocket.syncTorState().catch(() => false);
       (window as any).__TOR_MODE__ = ready;
       this.update({
@@ -281,7 +292,7 @@ class StartupConnection {
   }
 
   async checkConnected(): Promise<void> {
-    if (websocketClient.isConnectedToServer()) {
+    if (websocketClient.isConnectedToServer() && this.isTorRouteReady()) {
       this.update({ phase: 'ready', error: '', step: '', failureTarget: null });
       return;
     }
@@ -310,6 +321,17 @@ class StartupConnection {
         const message = this.state.step || 'Tor could not connect. Check your network or bridge settings.';
         this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
         throw new Error(message);
+      }
+
+      if (!this.isTorRouteReady()) {
+        const message = 'Tor could not connect. Check your network or bridge settings.';
+        this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
+        throw new Error(message);
+      }
+
+      if (websocketClient.isConnectedToServer()) {
+        this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
+        return;
       }
 
       void anonymousHttp.prewarm().catch(() => { });
@@ -367,6 +389,14 @@ class StartupConnection {
 
     this.inFlight = run;
     return run;
+  }
+
+  async prepareRecoveryTransport(): Promise<void> {
+    const torReady = await this.validateTor();
+    if (!torReady) {
+      throw new Error(this.state.step || 'Tor could not connect.');
+    }
+    void anonymousHttp.prewarm().catch(() => { });
   }
 
   async restartTor(): Promise<boolean> {

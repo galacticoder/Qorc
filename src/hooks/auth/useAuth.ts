@@ -6,7 +6,12 @@ import type { ServerHybridPublicKeys, HybridKeys } from "../../lib/types/auth-ty
 import { createDeriveEffectivePassphrase, createGetKeysOnDemand, createWaitForServerKeys, createInitializeKeys } from "./keyManagement";
 import { createHandleAccountSubmit } from "./handlers";
 import { createHandleAuthSuccess } from "./authSuccess";
-import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearAuthenticationState } from "./recovery";
+import {
+  createAttemptAuthRecovery,
+  createStoreAuthenticationState,
+  createClearAuthenticationState,
+  type AuthRecoveryResult,
+} from "./recovery";
 import { createLogout, createGetLogout } from "./logout";
 import { account } from "../../lib/tauri-bindings";
 import { toast } from "sonner";
@@ -61,7 +66,7 @@ export const useAuth = () => {
   const passphrasePlaintextRef = useRef<string>("");
   const getKeysPromiseRef = useRef<Promise<any> | null>(null);
   const accountSubmitInFlightRef = useRef<boolean>(false);
-  const recoveryInFlightRef = useRef<Promise<boolean> | null>(null);
+  const recoveryInFlightRef = useRef<Promise<AuthRecoveryResult> | null>(null);
   const loginUsernameRef = useRef("");
   const originalUsernameRef = useRef<string>("");
   const passwordRef = useRef<string>("");
@@ -256,7 +261,7 @@ export const useAuth = () => {
     [authLifecycle, getKeysOnDemand, setTokenValidationInProgress]
   );
 
-  const attemptAuthRecovery = useCallback(
+  const attemptAuthRecoveryDetailed = useCallback(
     createAttemptAuthRecovery(
       { loginUsernameRef, originalUsernameRef, recoveryInFlightRef },
       { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
@@ -264,6 +269,11 @@ export const useAuth = () => {
     ),
     [accountAuthenticated, authLifecycle, completeRecoveredAuthorization, isLoggedIn, setTokenValidationInProgress]
   );
+
+  const attemptAuthRecovery = useCallback(async (): Promise<boolean> => {
+    const result = await attemptAuthRecoveryDetailed();
+    return result.outcome === 'recovered';
+  }, [attemptAuthRecoveryDetailed]);
 
   const authRefs = {
     loginUsernameRef, originalUsernameRef, passwordRef, confirmPasswordRef,
@@ -398,18 +408,15 @@ export const useAuth = () => {
         authLifecycle.assertCurrent(operation);
         const canResume = sU ? await hasResumeToken(sU) : false;
         authLifecycle.assertCurrent(operation);
-        if (canResume || sU) {
-          setTokenValidationInProgress(true); setAuthStatus('Verifying session...');
-          if (sU) {
-            const pseudonymHash = computeBlindUserId(sU);
-            loginUsernameRef.current = sU;
-            setPseudonym(pseudonymHash);
-            setUsername(sU);
-            originalUsernameRef.current = sU;
-          }
-        } else {
-          setTokenValidationInProgress(false); setAuthStatus('');
+        if (sU) {
+          const pseudonymHash = computeBlindUserId(sU);
+          loginUsernameRef.current = sU;
+          setPseudonym(pseudonymHash);
+          setUsername(sU);
+          originalUsernameRef.current = sU;
         }
+        setTokenValidationInProgress(canResume);
+        setAuthStatus(canResume ? 'Verifying session...' : '');
       } catch (error) {
         if (!isStaleAuthOperation(error) && authLifecycle.isCurrent(operation)) {
           setTokenValidationInProgress(false); setAuthStatus('');
@@ -522,7 +529,7 @@ export const useAuth = () => {
     loginUsernameRef, originalUsernameRef, initializeKeys,
     handleAccountSubmit, handleAuthSuccess, setAccountAuthenticated, passwordRef, setLoginError,
     setShowPassphrasePrompt, showPassphrasePrompt, logout, getLogout,
-    hybridKeysRef, getKeysOnDemand, attemptAuthRecovery, storeAuthenticationState,
+    hybridKeysRef, getKeysOnDemand, attemptAuthRecovery, attemptAuthRecoveryDetailed, storeAuthenticationState,
     clearAuthenticationState, recoveryActive, setRecoveryActive,
     passphrasePlaintextRef,
     authLifecycle, keyManagerOwnerRef,

@@ -13,6 +13,7 @@ const {
 const repoRoot = path.resolve(__dirname, '..');
 const dockerfile = path.join('docker', 'Dockerfile.client-bundle');
 const imageName = 'qor-chat-client-bundle:linux-arm64';
+const buildCacheDirectory = path.join(repoRoot, '.cache', 'buildkit', 'client-linux-arm64');
 const outputDirectory = path.join(
     repoRoot,
     'src-tauri',
@@ -45,15 +46,36 @@ function checkDocker() {
         throw new Error('ARM64 client bundles require Docker running Linux containers');
     }
 
+    const configuredBuilderName = (process.env.QOR_ARM64_BUILDER || '').trim();
+    if (!configuredBuilderName) {
+        throw new Error(
+            'ARM64 cross-builds require a native ARM64 Buildx builder. Set QOR_ARM64_BUILDER, or run the build directly on an ARM64 machine.'
+        );
+    }
+    const builderName = configuredBuilderName;
     try {
-        execFileSync('docker', ['run', '--rm', '--platform', 'linux/arm64', 'ubuntu:26.04', 'true'], {
+        execFileSync('docker', ['buildx', 'version'], {
             stdio: ['ignore', 'ignore', 'pipe']
         });
     } catch {
-        throw new Error(
-            'Docker cannot execute ARM64 containers. Run `node scripts/install-deps.cjs --client-arm64` to install the Linux emulation prerequisite, or enable ARM64 emulation in Docker Desktop.'
-        );
+        throw new Error('Docker Buildx is required for persistent ARM64 build caches. Run `node scripts/install-deps.cjs --client-arm64`.');
     }
+
+    try {
+        const inspectArguments = ['buildx', 'inspect'];
+        inspectArguments.push(builderName);
+        inspectArguments.push('--bootstrap');
+        const inspection = execFileSync('docker', inspectArguments, {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+        if (!inspection.includes('linux/arm64')) {
+            throw new Error('selected builder does not advertise linux/arm64');
+        }
+    } catch {
+        throw new Error('QOR_ARM64_BUILDER must select a reachable native ARM64 Buildx builder that advertises linux/arm64. Emulated ARM64 builders are unsupported.');
+    }
+    return builderName;
 }
 
 function collectArtifacts(root) {
@@ -111,22 +133,40 @@ function main() {
     if (process.platform !== 'linux') {
         throw new Error('Cross-building Linux ARM64 client bundles is supported only from Linux');
     }
-    checkDocker();
+    const builderName = checkDocker();
+
+    console.log(`[CLIENT] Using native ARM64 Buildx builder '${builderName}'.`);
 
     let contextRoot;
     let containerId;
     let extractedRoot;
+    let nextCacheDirectory;
     try {
         console.log('[CLIENT] Preparing a secret-free ARM64 client build context...');
         contextRoot = createClientDockerBuildContext(repoRoot);
         console.log('[CLIENT] Building native Linux ARM64 installers in Docker...');
-        docker([
-            'build',
+        nextCacheDirectory = `${buildCacheDirectory}.next-${process.pid}`;
+        fs.rmSync(nextCacheDirectory, { recursive: true, force: true });
+        fs.mkdirSync(path.dirname(buildCacheDirectory), { recursive: true });
+        const buildArguments = [
+            'buildx', 'build',
+            '--load',
+            '--progress', 'plain',
             '--platform', 'linux/arm64',
             '--file', path.join(contextRoot, dockerfile),
             '--tag', imageName,
-            contextRoot
-        ]);
+            '--cache-to', `type=local,dest=${nextCacheDirectory},mode=max`
+        ];
+        buildArguments.push('--builder', builderName);
+        if (fs.statSync(path.join(buildCacheDirectory, 'index.json'), { throwIfNoEntry: false })?.isFile()) {
+            buildArguments.push('--cache-from', `type=local,src=${buildCacheDirectory}`);
+        }
+        buildArguments.push(contextRoot);
+        docker(buildArguments);
+
+        fs.rmSync(buildCacheDirectory, { recursive: true, force: true });
+        fs.renameSync(nextCacheDirectory, buildCacheDirectory);
+        nextCacheDirectory = null;
 
         containerId = execFileSync('docker', ['create', imageName, 'true'], {
             encoding: 'utf8',
@@ -154,6 +194,7 @@ function main() {
             try { execFileSync('docker', ['rm', '-f', containerId], { stdio: 'ignore' }); } catch { }
         }
         if (extractedRoot) fs.rmSync(extractedRoot, { recursive: true, force: true });
+        if (nextCacheDirectory) fs.rmSync(nextCacheDirectory, { recursive: true, force: true });
         if (contextRoot) removeClientDockerBuildContext(contextRoot);
     }
 }

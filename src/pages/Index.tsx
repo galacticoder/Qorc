@@ -38,6 +38,7 @@ import { resolveTrustedPeerHybridPublicKeys } from "../lib/utils/signal-bundle-u
 import { isLiveOnlySignalType, unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
 import { websocket, isTauri, tray } from "../lib/tauri-bindings";
 import type { PeerCertificateBundle } from "../lib/types/p2p-types";
+import type { CallState } from "../lib/types/calling-types";
 
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
@@ -105,6 +106,7 @@ const ChatApp: React.FC = () => {
   const [sidebarActiveTab, setSidebarActiveTab] = useState<'chats' | 'calls' | 'settings'>('chats');
   const [setupComplete, setSetupComplete] = useState(false);
   const [serverUrlResolved, setServerUrlResolved] = useState(false);
+  const [serverEntryPreflightInProgress, setServerEntryPreflightInProgress] = useState(true);
   const [showServerSetup, setShowServerSetup] = useState(false);
   const [selectedServerUrl, setSelectedServerUrl] = useState<string>('');
   const startup = useStartupConnection();
@@ -112,8 +114,29 @@ const ChatApp: React.FC = () => {
   const [showNewChatInput, setShowNewChatInput] = useState(false);
   const [conversationPanelWidth, setConversationPanelWidth] = useState(344);
   const [isResizing, setIsResizing] = useState(false);
+  const [floatingCallPosition, setFloatingCallPosition] = useState({ x: 20, bottom: 20 });
   const Authentication = useAuth();
   const callHistory = useCallHistory();
+
+  const promptForServerEntryIfRequired = useCallback((): boolean => {
+    if (
+      !websocketClient.isServerPasswordRequired()
+      || websocketClient.isServerAuthGranted()
+    ) {
+      return false;
+    }
+    websocketClient.setServerEntryPromptPending(true);
+    Authentication.setTokenValidationInProgress(false);
+    Authentication.setAuthStatus('');
+    Authentication.setLoginError('');
+    Authentication.setShowPasswordPrompt(true);
+    return true;
+  }, [
+    Authentication.setAuthStatus,
+    Authentication.setLoginError,
+    Authentication.setShowPasswordPrompt,
+    Authentication.setTokenValidationInProgress,
+  ]);
 
   // Discovery Service
   const discoveryUsername = Authentication.isLoggedIn ? Authentication.loginUsernameRef.current || undefined : undefined;
@@ -248,15 +271,19 @@ const ChatApp: React.FC = () => {
       if (cancelled) return;
 
       setServerUrlResolved(true);
-      if (!savedUrl) return;
+      if (!savedUrl) {
+        setServerEntryPreflightInProgress(false);
+        return;
+      }
 
       setSelectedServerUrl(savedUrl);
       setSetupComplete(true);
 
+      let canResume = false;
       try {
         const explicitLogout = await isExplicitlyLoggedOut();
         const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
-        const canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
+        canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
         if (cancelled) return;
         if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated) {
           if (canResume) {
@@ -269,20 +296,36 @@ const ChatApp: React.FC = () => {
         console.error('[Index] Failed to resolve stored session state:', err);
       }
 
-      void startupConnection.checkConnected().catch(() => { });
+      if (canResume) {
+        // Recovery owns its unlinked connection attempt. Starting the normal
+        // startup connection here would race it and turn recovery into a
+        // foreground server-connect gate.
+        setServerEntryPreflightInProgress(false);
+        return;
+      }
+
+      try {
+        await startupConnection.checkConnected();
+        if (!cancelled) promptForServerEntryIfRequired();
+      } catch { }
+      finally {
+        if (!cancelled) setServerEntryPreflightInProgress(false);
+      }
     })();
 
     return () => { cancelled = true; };
-  }, [backgroundCheckComplete]);
+  }, [backgroundCheckComplete, promptForServerEntryIfRequired]);
 
   useEffect(() => {
     if (startup.phase !== 'ready') return;
     if (Authentication.isLoggedIn || Authentication.accountAuthenticated) return;
-    if (!websocketClient.isServerPasswordRequired() || websocketClient.isServerAuthGranted()) return;
-    Authentication.setTokenValidationInProgress(false);
-    Authentication.setAuthStatus('');
-    Authentication.setShowPasswordPrompt(true);
-  }, [startup.phase, Authentication.isLoggedIn, Authentication.accountAuthenticated]);
+    promptForServerEntryIfRequired();
+  }, [
+    startup.phase,
+    Authentication.isLoggedIn,
+    Authentication.accountAuthenticated,
+    promptForServerEntryIfRequired,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -487,16 +530,41 @@ const ChatApp: React.FC = () => {
     getPeerCertificate: p2pMessaging.getPeerCertificateForCall,
     checkPeerSession: messageSender.prefetchSessionForPeer,
   });
+  const currentCall = callingHook.currentCall;
+  const currentCallIsDocked = Boolean(
+    currentCall
+    && sidebarActiveTab === 'chats'
+    && selectedConversation === currentCall.peer
+  );
+  const foregroundIncomingCall = callingHook.pendingIncomingCalls[
+    callingHook.pendingIncomingCalls.length - 1
+  ] ?? null;
+  const answerIncomingCall = useCallback(async (call: CallState) => {
+    await callingHook.answerCall(call.id, call.peer);
+  }, [callingHook.answerCall]);
+  const declineIncomingCall = useCallback(async (call: CallState) => {
+    await callingHook.declineCall(call.id);
+  }, [callingHook.declineCall]);
+  const answerForegroundIncomingCall = useCallback(async () => {
+    if (!foregroundIncomingCall) return;
+    await answerIncomingCall(foregroundIncomingCall);
+  }, [answerIncomingCall, foregroundIncomingCall]);
+  const declineForegroundIncomingCall = useCallback(() => {
+    if (!foregroundIncomingCall) return;
+    void declineIncomingCall(foregroundIncomingCall);
+  }, [declineIncomingCall, foregroundIncomingCall]);
+  const inactiveIncomingToggle = useCallback(() => false, []);
+  const inactiveIncomingDeviceSwitch = useCallback((_deviceId: string) => Promise.resolve(), []);
   const answerCurrentCall = useCallback(() => {
-    const call = callingHook.currentCall;
+    const call = currentCall;
     if (!call) return;
     return callingHook.answerCall(call.id, call.peer);
-  }, [callingHook.currentCall?.id, callingHook.currentCall?.peer, callingHook.answerCall]);
+  }, [callingHook.answerCall, currentCall]);
   const declineCurrentCall = useCallback(() => {
-    const call = callingHook.currentCall;
+    const call = currentCall;
     if (!call) return;
     callingHook.declineCall(call.id);
-  }, [callingHook.currentCall?.id, callingHook.declineCall]);
+  }, [callingHook.declineCall, currentCall]);
   const handleOpenCallLogConversation = useCallback((username: string) => {
     handleSelectConversation(username);
     setSidebarActiveTab('chats');
@@ -629,11 +697,14 @@ const ChatApp: React.FC = () => {
   }, [showSettings]);
 
   // Token validation
-  useTokenValidation({
+  const recoveryValidation = useTokenValidation({
     Authentication,
-    setupComplete: setupComplete && startup.phase === 'ready',
+    setupComplete,
     selectedServerUrl,
   });
+  const recoveryConnectionIssue = recoveryValidation.connectionIssue;
+  const retryAuthRecovery = recoveryValidation.retryRecovery;
+  const clearRecoveryConnectionIssue = recoveryValidation.clearConnectionIssue;
 
   // Get messages for the selected conversation
   const conversationMessages = useMemo(() => {
@@ -649,6 +720,7 @@ const ChatApp: React.FC = () => {
   }, [selectedConversation, p2pConnectedPeers.includes(selectedConversation)]);
 
   const handleServerSelected = useCallback(async (serverUrl: string) => {
+    clearRecoveryConnectionIssue();
     setSelectedServerUrl(serverUrl);
     setSetupComplete(true);
     setShowServerSetup(false);
@@ -657,27 +729,21 @@ const ChatApp: React.FC = () => {
       const explicitLogout = await isExplicitlyLoggedOut();
       const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
       const canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
-      const serverEntryRequired = (
-        websocketClient.isServerPasswordRequired()
-        && !websocketClient.isServerAuthGranted()
-      );
-
-      if (serverEntryRequired) {
-        Authentication.setTokenValidationInProgress(false);
-        Authentication.setAuthStatus('');
-        Authentication.setShowPasswordPrompt(true);
+      if (promptForServerEntryIfRequired()) {
+        return;
       } else if (canResume) {
         Authentication.setTokenValidationInProgress(true);
       } else {
-        Authentication.setIsRegistrationMode(true);
+        Authentication.setIsRegistrationMode(!storedUsername);
       }
     } catch (err) {
       console.error('[Index] Failed to resolve session state after server selection:', err);
       Authentication.setIsRegistrationMode(true);
     }
-  }, [Authentication]);
+  }, [Authentication, clearRecoveryConnectionIssue, promptForServerEntryIfRequired]);
 
   const handleChangeServer = useCallback(async () => {
+    clearRecoveryConnectionIssue();
     setShowServerSetup(true);
     startupConnection.reset();
     Authentication.setTokenValidationInProgress(false);
@@ -691,9 +757,13 @@ const ChatApp: React.FC = () => {
         await websocket.disconnect();
       }
     } catch { }
-  }, [Authentication]);
+  }, [Authentication, clearRecoveryConnectionIssue]);
 
   const handleRetryConnection = useCallback(async () => {
+    if (recoveryConnectionIssue) {
+      retryAuthRecovery();
+      return;
+    }
     const retryingFromServerSetup = showServerSetup || !selectedServerUrl;
     try {
       await startupConnection.retry();
@@ -702,19 +772,23 @@ const ChatApp: React.FC = () => {
         if (connectedServerUrl) await handleServerSelected(connectedServerUrl);
       }
     } catch { }
-  }, [handleServerSelected, selectedServerUrl, showServerSetup]);
+  }, [handleServerSelected, recoveryConnectionIssue, retryAuthRecovery, selectedServerUrl, showServerSetup]);
 
   const handleKeepCurrentServer = useCallback(() => {
     setShowServerSetup(false);
     void startupConnection.checkConnected().catch(() => { });
   }, []);
 
-  const connectedForAuth = useCallback(async (): Promise<boolean> => {
-    if (websocketClient.isConnectedToServer()) return true;
+  const connectedForAuth = useCallback(async (
+    allowServerEntrySubmission = false,
+  ): Promise<boolean> => {
+    if (websocketClient.isConnectedToServer()) {
+      return allowServerEntrySubmission || !promptForServerEntryIfRequired();
+    }
     Authentication.setAuthStatus('Connecting to server...');
     try {
       await startupConnection.checkConnected();
-      return true;
+      return allowServerEntrySubmission || !promptForServerEntryIfRequired();
     } catch {
       Authentication.setAuthStatus('');
       try {
@@ -722,7 +796,7 @@ const ChatApp: React.FC = () => {
       } catch { }
       return false;
     }
-  }, [Authentication]);
+  }, [Authentication, promptForServerEntryIfRequired]);
 
   const handleAccountSubmitWhenConnected = useCallback(async (
     mode: "login" | "register",
@@ -735,7 +809,7 @@ const ChatApp: React.FC = () => {
   }, [connectedForAuth, Authentication]);
 
   const handleServerPasswordSubmitWhenConnected = useCallback(async (password: string) => {
-    if (!await connectedForAuth()) return;
+    if (!await connectedForAuth(true)) return;
     await Authentication.handleServerPasswordSubmit(password);
   }, [connectedForAuth, Authentication]);
 
@@ -786,10 +860,18 @@ const ChatApp: React.FC = () => {
     return <FullscreenSpinner />;
   }
 
-  const connectionIssue = startup.phase === 'failed' ? (
+  const activeConnectionIssue = recoveryConnectionIssue ?? (
+    startup.phase === 'failed'
+      ? {
+          error: startup.error,
+          target: startup.failureTarget ?? 'server' as const,
+        }
+      : null
+  );
+  const connectionIssue = activeConnectionIssue ? (
     <ConnectionIssueSheet
-      error={startup.error}
-      target={startup.failureTarget ?? 'server'}
+      error={activeConnectionIssue.error}
+      target={activeConnectionIssue.target}
       onRetry={handleRetryConnection}
       onChangeServer={handleChangeServer}
     />
@@ -815,7 +897,11 @@ const ChatApp: React.FC = () => {
     && !Authentication.showPassphrasePrompt
     && !Authentication.showPasswordPrompt;
   const authPromptVisible = Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt;
-  const showValidationScreen = Authentication.tokenValidationInProgress && !isFullyAuthenticated && !authPromptVisible;
+  const showValidationScreen = (
+    Authentication.tokenValidationInProgress
+    || serverEntryPreflightInProgress
+    || Boolean(recoveryConnectionIssue)
+  ) && !isFullyAuthenticated && !authPromptVisible;
   const showLoginScreen = !showValidationScreen && (
     !Authentication.isLoggedIn ||
     !Authentication.accountAuthenticated ||
@@ -958,7 +1044,7 @@ const ChatApp: React.FC = () => {
                     <ChatInterface
                       messages={conversationMessages}
                       setMessages={setMessages}
-                      currentCall={callingHook.currentCall}
+                      currentCall={currentCall}
                       startCall={callingHook.startCall}
                       currentUsername={Authentication.loginUsernameRef.current || ''}
                       getDisplayUsername={stableGetDisplayUsername}
@@ -998,7 +1084,7 @@ const ChatApp: React.FC = () => {
                 getDisplayUsername={stableGetDisplayUsername}
                 onOpenConversation={handleOpenCallLogConversation}
                 onStartCall={handleStartCallFromLog}
-                callsDisabled={Boolean(callingHook.currentCall)}
+                callsDisabled={Boolean(currentCall)}
               />
             )}
           </div>
@@ -1017,9 +1103,9 @@ const ChatApp: React.FC = () => {
       </Layout>
       <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       {
-        callingHook.currentCall && CallModalPanel && createPortal(
+        currentCall && CallModalPanel && createPortal(
           <CallModalPanel
-            call={callingHook.currentCall}
+            call={currentCall}
             localStream={callingHook.localStream}
             localVideoCanvas={callingHook.localVideoCanvas}
             localScreenCanvas={callingHook.localScreenCanvas}
@@ -1036,7 +1122,35 @@ const ChatApp: React.FC = () => {
             onSwitchCamera={callingHook.switchCamera}
             onSwitchMicrophone={callingHook.switchMicrophone}
             onSwitchSpeaker={callingHook.switchSpeaker}
-            isAttached={sidebarActiveTab === 'chats' && selectedConversation === callingHook.currentCall.peer}
+            isAttached={currentCallIsDocked}
+            floatingPosition={floatingCallPosition}
+            onFloatingPositionChange={setFloatingCallPosition}
+          />,
+          document.body
+        )
+      }
+      {
+        foregroundIncomingCall && CallModalPanel && createPortal(
+          <CallModalPanel
+            key={foregroundIncomingCall.id}
+            call={foregroundIncomingCall}
+            localStream={null}
+            localVideoCanvas={null}
+            localScreenCanvas={null}
+            remoteVideoCanvas={null}
+            remoteScreenCanvas={null}
+            onAnswer={answerForegroundIncomingCall}
+            onDecline={declineForegroundIncomingCall}
+            onEndCall={declineForegroundIncomingCall}
+            onToggleMute={inactiveIncomingToggle}
+            onToggleVideo={inactiveIncomingToggle}
+            onSwitchCamera={inactiveIncomingDeviceSwitch}
+            onSwitchMicrophone={inactiveIncomingDeviceSwitch}
+            onSwitchSpeaker={inactiveIncomingDeviceSwitch}
+            isAttached={false}
+            floatingPosition={currentCallIsDocked ? undefined : floatingCallPosition}
+            onFloatingPositionChange={currentCallIsDocked ? undefined : setFloatingCallPosition}
+            isForeground
           />,
           document.body
         )

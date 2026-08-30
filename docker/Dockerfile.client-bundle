@@ -1,9 +1,17 @@
-FROM ubuntu:26.04@sha256:61b65dc6bddff5e68c552f22126fe77496395f956ff2e983e05d8a52efd63e55 AS builder
+# syntax=docker/dockerfile:1.7
 
+FROM ubuntu:26.04@sha256:61b65dc6bddff5e68c552f22126fe77496395f956ff2e983e05d8a52efd63e55 AS toolchain
+
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive \
-    PATH=/root/.cargo/bin:$PATH
+    PATH=/root/.cargo/bin:$PATH \
+    PNPM_HOME=/opt/pnpm \
+    PNPM_STORE_DIR=/opt/pnpm/store \
+    npm_config_store_dir=/opt/pnpm/store
 
-RUN apt-get update \
+RUN --mount=type=cache,id=qor-client-apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=qor-client-apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -13,6 +21,7 @@ RUN apt-get update \
         desktop-file-utils \
         file \
         git \
+        gstreamer1.0-gl \
         gstreamer1.0-libav \
         gstreamer1.0-plugins-bad \
         gstreamer1.0-plugins-base \
@@ -31,6 +40,7 @@ RUN apt-get update \
         libssl-dev \
         libv4l-dev \
         libwebkit2gtk-4.1-dev \
+        libxcb-randr0-dev \
         libxdo-dev \
         nodejs \
         ninja-build \
@@ -41,31 +51,59 @@ RUN apt-get update \
         protobuf-compiler \
         rpm \
         wget \
-        xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+        xz-utils
 
-RUN npm install --global pnpm@10.33.4 --no-audit --no-fund \
+RUN --mount=type=cache,id=qor-client-npm-${TARGETARCH},target=/root/.npm,sharing=locked \
+    npm install --global pnpm@10.33.4 --no-audit --no-fund \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain 1.95.0
 
 WORKDIR /workspace
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
 
+FROM toolchain AS node-dependencies
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile
+
+FROM node-dependencies AS frontend
+COPY data/ data/
+COPY public/ public/
+COPY scripts/generate-material-file-icons.cjs scripts/generate-material-file-icons.cjs
+COPY shared/ shared/
+COPY src/ src/
+COPY test-chat/ test-chat/
+COPY index.html postcss.config.js tailwind.config.js tailwind.config.ts ./
+COPY tsconfig.app.json tsconfig.json tsconfig.node.json vite.config.simple.ts ./
+RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+    --mount=type=cache,id=qor-client-vite-${TARGETARCH},target=/workspace/node_modules/.vite,sharing=locked \
+    pnpm run build
+
+FROM node-dependencies AS rust-dependencies
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/
 COPY vendor/ vendor/
-RUN cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+RUN --mount=type=cache,id=qor-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=qor-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
+    cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        gstreamer1.0-gl \
-        libxcb-randr0-dev \
-        qemu-user \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust-dependencies AS builder
+ENV QOR_FRONTEND_PREBUILT=1
+COPY .cargo/ .cargo/
+COPY LICENSE LICENSE
+COPY scripts/ scripts/
+COPY shared/ shared/
+COPY src-tauri/ src-tauri/
+COPY vendor/ vendor/
+COPY workers/ workers/
+COPY --from=frontend /workspace/dist/ dist/
 
-COPY . .
-
-RUN node scripts/start-client.cjs --bundle-only \
+RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+    --mount=type=cache,id=qor-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=qor-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=qor-client-cargo-target-${TARGETARCH},target=/workspace/src-tauri/target,sharing=locked \
+    --mount=type=cache,id=qor-client-pir-target-${TARGETARCH},target=/workspace/workers/ypir/target,sharing=locked \
+    --mount=type=cache,id=qor-client-downloads-${TARGETARCH},target=/workspace/.cache,sharing=locked \
+    --mount=type=cache,id=qor-client-tauri-tools-${TARGETARCH},target=/root/.cache/tauri,sharing=locked \
+    node scripts/start-client.cjs --bundle-only \
     && deb_bundle="$(find src-tauri/target/release/bundle -type f -name '*arm64.deb' -print -quit)" \
     && rpm_bundle="$(find src-tauri/target/release/bundle -type f -name '*aarch64.rpm' -print -quit)" \
     && appimage_bundle="$(find src-tauri/target/release/bundle -type f -name '*aarch64.AppImage' -print -quit)" \
@@ -74,7 +112,9 @@ RUN node scripts/start-client.cjs --bundle-only \
     && test -n "$appimage_bundle" \
     && test "$(dpkg-deb --field "$deb_bundle" Architecture)" = arm64 \
     && test "$(rpm -qp --qf '%{ARCH}' "$rpm_bundle")" = aarch64 \
-    && file "$appimage_bundle" | grep -q 'ARM aarch64'
+    && file "$appimage_bundle" | grep -q 'ARM aarch64' \
+    && mkdir -p /bundle-output \
+    && cp -a src-tauri/target/release/bundle/. /bundle-output/
 
 FROM scratch
-COPY --from=builder /workspace/src-tauri/target/release/bundle/ /bundle/
+COPY --from=builder /bundle-output/ /bundle/

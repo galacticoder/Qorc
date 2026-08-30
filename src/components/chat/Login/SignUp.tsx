@@ -134,12 +134,12 @@ export function SignUpForm({
       </div>
 
       <div className="signup-simple-field">
-        <label htmlFor="passphrase">Encryption passphrase</label>
+        <label htmlFor="passphrase">Passphrase</label>
         <input
           className="signup-simple-input"
           id="passphrase"
           type="password"
-          placeholder="New encryption passphrase"
+          placeholder="New passphrase"
           value={passphrase}
           onChange={(e) => setPassphrase(e.target.value)}
           disabled={disabled || isSubmitting}
