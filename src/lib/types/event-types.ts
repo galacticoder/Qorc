@@ -50,6 +50,7 @@ export const EventType = {
   SETTINGS_CLOSE: 'settings:close',
   OPEN_SETTINGS: 'openSettings',
   CLOSE_SETTINGS: 'closeSettings',
+  NAVIGATION_LAYOUT_CHANGED: 'navigation-layout-changed',
 
   // Edge events
   EDGE_SERVER_MESSAGE: 'edge:server-message',

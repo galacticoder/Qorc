@@ -22,6 +22,21 @@ let clusterManager = null;
 let configUpdateInterval = null;
 let configUpdateTask = null;
 
+export function getClusterTelemetry() {
+  if (process.env.ENABLE_CLUSTERING !== 'true') {
+    return {
+      serverId: process.env.SERVER_ID || 'default',
+      registration: 'standalone',
+      heartbeatAgeSeconds: null,
+    };
+  }
+  return clusterManager?.getTelemetrySnapshot?.() || {
+    serverId: process.env.SERVER_ID || 'default',
+    registration: 'checking',
+    heartbeatAgeSeconds: null,
+  };
+}
+
 // Initialize cluster integration
 export async function initializeCluster({
   serverHybridKeyPair,

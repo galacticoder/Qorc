@@ -46,7 +46,7 @@ cover-traffic protocol artifacts.
 
 ## Run a Qor server with Docker
 
-This is the simplest server setup. It works with Docker Linux containers on
+This is the source and terminal setup. It works with Docker Linux containers on
 64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
 
 You need only:

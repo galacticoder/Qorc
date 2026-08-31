@@ -18,6 +18,7 @@ import {
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { recordDeliveryExpired, recordDeliveryRetry, withoutStorageTelemetry } from '../telemetry/server-telemetry.js';
 
 import { SignalType } from '../signals.js';
 import {
@@ -731,6 +732,7 @@ async function recoverStaleMixnetClaims(client) {
     const entry = await loadMixnetEntry(client, indexMember);
     if (!entry || entry.expiresAt <= now) {
       await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, currentScore);
+      recordDeliveryExpired();
       continue;
     }
     const retryAt = Math.min(
@@ -745,6 +747,7 @@ async function recoverStaleMixnetClaims(client) {
       retryAt,
       currentScore
     );
+    recordDeliveryRetry();
   }
 }
 
@@ -758,6 +761,7 @@ async function finalizeMixnetClaim(indexMember, entry, claimUntil, succeeded) {
     const now = Date.now();
     if (!hasValidMixnetLifetime(entry) || entry.expiresAt <= now) {
       await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, claimUntil);
+      recordDeliveryExpired();
       return;
     }
     const retryAt = Math.min(
@@ -772,6 +776,7 @@ async function finalizeMixnetClaim(indexMember, entry, claimUntil, succeeded) {
       retryAt,
       claimUntil
     );
+    recordDeliveryRetry();
   });
 }
 
@@ -806,6 +811,7 @@ async function flushMixnetDelayPool() {
           entry.expiresAt <= claimStartedAt
         ) {
           await removeMixMember(client, MIXNET_DELAY_POOL_KEY, indexMember, currentScore);
+          recordDeliveryExpired();
           continue;
         }
 
@@ -1075,7 +1081,7 @@ const TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT = `
 
 async function trimExpiredGlobalMixSpool(client, now = Date.now()) {
   const oldestAllowed = ((now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000)) * 1000);
-  return client.eval(
+  const result = await client.eval(
     TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT,
     2,
     GLOBAL_MIX_SPOOL_KEY,
@@ -1084,6 +1090,36 @@ async function trimExpiredGlobalMixSpool(client, now = Date.now()) {
     GLOBAL_MIX_SPOOL_TRIM_BATCH,
     GLOBAL_MIX_SPOOL_TTL_SECONDS + 60
   );
+  const removed = Array.isArray(result) ? Number(result[0]) : 0;
+  if (Number.isSafeInteger(removed) && removed > 0) recordDeliveryExpired(removed);
+  return result;
+}
+
+export async function getBlindRouterTelemetry() {
+  return withoutStorageTelemetry(() => withRedisClient(async (client) => {
+    const [delayCount, processingCount, pendingBytes, spoolCount, spoolBytes, oldestSpool] = await Promise.all([
+      client.zcard(MIXNET_DELAY_POOL_KEY),
+      client.zcard(MIXNET_PROCESSING_POOL_KEY),
+      client.get(MIXNET_PENDING_BYTES_KEY),
+      client.zcard(GLOBAL_MIX_SPOOL_KEY),
+      client.get(GLOBAL_MIX_SPOOL_BYTES_KEY),
+      client.zrange(GLOBAL_MIX_SPOOL_KEY, 0, 0, 'WITHSCORES')
+    ]);
+    const oldestScore = Array.isArray(oldestSpool) && oldestSpool.length >= 2
+      ? Number(oldestSpool[1]) / 1000
+      : 0;
+    return {
+      pendingMessages: Number(delayCount || 0) + Number(processingCount || 0),
+      pendingBytes: Math.max(0, Number(pendingBytes || 0)),
+      spoolMessages: Number(spoolCount || 0),
+      spoolBytes: Math.max(0, Number(spoolBytes || 0)),
+      oldestSpoolAgeMs: oldestScore > 0 ? Math.max(0, Date.now() - oldestScore) : 0,
+      localDeliveryQueueMessages: globalMixDeliveryQueue.length,
+      localDeliveryQueueBytes: globalMixDeliveryQueuedBytes,
+      publicationQueueMessages: globalMixPublicationQueue.length,
+      publicationQueueBytes: globalMixPublicationQueuedBytes
+    };
+  }));
 }
 
 async function tryLocalBroadcastDelivery(sealedEnvelope, generation) {
@@ -1508,6 +1544,7 @@ export const BlindRouter = {
   routeToGlobalMix,
   enqueueMixnetRelay,
   enqueueMixnetCoverWrite,
+  getTelemetrySnapshot: getBlindRouterTelemetry,
   pruneBlindRouterRuntimeState,
   subscribeToBlindDelivery,
   stopBlindDeliverySubscription

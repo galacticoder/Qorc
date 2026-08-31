@@ -2,6 +2,7 @@ import Redis from 'ioredis';
 import { createPool } from 'generic-pool';
 import fs from 'fs';
 import { envInt } from '../utils/env.js';
+import { recordStorageOperation } from '../telemetry/server-telemetry.js';
 
 const REDIS_URL = process.env.REDIS_URL;
 if (!REDIS_URL) {
@@ -14,6 +15,7 @@ const REDIS_QUIET_ERRORS = (process.env.REDIS_QUIET_ERRORS || '').toLowerCase() 
 const REDIS_ERROR_THROTTLE_MS = envInt('REDIS_ERROR_THROTTLE_MS', 5000, 1000, 60000);
 const REDIS_CLIENT_HEALTHY = Symbol('redisClientHealthy');
 const REDIS_CLIENT_INTENTIONAL_CLOSE = Symbol('redisClientIntentionalClose');
+const REDIS_CLIENT_INSTRUMENTED = Symbol('redisClientInstrumented');
 let lastRedisErrorMessage = null;
 let lastRedisErrorTime = 0;
 
@@ -92,6 +94,34 @@ function getRedisOptions() {
 }
 
 function attachRedisClientLifecycle(client, label) {
+    if (!client[REDIS_CLIENT_INSTRUMENTED] && typeof client.sendCommand === 'function') {
+        client[REDIS_CLIENT_INSTRUMENTED] = true;
+        const originalSendCommand = client.sendCommand;
+        client.sendCommand = function instrumentedSendCommand(...arguments_) {
+            const started = performance.now();
+            let result;
+            try {
+                result = originalSendCommand.apply(this, arguments_);
+            } catch (error) {
+                recordStorageOperation('redis', performance.now() - started, true);
+                throw error;
+            }
+            if (!result || typeof result.then !== 'function') {
+                recordStorageOperation('redis', performance.now() - started, false);
+                return result;
+            }
+            return result.then(
+                (value) => {
+                    recordStorageOperation('redis', performance.now() - started, false);
+                    return value;
+                },
+                (error) => {
+                    recordStorageOperation('redis', performance.now() - started, true);
+                    throw error;
+                }
+            );
+        };
+    }
     client[REDIS_CLIENT_HEALTHY] = true;
     client[REDIS_CLIENT_INTENTIONAL_CLOSE] = false;
     client.on('ready', () => {
@@ -150,6 +180,7 @@ if (USING_CLUSTER) {
                 password: process.env.REDIS_PASSWORD
             }
         });
+        attachRedisClientLifecycle(clusterClient, 'Redis cluster');
         clusterClient.on('ready', () => console.log('Redis cluster client ready'));
         clusterClient.on('error', (error) => logRedisError('Redis cluster error', error));
     } catch (e) {

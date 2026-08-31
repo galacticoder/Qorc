@@ -304,36 +304,6 @@ class CircularBuffer {
   length() { return this.buffer.length; }
 }
 
-class Debouncer {
-  constructor(fn, delay = 50) {
-    this.fn = fn;
-    this.delay = delay;
-    this.timer = null;
-    this.pending = false;
-  }
-  call() {
-    this.pending = true;
-    if (this.timer) return;
-    this.timer = setTimeout(() => {
-      if (this.pending) {
-        this.fn();
-        this.pending = false;
-      }
-      this.timer = null;
-    }, this.delay);
-  }
-  flush() {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    if (this.pending) {
-      this.fn();
-      this.pending = false;
-    }
-  }
-}
-
 // Rate limiter for metrics polling
 class RateLimiter {
   constructor(minInterval = 1000) {
@@ -359,51 +329,6 @@ function sanitizeTerminalLog(value) {
     .replace(NON_SGR_ANSI_SEQUENCE, '')
     .replace(/\t/g, '  ')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, '');
-}
-
-function ansiWidth(value) {
-  return Array.from(String(value).replace(ANSI_SEQUENCE, '')).length;
-}
-
-function truncateAnsi(value, maxWidth) {
-  if (maxWidth <= 0) return '';
-  const input = String(value);
-  let result = '';
-  let width = 0;
-  let offset = 0;
-
-  while (offset < input.length && width < maxWidth) {
-    if (input[offset] === '\x1b' && input[offset + 1] === '[') {
-      const match = input.slice(offset).match(/^\x1b\[[0-?]*[ -/]*[@-~]/);
-      if (match) {
-        result += match[0];
-        offset += match[0].length;
-        continue;
-      }
-    }
-    const codePoint = input.codePointAt(offset);
-    const character = String.fromCodePoint(codePoint);
-    result += character;
-    offset += character.length;
-    width += 1;
-  }
-
-  return result;
-}
-
-function fitAnsi(value, width) {
-  const content = truncateAnsi(value, width);
-  return `${content}\x1b[0m${' '.repeat(Math.max(0, width - ansiWidth(content)))}`;
-}
-
-function joinAnsiEdges(left, right, width, gap = 2) {
-  if (width <= 0) return '';
-  const rightWidth = ansiWidth(right);
-  if (rightWidth >= width) return truncateAnsi(right, width);
-  const leftWidth = Math.max(0, width - rightWidth - gap);
-  const fittedLeft = truncateAnsi(left, leftWidth);
-  const padding = Math.max(1, width - ansiWidth(fittedLeft) - rightWidth);
-  return `${fittedLeft}${' '.repeat(padding)}${right}`;
 }
 
 function createLineCollector(onLine) {
@@ -575,13 +500,29 @@ function findSudo() {
 async function validateServerDeps() {
   const nm = path.join(serverDir, 'node_modules');
   const hasNm = fs.existsSync(nm);
+  const requiredPackages = [
+    'express',
+    'ioredis',
+    'pg',
+  ];
+  if (!CONFIG.NO_GUI) requiredPackages.push('@rezi-ui/core', '@rezi-ui/node');
+  const hasRequiredPackages = requiredPackages.every((packageName) => {
+    try {
+      require.resolve(packageName, { paths: [serverDir] });
+      return true;
+    } catch {
+      return false;
+    }
+  });
   const pkgLock = fs.existsSync(path.join(serverDir, 'package-lock.json'));
-  const ciArgs = pkgLock ? ['ci', '--omit=dev'] : ['install', '--omit=dev'];
-  if (!hasNm) {
+  const installArgs = pkgLock && !hasNm
+    ? ['ci', '--omit=dev']
+    : ['install', '--omit=dev'];
+  if (!hasRequiredPackages) {
     log('Installing server dependencies ...');
     await new Promise((resolve, reject) => {
-      const child = spawn('npm', ciArgs, { cwd: serverDir, stdio: 'inherit' });
-      child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`npm ${ciArgs[0]} failed: ${code}`)));
+      const child = spawn('npm', installArgs, { cwd: serverDir, stdio: 'inherit' });
+      child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`npm ${installArgs[0]} failed: ${code}`)));
     });
   }
 }
@@ -651,14 +592,14 @@ async function validatePostgresBootstrap() {
   }
 }
 
-class ServerUI {
+class ReziServerUI {
   constructor(serverProcess, config) {
     this.serverProcess = serverProcess;
     this.serverPid = serverProcess.pid;
     this.config = config;
     this.clusteringEnabled = String(config.ENABLE_CLUSTERING).toLowerCase() === 'true';
     this.logBuffer = new CircularBuffer(1000);
-    this.scrollOffset = 0;
+    this.logSequence = 0;
     this.running = true;
     this.shutdownRequested = false;
     this.startTime = Date.now();
@@ -676,64 +617,8 @@ class ServerUI {
     this.registrationCheckInterval = 2000;
     this.tlsCache = { state: 'checking', cn: null, days: null };
     this.lastTlsCheck = 0;
-    this.needsFullClear = true;
-
-    this.width = process.stdout.columns || 80;
-    this.height = process.stdout.rows || 24;
-    this.renderDebouncer = new Debouncer(() => this._doRender(), 50);
-
-    this.resizeHandler = () => {
-      this.width = process.stdout.columns || 80;
-      this.height = process.stdout.rows || 24;
-      this.needsFullClear = true;
-      this.renderDebouncer.call();
-    };
-    process.stdout.on('resize', this.resizeHandler);
-
-    this.inputHandler = (key) => this._handleInput(key);
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.setEncoding('utf8');
-      process.stdin.resume();
-      process.stdin.on('data', this.inputHandler);
-    }
-
-    process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
-  }
-
-  _visibleLogLines() {
-    return Math.max(1, this.height - 7);
-  }
-
-  _handleInput(key) {
-    const code = key.charCodeAt(0);
-    if (key === 'q' || key === 'Q' || code === 3) {
-      this.stop();
-      return;
-    }
-
-    const visibleLines = this._visibleLogLines();
-    const maxOffset = Math.max(0, this.logBuffer.length() - visibleLines);
-    if (key === '\x1b[A' || key === 'k') {
-      this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
-    } else if (key === '\x1b[B' || key === 'j') {
-      this.scrollOffset = Math.max(this.scrollOffset - 1, 0);
-    } else if (key === '\x1b[5~') {
-      this.scrollOffset = Math.min(this.scrollOffset + visibleLines, maxOffset);
-    } else if (key === '\x1b[6~') {
-      this.scrollOffset = Math.max(this.scrollOffset - visibleLines, 0);
-    } else if (key === '\x1b[H' || key === 'g') {
-      this.scrollOffset = maxOffset;
-    } else if (key === '\x1b[F' || key === 'G') {
-      this.scrollOffset = 0;
-    } else if (code === 21) {
-      this.scrollOffset = Math.min(this.scrollOffset + Math.floor(visibleLines / 2), maxOffset);
-    } else if (code === 4) {
-      this.scrollOffset = Math.max(this.scrollOffset - Math.floor(visibleLines / 2), 0);
-    } else {
-      return;
-    }
-    this.renderDebouncer.call();
+    this.dashboard = null;
+    this.stopPromise = null;
   }
 
   addLog(line) {
@@ -741,16 +626,18 @@ class ServerUI {
       const parts = line.split('\r');
       line = parts[parts.length - 1];
     }
-    line = sanitizeTerminalLog(line);
-    const keepViewportAnchored = this.scrollOffset > 0;
-    this.logBuffer.push(line);
-    if (keepViewportAnchored) {
-      this.scrollOffset = Math.min(
-        this.scrollOffset + 1,
-        Math.max(0, this.logBuffer.length() - 1)
-      );
-    }
-    this.renderDebouncer.call();
+    const cleanLine = sanitizeTerminalLog(line);
+    const entry = this.logEntryFactory
+      ? this.logEntryFactory(cleanLine, ++this.logSequence, 'server')
+      : {
+          id: `server-${++this.logSequence}`,
+          timestamp: Date.now(),
+          level: /\b(error|fatal|panic|failed)\b/i.test(cleanLine) ? 'error' : (/\bwarn/i.test(cleanLine) ? 'warn' : 'info'),
+          source: 'server',
+          message: cleanLine.replace(ANSI_SEQUENCE, ''),
+        };
+    this.logBuffer.push(entry);
+    this.render();
   }
 
   updateMetrics() {
@@ -819,39 +706,32 @@ class ServerUI {
 
   _truncate(value, maxLength) {
     const text = value ? String(value) : 'unknown';
-    if (maxLength <= 1) return text.slice(0, Math.max(0, maxLength));
     if (text.length <= maxLength) return text;
     const head = Math.floor((maxLength - 1) / 2);
-    const tail = maxLength - head - 1;
-    return `${text.slice(0, head)}…${text.slice(-tail)}`;
+    return `${text.slice(0, head)}…${text.slice(-(maxLength - head - 1))}`;
   }
 
-  _databaseDisplay(maxLength) {
-    try {
-      const rawUrl = process.env.DATABASE_URL;
-      let display = null;
-      if (typeof rawUrl === 'string' && rawUrl.length > 0) {
-        try {
-          const url = new URL(rawUrl);
-          const protocol = url.protocol.replace(/:$/, '') || 'postgres';
-          const host = url.hostname || 'localhost';
-          const port = url.port ? `:${url.port}` : '';
-          const database = url.pathname ? url.pathname.replace(/^\//, '') : '';
-          display = `${protocol}://${host}${port}${database ? `/${database}` : ''}`;
-        } catch {
-          display = '[invalid DATABASE_URL]';
-        }
+  _databaseDisplay(maxLength = 80) {
+    const rawUrl = process.env.DATABASE_URL;
+    let display = null;
+    if (typeof rawUrl === 'string' && rawUrl.length > 0) {
+      try {
+        const url = new URL(rawUrl);
+        const protocol = url.protocol.replace(/:$/, '') || 'postgres';
+        const port = url.port ? `:${url.port}` : '';
+        const database = url.pathname ? url.pathname.replace(/^\//, '') : '';
+        display = `${protocol}://${url.hostname || 'localhost'}${port}${database ? `/${database}` : ''}`;
+      } catch {
+        display = '[invalid DATABASE_URL]';
       }
-      if (!display) {
-        const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
-        const port = process.env.PGPORT || '5432';
-        const database = process.env.PGDATABASE || process.env.DB_NAME || 'Qor';
-        display = `postgres://${host}:${port}/${database}`;
-      }
-      return this._truncate(display, maxLength);
-    } catch {
-      return 'postgres://unknown';
     }
+    if (!display) {
+      const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
+      const port = process.env.PGPORT || '5432';
+      const database = process.env.PGDATABASE || process.env.DB_NAME || 'Qor';
+      display = `postgres://${host}:${port}/${database}`;
+    }
+    return this._truncate(display, maxLength);
   }
 
   _formatUptime(totalSeconds) {
@@ -866,159 +746,85 @@ class ServerUI {
   }
 
   _registrationLabel() {
-    const registration = this.lastMetrics.registration;
-    const redisState = this.lastMetrics.redisState;
-    if (registration === 'standalone') return '\x1b[36mSTANDALONE\x1b[0m';
-    if (registration === 'registered') {
-      const suffix = redisState === 'stale' ? ' · STALE' : '';
-      return `\x1b[32mREGISTERED${suffix}\x1b[0m`;
-    }
-    if (registration === 'pending' || registration === 'checking') {
-      return '\x1b[33mPENDING\x1b[0m';
-    }
-    if (registration === 'corrupt') return '\x1b[31mINVALID ENTRY\x1b[0m';
-    return '\x1b[31mUNAVAILABLE\x1b[0m';
+    return {
+      standalone: 'Standalone',
+      registered: this.lastMetrics.redisState === 'stale' ? 'Registered · stale' : 'Registered',
+      pending: 'Pending',
+      checking: 'Checking',
+      corrupt: 'Invalid entry',
+      unavailable: 'Unavailable',
+    }[this.lastMetrics.registration] || 'Unavailable';
   }
 
   _tlsLabel() {
     const tls = this.tlsCache;
-    if (tls.state === 'checking') return '\x1b[33mTLS CHECKING\x1b[0m';
-    if (tls.state === 'missing') return '\x1b[31mTLS MISSING\x1b[0m';
-    if (tls.state === 'unavailable') return '\x1b[31mTLS UNREADABLE\x1b[0m';
-    if (tls.state === 'expired') return '\x1b[31mTLS EXPIRED\x1b[0m';
-    const color = tls.days === null || tls.days >= 14 ? 32 : (tls.days >= 3 ? 33 : 31);
+    if (tls.state === 'checking') return 'Checking';
+    if (tls.state === 'missing') return 'Missing';
+    if (tls.state === 'unavailable') return 'Unreadable';
+    if (tls.state === 'expired') return 'Expired';
     const identity = tls.cn ? ` ${this._truncate(tls.cn, 24)}` : '';
     const remaining = tls.days === null ? '' : ` · ${tls.days}d`;
-    return `\x1b[${color}mTLS${identity}${remaining}\x1b[0m`;
+    return `TLS${identity}${remaining}`;
   }
 
   _overallStatus() {
     const metrics = this.lastMetrics;
-    if (metrics.redisState === 'checking') return '\x1b[33m● STARTING\x1b[0m';
+    if (metrics.redisState === 'checking') return { state: 'starting', label: 'Starting' };
     if (
-      this.tlsCache.state === 'expired' ||
-      this.tlsCache.state === 'missing' ||
-      this.tlsCache.state === 'unavailable' ||
+      ['expired', 'missing', 'unavailable'].includes(this.tlsCache.state) ||
       (this.tlsCache.days !== null && this.tlsCache.days < 3)
-    ) {
-      return '\x1b[31m● DEGRADED\x1b[0m';
-    }
+    ) return { state: 'degraded', label: 'Degraded' };
     if (metrics.registration === 'standalone') {
-      return metrics.redisState === 'live' ? '' : '\x1b[31m● DEGRADED\x1b[0m';
+      return metrics.redisState === 'live'
+        ? { state: 'healthy', label: '' }
+        : { state: 'degraded', label: 'Redis offline' };
     }
-    if (metrics.registration === 'checking' || metrics.registration === 'pending') {
-      return '\x1b[33m● STARTING\x1b[0m';
-    }
+    if (['checking', 'pending'].includes(metrics.registration)) return { state: 'starting', label: 'Starting' };
     if (
       metrics.registration !== 'registered' ||
       metrics.redisState !== 'live' ||
       metrics.heartbeatAge === null ||
       metrics.heartbeatAge >= 30
-    ) {
-      return '\x1b[31m● DEGRADED\x1b[0m';
-    }
-    return '';
+    ) return { state: 'degraded', label: 'Degraded' };
+    return { state: 'healthy', label: '' };
   }
 
-  _doRender() {
-    if (!this.running) return;
-    if (this.serverProcess.exitCode !== null || this.serverProcess.signalCode !== null) {
-      this.stop(false);
-      return;
-    }
-
-    const w = Math.max(1, this.width);
-    const h = Math.max(1, this.height);
-    const lines = [];
-    const metrics = this.lastMetrics;
-    const serverId = this.config.SERVER_ID || 'unknown';
-    const title = `\x1b[1;36m QOR\x1b[0m  \x1b[1mSERVER\x1b[0m  ${serverId}`;
-    const overallStatus = this._overallStatus();
-    const topRight = overallStatus ? `${overallStatus} ` : '';
-
-    if (h < 9 || w < 40) {
-      lines.push(joinAnsiEdges(title, '', w));
-      lines.push(joinAnsiEdges(overallStatus, `PID ${this.serverPid}`, w));
-      if (h > 2) lines.push('\x1b[90mResize the terminal for the activity view\x1b[0m');
-      this._writeFrame(lines, w, h);
-      return;
-    }
-
-    lines.push(joinAnsiEdges(title, topRight, w));
-    const uptime = this._formatUptime(Math.floor((Date.now() - this.startTime) / 1000));
-    const endpoint = ` \x1b[90mHTTPS\x1b[0m  ${this.config.SERVER_HOST || '127.0.0.1'}:${this.config.PORT}`;
-    const processStats = `PID ${this.serverPid}   CPU ${metrics.cpu || '?'}%   MEM ${metrics.mem || '?'}%   UP ${uptime} `;
-    lines.push(joinAnsiEdges(endpoint, processStats, w));
-
-    let heartbeat = 'HB —';
-    if (metrics.heartbeatAge !== null) {
-      const color = metrics.heartbeatAge < 10 ? 32 : (metrics.heartbeatAge < 30 ? 33 : 31);
-      heartbeat = `HB \x1b[${color}m${metrics.heartbeatAge}s\x1b[0m`;
-    }
-    lines.push(joinAnsiEdges(
-      ` \x1b[90mCLUSTER\x1b[0m  ${this._registrationLabel()}   ${heartbeat}`,
-      `${this._tlsLabel()} `,
-      w
-    ));
-
-    const redisDisplay = safeUrlEndpointForDisplay(this.config.REDIS_URL, 'REDIS_URL');
-    const dbDisplay = this._databaseDisplay(Math.max(16, Math.floor(w / 2) - 5));
-    lines.push(joinAnsiEdges(
-      ` \x1b[90mREDIS\x1b[0m  ${redisDisplay}`,
-      `\x1b[90mDB\x1b[0m  ${dbDisplay} `,
-      w
-    ));
-
-    const activityTitle = this.scrollOffset > 0
-      ? ` ACTIVITY · ${this.scrollOffset} NEWER `
-      : ' ACTIVITY ';
-    lines.push(`┌─${activityTitle}${'─'.repeat(Math.max(0, w - activityTitle.length - 3))}┐`);
-
-    const logHeight = Math.max(1, h - 7);
-    const logs = this.logBuffer.getAll();
-    const maxOffset = Math.max(0, logs.length - logHeight);
-    this.scrollOffset = Math.min(this.scrollOffset, maxOffset);
-    const start = Math.max(0, logs.length - logHeight - this.scrollOffset);
-    const end = logs.length - this.scrollOffset;
-    const visibleLogs = logs.slice(start, end);
-    const contentWidth = Math.max(0, w - 4);
-    for (let index = 0; index < logHeight; index += 1) {
-      lines.push(`│ ${fitAnsi(visibleLogs[index] || '', contentWidth)}\x1b[0m │`);
-    }
-    lines.push('└' + '─'.repeat(Math.max(0, w - 2)) + '┘');
-    lines.push(' \x1b[90m↑↓\x1b[0m scroll   \x1b[90mPgUp/PgDn\x1b[0m page   \x1b[90mG\x1b[0m latest   \x1b[90mq\x1b[0m stop server');
-    this._writeFrame(lines, w, h);
-  }
-
-  _writeFrame(lines, width, height) {
-    const fittedLines = lines.slice(0, height).map((line) => `\x1b[2K${fitAnsi(line, width)}`);
-    const clearPrefix = this.needsFullClear ? '\x1b[2J' : '';
-    this.needsFullClear = false;
-    try {
-      process.stdout.write(`${clearPrefix}\x1b[H${fittedLines.join('\n')}\x1b[J`);
-    } catch { }
+  _snapshot() {
+    const overall = this._overallStatus();
+    const heartbeat = this.lastMetrics.heartbeatAge === null ? '—' : `${this.lastMetrics.heartbeatAge}s ago`;
+    return {
+      pid: this.serverPid,
+      serverId: this.config.SERVER_ID || 'unknown',
+      endpoint: `${this.config.SERVER_HOST || '127.0.0.1'}:${this.config.PORT}`,
+      uptime: this._formatUptime(Math.floor((Date.now() - this.startTime) / 1000)),
+      cpu: this.lastMetrics.cpu,
+      mem: this.lastMetrics.mem,
+      status: overall.state,
+      statusLabel: overall.label,
+      registration: this.lastMetrics.registration,
+      registrationLabel: this._registrationLabel(),
+      heartbeat,
+      tlsState: this.tlsCache.state,
+      tlsLabel: this._tlsLabel(),
+      redisState: this.lastMetrics.redisState,
+      redis: safeUrlEndpointForDisplay(this.config.REDIS_URL, 'REDIS_URL'),
+      database: this._databaseDisplay(),
+      logs: [...this.logBuffer.getAll()],
+    };
   }
 
   render() {
-    this.renderDebouncer.call();
+    if (this.running && this.dashboard) this.dashboard.update(this._snapshot());
   }
 
   stop(terminateServer = true) {
-    if (!this.running) return;
     if (terminateServer) this.shutdownRequested = true;
+    if (this.stopPromise) return this.stopPromise;
     this.running = false;
-    this.renderDebouncer.flush();
     if (this.metricsInterval) clearInterval(this.metricsInterval);
     this.metricsInterval = null;
-    process.stdout.removeListener('resize', this.resizeHandler);
     if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler);
     if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler);
-    if (process.stdin.isTTY) {
-      process.stdin.removeListener('data', this.inputHandler);
-      try { process.stdin.setRawMode(false); } catch { }
-      try { process.stdin.pause(); } catch { }
-    }
-    process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
 
     if (
       terminateServer &&
@@ -1033,16 +839,25 @@ class ServerUI {
       }, 2000);
       this.forceKillTimer.unref?.();
     }
+
+    this.stopPromise = this.dashboard
+      ? this.dashboard.stop().catch(() => {})
+      : Promise.resolve();
+    return this.stopPromise;
   }
 
-  start() {
+  async start() {
+    const { createServerDashboard, logEntry } = await import('./qor-rezi-tui.js');
+    this.logEntryFactory = logEntry;
+    this.dashboard = createServerDashboard(this._snapshot(), {
+      stop: () => { void this.stop(); },
+    });
+    await this.dashboard.start();
     this.render();
     void this.updateMetrics();
-    this.metricsInterval = setInterval(() => {
-      void this.updateMetrics();
-    }, 1000);
-    this.sigintHandler = () => this.stop();
-    this.sigtermHandler = () => this.stop();
+    this.metricsInterval = setInterval(() => void this.updateMetrics(), 1000);
+    this.sigintHandler = () => { void this.stop(); };
+    this.sigtermHandler = () => { void this.stop(); };
     process.on('SIGINT', this.sigintHandler);
     process.on('SIGTERM', this.sigtermHandler);
   }
@@ -1500,7 +1315,7 @@ async function main() {
   });
 
   // Setup TUI
-  const uiTui = new ServerUI(childServer, CONFIG);
+  const uiTui = new ReziServerUI(childServer, CONFIG);
 
   const lastLinesArr = [];
   const MAX_LAST_LOG = 80;
@@ -1519,11 +1334,11 @@ async function main() {
   childServer.stdout.on('data', (chunk) => stdoutLines.push(chunk));
   childServer.stderr.on('data', (chunk) => stderrLines.push(chunk));
 
-  childServer.on('close', (code, signal) => {
+  childServer.on('close', async (code, signal) => {
     stdoutLines.flush();
     stderrLines.flush();
     const expectedShutdown = uiTui.shutdownRequested;
-    uiTui.stop(false);
+    await uiTui.stop(false);
 
     const failed = typeof code === 'number'
       ? code !== 0
@@ -1543,7 +1358,7 @@ async function main() {
     setTimeout(() => process.exit(exitCode), 200);
   });
 
-  uiTui.start();
+  await uiTui.start();
 }
 
 main().catch((e) => { logErr(e.message); process.exit(1); });

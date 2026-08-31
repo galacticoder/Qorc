@@ -54,6 +54,7 @@ import {
   destroyEnvelopeHandler
 } from './messaging/pq-envelope-handler.js';
 import { initializeCluster, shutdownCluster } from './cluster/cluster-integration.js';
+import { getServerRuntimeTelemetry } from './telemetry/runtime-telemetry.js';
 import clusterRoutes from './routes/cluster-routes.js';
 import {
   handleBlindRoute,
@@ -109,6 +110,13 @@ import { LOOPBACK_HOST } from './config/infrastructure.js';
 import {
   ACCOUNT_AUTH_PURPOSE
 } from './config/audiences.js';
+import {
+  recordServerOperation,
+  setDeliveryTelemetryProvider,
+  setRuntimeTelemetryProvider,
+  startServerTelemetry,
+  stopServerTelemetry
+} from './telemetry/server-telemetry.js';
 import {
   DISCOVERY_EPOCH_EXPIRED,
   DISCOVERY_PUBLICATION_UNAVAILABLE,
@@ -192,6 +200,21 @@ function startRetentionCleanup() {
 async function createExpressApp({ context }) {
   const app = express();
   app.disable('x-powered-by');
+
+  app.use((req, res, next) => {
+    const started = performance.now();
+    let recorded = false;
+    const record = () => {
+      if (recorded) return;
+      recorded = true;
+      recordServerOperation(performance.now() - started, {
+        bytes: Number(req.headers['content-length'] || 0)
+      });
+    };
+    res.once('finish', record);
+    res.once('close', record);
+    next();
+  });
 
   app.use((req, res, next) => {
     for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
@@ -428,15 +451,28 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
       fixedMessageSizeBytes: SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES,
     },
     onMessage: async ({ ws, parsed }) => {
-      await handleWebSocketMessage({ ws, parsed, context });
+      const started = performance.now();
+      try {
+        await handleWebSocketMessage({ ws, parsed, context });
+      } finally {
+        recordServerOperation(performance.now() - started);
+      }
     },
     onBinaryMessage: async ({ ws, frame }) => {
-      await handlePQBinaryCell({
-        ws,
-        cell: frame,
-        context,
-        handleInnerMessage: handleWebSocketMessage
-      });
+      const started = performance.now();
+      try {
+        await handlePQBinaryCell({
+          ws,
+          cell: frame,
+          context,
+          handleInnerMessage: handleWebSocketMessage
+        });
+      } finally {
+        recordServerOperation(performance.now() - started, {
+          frame: true,
+          bytes: frame?.byteLength || frame?.length || 0
+        });
+      }
     },
     onConnectionClosed: (ws) => context.authHandler.clearConnectionState(ws)
   });
@@ -1332,6 +1368,8 @@ async function shutdownServer(signal) {
     console.error('[SERVER] Database shutdown failed', error);
   }
 
+  await stopServerTelemetry();
+
   console.log('[SERVER] Shutdown completed', { signal });
 }
 
@@ -1339,6 +1377,9 @@ async function shutdownServer(signal) {
 async function startServer() {
   let unregisterShutdownHandlers = null;
   try {
+    setDeliveryTelemetryProvider(BlindRouter.getTelemetrySnapshot);
+    setRuntimeTelemetryProvider(getServerRuntimeTelemetry);
+    startServerTelemetry();
     unregisterShutdownHandlers = registerShutdownHandlers({
       handler: shutdownServer,
     });

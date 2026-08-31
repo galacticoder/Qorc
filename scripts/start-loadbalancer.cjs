@@ -9,6 +9,7 @@ const { pathToFileURL } = require('url');
 const { parseActiveServers } = require('./loadbalancer-tui-state.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
+const serverDir = path.join(repoRoot, 'server');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
 const edgeRuntimeRoot = '/opt/qor-edge';
 const edgeRuntimeLibDir = path.join(edgeRuntimeRoot, 'lib');
@@ -69,58 +70,30 @@ if (!process.env.REDIS_QUIET_ERRORS) {
 function log(...args) { console.log('[LB]', ...args); }
 function logErr(...args) { console.error('[LB]', ...args); }
 
+async function validateTuiDependencies() {
+  const hasRezi = ['@rezi-ui/core', '@rezi-ui/node'].every((packageName) => {
+    try {
+      require.resolve(packageName, { paths: [serverDir] });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (hasRezi) return;
+
+  log('Installing terminal UI dependencies ...');
+  await new Promise((resolve, reject) => {
+    const child = spawn('npm', ['install', '--omit=dev'], { cwd: serverDir, stdio: 'inherit' });
+    child.on('exit', (code) => code === 0
+      ? resolve()
+      : reject(new Error(`npm install failed: ${code}`)));
+  });
+}
+
 class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } len() { return this.a.length; } }
-class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
 
 const ANSI_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-
-function ansiWidth(value) {
-  return Array.from(String(value).replace(ANSI_SEQUENCE, '')).length;
-}
-
-function truncateAnsi(value, maxWidth) {
-  if (maxWidth <= 0) return '';
-  const input = String(value);
-  let result = '';
-  let width = 0;
-  let offset = 0;
-
-  while (offset < input.length && width < maxWidth) {
-    if (input[offset] === '\x1b' && input[offset + 1] === '[') {
-      const match = input.slice(offset).match(/^\x1b\[[0-?]*[ -/]*[@-~]/);
-      if (match) {
-        result += match[0];
-        offset += match[0].length;
-        continue;
-      }
-    }
-
-    const codePoint = input.codePointAt(offset);
-    const character = String.fromCodePoint(codePoint);
-    result += character;
-    offset += character.length;
-    width += 1;
-  }
-
-  return result;
-}
-
-function fitAnsi(value, width) {
-  const content = truncateAnsi(value, width);
-  return `${content}\x1b[0m${' '.repeat(Math.max(0, width - ansiWidth(content)))}`;
-}
-
-function joinAnsiEdges(left, right, width, gap = 2) {
-  if (width <= 0) return '';
-  const rightWidth = ansiWidth(right);
-  if (rightWidth >= width) return truncateAnsi(right, width);
-
-  const leftWidth = Math.max(0, width - rightWidth - gap);
-  const fittedLeft = truncateAnsi(left, leftWidth);
-  const padding = Math.max(1, width - ansiWidth(fittedLeft) - rightWidth);
-  return `${fittedLeft}${' '.repeat(padding)}${right}`;
-}
 
 function createLineCollector(onLine) {
   let pending = '';
@@ -246,19 +219,17 @@ async function checkHaproxyBuiltOrReady() {
   process.env.LB_HAPROXY_BIN = bundledBin;
 }
 
-class LBTUI {
+class ReziLBTUI {
   constructor(childPid) {
     this.pid = childPid;
     this.buf = new CircularBuffer(1000);
+    this.logSequence = 0;
     this.scroll = 0;
     this.run = true;
-    this.w = process.stdout.columns || 80;
-    this.h = process.stdout.rows || 24;
-    this.renderDeb = new Debouncer(() => this.renderFrame(), 50);
     this.metrics = new RateLimiter(1000);
     this.stats = {
-      cpu: '?',
-      mem: '?',
+      cpu: null,
+      mem: null,
       servers: null,
       serverList: [],
       onionUrl: null,
@@ -268,18 +239,10 @@ class LBTUI {
     };
     this.pollInFlight = null;
     this.redisModulesPromise = null;
-    this.needsFullClear = true;
-
-    this.cmdMode = false;
-    this.cmdInput = '';
-    this.cmdCursor = 0;
+    this.dashboard = null;
+    this.stopPromise = null;
     this.cmdHistory = [];
     this.cmdHistoryIndex = -1;
-    this.cmdSuggestions = [];
-    this.cmdSuggestionIndex = 0;
-    this.showInlineSuggestion = true;
-
-    // Available commands
     this.commands = [
       { name: '/help', desc: 'Show available commands', aliases: ['/h', '/?'] },
       { name: '/reload', desc: 'Reload HAProxy configuration', aliases: ['/r'] },
@@ -287,37 +250,6 @@ class LBTUI {
       { name: '/clear', desc: 'Clear log buffer', aliases: ['/c'] },
       { name: '/quit', desc: 'Stop load balancer and exit', aliases: ['/q'] },
     ];
-
-    process.stdout.on('resize', () => {
-      this.w = process.stdout.columns || 80;
-      this.h = process.stdout.rows || 24;
-      this.needsFullClear = true;
-      this.renderDeb.call();
-    });
-
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.setEncoding('utf8');
-      try { process.stdin.resume(); } catch { }
-      process.stdin.on('data', k => this.onKey(k));
-    }
-
-    process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
-  }
-
-  stop() {
-    if (!this.run) return;
-    this.run = false;
-    this.renderDeb.flush();
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
-    if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch { }
-      try { process.stdin.pause(); } catch { }
-    }
-    process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
   }
 
   add(line) {
@@ -325,43 +257,21 @@ class LBTUI {
       const parts = line.split('\r');
       line = parts[parts.length - 1];
     }
-    const keepViewportAnchored = this.scroll > 0;
-    this.buf.push(line);
-    if (keepViewportAnchored) {
-      this.scroll = Math.min(this.scroll + 1, Math.max(0, this.buf.len() - 1));
-    }
-    this.renderDeb.call();
-  }
-
-  updateCmdSuggestions() {
-    if (!this.cmdInput.startsWith('/')) {
-      this.cmdSuggestions = [];
-      return;
-    }
-
-    const input = this.cmdInput.toLowerCase();
-    this.cmdSuggestions = [];
-
-    const exactMatches = [];
-    const partialMatches = [];
-
-    for (const cmd of this.commands) {
-      if (cmd.name.toLowerCase() === input) {
-        exactMatches.push(cmd.name);
-      } else if (cmd.name.toLowerCase().startsWith(input)) {
-        partialMatches.push(cmd.name);
-      } else {
-        for (const alias of cmd.aliases || []) {
-          if (alias.toLowerCase().startsWith(input)) {
-            partialMatches.push(cmd.name);
-            break;
-          }
-        }
-      }
-    }
-
-    this.cmdSuggestions = [...exactMatches, ...partialMatches];
-    this.cmdSuggestionIndex = 0;
+    const cleanLine = String(line)
+      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+      .replace(ANSI_SEQUENCE, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+    const entry = this.logEntryFactory
+      ? this.logEntryFactory(cleanLine, ++this.logSequence, 'load-balancer')
+      : {
+          id: `load-balancer-${++this.logSequence}`,
+          timestamp: Date.now(),
+          level: /\b(error|fatal|panic|failed)\b/i.test(cleanLine) ? 'error' : (/\bwarn/i.test(cleanLine) ? 'warn' : 'info'),
+          source: 'load-balancer',
+          message: cleanLine,
+        };
+    this.buf.push(entry);
+    this.render();
   }
 
   async getKeypair() {
@@ -541,202 +451,6 @@ class LBTUI {
     }
   }
 
-  onKey(k) {
-    const c = k.charCodeAt(0);
-
-    if (this.cmdMode) {
-      if (c === 3 || k === '\x1b') { // Ctrl+C or ESC
-        this.cmdMode = false;
-        this.cmdInput = '';
-        this.cmdCursor = 0;
-        this.cmdSuggestions = [];
-        this.cmdHistoryIndex = -1;
-        this.renderDeb.call();
-        return;
-      }
-
-      if (k === '\r' || k === '\n') { // Enter
-        const cmd = this.cmdInput;
-        this.cmdMode = false;
-        this.cmdInput = '';
-        this.cmdCursor = 0;
-        this.cmdSuggestions = [];
-        this.cmdHistoryIndex = -1;
-        this.renderDeb.call();
-        if (cmd) this.executeCommand(cmd);
-        return;
-      }
-
-      if (k === '\t') { // Tab autocomplete
-        if (this.cmdSuggestions.length > 0) {
-          this.cmdInput = this.cmdSuggestions[this.cmdSuggestionIndex];
-          this.cmdCursor = this.cmdInput.length;
-          this.cmdSuggestionIndex = (this.cmdSuggestionIndex + 1) % this.cmdSuggestions.length;
-          this.updateCmdSuggestions();
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x7f' || k === '\b') { // Backspace
-        if (this.cmdCursor > 0) {
-          this.cmdInput = this.cmdInput.slice(0, this.cmdCursor - 1) + this.cmdInput.slice(this.cmdCursor);
-          this.cmdCursor--;
-          this.updateCmdSuggestions();
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x1b[3~') { // Delete
-        if (this.cmdCursor < this.cmdInput.length) {
-          this.cmdInput = this.cmdInput.slice(0, this.cmdCursor) + this.cmdInput.slice(this.cmdCursor + 1);
-          this.updateCmdSuggestions();
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x1b[D') { // Left arrow
-        if (this.cmdCursor > 0) {
-          this.cmdCursor--;
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x1b[C') { // Right arrow
-        if (this.cmdCursor < this.cmdInput.length) {
-          this.cmdCursor++;
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x1b[H' || c === 1) { // Home or Ctrl+A
-        this.cmdCursor = 0;
-        this.renderDeb.call();
-        return;
-      }
-
-      if (k === '\x1b[F' || c === 5) { // End or Ctrl+E
-        this.cmdCursor = this.cmdInput.length;
-        this.renderDeb.call();
-        return;
-      }
-
-      if (k === '\x1b[A') { // Up arrow history
-        if (this.cmdHistory.length > 0) {
-          if (this.cmdHistoryIndex === -1) {
-            this.cmdHistoryIndex = this.cmdHistory.length - 1;
-          } else if (this.cmdHistoryIndex > 0) {
-            this.cmdHistoryIndex--;
-          }
-          this.cmdInput = this.cmdHistory[this.cmdHistoryIndex];
-          this.cmdCursor = this.cmdInput.length;
-          this.updateCmdSuggestions();
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (k === '\x1b[B') { // Down arrow history
-        if (this.cmdHistoryIndex !== -1) {
-          if (this.cmdHistoryIndex < this.cmdHistory.length - 1) {
-            this.cmdHistoryIndex++;
-            this.cmdInput = this.cmdHistory[this.cmdHistoryIndex];
-          } else {
-            this.cmdHistoryIndex = -1;
-            this.cmdInput = '';
-          }
-          this.cmdCursor = this.cmdInput.length;
-          this.updateCmdSuggestions();
-          this.renderDeb.call();
-        }
-        return;
-      }
-
-      if (c >= 32 && c <= 126) {
-        this.cmdInput = this.cmdInput.slice(0, this.cmdCursor) + k + this.cmdInput.slice(this.cmdCursor);
-        this.cmdCursor++;
-        this.updateCmdSuggestions();
-        this.renderDeb.call();
-        return;
-      }
-
-      return;
-    }
-
-    // Normal mode handling
-    if (k === '/' || k === ':') {
-      this.cmdMode = true;
-      this.cmdInput = '/';
-      this.cmdCursor = 1;
-      this.updateCmdSuggestions();
-      this.renderDeb.call();
-      return;
-    }
-
-    if (k === 'q' || k === 'Q' || c === 3) {
-      this.stop();
-      try { process.kill(this.pid, 'SIGTERM'); } catch { }
-      return;
-    }
-
-    const vis = Math.max(1, this.h - 6);
-    const max = Math.max(0, this.buf.len() - vis);
-
-    if (k === '\x1b[A' || k === 'k') {
-      this.scroll = Math.min(this.scroll + 1, max);
-      this.renderDeb.call();
-    } else if (k === '\x1b[B' || k === 'j') {
-      this.scroll = Math.max(this.scroll - 1, 0);
-      this.renderDeb.call();
-    } else if (k === '\x1b[5~' || c === 21) {
-      this.scroll = Math.min(this.scroll + vis, max);
-      this.renderDeb.call();
-    } else if (k === '\x1b[6~' || c === 4) {
-      this.scroll = Math.max(this.scroll - vis, 0);
-      this.renderDeb.call();
-    } else if (k === 'g') {
-      this.scroll = max;
-      this.renderDeb.call();
-    } else if (k === 'G') {
-      this.scroll = 0;
-      this.renderDeb.call();
-    }
-  }
-  poll() {
-    if (this.pollInFlight || !this.metrics.ok()) return this.pollInFlight;
-    this.pollInFlight = this.pollOnce().finally(() => {
-      this.pollInFlight = null;
-      this.renderDeb.call();
-    });
-    return this.pollInFlight;
-  }
-
-  async pollOnce() {
-    const metricsPromise = readProcessMetrics(this.pid);
-
-    try {
-      const snapshot = await this.getStatusSnapshot();
-      this.stats.servers = snapshot.servers.length;
-      this.stats.serverList = snapshot.servers;
-      this.stats.onionUrl = snapshot.onionUrl;
-      if (snapshot.lbPort) this.stats.lbPort = snapshot.lbPort;
-      this.stats.dataState = 'live';
-      this.stats.updatedAt = Date.now();
-    } catch {
-      this.stats.dataState = this.stats.updatedAt === null ? 'unavailable' : 'stale';
-    }
-
-    const processMetrics = await metricsPromise;
-    if (processMetrics) {
-      this.stats.cpu = processMetrics.cpu;
-      this.stats.mem = processMetrics.mem;
-    }
-  }
-
   async getStatusSnapshot() {
     const { redisKeys } = await this.getRedisModules();
     return this.withRedisClient(async (client) => {
@@ -766,106 +480,121 @@ class LBTUI {
     });
   }
 
-  start() {
-    this.renderDeb.call();
-    void this.poll();
-    this.interval = setInterval(() => {
-      void this.poll();
-    }, 1000);
-    process.on('SIGINT', () => this.stop());
-    process.on('SIGTERM', () => this.stop());
+  poll() {
+    if (this.pollInFlight || !this.metrics.ok()) return this.pollInFlight;
+    this.pollInFlight = this.pollOnce().finally(() => {
+      this.pollInFlight = null;
+      if (this.run) this.render();
+    });
+    return this.pollInFlight;
   }
 
-  renderFrame() {
-    if (!this.run) return;
-    const w = Math.max(1, this.w);
-    const h = Math.max(1, this.h);
-    const lines = [];
-    const dataStatus = {
-      connecting: '\x1b[36m● CONNECTING\x1b[0m',
-      live: '',
-      stale: '\x1b[33m● STALE\x1b[0m',
-      unavailable: '\x1b[31m● REDIS OFFLINE\x1b[0m',
-    }[this.stats.dataState] || '\x1b[90m● UNKNOWN\x1b[0m';
-    const serverCount = this.stats.servers === null ? '—' : String(this.stats.servers);
-    const serverLabel = this.stats.servers === 1 ? 'SERVER' : 'SERVERS';
-    const title = '\x1b[1;36m QOR\x1b[0m  \x1b[1mLOAD BALANCER\x1b[0m';
-    const statusPrefix = dataStatus ? `${dataStatus}  ` : '';
-    const topRight = `${statusPrefix}\x1b[1m${serverCount} ${serverLabel}\x1b[0m `;
-
-    if (h < 8 || w < 34) {
-      lines.push(joinAnsiEdges(title, `${serverCount} ${serverLabel}`, w));
-      lines.push(joinAnsiEdges(dataStatus, `PID ${this.pid}`, w));
-      if (h > 2) lines.push('\x1b[90mResize the terminal for the activity view\x1b[0m');
-      this.writeFrame(lines, w, h);
-      return;
-    }
-
-    lines.push(joinAnsiEdges(title, topRight, w));
-
-    const httpsPort = this.stats.lbPort || CONFIG.HAPROXY_HTTPS_PORT;
-    const ports = ` \x1b[90mHTTPS\x1b[0m :${httpsPort}   \x1b[90mSTATS\x1b[0m :${CONFIG.HAPROXY_STATS_PORT}`;
-    const processStats = `PID ${this.pid}   CPU ${this.stats.cpu}%   MEM ${this.stats.mem}% `;
-    lines.push(joinAnsiEdges(ports, processStats, w));
-
-    let edgeLabel = 'Waiting for Tor publication';
-    if (this.stats.onionUrl) edgeLabel = this.stats.onionUrl;
-    if (this.stats.dataState === 'unavailable') edgeLabel = 'Redis status unavailable';
-    const freshness = this.stats.dataState === 'stale'
-      ? 'showing last known state '
-      : `heartbeat window ${Math.round(CONFIG.SERVER_ACTIVE_TIMEOUT_MS / 1000)}s `;
-    lines.push(joinAnsiEdges(` \x1b[90mEDGE\x1b[0m  ${edgeLabel}`, `\x1b[90m${freshness}\x1b[0m`, w));
-
-    const activityTitle = this.scroll > 0
-      ? ` ACTIVITY · ${this.scroll} NEWER `
-      : ' ACTIVITY ';
-    lines.push(`┌─${activityTitle}${'─'.repeat(Math.max(0, w - activityTitle.length - 3))}┐`);
-
-    const vis = Math.max(1, h - 6);
-    const start = Math.max(0, this.buf.len() - vis - this.scroll);
-    const end = this.buf.len() - this.scroll;
-    const slice = this.buf.get().slice(start, end);
-    const contentWidth = Math.max(0, w - 4);
-    for (let i = 0; i < vis; i++) {
-      lines.push(`│ ${fitAnsi(slice[i] || '', contentWidth)}\x1b[0m │`);
-    }
-    lines.push('└' + '─'.repeat(Math.max(0, w - 2)) + '┘');
-
-    if (this.cmdMode) {
-      const maxInputWidth = Math.max(1, w - 3);
-      const inputStart = Math.max(0, this.cmdCursor - maxInputWidth + 1);
-      const cmdDisplay = this.cmdInput.slice(inputStart, inputStart + maxInputWidth);
-      const cursorPos = Math.max(0, Math.min(this.cmdCursor - inputStart, cmdDisplay.length));
-      let inlineSuggestion = '';
-      if (this.cmdSuggestions.length > 0 && this.cmdInput.length > 0 && this.cmdCursor === this.cmdInput.length) {
-        const firstSuggestion = this.cmdSuggestions[0];
-        if (firstSuggestion.toLowerCase().startsWith(this.cmdInput.toLowerCase())) {
-          inlineSuggestion = firstSuggestion.substring(this.cmdInput.length);
-        }
-      }
-      const beforeCursor = cmdDisplay.substring(0, cursorPos);
-      const atCursor = cmdDisplay[cursorPos] || (inlineSuggestion ? inlineSuggestion[0] : ' ');
-      const afterCursor = cmdDisplay.substring(cursorPos + 1);
-      let cmdLine = `\x1b[36m›\x1b[0m ${beforeCursor}\x1b[7m${atCursor}\x1b[0m${afterCursor}`;
-      if (this.cmdCursor === this.cmdInput.length && inlineSuggestion.length > 0) {
-        cmdLine += `\x1b[90m${inlineSuggestion.substring(1)}\x1b[0m`;
-      }
-      lines.push(cmdLine);
-    } else {
-      lines.push(' \x1b[36m/\x1b[0m command   \x1b[90m↑↓\x1b[0m scroll   \x1b[90mPgUp/PgDn\x1b[0m page   \x1b[90mG\x1b[0m latest   \x1b[90mq\x1b[0m quit');
-    }
-
-    this.writeFrame(lines, w, h);
-  }
-
-  writeFrame(lines, width, height) {
-    const fittedLines = lines.slice(0, height).map((line) => `\x1b[2K${fitAnsi(line, width)}`);
-    const clearPrefix = this.needsFullClear ? '\x1b[2J' : '';
-    this.needsFullClear = false;
-    const out = `${clearPrefix}\x1b[H${fittedLines.join('\n')}\x1b[J`;
+  async pollOnce() {
+    const metricsPromise = readProcessMetrics(this.pid);
     try {
-      process.stdout.write(out);
-    } catch { }
+      const snapshot = await this.getStatusSnapshot();
+      this.stats.servers = snapshot.servers.length;
+      this.stats.serverList = snapshot.servers;
+      this.stats.onionUrl = snapshot.onionUrl;
+      if (snapshot.lbPort) this.stats.lbPort = snapshot.lbPort;
+      this.stats.dataState = 'live';
+      this.stats.updatedAt = Date.now();
+    } catch {
+      this.stats.dataState = this.stats.updatedAt === null ? 'unavailable' : 'stale';
+    }
+
+    const processMetrics = await metricsPromise;
+    if (processMetrics) {
+      this.stats.cpu = processMetrics.cpu;
+      this.stats.mem = processMetrics.mem;
+    }
+  }
+
+  recallHistory(direction, currentValue) {
+    if (!this.cmdHistory.length) return currentValue;
+    if (direction < 0) {
+      this.cmdHistoryIndex = this.cmdHistoryIndex < 0
+        ? this.cmdHistory.length - 1
+        : Math.max(0, this.cmdHistoryIndex - 1);
+      return this.cmdHistory[this.cmdHistoryIndex];
+    }
+    if (this.cmdHistoryIndex < 0) return currentValue;
+    if (this.cmdHistoryIndex < this.cmdHistory.length - 1) {
+      this.cmdHistoryIndex += 1;
+      return this.cmdHistory[this.cmdHistoryIndex];
+    }
+    this.cmdHistoryIndex = -1;
+    return '/';
+  }
+
+  _dataLabel() {
+    return {
+      connecting: 'Connecting',
+      live: 'Connected',
+      stale: 'Last known state',
+      unavailable: 'Redis unavailable',
+    }[this.stats.dataState] || 'Unknown';
+  }
+
+  _snapshot() {
+    return {
+      pid: this.pid,
+      cpu: this.stats.cpu,
+      mem: this.stats.mem,
+      servers: this.stats.servers,
+      serverList: [...this.stats.serverList],
+      onionUrl: this.stats.onionUrl,
+      httpsPort: this.stats.lbPort || CONFIG.HAPROXY_HTTPS_PORT,
+      statsPort: CONFIG.HAPROXY_STATS_PORT,
+      heartbeatWindow: `${Math.round(CONFIG.SERVER_ACTIVE_TIMEOUT_MS / 1000)} seconds`,
+      dataState: this.stats.dataState,
+      dataLabel: this._dataLabel(),
+      logs: [...this.buf.get()],
+    };
+  }
+
+  render() {
+    if (this.run && this.dashboard) this.dashboard.update(this._snapshot());
+  }
+
+  terminate() {
+    void this.stop();
+    try { process.kill(this.pid, 'SIGTERM'); } catch { }
+  }
+
+  stop() {
+    if (this.stopPromise) return this.stopPromise;
+    this.run = false;
+    if (this.interval) clearInterval(this.interval);
+    this.interval = null;
+    if (this.sigintHandler) process.removeListener('SIGINT', this.sigintHandler);
+    if (this.sigtermHandler) process.removeListener('SIGTERM', this.sigtermHandler);
+    this.stopPromise = this.dashboard
+      ? this.dashboard.stop().catch(() => {})
+      : Promise.resolve();
+    return this.stopPromise;
+  }
+
+  async start() {
+    const { createLoadBalancerDashboard, logEntry } = await import('./qor-rezi-tui.js');
+    this.logEntryFactory = logEntry;
+    this.dashboard = createLoadBalancerDashboard(this._snapshot(), {
+      stop: () => this.terminate(),
+      submitCommand: async (command) => {
+        this.cmdHistoryIndex = -1;
+        await this.executeCommand(command);
+        this.render();
+      },
+      recallHistory: (direction, currentValue) => this.recallHistory(direction, currentValue),
+    });
+    await this.dashboard.start();
+    this.render();
+    void this.poll();
+    this.interval = setInterval(() => void this.poll(), 1000);
+    this.sigintHandler = () => this.terminate();
+    this.sigtermHandler = () => this.terminate();
+    process.on('SIGINT', this.sigintHandler);
+    process.on('SIGTERM', this.sigtermHandler);
   }
 }
 
@@ -1079,9 +808,7 @@ async function checkStatsCredentials() {
     process.exit(1);
   }
 
-  console.log('\x1b[34m╔════════════════════════════════════════════╗\x1b[0m');
-  console.log('\x1b[34m║\x1b[32m            Load Balancer                 \x1b[34m║\x1b[0m');
-  console.log('\x1b[34m╚════════════════════════════════════════════╝\x1b[0m');
+  if (!CONFIG.NO_GUI) await validateTuiDependencies();
 
   await checkHaproxyCerts();
   await checkStatsCredentials();
@@ -1128,7 +855,7 @@ async function checkStatsCredentials() {
     exitedImmediately = false;
   }, 1000);
 
-  const ui = new LBTUI(child.pid);
+  const ui = new ReziLBTUI(child.pid);
 
   const last = []; const MAX = 200; const push = (l) => { last.push(l); if (last.length > MAX) last.shift(); };
   const collectLine = (line) => {
@@ -1141,11 +868,11 @@ async function checkStatsCredentials() {
   const stderrLines = createLineCollector(collectLine);
   child.stdout.on('data', (chunk) => stdoutLines.push(chunk));
   child.stderr.on('data', (chunk) => stderrLines.push(chunk));
-  child.on('exit', (code) => {
+  child.on('exit', async (code) => {
     clearTimeout(immediateCheck);
     stdoutLines.flush();
     stderrLines.flush();
-    ui.stop();
+    await ui.stop();
 
     if (code === 0 && exitedImmediately !== false) {
       const hasExistingMsg = capturedOutput.some(l => /already running/i.test(l));
@@ -1158,10 +885,10 @@ async function checkStatsCredentials() {
           console.log(`\n[INFO] Stopping existing load balancer (PID: ${existingPid})...`);
           try {
             process.kill(existingPid, 'SIGTERM');
-            setTimeout(() => {
+            setTimeout(async () => {
               console.log('[INFO] Restarting with TUI...\n');
               const restartChild = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-              const restartUi = new LBTUI(restartChild.pid);
+              const restartUi = new ReziLBTUI(restartChild.pid);
               const restartLast = [];
               const collectRestartLine = (line) => {
                 if (!line.trim()) return;
@@ -1173,10 +900,10 @@ async function checkStatsCredentials() {
               const restartStderrLines = createLineCollector(collectRestartLine);
               restartChild.stdout.on('data', (chunk) => restartStdoutLines.push(chunk));
               restartChild.stderr.on('data', (chunk) => restartStderrLines.push(chunk));
-              restartChild.on('exit', (c) => {
+              restartChild.on('exit', async (c) => {
                 restartStdoutLines.flush();
                 restartStderrLines.flush();
-                restartUi.stop();
+                await restartUi.stop();
                 if (c !== 0) {
                   console.error(`\n[ERROR] Load balancer exited with code ${c}`);
                   if (restartLast.length) {
@@ -1186,7 +913,7 @@ async function checkStatsCredentials() {
                 }
                 process.exit(c || 0);
               });
-              restartUi.start();
+              await restartUi.start();
             }, 500);
             return;
           } catch (e) {
@@ -1220,5 +947,5 @@ async function checkStatsCredentials() {
   });
 
   exitedImmediately = true;
-  ui.start();
+  await ui.start();
 })();

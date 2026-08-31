@@ -9,6 +9,7 @@ import { deriveAuthRootKey } from '../crypto/auth-root.js';
 import { envInt } from '../utils/env.js';
 import { SHA_512_ALGORITHM } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { recordStorageOperation } from '../telemetry/server-telemetry.js';
 
 const ROUTING_IDENTIFIER_KEY = deriveAuthRootKey(PROTOCOL_KEYS.ROUTING_IDENTIFIER_ROOT);
 let routingIdentifierKeyDestroyed = false;
@@ -40,6 +41,38 @@ export function privateLookupId(namespace, identifier) {
 
 let pgPool = null;
 let pgPoolInitialization = null;
+const INSTRUMENTED_POSTGRES_CLIENT = Symbol('instrumentedPostgresClient');
+
+function instrumentPostgresClient(client) {
+  if (!client || client[INSTRUMENTED_POSTGRES_CLIENT]) return client;
+  client[INSTRUMENTED_POSTGRES_CLIENT] = true;
+  const originalQuery = client.query;
+  client.query = function instrumentedQuery(...arguments_) {
+    const started = performance.now();
+    let result;
+    try {
+      result = originalQuery.apply(this, arguments_);
+    } catch (error) {
+      recordStorageOperation('postgres', performance.now() - started, true);
+      throw error;
+    }
+    if (!result || typeof result.then !== 'function') {
+      recordStorageOperation('postgres', performance.now() - started, false);
+      return result;
+    }
+    return result.then(
+      (value) => {
+        recordStorageOperation('postgres', performance.now() - started, false);
+        return value;
+      },
+      (error) => {
+        recordStorageOperation('postgres', performance.now() - started, true);
+        throw error;
+      }
+    );
+  };
+  return client;
+}
 
 function requiredDatabaseValue(value, label) {
   if (typeof value !== 'string' || value.length === 0) {
@@ -152,6 +185,7 @@ export async function getPgPool() {
 
     const config = databaseConnectionConfig();
     const candidate = new Pool(config);
+    candidate.on('connect', instrumentPostgresClient);
 
     try {
       await candidate.query('SELECT 1');

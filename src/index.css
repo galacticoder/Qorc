@@ -179,6 +179,13 @@
     border-color: hsl(var(--border));
   }
 
+  #root :focus,
+  #root :focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+    -webkit-focus-ring-color: transparent !important;
+  }
+
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
@@ -436,6 +443,137 @@ body,
   flex-basis: 176px;
 }
 
+.qor-top-nav {
+  position: absolute;
+  z-index: 80;
+  top: 8px;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.qor-top-nav-cluster {
+  width: max-content;
+  max-width: calc(100% - 16px);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(246, 247, 249, .9);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  pointer-events: auto;
+}
+
+.dark .qor-top-nav-cluster {
+  background: rgba(14, 14, 17, .9);
+}
+
+.qor-top-nav-brand {
+  flex: 0 0 auto;
+  margin: 0 8px;
+  display: flex;
+  align-items: center;
+}
+
+.qor-top-nav-sections {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.qor-top-nav-button {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: grid;
+  place-items: center;
+  overflow: visible;
+  border: 0;
+  border-radius: 10px;
+  padding: 0;
+  background: transparent;
+  color: var(--qor-muted-text);
+  cursor: pointer;
+  user-select: none;
+  transition: background .2s ease, color .2s ease;
+}
+
+.qor-top-nav-button:focus,
+.qor-top-nav-button:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.qor-top-nav-button:hover {
+  background: color-mix(in srgb, var(--qor-accent) 8%, transparent);
+  color: var(--qor-text);
+}
+
+.dark .qor-top-nav-button:hover {
+  background: #101015;
+  color: #ffffff;
+}
+
+.qor-top-nav-button.is-active,
+.qor-top-nav-button.is-active:hover {
+  background: var(--qor-accent);
+  color: #ffffff;
+}
+
+.qor-top-nav-settings {
+  margin-left: 8px;
+}
+
+.qor-top-nav-settings::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 11px;
+  width: 1px;
+  height: 20px;
+  background: var(--qor-border);
+  pointer-events: none;
+}
+
+.qor-top-nav-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.qor-top-nav-profile .qor-profile-avatar,
+.qor-top-nav-profile .qor-logout-icon {
+  z-index: 1;
+}
+
+.qor-top-nav-profile {
+  overflow: hidden;
+}
+
+.qor-top-nav-profile.is-holding {
+  background: #6b2c2b;
+}
+
+.qor-top-nav-profile.is-holding .qor-logout-progress {
+  opacity: 1;
+}
+
+.qor-top-nav-profile.is-holding .qor-profile-avatar {
+  opacity: 0;
+  transform: translateY(8px) scale(.9);
+}
+
+.qor-top-nav-profile.is-holding .qor-logout-icon {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
 .qor-rail-row {
   position: relative;
   width: 100%;
@@ -572,6 +710,13 @@ body,
 .qor-rail.is-expanded .qor-rail-label {
   width: 104px;
   opacity: 1;
+}
+
+html.light .qor-rail-label,
+.light .qor-rail-label,
+html.light .qor-profile-stack,
+.light .qor-profile-stack {
+  transition: width .3s ease;
 }
 
 .qor-profile-stack {
@@ -5196,22 +5341,35 @@ html.light .conn-sheet-btn.is-primary,
 /* ── Full-screen loading spinner */
 .qor-fullscreen-spinner {
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 17px;
   padding: 16px;
-  background: hsl(var(--background));
+  background: var(--qor-app-bg);
   user-select: none;
 }
 
+.qor-fullscreen-spinner-logo {
+  width: 45px;
+  height: 45px;
+  display: grid;
+  place-items: center;
+}
+
+.qor-fullscreen-spinner-logo-image {
+  width: 45px;
+  height: 45px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
 .qor-fullscreen-spinner-mark {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  border: 2px solid hsl(var(--muted-foreground));
-  border-top-color: transparent;
+  width: 17px;
+  height: 17px;
+  color: var(--qor-muted-text);
   will-change: transform;
-  animation: qor-fullscreen-spin 0.7s linear infinite;
+  animation: qor-fullscreen-spin 0.8s linear infinite;
 }
 
 @keyframes qor-fullscreen-spin {
@@ -5220,5 +5378,5 @@ html.light .conn-sheet-btn.is-primary,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .qor-fullscreen-spinner-mark { animation-duration: 1.4s; }
+  .qor-fullscreen-spinner-mark { animation-duration: 1.6s; }
 }

@@ -245,6 +245,52 @@ const APP_SETTINGS_CSS = `
       font-weight: 430;
     }
 
+    .navigation-layout-picker {
+      width: 164px;
+      height: 38px;
+      justify-self: end;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-items: center;
+      gap: 0;
+      padding: 0;
+      overflow: hidden;
+      border-radius: 9px;
+      background: var(--settings-control);
+    }
+
+    .navigation-layout-picker button {
+      width: 100%;
+      min-width: 0;
+      height: 38px;
+      border: 0;
+      border-radius: 0;
+      padding: 0 8px;
+      background: transparent;
+      color: var(--settings-muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .navigation-layout-picker button:hover {
+      background: var(--settings-hover);
+      color: var(--settings-text);
+    }
+
+    .navigation-layout-picker button.is-active,
+    .navigation-layout-picker button.is-active:hover {
+      background: var(--qor-accent, #7057c8);
+      color: #fff;
+    }
+
+    .navigation-layout-picker button:first-child {
+      border-radius: 9px 7px 7px 9px;
+    }
+
+    .navigation-layout-picker button:last-child {
+      border-radius: 7px 9px 9px 7px;
+    }
+
     .settings-icon-action,
     .settings-head-action,
     .action,

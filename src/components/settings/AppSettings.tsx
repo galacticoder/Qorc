@@ -26,6 +26,11 @@ import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../ui/UserAvatar';
 import { installAppSettingsStyles } from './sections/AppSettingsStyles';
 import { STORAGE_KEYS } from '../../lib/database/storage-keys';
+import {
+  readNavigationLayout,
+  writeNavigationLayout,
+  type NavigationLayout,
+} from '../../lib/ui/navigation-layout';
 
 installAppSettingsStyles();
 
@@ -138,6 +143,7 @@ export const AppSettings = React.memo(function AppSettings({
   const [logoutArmed, setLogoutArmed] = useState(false);
   const logoutTimerRef = useRef<number | null>(null);
   const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true });
+  const [navigationLayout, setNavigationLayout] = useState<NavigationLayout>(readNavigationLayout);
   const [closeToTray, setCloseToTray] = useState(true);
   const [isTrayLoading, setIsTrayLoading] = useState(true);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -396,6 +402,16 @@ export const AppSettings = React.memo(function AppSettings({
     setNotifications(updated);
     saveSettings({ notifications: updated });
     tauriNotifications.setEnabled(checked).catch(() => { });
+  };
+
+  const handleNavigationLayoutChange = (layout: NavigationLayout) => {
+    if (layout === navigationLayout) return;
+    try {
+      writeNavigationLayout(layout);
+      setNavigationLayout(layout);
+    } catch {
+      toast.error('Failed to update navigation layout');
+    }
   };
 
   const handleDevicePreference = (
@@ -676,6 +692,30 @@ export const AppSettings = React.memo(function AppSettings({
 
               <div className="settings-section">
                 <div className="settings-list">
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">Navigation layout</div>
+                      <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
+                    </div>
+                    <div className="navigation-layout-picker" role="group" aria-label="Navigation layout">
+                      <button
+                        type="button"
+                        className={navigationLayout === 'sidebar' ? 'is-active' : ''}
+                        aria-pressed={navigationLayout === 'sidebar'}
+                        onClick={() => handleNavigationLayoutChange('sidebar')}
+                      >
+                        Sidebar
+                      </button>
+                      <button
+                        type="button"
+                        className={navigationLayout === 'top' ? 'is-active' : ''}
+                        aria-pressed={navigationLayout === 'top'}
+                        onClick={() => handleNavigationLayoutChange('top')}
+                      >
+                        Top
+                      </button>
+                    </div>
+                  </div>
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Minimize to system tray on close</div>

@@ -74,6 +74,7 @@ export class ClusterManager extends EventEmitter {
     this.autoApprove = autoApprove;
     this.isApproved = isPrimary;
     this.isShuttingDown = false;
+    this.lastHeartbeatAt = null;
 
     // Cluster state
     this.clusterServers = new Map(); // serverId -> serverInfo
@@ -127,6 +128,7 @@ export class ClusterManager extends EventEmitter {
       } else {
         await this.requestClusterJoin();
       }
+      if (this.isApproved) this.lastHeartbeatAt = Date.now();
 
       await this.setupMessageSubscriber();
       this.startHeartbeat();
@@ -611,11 +613,22 @@ export class ClusterManager extends EventEmitter {
         info.lastHeartbeat = Date.now();
 
         await client.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(info));
+        this.lastHeartbeatAt = info.lastHeartbeat;
       });
     } catch (error) {
       console.error('[CLUSTER] Failed to send heartbeat', error);
       throw error;
     }
+  }
+
+  getTelemetrySnapshot() {
+    return {
+      serverId: this.serverId,
+      registration: this.isApproved ? 'registered' : 'pending',
+      heartbeatAgeSeconds: this.lastHeartbeatAt === null
+        ? null
+        : Math.max(0, Math.floor((Date.now() - this.lastHeartbeatAt) / 1000)),
+    };
   }
 
   // Start health monitoring of cluster servers
