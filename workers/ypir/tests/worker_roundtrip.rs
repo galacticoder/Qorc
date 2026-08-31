@@ -13,7 +13,7 @@ use ypir::client::*;
 use ypir::modulus_switch::ModulusSwitch;
 use ypir::packing::condense_matrix;
 use ypir::params::{params_for_scenario_simplepir, GetQPrime};
-use ypir::qor_spool::{unpack_record, wire};
+use ypir::qorc_spool::{unpack_record, wire};
 use ypir::scheme::{SEED_0, STATIC_SEED_2};
 
 const OP_BUILD: u8 = 1;
@@ -56,13 +56,13 @@ fn worker_path() -> std::path::PathBuf {
     if path.ends_with("deps") {
         path.pop();
     }
-    path.join("qor-pir-worker")
+    path.join("qorc-pir-worker")
 }
 
 #[test]
 fn worker_answers_a_query_with_the_requested_entry() {
     let records: Vec<Vec<u8>> = (0..COUNT).map(|i| record(i as u64 + 1)).collect();
-    let dir = std::env::temp_dir().join(format!("qor-pir-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("qorc-pir-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("records.bin");
     std::fs::write(&path, records.concat()).unwrap();
@@ -71,7 +71,7 @@ fn worker_answers_a_query_with_the_requested_entry() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("worker binary should be built; run `cargo build --release --bin qor-pir-worker`");
+        .expect("worker binary should be built; run `cargo build --release --bin qorc-pir-worker`");
 
     let epoch: u32 = 4242;
     let mut build = Vec::new();

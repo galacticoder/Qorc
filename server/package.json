@@ -1,7 +1,7 @@
 {
-  "name": "qor-chat-server",
+  "name": "qorc-server",
   "version": "1.0.0",
-  "description": "Server for Qor-Chat",
+  "description": "Server for qorc",
   "main": "server.js",
   "type": "module",
   "scripts": {

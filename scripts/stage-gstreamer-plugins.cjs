@@ -180,8 +180,8 @@ function captureRuntimeFiles(runtimeDir) {
 
 function writeCaptureManifest(runtimeDir, gstLaunchVersion) {
     const roleForPath = relativePath => {
-        if (relativePath === 'bin/qor-gst-launch-1.0') return 'launcher';
-        if (relativePath === 'bin/qor-gst-plugin-scanner') return 'plugin-scanner';
+        if (relativePath === 'bin/qorc-gst-launch-1.0') return 'launcher';
+        if (relativePath === 'bin/qorc-gst-plugin-scanner') return 'plugin-scanner';
         if (relativePath.startsWith('capture-plugins/')) return 'plugin';
         if (relativePath.startsWith('lib/')) return 'library';
         if (relativePath.startsWith('spa-0.2/')) return 'spa';
@@ -197,7 +197,7 @@ function writeCaptureManifest(runtimeDir, gstLaunchVersion) {
         };
     });
     const manifest = {
-        format: 'qor-gstreamer-capture-runtime',
+        format: 'qorc-gstreamer-capture-runtime',
         formatVersion: 1,
         platform: process.platform,
         architecture: process.arch,
@@ -212,8 +212,8 @@ function writeCaptureManifest(runtimeDir, gstLaunchVersion) {
 }
 
 function resolvePluginsDir() {
-    if (process.env.QOR_GSTREAMER_SYSTEM_PLUGINS_DIR) {
-        return path.resolve(process.env.QOR_GSTREAMER_SYSTEM_PLUGINS_DIR);
+    if (process.env.QORC_GSTREAMER_SYSTEM_PLUGINS_DIR) {
+        return path.resolve(process.env.QORC_GSTREAMER_SYSTEM_PLUGINS_DIR);
     }
     try {
         const resolved = execFileSync('pkg-config', ['--variable=pluginsdir', 'gstreamer-1.0'], {
@@ -303,7 +303,7 @@ for (const [sourceRelative, destinationRelative] of pipeWireRuntimeFiles) {
     fs.copyFileSync(source, destination);
 }
 
-const gStreamerLauncher = process.env.QOR_GSTREAMER_LAUNCH_SOURCE || [
+const gStreamerLauncher = process.env.QORC_GSTREAMER_LAUNCH_SOURCE || [
     '/usr/bin/gst-launch-1.0',
     '/bin/gst-launch-1.0'
 ].find(candidate => fs.statSync(candidate, { throwIfNoEntry: false })?.isFile());
@@ -312,12 +312,12 @@ if (!gStreamerLauncher || !fs.statSync(gStreamerLauncher, { throwIfNoEntry: fals
     console.error('[gstreamer] missing gst-launch-1.0 for native screen capture');
     process.exit(1);
 }
-const stagedLauncher = path.join(stagingDir, 'runtime', 'bin', 'qor-gst-launch-1.0');
+const stagedLauncher = path.join(stagingDir, 'runtime', 'bin', 'qorc-gst-launch-1.0');
 fs.mkdirSync(path.dirname(stagedLauncher), { recursive: true });
 fs.copyFileSync(gStreamerLauncher, stagedLauncher);
 fs.chmodSync(stagedLauncher, 0o755);
 
-const pluginScanner = process.env.QOR_GSTREAMER_PLUGIN_SCANNER_SOURCE || [
+const pluginScanner = process.env.QORC_GSTREAMER_PLUGIN_SCANNER_SOURCE || [
     path.join(systemLibDir, 'gstreamer1.0', 'gstreamer-1.0', 'gst-plugin-scanner'),
     '/usr/libexec/gstreamer-1.0/gst-plugin-scanner'
 ].find(candidate => fs.statSync(candidate, { throwIfNoEntry: false })?.isFile());
@@ -326,7 +326,7 @@ if (!pluginScanner || !fs.statSync(pluginScanner, { throwIfNoEntry: false })?.is
     console.error('[gstreamer] missing gst-plugin-scanner for native screen capture');
     process.exit(1);
 }
-const stagedScanner = path.join(stagingDir, 'runtime', 'bin', 'qor-gst-plugin-scanner');
+const stagedScanner = path.join(stagingDir, 'runtime', 'bin', 'qorc-gst-plugin-scanner');
 fs.copyFileSync(pluginScanner, stagedScanner);
 fs.chmodSync(stagedScanner, 0o755);
 

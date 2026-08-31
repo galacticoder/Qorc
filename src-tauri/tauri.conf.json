@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Qor",
+  "productName": "qorc",
   "version": "1.0.0",
-  "identifier": "com.qor.chat",
+  "identifier": "com.qorc.app",
   "build": {
     "frontendDist": "../dist",
     "beforeBuildCommand": "node scripts/prepare-tauri-frontend.cjs",
@@ -17,7 +17,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "qor",
+        "title": "qorc",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -61,7 +61,7 @@
   "bundle": {
     "active": true,
     "publisher": "galacticoderr",
-    "homepage": "https://github.com/galacticoder/Qor-Chat",
+    "homepage": "https://github.com/galacticoder/qorc",
     "targets": [
       "deb",
       "rpm",
@@ -88,7 +88,7 @@
       },
       "deb": {
         "files": {
-          "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
+          "/usr/share/metainfo/com.qorc.app.metainfo.xml": "linux/com.qorc.app.metainfo.xml"
         },
         "depends": [
           "libwebkit2gtk-4.1-0",
@@ -97,7 +97,7 @@
       },
       "rpm": {
         "files": {
-          "/usr/share/metainfo/com.qor.chat.metainfo.xml": "linux/com.qor.chat.metainfo.xml"
+          "/usr/share/metainfo/com.qorc.app.metainfo.xml": "linux/com.qorc.app.metainfo.xml"
         },
         "compression": {
           "type": "zstd",

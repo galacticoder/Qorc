@@ -128,7 +128,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     return createPortal(
         <div
             ref={menuRef}
-            className="qor-message-context-menu fixed z-50 rounded-xl overflow-hidden shadow-xl flex flex-col"
+            className="qorc-message-context-menu fixed z-50 rounded-xl overflow-hidden shadow-xl flex flex-col"
             style={{
                 top: position?.top ?? 0,
                 left: position?.left ?? 0,
@@ -136,7 +136,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
             }}
         >
             {(onReactionSelect || onReact) && (
-            <div className="qor-message-context-reactions">
+            <div className="qorc-message-context-reactions">
                 {QUICK_REACTIONS.map((emoji) => (
                     <button
                         key={emoji}
@@ -146,7 +146,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                             onReactionSelect?.(emoji);
                             onClose();
                         }}
-                        className="qor-message-context-reaction"
+                        className="qorc-message-context-reaction"
                         aria-label={`React with ${emoji}`}
                     >
                         {emoji}
@@ -159,7 +159,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                             onReact?.(position ?? { top: anchorRect.top, left: anchorRect.left });
                             onClose();
                         }}
-                    className="qor-message-context-more-reactions"
+                    className="qorc-message-context-more-reactions"
                     title="Add Reaction"
                     aria-label="Add reaction"
                 >
@@ -168,12 +168,12 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
             </div>
             )}
 
-            <div className="qor-message-context-actions">
+            <div className="qorc-message-context-actions">
                 {onReply && (
                 <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onReply?.(); onClose(); }}
-                    className="qor-message-context-action"
+                    className="qorc-message-context-action"
                     title="Reply"
                     aria-label="Reply"
                 >
@@ -185,7 +185,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                     <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); onCopy?.(); onClose(); }}
-                        className="qor-message-context-action"
+                        className="qorc-message-context-action"
                         title="Copy"
                         aria-label="Copy"
                     >
@@ -197,7 +197,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                     <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); onEdit?.(); onClose(); }}
-                        className="qor-message-context-action"
+                        className="qorc-message-context-action"
                         title="Edit"
                         aria-label="Edit"
                     >
@@ -209,7 +209,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                     <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); onDownload?.(); onClose(); }}
-                        className="qor-message-context-action"
+                        className="qorc-message-context-action"
                         title="Download"
                         aria-label="Download"
                     >
@@ -221,7 +221,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                     <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); onDelete?.(); onClose(); }}
-                        className="qor-message-context-action qor-message-context-action--danger"
+                        className="qorc-message-context-action qorc-message-context-action--danger"
                         title="Delete"
                         aria-label="Delete"
                     >

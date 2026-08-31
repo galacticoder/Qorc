@@ -75,7 +75,7 @@ const DISCOVERY_BUCKET_POW_DIFFICULTY = 18;
 const AVATAR_GET_POW_DIFFICULTY = 16;
 const AVATAR_PUT_POW_DIFFICULTY = 18;
 const router = express.Router();
-const PQ_ANONYMOUS_INTERNAL_REQUEST = Symbol('qor.pqAnonymousInternalRequest');
+const PQ_ANONYMOUS_INTERNAL_REQUEST = Symbol('qorc.pqAnonymousInternalRequest');
 
 function fail(res, status, error) {
   return res.status(status).json({ ok: false, error });

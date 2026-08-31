@@ -1,6 +1,6 @@
 //! screen source enumeration for screen share picker
 
-use crate::error::QorResult;
+use crate::error::QorcResult;
 use serde::Serialize;
 
 const MAX_SCREEN_SOURCES: usize = 128;
@@ -13,7 +13,7 @@ pub struct ScreenSource {
     pub source_type: String,
 }
 
-pub async fn get_sources() -> QorResult<Vec<ScreenSource>> {
+pub async fn get_sources() -> QorcResult<Vec<ScreenSource>> {
     #[cfg(target_os = "linux")]
     {
         get_sources_linux().await
@@ -116,7 +116,7 @@ async fn run_bounded_command(path: &str, args: &[&str]) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "linux")]
-async fn get_sources_linux() -> QorResult<Vec<ScreenSource>> {
+async fn get_sources_linux() -> QorcResult<Vec<ScreenSource>> {
     use std::path::Path;
 
     let mut sources = Vec::new();
@@ -164,7 +164,7 @@ async fn get_sources_linux() -> QorResult<Vec<ScreenSource>> {
 }
 
 #[cfg(target_os = "windows")]
-async fn get_sources_windows() -> QorResult<Vec<ScreenSource>> {
+async fn get_sources_windows() -> QorcResult<Vec<ScreenSource>> {
     use std::sync::{Arc, Mutex};
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, IsWindowVisible};

@@ -12,7 +12,7 @@ export {
 } from './patterns.js';
 
 export const AUTH_CHANNEL_BINDING_BYTES = 64;
-const AUTH_CHANNEL_BINDING_CONTEXT = 'Qor-Authentication-Channel-Binding-v1';
+const AUTH_CHANNEL_BINDING_CONTEXT = 'qorc-Authentication-Channel-Binding-v1';
 
 const encoder = new TextEncoder();
 

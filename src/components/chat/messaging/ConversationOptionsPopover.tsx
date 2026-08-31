@@ -51,19 +51,19 @@ export function ConversationOptionsPopover({
         <Button
           size="sm"
           variant="ghost"
-          className="qor-call-pill-btn qor-chat-more-btn"
+          className="qorc-call-pill-btn qorc-more-btn"
           title="Options"
           aria-label={ariaLabel}
         >
           <MoreVertical className="w-4 h-4" aria-hidden="true" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="qor-conversation-options-popover select-none" align="end">
-        <div className="qor-conversation-options-menu">
-          <div className="qor-conversation-options-title">Options</div>
+      <PopoverContent className="qorc-conversation-options-popover select-none" align="end">
+        <div className="qorc-conversation-options-menu">
+          <div className="qorc-conversation-options-title">Options</div>
           <button
             type="button"
-            className="qor-conversation-options-action"
+            className="qorc-conversation-options-action"
             disabled={!onToggleBlock || updating}
             onClick={() => void handleToggleBlock()}
           >

@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::database::DatabaseManager;
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::signal_protocol::PendingDecryptedMessage;
 
 const MAX_PRIVATE_MESSAGE_CHARS: usize = 16 * 1024;
@@ -165,20 +165,20 @@ pub fn message_links(content: &str) -> Vec<NativeMessageLinkTarget> {
         .collect()
 }
 
-fn parse_rgb(color: &str) -> QorResult<(u8, u8, u8)> {
+fn parse_rgb(color: &str) -> QorcResult<(u8, u8, u8)> {
     if color.len() != 7 || !color.starts_with('#') || !color[1..].is_ascii() {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid native message render color".to_string(),
         ));
     }
     let red = u8::from_str_radix(&color[1..3], 16).map_err(|_| {
-        QorError::InvalidArgument("Invalid native message render color".to_string())
+        QorcError::InvalidArgument("Invalid native message render color".to_string())
     })?;
     let green = u8::from_str_radix(&color[3..5], 16).map_err(|_| {
-        QorError::InvalidArgument("Invalid native message render color".to_string())
+        QorcError::InvalidArgument("Invalid native message render color".to_string())
     })?;
     let blue = u8::from_str_radix(&color[5..7], 16).map_err(|_| {
-        QorError::InvalidArgument("Invalid native message render color".to_string())
+        QorcError::InvalidArgument("Invalid native message render color".to_string())
     })?;
     Ok((red, green, blue))
 }
@@ -208,7 +208,7 @@ pub fn render_private_message(
     color: &str,
     single_line: bool,
     max_lines: u32,
-) -> QorResult<RenderedMessageContent> {
+) -> QorcResult<RenderedMessageContent> {
     use base64::Engine as _;
     use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
     use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
@@ -218,7 +218,7 @@ pub fn render_private_message(
         || !(10.0..=32.0).contains(&font_size)
         || max_lines > 8
     {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid native message render dimensions".to_string(),
         ));
     }
@@ -332,7 +332,7 @@ pub fn render_private_message(
         .ok()
         .and_then(|value| value.checked_mul(height as usize))
         .and_then(|value| value.checked_mul(4))
-        .ok_or_else(|| QorError::InvalidArgument("Native render size overflow".to_string()))?;
+        .ok_or_else(|| QorcError::InvalidArgument("Native render size overflow".to_string()))?;
     let mut pixels = Zeroizing::new(vec![0u8; pixel_len]);
     let base_color = Color::rgb(red, green, blue);
     buffer.draw(
@@ -360,9 +360,9 @@ pub fn render_private_message(
     let mut encoded = Zeroizing::new(Vec::new());
     PngEncoder::new(&mut Cursor::new(&mut *encoded))
         .write_image(pixels.as_slice(), width, height, ExtendedColorType::Rgba8)
-        .map_err(|_| QorError::Internal("Native message PNG encoding failed".to_string()))?;
+        .map_err(|_| QorcError::Internal("Native message PNG encoding failed".to_string()))?;
     if encoded.len() > 4 * 1024 * 1024 {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Native message render output exceeded its limit".to_string(),
         ));
     }
@@ -386,7 +386,7 @@ fn valid_username(value: &str) -> bool {
         })
 }
 
-fn encode_record(record: &NativeMessageContentRecord) -> QorResult<Zeroizing<Vec<u8>>> {
+fn encode_record(record: &NativeMessageContentRecord) -> QorcResult<Zeroizing<Vec<u8>>> {
     let (recipient, application_type, wire_message_id) = match record.outbound.as_ref() {
         Some(binding) => (
             binding.recipient.as_bytes(),
@@ -396,13 +396,13 @@ fn encode_record(record: &NativeMessageContentRecord) -> QorResult<Zeroizing<Vec
         None => (&[][..], &[][..], &[][..]),
     };
     let recipient_len = u16::try_from(recipient.len())
-        .map_err(|_| QorError::InvalidArgument("Invalid native content binding".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid native content binding".to_string()))?;
     let type_len = u16::try_from(application_type.len())
-        .map_err(|_| QorError::InvalidArgument("Invalid native content binding".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid native content binding".to_string()))?;
     let wire_len = u16::try_from(wire_message_id.len())
-        .map_err(|_| QorError::InvalidArgument("Invalid native content binding".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid native content binding".to_string()))?;
     let content_len = u32::try_from(record.content.len())
-        .map_err(|_| QorError::InvalidArgument("Invalid native message content".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid native message content".to_string()))?;
     let capacity = 4usize
         .checked_add(1)
         .and_then(|value| value.checked_add(2 + 2 + 2 + 4))
@@ -411,7 +411,7 @@ fn encode_record(record: &NativeMessageContentRecord) -> QorResult<Zeroizing<Vec
         .and_then(|value| value.checked_add(wire_message_id.len()))
         .and_then(|value| value.checked_add(record.content.len()))
         .ok_or_else(|| {
-            QorError::InvalidArgument("Native content record is too large".to_string())
+            QorcError::InvalidArgument("Native content record is too large".to_string())
         })?;
     let mut encoded = Zeroizing::new(Vec::with_capacity(capacity));
     encoded.extend_from_slice(crate::protocol_keys::NATIVE_MESSAGE_CONTENT_MAGIC);
@@ -427,23 +427,23 @@ fn encode_record(record: &NativeMessageContentRecord) -> QorResult<Zeroizing<Vec
     Ok(encoded)
 }
 
-fn read_u16(input: &[u8], offset: &mut usize) -> QorResult<usize> {
+fn read_u16(input: &[u8], offset: &mut usize) -> QorcResult<usize> {
     let end = offset
         .checked_add(2)
-        .ok_or_else(|| QorError::DecryptionFailed("Invalid native content record".to_string()))?;
+        .ok_or_else(|| QorcError::DecryptionFailed("Invalid native content record".to_string()))?;
     let bytes: [u8; 2] = input
         .get(*offset..end)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| QorError::DecryptionFailed("Invalid native content record".to_string()))?;
+        .ok_or_else(|| QorcError::DecryptionFailed("Invalid native content record".to_string()))?;
     *offset = end;
     Ok(u16::from_be_bytes(bytes) as usize)
 }
 
-fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentRecord> {
+fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorcResult<NativeMessageContentRecord> {
     if encoded.len() < 15
         || encoded.get(..4) != Some(crate::protocol_keys::NATIVE_MESSAGE_CONTENT_MAGIC.as_slice())
     {
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native content record".to_string(),
         ));
     }
@@ -451,7 +451,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
         0 => false,
         1 => true,
         _ => {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid native content record".to_string(),
             ));
         }
@@ -462,11 +462,11 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
     let wire_len = read_u16(encoded.as_slice(), &mut offset)?;
     let content_len_end = offset
         .checked_add(4)
-        .ok_or_else(|| QorError::DecryptionFailed("Invalid native content record".to_string()))?;
+        .ok_or_else(|| QorcError::DecryptionFailed("Invalid native content record".to_string()))?;
     let content_len_bytes: [u8; 4] = encoded
         .get(offset..content_len_end)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| QorError::DecryptionFailed("Invalid native content record".to_string()))?;
+        .ok_or_else(|| QorcError::DecryptionFailed("Invalid native content record".to_string()))?;
     offset = content_len_end;
     let content_len = u32::from_be_bytes(content_len_bytes) as usize;
     let total = offset
@@ -474,15 +474,15 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
         .and_then(|value| value.checked_add(type_len))
         .and_then(|value| value.checked_add(wire_len))
         .and_then(|value| value.checked_add(content_len))
-        .ok_or_else(|| QorError::DecryptionFailed("Invalid native content record".to_string()))?;
+        .ok_or_else(|| QorcError::DecryptionFailed("Invalid native content record".to_string()))?;
     if total != encoded.len() || content_len == 0 || content_len > 64 * 1024 {
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native content record".to_string(),
         ));
     }
-    let take_string = |start: usize, len: usize| -> QorResult<String> {
+    let take_string = |start: usize, len: usize| -> QorcResult<String> {
         String::from_utf8(encoded[start..start + len].to_vec())
-            .map_err(|_| QorError::DecryptionFailed("Invalid native content record".to_string()))
+            .map_err(|_| QorcError::DecryptionFailed("Invalid native content record".to_string()))
     };
     let recipient = take_string(offset, recipient_len)?;
     offset += recipient_len;
@@ -496,7 +496,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
             || !private_text_application_type(&application_type)
             || !valid_message_id(&wire_message_id)
         {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid native content binding".to_string(),
             ));
         }
@@ -507,7 +507,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
         })
     } else {
         if recipient_len != 0 || type_len != 0 || wire_len != 0 {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid native content record".to_string(),
             ));
         }
@@ -519,7 +519,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorResult<NativeMessageContentR
 pub fn load_native_content_record(
     db: &DatabaseManager,
     storage_id: &str,
-) -> QorResult<Option<NativeMessageContentRecord>> {
+) -> QorcResult<Option<NativeMessageContentRecord>> {
     db.get_native_message_content(storage_id)?
         .map(decode_record)
         .transpose()
@@ -529,7 +529,7 @@ fn persist_native_content_record(
     db: &DatabaseManager,
     storage_id: &str,
     record: &NativeMessageContentRecord,
-) -> QorResult<()> {
+) -> QorcResult<()> {
     let encoded = encode_record(record)?;
     db.set_native_message_content(storage_id, encoded.as_slice())
 }
@@ -544,10 +544,10 @@ fn valid_message_id(value: &str) -> bool {
         })
 }
 
-fn sanitize_private_text(value: &str) -> QorResult<Zeroizing<String>> {
+fn sanitize_private_text(value: &str) -> QorcResult<Zeroizing<String>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Private message content is empty".to_string(),
         ));
     }
@@ -560,7 +560,7 @@ fn sanitize_private_text(value: &str) -> QorResult<Zeroizing<String>> {
         sanitized.push(character);
     }
     if sanitized.is_empty() || sanitized.len() > 64 * 1024 {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Private message content is invalid".to_string(),
         ));
     }
@@ -570,23 +570,23 @@ fn sanitize_private_text(value: &str) -> QorResult<Zeroizing<String>> {
 fn payload_content(
     pending: &PendingDecryptedMessage,
     expected_wire_message_id: &str,
-) -> QorResult<Zeroizing<String>> {
+) -> QorcResult<Zeroizing<String>> {
     if !private_text_application_type(&pending.application_type)
         || !valid_message_id(expected_wire_message_id)
     {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid private message content request".to_string(),
         ));
     }
     let mut payload: serde_json::Value = serde_json::from_str(&pending.plaintext)
-        .map_err(|_| QorError::InvalidArgument("Invalid private message payload".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid private message payload".to_string()))?;
     let object = payload
         .as_object_mut()
-        .ok_or_else(|| QorError::InvalidArgument("Invalid private message payload".to_string()))?;
+        .ok_or_else(|| QorcError::InvalidArgument("Invalid private message payload".to_string()))?;
     if object.get("type").and_then(serde_json::Value::as_str)
         != Some(pending.application_type.as_str())
     {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Private message type binding mismatch".to_string(),
         ));
     }
@@ -596,7 +596,7 @@ fn payload_content(
         "messageId"
     };
     if object.get(selector).and_then(serde_json::Value::as_str) != Some(expected_wire_message_id) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Private message identifier binding mismatch".to_string(),
         ));
     }
@@ -604,7 +604,7 @@ fn payload_content(
         .get("content")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            QorError::InvalidArgument("Private message content is missing".to_string())
+            QorcError::InvalidArgument("Private message content is missing".to_string())
         })?;
     sanitize_private_text(content)
 }
@@ -613,7 +613,7 @@ pub fn redact_application_plaintext(
     plaintext: &str,
     application_type: &str,
     pending_id: &str,
-) -> QorResult<RedactedApplicationPlaintext> {
+) -> QorcResult<RedactedApplicationPlaintext> {
     if !private_text_application_type(application_type) {
         return Ok(RedactedApplicationPlaintext {
             plaintext: plaintext.to_string(),
@@ -621,17 +621,17 @@ pub fn redact_application_plaintext(
         });
     }
     if !valid_message_id(pending_id) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid staged message content reference".to_string(),
         ));
     }
     let mut payload: serde_json::Value = serde_json::from_str(plaintext)
-        .map_err(|_| QorError::InvalidArgument("Invalid private message payload".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid private message payload".to_string()))?;
     let object = payload
         .as_object_mut()
-        .ok_or_else(|| QorError::InvalidArgument("Invalid private message payload".to_string()))?;
+        .ok_or_else(|| QorcError::InvalidArgument("Invalid private message payload".to_string()))?;
     if object.get("type").and_then(serde_json::Value::as_str) != Some(application_type) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Private message type binding mismatch".to_string(),
         ));
     }
@@ -639,7 +639,7 @@ pub fn redact_application_plaintext(
         .get("content")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
-            QorError::InvalidArgument("Private message content is missing".to_string())
+            QorcError::InvalidArgument("Private message content is missing".to_string())
         })?;
     let sanitized = sanitize_private_text(content)?;
     if let Some(serde_json::Value::String(mut sensitive)) = object.insert(
@@ -654,7 +654,7 @@ pub fn redact_application_plaintext(
         serde_json::Value::String(pending_id.to_string()),
     );
     let serialized = serde_json::to_string(&payload)
-        .map_err(|_| QorError::InvalidArgument("Invalid private message payload".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid private message payload".to_string()))?;
     drop(sanitized);
     Ok(RedactedApplicationPlaintext {
         plaintext: serialized,
@@ -668,9 +668,9 @@ pub fn commit_pending_content(
     expected_wire_message_id: &str,
     storage_id: &str,
     overwrite: bool,
-) -> QorResult<ContentCommitResult> {
+) -> QorcResult<ContentCommitResult> {
     if !valid_message_id(storage_id) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid private message storage identifier".to_string(),
         ));
     }
@@ -713,14 +713,14 @@ pub fn store_outgoing_content(
     application_type: &str,
     wire_message_id: &str,
     overwrite: bool,
-) -> QorResult<ContentCommitResult> {
+) -> QorcResult<ContentCommitResult> {
     if !valid_message_id(storage_id)
         || !valid_username(recipient)
         || !private_text_application_type(application_type)
         || !valid_message_id(wire_message_id)
         || storage_id != wire_message_id
     {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid private message storage identifier".to_string(),
         ));
     }
@@ -766,14 +766,14 @@ pub fn clone_content_for_display(
     source_id: &str,
     target_id: &str,
     overwrite: bool,
-) -> QorResult<ContentCommitResult> {
+) -> QorcResult<ContentCommitResult> {
     if !valid_message_id(source_id) || !valid_message_id(target_id) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid private message storage identifier".to_string(),
         ));
     }
     let source = load_native_content_record(db, source_id)?.ok_or_else(|| {
-        QorError::NotInitialized("Native message content is unavailable".to_string())
+        QorcError::NotInitialized("Native message content is unavailable".to_string())
     })?;
     if let Some(existing) = load_native_content_record(db, target_id)? {
         let duplicate = existing.content.len() == source.content.len()
@@ -805,7 +805,7 @@ pub fn clone_content_for_display(
     })
 }
 
-pub fn revoke_outbound_binding(db: &DatabaseManager, storage_id: &str) -> QorResult<bool> {
+pub fn revoke_outbound_binding(db: &DatabaseManager, storage_id: &str) -> QorcResult<bool> {
     let Some(mut record) = load_native_content_record(db, storage_id)? else {
         return Ok(false);
     };

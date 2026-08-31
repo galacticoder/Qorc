@@ -301,7 +301,6 @@ class CircularBuffer {
     }
   }
   getAll() { return this.buffer; }
-  length() { return this.buffer.length; }
 }
 
 // Rate limiter for metrics polling
@@ -528,7 +527,7 @@ async function validateServerDeps() {
 }
 
 async function validatePostgresBootstrap() {
-  const dbName = process.env.PGDATABASE || 'Qor';
+  const dbName = process.env.PGDATABASE || 'qorc';
   const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
   const port = process.env.PGPORT || '5432';
   const user = process.env.DATABASE_USER || process.env.PGUSER || process.env.USER;
@@ -553,7 +552,7 @@ async function validatePostgresBootstrap() {
     return;
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      logErr('psql not found in PATH; skipping Postgres bootstrap.');
+      logErr('psql not found in PATH, skipping Postgres bootstrap.');
       return;
     }
   }
@@ -563,7 +562,7 @@ async function validatePostgresBootstrap() {
     return;
   }
 
-  log('[DB] Postgres not reachable; attempting auto-bootstrap...');
+  log('[DB] Postgres not reachable, attempting auto-bootstrap...');
 
   const safeUser = String(user).replace(/"/g, '""');
   const safeDb = String(dbName).replace(/"/g, '""');
@@ -577,7 +576,7 @@ async function validatePostgresBootstrap() {
       `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`,
     ], { stdio: 'inherit' });
   } catch (err) {
-    logErr('[DB] CREATE USER via sudo psql failed (may already exist).');
+    logErr('[DB] CREATE USER using sudo psql failed (may already exist).');
   }
 
   try {
@@ -588,7 +587,7 @@ async function validatePostgresBootstrap() {
       `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`,
     ], { stdio: 'inherit' });
   } catch (err) {
-    logErr('[DB] CREATE DATABASE via sudo psql failed (may already exist).');
+    logErr('[DB] CREATE DATABASE using sudo psql failed (may already exist).');
   }
 }
 
@@ -728,7 +727,7 @@ class ReziServerUI {
     if (!display) {
       const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
       const port = process.env.PGPORT || '5432';
-      const database = process.env.PGDATABASE || process.env.DB_NAME || 'Qor';
+      const database = process.env.PGDATABASE || process.env.DB_NAME || 'qorc';
       display = `postgres://${host}:${port}/${database}`;
     }
     return this._truncate(display, maxLength);
@@ -847,7 +846,7 @@ class ReziServerUI {
   }
 
   async start() {
-    const { createServerDashboard, logEntry } = await import('./qor-rezi-tui.js');
+    const { createServerDashboard, logEntry } = await import('./qorc-rezi-tui.js');
     this.logEntryFactory = logEntry;
     this.dashboard = createServerDashboard(this._snapshot(), {
       stop: () => { void this.stop(); },

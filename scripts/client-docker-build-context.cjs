@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const BUILD_CONTEXT_PREFIX = 'qor-chat-client-build-';
+const BUILD_CONTEXT_PREFIX = 'qorc-client-build-';
 const ROOT_DIRECTORIES = Object.freeze([
     '.cargo',
     'data',

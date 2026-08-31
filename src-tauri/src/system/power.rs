@@ -1,6 +1,6 @@
 //! Bounded powersave for active calls
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use parking_lot::Mutex;
 
 pub struct PowerSaveBlocker {
@@ -21,7 +21,7 @@ impl PowerSaveBlocker {
         }
     }
 
-    pub fn start(&self) -> QorResult<bool> {
+    pub fn start(&self) -> QorcResult<bool> {
         let mut active = self.active.lock();
         if active.is_some() {
             return Ok(false);
@@ -30,7 +30,7 @@ impl PowerSaveBlocker {
         Ok(true)
     }
 
-    pub fn stop(&self) -> QorResult<bool> {
+    pub fn stop(&self) -> QorcResult<bool> {
         let mut active = self.active.lock();
         let Some(handle) = active.take() else {
             return Ok(false);
@@ -55,7 +55,7 @@ impl Drop for PowerSaveBlocker {
 }
 
 #[cfg(target_os = "linux")]
-fn create_blocker() -> QorResult<BlockerHandle> {
+fn create_blocker() -> QorcResult<BlockerHandle> {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
@@ -63,7 +63,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
         .into_iter()
         .find(|path| Path::new(path).is_file())
         .ok_or_else(|| {
-            QorError::SystemError("Sleep inhibitor helper is unavailable".to_string())
+            QorcError::SystemError("Sleep inhibitor helper is unavailable".to_string())
         })?;
 
     for inhibitor in [
@@ -78,7 +78,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
                 "--inhibit",
                 "idle:suspend",
                 "--reason",
-                "Qor call in progress",
+                "qorc call in progress",
                 sleep,
                 "infinity",
             ])
@@ -99,7 +99,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
             .args([
                 "--what=idle:sleep",
                 "--mode=block",
-                "--why=Qor call in progress",
+                "--why=qorc call in progress",
                 sleep,
                 "infinity",
             ])
@@ -112,27 +112,27 @@ fn create_blocker() -> QorResult<BlockerHandle> {
         }
     }
 
-    Err(QorError::SystemError(
+    Err(QorcError::SystemError(
         "No supported sleep inhibitor is available".to_string(),
     ))
 }
 
 #[cfg(target_os = "linux")]
-fn release_blocker(mut handle: BlockerHandle) -> QorResult<()> {
+fn release_blocker(mut handle: BlockerHandle) -> QorcResult<()> {
     match handle.child.try_wait() {
         Ok(Some(_)) => Ok(()),
         Ok(None) => {
             handle
                 .child
                 .kill()
-                .map_err(|_| QorError::SystemError("Failed to stop sleep inhibitor".to_string()))?;
+                .map_err(|_| QorcError::SystemError("Failed to stop sleep inhibitor".to_string()))?;
             handle
                 .child
                 .wait()
-                .map_err(|_| QorError::SystemError("Failed to reap sleep inhibitor".to_string()))?;
+                .map_err(|_| QorcError::SystemError("Failed to reap sleep inhibitor".to_string()))?;
             Ok(())
         }
-        Err(_) => Err(QorError::SystemError(
+        Err(_) => Err(QorcError::SystemError(
             "Failed to inspect sleep inhibitor".to_string(),
         )),
     }
@@ -145,14 +145,14 @@ struct WindowsBlocker {
 }
 
 #[cfg(target_os = "windows")]
-fn create_blocker() -> QorResult<BlockerHandle> {
+fn create_blocker() -> QorcResult<BlockerHandle> {
     use std::sync::mpsc;
     use std::time::Duration;
 
     let (stop_tx, stop_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new()
-        .name("qor-power-inhibitor".to_string())
+        .name("qorc-power-inhibitor".to_string())
         .spawn(move || {
             let enabled = set_execution_state_windows(true);
             let ready = enabled.is_ok();
@@ -162,7 +162,7 @@ fn create_blocker() -> QorResult<BlockerHandle> {
                 let _ = set_execution_state_windows(false);
             }
         })
-        .map_err(|_| QorError::SystemError("Failed to start sleep inhibitor".to_string()))?;
+        .map_err(|_| QorcError::SystemError("Failed to start sleep inhibitor".to_string()))?;
 
     match ready_rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => Ok(BlockerHandle {
@@ -173,12 +173,12 @@ fn create_blocker() -> QorResult<BlockerHandle> {
         }),
         Ok(Err(error)) => {
             let _ = thread.join();
-            Err(QorError::SystemError(error))
+            Err(QorcError::SystemError(error))
         }
         Err(_) => {
             let _ = stop_tx.send(());
             let _ = thread.join();
-            Err(QorError::SystemError(
+            Err(QorcError::SystemError(
                 "Sleep inhibitor startup timed out".to_string(),
             ))
         }
@@ -186,12 +186,12 @@ fn create_blocker() -> QorResult<BlockerHandle> {
 }
 
 #[cfg(target_os = "windows")]
-fn release_blocker(mut handle: BlockerHandle) -> QorResult<()> {
+fn release_blocker(mut handle: BlockerHandle) -> QorcResult<()> {
     let _ = handle.worker.stop_tx.send(());
     if let Some(thread) = handle.worker.thread.take() {
         thread
             .join()
-            .map_err(|_| QorError::SystemError("Sleep inhibitor thread failed".to_string()))?;
+            .map_err(|_| QorcError::SystemError("Sleep inhibitor thread failed".to_string()))?;
     }
     Ok(())
 }

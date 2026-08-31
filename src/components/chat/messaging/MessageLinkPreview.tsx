@@ -241,41 +241,41 @@ export function MessageLinkPreviews({
     if (previews.length === 0) return null;
 
     return (
-        <div className="qor-message-link-previews" role="group" aria-label="Link previews">
+        <div className="qorc-message-link-previews" role="group" aria-label="Link previews">
             {previews.map((preview) => (
                 <button
                     key={preview.url}
                     type="button"
-                    className={`qor-message-link-preview${preview.imageDataUrl ? ' has-image' : ''}`}
+                    className={`qorc-message-link-preview${preview.imageDataUrl ? ' has-image' : ''}`}
                     onClick={() => openPreview(preview.url)}
                     onContextMenu={onContextMenu}
                     aria-label={`Open link to ${preview.host}`}
                 >
                     {preview.imageDataUrl ? (
                         <img
-                            className="qor-message-link-preview-image"
+                            className="qorc-message-link-preview-image"
                             src={preview.imageDataUrl}
                             alt=""
                             aria-hidden="true"
                             draggable={false}
                         />
                     ) : (
-                        <span className="qor-message-link-preview-icon" aria-hidden="true">
+                        <span className="qorc-message-link-preview-icon" aria-hidden="true">
                             <Link2 />
                         </span>
                     )}
-                    <span className="qor-message-link-preview-body">
-                        <span className="qor-message-link-preview-host">{preview.host}</span>
-                        <span className="qor-message-link-preview-title">
+                    <span className="qorc-message-link-preview-body">
+                        <span className="qorc-message-link-preview-host">{preview.host}</span>
+                        <span className="qorc-message-link-preview-title">
                             {preview.title || preview.displayUrl}
                         </span>
                         {preview.description ? (
-                            <span className="qor-message-link-preview-description">
+                            <span className="qorc-message-link-preview-description">
                                 {preview.description}
                             </span>
                         ) : null}
                     </span>
-                    <ExternalLink className="qor-message-link-preview-open" aria-hidden="true" />
+                    <ExternalLink className="qorc-message-link-preview-open" aria-hidden="true" />
                 </button>
             ))}
         </div>

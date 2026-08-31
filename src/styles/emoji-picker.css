@@ -1,5 +1,5 @@
 .emoji-picker {
-  --emoji-picker-bg: var(--qor-control-bg, hsl(var(--background)));
+  --emoji-picker-bg: var(--qorc-control-bg, hsl(var(--background)));
   position: fixed;
   z-index: 1100;
   display: flex;
@@ -10,8 +10,8 @@
   border: 0;
   border-radius: 8px;
   background: var(--emoji-picker-bg);
-  box-shadow: var(--qor-shadow, 0 20px 55px rgba(0, 0, 0, 0.3));
-  color: var(--qor-text, hsl(var(--popover-foreground)));
+  box-shadow: var(--qorc-shadow, 0 20px 55px rgba(0, 0, 0, 0.3));
+  color: var(--qorc-text, hsl(var(--popover-foreground)));
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   isolation: isolate;
@@ -19,7 +19,7 @@
 
 html.light .emoji-picker,
 .light .emoji-picker {
-  --emoji-picker-bg: var(--qor-input-bg, #f7f7f7);
+  --emoji-picker-bg: var(--qorc-input-bg, #f7f7f7);
 }
 
 .emoji-picker,
@@ -40,11 +40,11 @@ html.light .emoji-picker,
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
 }
 
 .emoji-picker__search:focus-within {
-  color: var(--qor-text, hsl(var(--foreground)));
+  color: var(--qorc-text, hsl(var(--foreground)));
 }
 
 .emoji-picker__search input {
@@ -58,7 +58,7 @@ html.light .emoji-picker,
 }
 
 .emoji-picker__search input::placeholder {
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
   opacity: 1;
 }
 
@@ -84,20 +84,20 @@ html.light .emoji-picker,
 .emoji-picker__clear {
   width: 22px;
   height: 22px;
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
 }
 
 .emoji-picker__clear:hover,
 .emoji-picker__category:hover,
 .emoji-picker__emoji:hover {
-  background: var(--qor-control-hover, hsl(var(--accent)));
-  color: var(--qor-text, hsl(var(--accent-foreground)));
+  background: var(--qorc-control-hover, hsl(var(--accent)));
+  color: var(--qorc-text, hsl(var(--accent-foreground)));
 }
 
 .emoji-picker__clear:focus-visible,
 .emoji-picker__category:focus-visible,
 .emoji-picker__emoji:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--qor-border, hsl(var(--border)));
+  box-shadow: inset 0 0 0 1px var(--qorc-border, hsl(var(--border)));
 }
 
 .emoji-picker__categories {
@@ -125,12 +125,12 @@ html.light .emoji-picker,
   width: 100%;
   height: 34px;
   scroll-snap-align: start;
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
 }
 
 .emoji-picker__category[aria-selected="true"] {
-  background: var(--qor-control-hover, hsl(var(--accent)));
-  color: var(--qor-text, hsl(var(--foreground)));
+  background: var(--qorc-control-hover, hsl(var(--accent)));
+  color: var(--qorc-text, hsl(var(--foreground)));
   box-shadow: none;
 }
 
@@ -141,7 +141,7 @@ html.light .emoji-picker,
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: var(--qor-muted-text, hsl(var(--muted-foreground))) transparent;
+  scrollbar-color: var(--qorc-muted-text, hsl(var(--muted-foreground))) transparent;
   scrollbar-width: thin;
 }
 
@@ -154,7 +154,7 @@ html.light .emoji-picker,
   align-items: center;
   justify-content: flex-start;
   background: var(--emoji-picker-bg);
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
   font-size: 12px;
   font-weight: 650;
 }
@@ -198,7 +198,7 @@ html.light .emoji-picker,
   justify-content: center;
   flex-direction: column;
   gap: 10px;
-  color: var(--qor-muted-text, hsl(var(--muted-foreground)));
+  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
   text-align: center;
 }
 

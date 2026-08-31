@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { QorBrandLogo } from '../ui/QorBrandLogo';
+import { QorcBrandLogo } from '../ui/QorcBrandLogo';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
 import { useStartupConnection } from '../../hooks/app/useStartupConnection';
 import {
@@ -116,9 +116,9 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
     <section className="screen screen-welcome">
       <div className="welcome-scene">
         <header className="welcome-topbar">
-          <div className="login-screen-brand" aria-label="Qor">
-            <QorBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
-            <span className="login-brand-name">Qor</span>
+          <div className="login-screen-brand" aria-label="qorc">
+            <QorcBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
+            <span className="login-brand-name">qorc</span>
           </div>
         </header>
 

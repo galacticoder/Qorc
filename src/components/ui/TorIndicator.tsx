@@ -41,7 +41,7 @@ export function TorIndicator() {
 
   return (
     <span
-      className={cn('qor-tor-badge', !isConnected && 'is-off')}
+      className={cn('qorc-tor-badge', !isConnected && 'is-off')}
       role="status"
       aria-label={`Tor ${statusLabel}`}
       title={`Tor ${statusLabel}`}

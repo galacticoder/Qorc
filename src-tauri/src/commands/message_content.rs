@@ -133,12 +133,12 @@ pub async fn message_content_render(
         .ok_or_else(|| "Database not initialized".to_string())?;
     tokio::task::spawn_blocking(move || {
         let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
-            crate::error::QorError::NotInitialized(
+            crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )
         })?;
         let plaintext = std::str::from_utf8(record.content.as_slice()).map_err(|_| {
-            crate::error::QorError::DecryptionFailed(
+            crate::error::QorcError::DecryptionFailed(
                 "Native message content is not valid UTF-8".to_string(),
             )
         })?;
@@ -169,16 +169,16 @@ pub async fn message_content_link_targets(
         .ok_or_else(|| "Database not initialized".to_string())?;
     let targets = tokio::task::spawn_blocking(move || {
         let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
-            crate::error::QorError::NotInitialized(
+            crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )
         })?;
         let plaintext = std::str::from_utf8(record.content.as_slice()).map_err(|_| {
-            crate::error::QorError::DecryptionFailed(
+            crate::error::QorcError::DecryptionFailed(
                 "Native message content is not valid UTF-8".to_string(),
             )
         })?;
-        Ok::<Vec<NativeMessageLinkTarget>, crate::error::QorError>(message_links(plaintext))
+        Ok::<Vec<NativeMessageLinkTarget>, crate::error::QorcError>(message_links(plaintext))
     })
     .await
     .map_err(|_| "Native message operation failed".to_string())?
@@ -294,22 +294,22 @@ pub async fn message_content_copy(
         .ok_or_else(|| "Database not initialized".to_string())?;
     tokio::task::spawn_blocking(move || {
         let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
-            crate::error::QorError::NotInitialized(
+            crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )
         })?;
         let plaintext = std::str::from_utf8(record.content.as_slice()).map_err(|_| {
-            crate::error::QorError::DecryptionFailed(
+            crate::error::QorcError::DecryptionFailed(
                 "Native message content is not valid UTF-8".to_string(),
             )
         })?;
         let mut clipboard = arboard::Clipboard::new().map_err(|_| {
-            crate::error::QorError::Internal("System clipboard is unavailable".to_string())
+            crate::error::QorcError::Internal("System clipboard is unavailable".to_string())
         })?;
         clipboard.set_text(plaintext).map_err(|_| {
-            crate::error::QorError::Internal("System clipboard write failed".to_string())
+            crate::error::QorcError::Internal("System clipboard write failed".to_string())
         })?;
-        Ok::<bool, crate::error::QorError>(true)
+        Ok::<bool, crate::error::QorcError>(true)
     })
     .await
     .map_err(|_| "Native clipboard operation failed".to_string())?

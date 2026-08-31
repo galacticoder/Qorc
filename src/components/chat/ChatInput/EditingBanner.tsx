@@ -10,11 +10,11 @@ interface EditingBannerProps {
 
 export function EditingBanner({ onCancelEdit, editingMessage }: EditingBannerProps) {
   return (
-    <div className="qor-reply-banner select-none">
-      <UserAvatar username={editingMessage.sender} size="xs" className="qor-reply-banner-avatar" />
-      <div className="qor-reply-banner-copy">
-        <span className="qor-reply-banner-name">Editing message</span>
-        <div className="qor-reply-banner-preview">
+    <div className="qorc-reply-banner select-none">
+      <UserAvatar username={editingMessage.sender} size="xs" className="qorc-reply-banner-avatar" />
+      <div className="qorc-reply-banner-copy">
+        <span className="qorc-reply-banner-name">Editing message</span>
+        <div className="qorc-reply-banner-preview">
           <BannerMessagePreview
             messageId={editingMessage.secureContentId || editingMessage.id}
             contentVersion={editingMessage.controlState?.editOperationId}
@@ -23,7 +23,7 @@ export function EditingBanner({ onCancelEdit, editingMessage }: EditingBannerPro
       </div>
       <button
         type="button"
-        className="qor-reply-banner-close"
+        className="qorc-reply-banner-close"
         onClick={onCancelEdit}
         aria-label="Cancel edit"
         title="Cancel edit"

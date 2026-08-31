@@ -165,7 +165,7 @@ export class PirWorkerClient {
 
     const file = path.join(
       TEMP_DIRECTORY,
-      `qor-pir-${process.pid}-${crypto.randomBytes(8).toString('hex')}.bin`
+      `qorc-pir-${process.pid}-${crypto.randomBytes(8).toString('hex')}.bin`
     );
     await fs.writeFile(file, Buffer.concat(records), { mode: 0o600 });
     try {

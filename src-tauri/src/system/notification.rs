@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use parking_lot::RwLock;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
 const RATE_LIMIT_WINDOW_MS: u128 = 60_000;
 const MAX_NOTIFICATIONS_PER_WINDOW: usize = 5;
-const NOTIFICATION_TITLE: &str = "New Qor activity";
-const NOTIFICATION_BODY: &str = "Open Qor to view it";
+const NOTIFICATION_TITLE: &str = "New qorc activity";
+const NOTIFICATION_BODY: &str = "Open qorc to view it";
 
 pub struct NotificationHandler {
     enabled: RwLock<bool>,
@@ -41,7 +41,7 @@ impl NotificationHandler {
     }
 
     /// Show notification
-    pub fn show(&self) -> QorResult<bool> {
+    pub fn show(&self) -> QorcResult<bool> {
         if !*self.enabled.read() {
             return Ok(false);
         }
@@ -58,7 +58,7 @@ impl NotificationHandler {
 
             notification
                 .show()
-                .map_err(|e| QorError::NotificationFailed(e.to_string()))?;
+                .map_err(|e| QorcError::NotificationFailed(e.to_string()))?;
         }
 
         #[cfg(target_os = "windows")]
@@ -68,7 +68,7 @@ impl NotificationHandler {
                 .summary(NOTIFICATION_TITLE)
                 .body(NOTIFICATION_BODY)
                 .show()
-                .map_err(|e| QorError::NotificationFailed(e.to_string()))?;
+                .map_err(|e| QorcError::NotificationFailed(e.to_string()))?;
         }
 
         Ok(true)
@@ -85,7 +85,7 @@ impl Default for NotificationHandler {
     }
 }
 
-pub async fn init(state: &AppState) -> QorResult<()> {
+pub async fn init(state: &AppState) -> QorcResult<()> {
     let handler = NotificationHandler::new();
     *state.notification_handler.write() = Some(Arc::new(handler));
     Ok(())

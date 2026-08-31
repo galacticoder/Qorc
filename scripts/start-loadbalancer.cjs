@@ -11,7 +11,7 @@ const { parseActiveServers } = require('./loadbalancer-tui-state.cjs');
 const repoRoot = path.resolve(__dirname, '..');
 const serverDir = path.join(repoRoot, 'server');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
-const edgeRuntimeRoot = '/opt/qor-edge';
+const edgeRuntimeRoot = '/opt/qorc-edge';
 const edgeRuntimeLibDir = path.join(edgeRuntimeRoot, 'lib');
 const bundledHaproxyBin = path.join(edgeRuntimeRoot, 'bin', 'haproxy');
 const bundledOqsModule = path.join(edgeRuntimeLibDir, 'ossl-modules', 'oqsprovider.so');
@@ -90,7 +90,7 @@ async function validateTuiDependencies() {
   });
 }
 
-class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } len() { return this.a.length; } }
+class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
 
 const ANSI_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
@@ -224,7 +224,6 @@ class ReziLBTUI {
     this.pid = childPid;
     this.buf = new CircularBuffer(1000);
     this.logSequence = 0;
-    this.scroll = 0;
     this.run = true;
     this.metrics = new RateLimiter(1000);
     this.stats = {
@@ -392,7 +391,7 @@ class ReziLBTUI {
       if (this.cmdHistory.length > 100) this.cmdHistory.shift();
     }
 
-    this.add(`\x1b[36m> ${cmd}\x1b[0m`);
+    this.add(`> ${cmd}`);
 
     const parts = cmd.split(/\s+/);
     const mainCmd = parts[0].toLowerCase();
@@ -408,38 +407,37 @@ class ReziLBTUI {
     }
 
     if (!cmdDef) {
-      this.add(`\x1b[31mUnknown command: ${mainCmd}\x1b[0m`);
+      this.add(`Unknown command: ${mainCmd}`);
       this.add(`Type /help for available commands`);
       return;
     }
 
     try {
       if (cmdDef.name === '/help') {
-        this.add('\x1b[33mAvailable commands:\x1b[0m');
+        this.add('Available commands:');
         for (const c of this.commands) {
           const aliases = c.aliases && c.aliases.length > 0 ? ` (${c.aliases.join(', ')})` : '';
-          this.add(`  \x1b[36m${c.name}\x1b[0m${aliases} - ${c.desc}`);
+          this.add(`  ${c.name}${aliases} - ${c.desc}`);
         }
       } else if (cmdDef.name === '/reload') {
         try {
           await this.sendEncryptedCommand({ cmd: 'reload', pid: this.pid });
-          this.add('\x1b[32mReload command sent\x1b[0m');
+          this.add('Reload command sent');
         } catch (error) {
-          this.add(`\x1b[31mError: ${error.message}\x1b[0m`);
+          this.add(`Error: ${error.message}`);
         }
       } else if (cmdDef.name === '/servers') {
         if (this.stats.serverList.length === 0) {
           this.add('No active servers');
         } else {
-          this.add(`\x1b[33mActive servers (${this.stats.serverList.length}):\x1b[0m`);
+          this.add(`Active servers (${this.stats.serverList.length}):`);
           for (const s of this.stats.serverList) {
             this.add(`  - ${s.id} (${s.host}:${s.port})`);
           }
         }
       } else if (cmdDef.name === '/clear') {
         this.buf = new CircularBuffer(1000);
-        this.scroll = 0;
-        this.add('\x1b[32mLog cleared\x1b[0m');
+        this.add('Log cleared');
       } else if (cmdDef.name === '/quit') {
         this.add('Stopping load balancer...');
         this.stop();
@@ -447,7 +445,7 @@ class ReziLBTUI {
         return;
       }
     } catch (error) {
-      this.add(`\x1b[31mError executing command: ${error.message}\x1b[0m`);
+      this.add(`Error executing command: ${error.message}`);
     }
   }
 
@@ -576,7 +574,7 @@ class ReziLBTUI {
   }
 
   async start() {
-    const { createLoadBalancerDashboard, logEntry } = await import('./qor-rezi-tui.js');
+    const { createLoadBalancerDashboard, logEntry } = await import('./qorc-rezi-tui.js');
     this.logEntryFactory = logEntry;
     this.dashboard = createLoadBalancerDashboard(this._snapshot(), {
       stop: () => this.terminate(),

@@ -117,7 +117,7 @@ export const FileContent: React.FC<FileContentProps> = ({
 
   const fileCard = (children: React.ReactNode, onClick?: () => void, label?: string) => (
     <div
-      className="qor-file-card"
+      className="qorc-file-card"
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
       aria-label={onClick ? label : undefined}
@@ -130,29 +130,29 @@ export const FileContent: React.FC<FileContentProps> = ({
         }
       } : undefined}
     >
-      <MaterialFileIcon fileName={filename} className="qor-file-card-icon" />
+      <MaterialFileIcon fileName={filename} className="qorc-file-card-icon" />
       {children}
     </div>
   );
 
   const mediaCard = (onOpen: () => void, label: string) => (
-    <div className="qor-file-card qor-file-media-card">
+    <div className="qorc-file-card qorc-file-media-card">
       <button
         type="button"
-        className="qor-file-preview-trigger"
+        className="qorc-file-preview-trigger"
         onClick={onOpen}
         aria-label={label}
         title={label}
       >
-        <MaterialFileIcon fileName={filename} className="qor-file-card-icon" />
-        <span className="qor-file-meta">
-          <span className="qor-file-name" title={filename}>{filename || 'File'}</span>
-          <span className="qor-file-size">{sizeLabel}</span>
+        <MaterialFileIcon fileName={filename} className="qorc-file-card-icon" />
+        <span className="qorc-file-meta">
+          <span className="qorc-file-name" title={filename}>{filename || 'File'}</span>
+          <span className="qorc-file-size">{sizeLabel}</span>
         </span>
       </button>
       <button
         type="button"
-        className="qor-file-dl"
+        className="qorc-file-dl"
         onClick={downloadFile}
         disabled={downloadRequested}
         aria-label="Download file"
@@ -179,25 +179,25 @@ export const FileContent: React.FC<FileContentProps> = ({
         <>
           {!imageError ? (
             <div
-              className="qor-file-image group"
+              className="qorc-file-image group"
               onClick={() => setLightboxOpen(true)}
               role="button"
               tabIndex={0}
               onKeyDown={(event) => { if (event.key === 'Enter') setLightboxOpen(true); }}
               title="Click to expand"
             >
-              {!imageLoaded && <div className="qor-file-image-skeleton animate-pulse" />}
+              {!imageLoaded && <div className="qorc-file-image-skeleton animate-pulse" />}
               <img
                 src={effectiveFileUrl || undefined}
                 alt={filename}
-                className={cn("qor-file-image-img", imageLoaded ? "opacity-100" : "opacity-0")}
+                className={cn("qorc-file-image-img", imageLoaded ? "opacity-100" : "opacity-0")}
                 draggable={false}
                 onLoad={() => { setImageLoaded(true); onRendered?.(); }}
                 onError={() => { setImageError(true); setImageLoaded(true); onRendered?.(); }}
               />
             </div>
           ) : (
-            <div className="qor-file-error">Image cannot be loaded</div>
+            <div className="qorc-file-error">Image cannot be loaded</div>
           )}
 
           {lightboxOpen && effectiveFileUrl && createPortal(
@@ -222,54 +222,54 @@ export const FileContent: React.FC<FileContentProps> = ({
 
       {isVideoFile && mediaRequested && effectiveFileUrl && (
         !videoError ? (
-          <div className="qor-file-media">
+          <div className="qorc-file-media">
             <video
               controls
               preload="none"
               src={effectiveFileUrl}
-              className="qor-file-video"
+              className="qorc-file-video"
               onError={() => setVideoError(true)}
             />
-            <div className="qor-file-media-foot">
-              <MaterialFileIcon fileName={filename} className="qor-file-media-icon" />
-              <div className="qor-file-meta">
-                <span className="qor-file-name" title={filename}>{filename}</span>
-                <span className="qor-file-size">{sizeLabel}</span>
+            <div className="qorc-file-media-foot">
+              <MaterialFileIcon fileName={filename} className="qorc-file-media-icon" />
+              <div className="qorc-file-meta">
+                <span className="qorc-file-name" title={filename}>{filename}</span>
+                <span className="qorc-file-size">{sizeLabel}</span>
               </div>
             </div>
           </div>
         ) : (
-          <div className="qor-file-error">Video cannot be loaded</div>
+          <div className="qorc-file-error">Video cannot be loaded</div>
         )
       )}
 
       {isAudioFile && mediaRequested && effectiveFileUrl && (
         !audioError ? (
           fileCard(
-            <div className="qor-file-meta">
-              <span className="qor-file-name" title={filename}>{filename}</span>
+            <div className="qorc-file-meta">
+              <span className="qorc-file-name" title={filename}>{filename}</span>
               <audio
                 controls
                 preload="none"
                 src={effectiveFileUrl}
-                className="qor-file-audio"
+                className="qorc-file-audio"
                 onError={() => setAudioError(true)}
               />
-              <span className="qor-file-size">{sizeLabel}</span>
+              <span className="qorc-file-size">{sizeLabel}</span>
             </div>
           )
         ) : (
-          <div className="qor-file-error">Audio cannot be loaded</div>
+          <div className="qorc-file-error">Audio cannot be loaded</div>
         )
       )}
 
       {isGenericFile && fileCard(
         <>
-          <div className="qor-file-meta">
-            <span className="qor-file-name" title={filename}>{filename || 'File'}</span>
-            <span className="qor-file-size">{sizeLabel}</span>
+          <div className="qorc-file-meta">
+            <span className="qorc-file-name" title={filename}>{filename || 'File'}</span>
+            <span className="qorc-file-size">{sizeLabel}</span>
           </div>
-          <div className="qor-file-dl" aria-hidden="true"><Download className="w-[18px] h-[18px]" /></div>
+          <div className="qorc-file-dl" aria-hidden="true"><Download className="w-[18px] h-[18px]" /></div>
         </>,
         downloadFile,
         'Download file',

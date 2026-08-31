@@ -9,8 +9,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PNPM_STORE_DIR=/opt/pnpm/store \
     npm_config_store_dir=/opt/pnpm/store
 
-RUN --mount=type=cache,id=qor-client-apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
-    --mount=type=cache,id=qor-client-apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=qorc-client-apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
     apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -53,7 +53,7 @@ RUN --mount=type=cache,id=qor-client-apt-lists-${TARGETARCH},target=/var/lib/apt
         wget \
         xz-utils
 
-RUN --mount=type=cache,id=qor-client-npm-${TARGETARCH},target=/root/.npm,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-npm-${TARGETARCH},target=/root/.npm,sharing=locked \
     npm install --global pnpm@10.33.4 --no-audit --no-fund \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain 1.95.0
@@ -62,7 +62,7 @@ WORKDIR /workspace
 
 FROM toolchain AS node-dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile
 
 FROM node-dependencies AS frontend
@@ -74,19 +74,19 @@ COPY src/ src/
 COPY test-chat/ test-chat/
 COPY index.html postcss.config.js tailwind.config.js tailwind.config.ts ./
 COPY tsconfig.app.json tsconfig.json tsconfig.node.json vite.config.simple.ts ./
-RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
-    --mount=type=cache,id=qor-client-vite-${TARGETARCH},target=/workspace/node_modules/.vite,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+    --mount=type=cache,id=qorc-client-vite-${TARGETARCH},target=/workspace/node_modules/.vite,sharing=locked \
     pnpm run build
 
 FROM node-dependencies AS rust-dependencies
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/
 COPY vendor/ vendor/
-RUN --mount=type=cache,id=qor-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,id=qor-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=qorc-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
     cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
 FROM rust-dependencies AS builder
-ENV QOR_FRONTEND_PREBUILT=1
+ENV QORC_FRONTEND_PREBUILT=1
 COPY .cargo/ .cargo/
 COPY LICENSE LICENSE
 COPY scripts/ scripts/
@@ -96,13 +96,13 @@ COPY vendor/ vendor/
 COPY workers/ workers/
 COPY --from=frontend /workspace/dist/ dist/
 
-RUN --mount=type=cache,id=qor-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
-    --mount=type=cache,id=qor-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,id=qor-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
-    --mount=type=cache,id=qor-client-cargo-target-${TARGETARCH},target=/workspace/src-tauri/target,sharing=locked \
-    --mount=type=cache,id=qor-client-pir-target-${TARGETARCH},target=/workspace/workers/ypir/target,sharing=locked \
-    --mount=type=cache,id=qor-client-downloads-${TARGETARCH},target=/workspace/.cache,sharing=locked \
-    --mount=type=cache,id=qor-client-tauri-tools-${TARGETARCH},target=/root/.cache/tauri,sharing=locked \
+RUN --mount=type=cache,id=qorc-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \
+    --mount=type=cache,id=qorc-client-cargo-registry-${TARGETARCH},target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=qorc-client-cargo-git-${TARGETARCH},target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=qorc-client-cargo-target-${TARGETARCH},target=/workspace/src-tauri/target,sharing=locked \
+    --mount=type=cache,id=qorc-client-pir-target-${TARGETARCH},target=/workspace/workers/ypir/target,sharing=locked \
+    --mount=type=cache,id=qorc-client-downloads-${TARGETARCH},target=/workspace/.cache,sharing=locked \
+    --mount=type=cache,id=qorc-client-tauri-tools-${TARGETARCH},target=/root/.cache/tauri,sharing=locked \
     node scripts/start-client.cjs --bundle-only \
     && deb_bundle="$(find src-tauri/target/release/bundle -type f -name '*arm64.deb' -print -quit)" \
     && rpm_bundle="$(find src-tauri/target/release/bundle -type f -name '*aarch64.rpm' -print -quit)" \

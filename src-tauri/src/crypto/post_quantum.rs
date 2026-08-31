@@ -5,7 +5,7 @@ use libcrux_ml_kem::mlkem1024::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 /// ML-KEM-1024 public key size
 pub const ML_KEM_PUBLIC_KEY_SIZE: usize = 1568;
@@ -19,30 +19,30 @@ pub struct MlKemEncapsulation {
     pub shared_secret: Zeroizing<Vec<u8>>,
 }
 
-pub fn validate_ml_kem_public_key(public_key: &[u8]) -> QorResult<()> {
+pub fn validate_ml_kem_public_key(public_key: &[u8]) -> QorcResult<()> {
     if public_key.len() != ML_KEM_PUBLIC_KEY_SIZE {
-        return Err(QorError::InvalidKeyLength {
+        return Err(QorcError::InvalidKeyLength {
             expected: ML_KEM_PUBLIC_KEY_SIZE,
             actual: public_key.len(),
         });
     }
 
     let key =
-        MlKem1024PublicKey::try_from(public_key).map_err(|_| QorError::KemEncapsulationFailed)?;
+        MlKem1024PublicKey::try_from(public_key).map_err(|_| QorcError::KemEncapsulationFailed)?;
     if !mlkem1024::validate_public_key(&key) {
-        return Err(QorError::KemEncapsulationFailed);
+        return Err(QorcError::KemEncapsulationFailed);
     }
     Ok(())
 }
 
 /// Encapsulate with ML-KEM-1024
-pub fn ml_kem_encapsulate(public_key: &[u8]) -> QorResult<MlKemEncapsulation> {
+pub fn ml_kem_encapsulate(public_key: &[u8]) -> QorcResult<MlKemEncapsulation> {
     validate_ml_kem_public_key(public_key)?;
     let pk =
-        MlKem1024PublicKey::try_from(public_key).map_err(|_| QorError::KemEncapsulationFailed)?;
+        MlKem1024PublicKey::try_from(public_key).map_err(|_| QorcError::KemEncapsulationFailed)?;
 
     let mut randomness = Zeroizing::new([0u8; ML_KEM_SHARED_SECRET_SIZE]);
-    getrandom::fill(randomness.as_mut()).map_err(|_| QorError::KemEncapsulationFailed)?;
+    getrandom::fill(randomness.as_mut()).map_err(|_| QorcError::KemEncapsulationFailed)?;
     let (ct, mut shared_secret) = mlkem1024::encapsulate(&pk, *randomness);
     let output_secret = Zeroizing::new(shared_secret.to_vec());
     shared_secret.zeroize();
@@ -54,30 +54,30 @@ pub fn ml_kem_encapsulate(public_key: &[u8]) -> QorResult<MlKemEncapsulation> {
 }
 
 /// Decapsulate with ML-KEM-1024
-pub fn ml_kem_decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> QorResult<Zeroizing<Vec<u8>>> {
+pub fn ml_kem_decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> QorcResult<Zeroizing<Vec<u8>>> {
     if ciphertext.len() != ML_KEM_CIPHERTEXT_SIZE {
-        return Err(QorError::InvalidKeyLength {
+        return Err(QorcError::InvalidKeyLength {
             expected: ML_KEM_CIPHERTEXT_SIZE,
             actual: ciphertext.len(),
         });
     }
 
     if secret_key.len() != ML_KEM_SECRET_KEY_SIZE {
-        return Err(QorError::InvalidKeyLength {
+        return Err(QorcError::InvalidKeyLength {
             expected: ML_KEM_SECRET_KEY_SIZE,
             actual: secret_key.len(),
         });
     }
 
     let ct =
-        MlKem1024Ciphertext::try_from(ciphertext).map_err(|_| QorError::KemDecapsulationFailed)?;
+        MlKem1024Ciphertext::try_from(ciphertext).map_err(|_| QorcError::KemDecapsulationFailed)?;
     let sk =
-        MlKem1024PrivateKey::try_from(secret_key).map_err(|_| QorError::KemDecapsulationFailed)?;
+        MlKem1024PrivateKey::try_from(secret_key).map_err(|_| QorcError::KemDecapsulationFailed)?;
 
     if !mlkem1024::validate_private_key(&sk, &ct) {
         let mut rejected_key: [u8; ML_KEM_SECRET_KEY_SIZE] = sk.into();
         rejected_key.zeroize();
-        return Err(QorError::KemDecapsulationFailed);
+        return Err(QorcError::KemDecapsulationFailed);
     }
 
     let mut shared_secret = mlkem1024::decapsulate(&sk, &ct);
@@ -90,14 +90,14 @@ pub fn ml_kem_decapsulate(ciphertext: &[u8], secret_key: &[u8]) -> QorResult<Zer
     Ok(output_secret)
 }
 
-pub fn validate_ml_kem_keypair(public_key: &[u8], secret_key: &[u8]) -> QorResult<()> {
+pub fn validate_ml_kem_keypair(public_key: &[u8], secret_key: &[u8]) -> QorcResult<()> {
     let encapsulated = ml_kem_encapsulate(public_key)?;
     let decapsulated = ml_kem_decapsulate(&encapsulated.ciphertext, secret_key)?;
     if !crate::crypto::utils::constant_time_eq(
         encapsulated.shared_secret.as_slice(),
         decapsulated.as_slice(),
     ) {
-        return Err(QorError::Verification(
+        return Err(QorcError::Verification(
             "ML-KEM public/private key mismatch".to_string(),
         ));
     }

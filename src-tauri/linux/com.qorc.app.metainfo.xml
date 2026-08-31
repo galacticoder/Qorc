@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.qorc.app</id>
+  <name>qorc</name>
+  <summary>Secure messaging with post-quantum cryptography</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-qorc-Non-Commercial-Copyleft-1.0</project_license>
+
+  <developer id="io.github.galacticoder">
+    <name>galacticoderr</name>
+  </developer>
+  <developer_name>galacticoderr</developer_name>
+
+  <description>
+    <p>
+      qorc is a secure messaging application focused on private communication,
+      end-to-end encryption, post-quantum cryptography, and privacy-preserving
+      transport.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">qorc.desktop</launchable>
+  <icon type="stock">qorc</icon>
+
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+
+  <keywords>
+    <keyword>messaging</keyword>
+    <keyword>chat</keyword>
+    <keyword>encryption</keyword>
+    <keyword>privacy</keyword>
+    <keyword>post-quantum</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/galacticoder/qorc</url>
+  <url type="bugtracker">https://github.com/galacticoder/qorc/issues</url>
+  <url type="vcs-browser">https://github.com/galacticoder/qorc</url>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+
+  <releases>
+    <release version="1.0.0" date="2026-06-23">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

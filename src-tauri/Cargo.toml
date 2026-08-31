@@ -1,5 +1,5 @@
 [package]
-name = "qor"
+name = "qorc"
 version = "1.0.0"
 description = "Secure messaging application"
 authors = ["galacticoderr"]
@@ -8,12 +8,12 @@ rust-version = "1.91"
 autobins = false
 
 [lib]
-name = "qor_chat_lib"
+name = "qorc_lib"
 path = "src/main.rs"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "qor"
+name = "qorc"
 path = "src/desktop.rs"
 
 [build-dependencies]

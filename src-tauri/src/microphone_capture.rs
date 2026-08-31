@@ -182,7 +182,7 @@ impl MicrophoneCaptureState {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let worker_session = session.clone();
         let worker = thread::Builder::new()
-            .name("qor-microphone-capture".to_string())
+            .name("qorc-microphone-capture".to_string())
             .spawn(move || {
                 run_capture(
                     worker_session.clone(),
@@ -389,7 +389,7 @@ fn pulse_client() -> Result<PulseClient, String> {
         .set_write_timeout(timeout)
         .map_err(|_| "microphone server connection failed".to_string())?;
     let cookie = pulseaudio::cookie_path_from_env().and_then(|path| std::fs::read(path).ok());
-    PulseClient::new_unix(c"Qor", socket, cookie.as_deref())
+    PulseClient::new_unix(c"qorc", socket, cookie.as_deref())
         .map_err(|_| "microphone server connection failed".to_string())
 }
 

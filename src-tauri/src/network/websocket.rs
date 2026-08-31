@@ -20,7 +20,7 @@ use tokio_tungstenite::{
 use url::Url;
 use uuid::Uuid;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::json_bounds::enforce_bounded_json_structure;
 
 // Constants
@@ -41,8 +41,8 @@ const MAX_WS_PENDING_WRITES: usize = 1024;
 const MAX_WS_PENDING_WRITE_BYTES: usize = 64 * 1024 * 1024;
 const PQ_WS_FIXED_CELL_BYTES: usize = 64 * 1024;
 
-fn connection_failure_diagnostic(error: &QorError) -> (&'static str, &'static str) {
-    let QorError::Network(message) = error else {
+fn connection_failure_diagnostic(error: &QorcError) -> (&'static str, &'static str) {
+    let QorcError::Network(message) = error else {
         return ("validation", "invalid-input");
     };
     let normalized = message.to_ascii_lowercase();
@@ -385,41 +385,41 @@ impl WebSocketHandler {
     }
 
     /// Set server URL
-    pub async fn set_server_url(&self, url: &str) -> QorResult<bool> {
+    pub async fn set_server_url(&self, url: &str) -> QorcResult<bool> {
         if url.is_empty() || url.len() > 2048 {
-            return Err(QorError::InvalidArgument("Invalid server URL".to_string()));
+            return Err(QorcError::InvalidArgument("Invalid server URL".to_string()));
         }
 
         let parsed = Url::parse(url)
-            .map_err(|e| QorError::InvalidArgument(format!("Invalid URL format: {}", e)))?;
+            .map_err(|e| QorcError::InvalidArgument(format!("Invalid URL format: {}", e)))?;
 
         if parsed.scheme() != "wss" {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Only secure WebSocket (wss://) allowed".to_string(),
             ));
         }
 
         let host = parsed
             .host_str()
-            .ok_or_else(|| QorError::InvalidArgument("Invalid hostname".to_string()))?;
+            .ok_or_else(|| QorcError::InvalidArgument("Invalid hostname".to_string()))?;
         if host.len() > 253 {
-            return Err(QorError::InvalidArgument("Invalid hostname".to_string()));
+            return Err(QorcError::InvalidArgument("Invalid hostname".to_string()));
         }
 
         if parsed.username() != "" || parsed.password().is_some() {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Credentials in URL not allowed".to_string(),
             ));
         }
 
         if parsed.fragment().is_some() {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "URL fragments are not allowed".to_string(),
             ));
         }
 
         if parsed.query().is_some() || parsed.path() != "/" {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Server URL must not contain a path or query".to_string(),
             ));
         }
@@ -454,12 +454,12 @@ impl WebSocketHandler {
         )
     }
 
-    pub fn rotate_socks_identity(&self) -> QorResult<()> {
+    pub fn rotate_socks_identity(&self) -> QorcResult<()> {
         if *self.state.read() != ConnectionState::Disconnected
             || self.connecting_attempt.read().is_some()
             || self.tx.read().is_some()
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Disconnect before rotating the Tor stream identity".to_string(),
             ));
         }
@@ -526,8 +526,8 @@ impl WebSocketHandler {
         }
     }
 
-    fn connection_cancelled_error() -> QorError {
-        QorError::Network("Connection attempt cancelled".to_string())
+    fn connection_cancelled_error() -> QorcError {
+        QorcError::Network("Connection attempt cancelled".to_string())
     }
 
     fn publish_connection(
@@ -535,7 +535,7 @@ impl WebSocketHandler {
         attempt_id: u64,
         connect_cancel_rx: &watch::Receiver<bool>,
         entry: WsSenderEntry,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let mut connecting_attempt = self.connecting_attempt.write();
         let attempt_is_current = connecting_attempt
             .as_ref()
@@ -555,7 +555,7 @@ impl WebSocketHandler {
     }
 
     /// Connect to server
-    pub async fn connect(&self) -> QorResult<ConnectResult> {
+    pub async fn connect(&self) -> QorcResult<ConnectResult> {
         let server_url = self.server_url.read().clone();
         let url_str = match server_url {
             Some(url) => url,
@@ -645,7 +645,7 @@ impl WebSocketHandler {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(QorError::Network(
+            Err(_) => Err(QorcError::Network(
                 "Server connection timed out after 10 seconds".to_string(),
             )),
         };
@@ -685,14 +685,14 @@ impl WebSocketHandler {
         url_input: &str,
         attempt_id: u64,
         mut connect_cancel_rx: watch::Receiver<bool>,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let url_str = url_input.trim();
         let url = Url::parse(url_str)
-            .map_err(|e| QorError::InvalidArgument(format!("Invalid URL: {}", e)))?;
+            .map_err(|e| QorcError::InvalidArgument(format!("Invalid URL: {}", e)))?;
 
         let host = url
             .host_str()
-            .ok_or_else(|| QorError::InvalidArgument("No host in URL".to_string()))?;
+            .ok_or_else(|| QorcError::InvalidArgument("No host in URL".to_string()))?;
         let port = url.port().unwrap_or(443);
 
         let socks_port = self.tor_socks_port.load(Ordering::Relaxed);
@@ -719,10 +719,10 @@ impl WebSocketHandler {
                         "[WS] SOCKS connect timed out after {}s",
                         SOCKS_CONNECT_TIMEOUT_SECS
                     );
-                    return Err(QorError::Network("Tor SOCKS connection timeout".to_string()));
+                    return Err(QorcError::Network("Tor SOCKS connection timeout".to_string()));
                 }
                 Ok(inner) => inner.map_err(|error| {
-                    QorError::Network(format!("SOCKS5 connection failed: {error}"))
+                    QorcError::Network(format!("SOCKS5 connection failed: {error}"))
                 })?,
             },
         };
@@ -730,7 +730,7 @@ impl WebSocketHandler {
         let tcp = tcp_stream.into_inner();
         let tls_config = crate::crypto::tls::controlled_client_config(host.ends_with(".onion"))
             .map_err(|error| {
-                QorError::Network(format!("Failed to build PQ TLS connector: {error}"))
+                QorcError::Network(format!("Failed to build PQ TLS connector: {error}"))
             })?;
         let connector = tokio_tungstenite::Connector::Rustls(tls_config);
 
@@ -760,11 +760,11 @@ impl WebSocketHandler {
                     "[WS] TLS/WebSocket upgrade timed out after {}s",
                     WEBSOCKET_UPGRADE_TIMEOUT_SECS
                 );
-                return Err(QorError::Network("WebSocket upgrade timeout".to_string()));
+                return Err(QorcError::Network("WebSocket upgrade timeout".to_string()));
             }
             Ok(Err(e)) => {
                 error!("[WS] TLS/WebSocket upgrade failed: {}", e);
-                return Err(QorError::Network(format!(
+                return Err(QorcError::Network(format!(
                     "WebSocket upgrade failed: {}",
                     e
                 )));
@@ -1140,7 +1140,7 @@ impl WebSocketHandler {
         &self,
         payload: String,
         expected_connection_token: u64,
-    ) -> QorResult<SendResult> {
+    ) -> QorcResult<SendResult> {
         let state = *self.state.read();
 
         if state != ConnectionState::Connected {
@@ -1192,13 +1192,13 @@ impl WebSocketHandler {
                 MAX_WS_JSON_STRUCTURAL_TOKENS,
                 MAX_WS_MESSAGE_BYTES,
             )
-            .map_err(|_| QorError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
+            .map_err(|_| QorcError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
             let mut deserializer = serde_json::Deserializer::from_str(&payload);
             serde::de::IgnoredAny::deserialize(&mut deserializer)
-                .map_err(|_| QorError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
+                .map_err(|_| QorcError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
             deserializer
                 .end()
-                .map_err(|_| QorError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
+                .map_err(|_| QorcError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
 
             let Some(queued) =
                 QueuedWsMessage::reserved(Message::Text(payload), entry.pending_writes)
@@ -1235,7 +1235,7 @@ impl WebSocketHandler {
         &self,
         payload: Vec<u8>,
         expected_connection_token: u64,
-    ) -> QorResult<SendResult> {
+    ) -> QorcResult<SendResult> {
         if payload.len() != PQ_WS_FIXED_CELL_BYTES {
             return Ok(SendResult {
                 success: false,
@@ -1290,7 +1290,7 @@ impl WebSocketHandler {
         })
     }
 
-    pub async fn disconnect(&self, expected_connection_token: Option<u64>) -> QorResult<bool> {
+    pub async fn disconnect(&self, expected_connection_token: Option<u64>) -> QorcResult<bool> {
         let (close_entry, cancelled_connect) = {
             let mut connecting_attempt = self.connecting_attempt.write();
 
@@ -1370,7 +1370,7 @@ impl Drop for WebSocketHandler {
     }
 }
 
-pub async fn init() -> QorResult<Arc<WebSocketHandler>> {
+pub async fn init() -> QorcResult<Arc<WebSocketHandler>> {
     let handler = WebSocketHandler::new();
     Ok(Arc::new(handler))
 }

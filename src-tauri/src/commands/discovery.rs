@@ -129,7 +129,7 @@ const RESPONSE_PIR_BYTES: usize = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES: usize = 8912896;
 const MAX_RESPONSE_BYTES: usize = RESPONSE_DISCOVERY_BYTES;
-const ANONYMOUS_TRANSPORT_LANE_HEADER: &str = "x-qor-anonymous-transport-lane";
+const ANONYMOUS_TRANSPORT_LANE_HEADER: &str = "x-qorc-anonymous-transport-lane";
 const PIR_TRANSPORT_LANE: &str = "pir";
 
 async fn wait_for_bootstrap(tor: &Arc<crate::tor::TorManager>) -> bool {

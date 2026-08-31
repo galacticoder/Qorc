@@ -91,7 +91,7 @@ export class HAProxyConfigGenerator {
 
   // Generate complete HAProxy configuration
   generateConfig() {
-    const config = `# HAProxy Configuration for Qor-Chat Server Cluster
+    const config = `# HAProxy Configuration for qorc Server Cluster
 # Generated automatically - DO NOT EDIT MANUALLY
 # Generated at: ${new Date().toISOString()}
 

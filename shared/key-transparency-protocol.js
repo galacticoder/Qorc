@@ -5,7 +5,7 @@ import {
 } from './crypto-sizes.js';
 import { bytesToHex } from './bytes.js';
 
-export const KEY_TRANSPARENCY_PROTOCOL = 'qor-key-transparency-v2';
+export const KEY_TRANSPARENCY_PROTOCOL = 'qorc-key-transparency-v2';
 const KEY_TRANSPARENCY_HASH_BYTES = 64;
 const KEY_TRANSPARENCY_HASH_HEX_CHARS = KEY_TRANSPARENCY_HASH_BYTES * 2;
 export const KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES = ML_DSA_87_PUBLIC_KEY_BYTES;
@@ -18,8 +18,8 @@ export const KEY_TRANSPARENCY_RECOVERY_DELAY_EPOCHS = 7 * 24;
 export const KEY_TRANSPARENCY_POW_EPOCH_MS = 60 * 60 * 1000;
 export const KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY = 18;
 export const KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY = 14;
-export const KEY_TRANSPARENCY_APPEND_POW_DOMAIN = 'qor-key-transparency-append-pow-v2';
-export const KEY_TRANSPARENCY_SYNC_POW_DOMAIN = 'qor-key-transparency-sync-pow-v2';
+export const KEY_TRANSPARENCY_APPEND_POW_DOMAIN = 'qorc-key-transparency-append-pow-v2';
+export const KEY_TRANSPARENCY_SYNC_POW_DOMAIN = 'qorc-key-transparency-sync-pow-v2';
 
 export const KEY_TRANSPARENCY_MAX_LOG_SIZE = 10_000_000;
 export const KEY_TRANSPARENCY_DELTA_MAX_RECORDS = 4096;
@@ -62,7 +62,7 @@ export function encodeKeyTransparencySignaturePayload(kind, payload) {
     throw new Error('Invalid key-transparency signature kind');
   }
   return encoder.encode(canonicalKeyTransparencyJson({
-    context: 'Qor-Key-Transparency-Signature-v2',
+    context: 'qorc-Key-Transparency-Signature-v2',
     kind,
     payload,
     protocol: KEY_TRANSPARENCY_PROTOCOL,
@@ -140,9 +140,9 @@ export function keyTransparencyHeadPayload(head) {
   };
 }
 
-const LOG_ROOT_DOMAIN = 'qor-key-transparency-log-root-v2';
-const LOG_GENESIS_DOMAIN = 'qor-key-transparency-log-genesis-v2';
-const RECORD_HASH_DOMAIN = 'qor-key-transparency-record-v2';
+const LOG_ROOT_DOMAIN = 'qorc-key-transparency-log-root-v2';
+const LOG_GENESIS_DOMAIN = 'qorc-key-transparency-log-genesis-v2';
+const RECORD_HASH_DOMAIN = 'qorc-key-transparency-record-v2';
 
 export function keyTransparencyGenesisRoot(sha3_512) {
   return bytesToHex(sha3_512(encoder.encode(LOG_GENESIS_DOMAIN)));

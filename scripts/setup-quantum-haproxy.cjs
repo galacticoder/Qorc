@@ -29,7 +29,7 @@ async function hasOqsProvider(env) {
     const baseDir = path.join('server', 'config', 'certs');
     await fsp.mkdir(baseDir, { recursive: true });
     const localConf = path.join('server', 'config', 'openssl-oqs.cnf');
-    const runtimeRoot = '/opt/qor-edge';
+    const runtimeRoot = '/opt/qorc-edge';
     const runtimeLibDir = path.join(runtimeRoot, 'lib');
     const modulePath = path.join(runtimeLibDir, 'ossl-modules', 'oqsprovider.so');
     if (!fs.existsSync(modulePath)) {

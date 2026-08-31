@@ -26,7 +26,7 @@ const command = args[0];
 const flags = args.slice(1);
 
 if (!['linux', 'win32', 'darwin'].includes(process.platform)) {
-    console.error('[DOCKER] Qor deployment supports Linux, Windows, and macOS hosts running Docker Linux containers.');
+    console.error('[DOCKER] qorc deployment supports Linux, Windows, and macOS hosts running Docker Linux containers.');
     process.exit(1);
 }
 
@@ -57,6 +57,46 @@ if (!command || command === '-h' || command === '--help') {
 const repoRoot = path.resolve(__dirname, '..');
 const envPath = path.join(repoRoot, '.env');
 const hostLogsPath = path.join(repoRoot, 'logs');
+const composeFilePath = path.join(repoRoot, 'docker/docker-compose.yml');
+const serverImagePirWorkerPath = '/app/bin/qorc-pir-worker';
+
+function composeImageName(service) {
+    const rawConfig = execFileSync('docker', [
+        'compose',
+        '--env-file', envPath,
+        '-f', composeFilePath,
+        '--profile', '*',
+        'config',
+        '--format', 'json'
+    ], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const projectName = JSON.parse(rawConfig).name;
+    if (typeof projectName !== 'string' || !projectName) {
+        throw new Error('Docker Compose did not provide a project name');
+    }
+    return `${projectName}-${service}:latest`;
+}
+
+function serverImageHasCurrentPirWorker() {
+    try {
+        const imageName = composeImageName('server');
+        execFileSync('docker', [
+            'run', '--rm',
+            '--entrypoint', '/usr/bin/test',
+            imageName,
+            '-x', serverImagePirWorkerPath
+        ], {
+            cwd: repoRoot,
+            stdio: 'ignore'
+        });
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 // Helper to check if a port is in use
 function isPortInUse(port) {
@@ -180,7 +220,7 @@ async function checkDockerEnvironment(env, needsServerPassword) {
     let redisPasswordChanged = false;
     const defaults = {
         DB_PORT: '5432',
-        DB_NAME: 'Qor',
+        DB_NAME: 'qorc',
         DATABASE_USER: 'postgres',
         REDIS_URL: 'rediss://redis:6379',
         REDIS_EXTERNAL_PORT: '6379',
@@ -247,7 +287,7 @@ function checkSupportedDockerRuntime() {
         throw new Error(`Docker is running ${operatingSystem || 'an unknown container mode'}. Switch Docker to Linux containers.`);
     }
     if (!['amd64', 'arm64'].includes(architecture)) {
-        throw new Error(`Docker architecture '${rawArchitecture || 'unknown'}' is unsupported. Qor server images support amd64 and arm64.`);
+        throw new Error(`Docker architecture '${rawArchitecture || 'unknown'}' is unsupported. qorc server images support amd64 and arm64.`);
     }
 
     console.log(`[INFO] Docker runtime: linux/${architecture}`);
@@ -515,7 +555,7 @@ async function main() {
 
             try {
                 dockerBuildContext = createDockerBuildContext(repoRoot);
-                process.env.QOR_DOCKER_BUILD_CONTEXT = dockerBuildContext;
+                process.env.QORC_DOCKER_BUILD_CONTEXT = dockerBuildContext;
                 const targetServices = command === 'all' ? 'server loadbalancer' : command;
                 const buildServices = command === 'all'
                     ? 'postgres redis server loadbalancer'
@@ -528,8 +568,17 @@ async function main() {
                 let sharedServices = 'redis';
                 if (command === 'server' || command === 'all') sharedServices = 'postgres redis';
 
-                if (shouldBuild) {
-                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildServices}`, { cwd: repoRoot, stdio: 'inherit' });
+                const needsServer = command === 'server' || command === 'all';
+                const repairServerImage = needsServer
+                    && !shouldBuild
+                    && !serverImageHasCurrentPirWorker();
+                if (repairServerImage) {
+                    console.log(`[INFO] Existing server image is missing ${serverImagePirWorkerPath}, rebuilding it once.`);
+                }
+
+                if (shouldBuild || repairServerImage) {
+                    const servicesToBuild = shouldBuild ? buildServices : 'server';
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${servicesToBuild}`, { cwd: repoRoot, stdio: 'inherit' });
                 }
 
                 const sharedRecreateFlag = shouldBuild || environmentChanges.redisPasswordChanged ? '' : '--no-recreate';

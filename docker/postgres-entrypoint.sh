@@ -6,7 +6,7 @@ if [ -z "${POSTGRES_PASSWORD:-}" ]; then
   exit 1
 fi
 
-POSTGRES_DB="${POSTGRES_DB:-Qor}"
+POSTGRES_DB="${POSTGRES_DB:-qorc}"
 PG_ALLOWED_CIDR="${PG_ALLOWED_CIDR:-172.16.0.0/12}"
 if ! [[ "$POSTGRES_DB" =~ ^[A-Za-z_][A-Za-z0-9_]{0,62}$ ]]; then
   echo "POSTGRES_DB must be a simple PostgreSQL identifier" >&2

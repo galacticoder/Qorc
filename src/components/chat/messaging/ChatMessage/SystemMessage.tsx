@@ -19,7 +19,7 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
         'text-xs rounded-lg px-3 py-1.5 flex items-center gap-2',
         isError
           ? 'bg-red-500 text-white font-medium'
-          : 'qor-system-message-call text-zinc-100'
+          : 'qorc-system-message-call text-zinc-100'
         )}>
         {(isError || showCallIcon) && callType && <CallIcon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />}
         <span>{content}</span>
@@ -35,9 +35,9 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
                 key={i}
                 onClick={a.onClick}
                 className={cn(
-                  'qor-system-message-action ml-1 cursor-pointer px-2 py-0.5 rounded-md font-semibold',
+                  'qorc-system-message-action ml-1 cursor-pointer px-2 py-0.5 rounded-md font-semibold',
                   isError
-                    ? 'qor-system-message-action--error bg-red-600 text-white'
+                    ? 'qorc-system-message-action--error bg-red-600 text-white'
                     : 'border border-border bg-background text-foreground hover:bg-accent'
                 )}
                 style={{ fontSize: '0.7rem' }}

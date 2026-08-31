@@ -63,13 +63,13 @@ fn spawn(name: &str) -> Child {
 #[test]
 fn client_and_worker_complete_a_private_retrieval() {
     let records: Vec<Vec<u8>> = (0..COUNT).map(|i| record(i as u64 + 1)).collect();
-    let dir = std::env::temp_dir().join(format!("qor-pir-sidecar-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("qorc-pir-sidecar-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("records.bin");
     std::fs::write(&path, records.concat()).unwrap();
 
-    let mut worker = spawn("qor-pir-worker");
-    let mut client = spawn("qor-pir-client");
+    let mut worker = spawn("qorc-pir-worker");
+    let mut client = spawn("qorc-pir-client");
 
     let epoch: u32 = 31337;
     let mut build = Vec::new();
@@ -184,7 +184,7 @@ fn client_and_worker_complete_a_private_retrieval() {
 
 #[test]
 fn reports_wire_sizes_for_transport_classes() {
-    let mut client = spawn("qor-pir-client");
+    let mut client = spawn("qorc-pir-client");
     for &count in &[1024usize, 4096, 16384] {
         let mut request = Vec::new();
         request.extend_from_slice(&(count as u32).to_le_bytes());
@@ -201,11 +201,11 @@ fn reports_wire_sizes_for_transport_classes() {
     }
     
     let records: Vec<Vec<u8>> = (0..COUNT).map(|i| record(i as u64 + 1)).collect();
-    let dir = std::env::temp_dir().join(format!("qor-pir-size-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("qorc-pir-size-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("records.bin");
     std::fs::write(&path, records.concat()).unwrap();
-    let mut worker = spawn("qor-pir-worker");
+    let mut worker = spawn("qorc-pir-worker");
     let epoch: u32 = 5;
     let mut build = Vec::new();
     build.extend_from_slice(&epoch.to_le_bytes());

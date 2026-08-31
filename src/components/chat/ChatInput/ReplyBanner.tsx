@@ -29,18 +29,18 @@ export function ReplyBanner({ replyTo, onCancelReply, displaySender }: ReplyBann
     [replyTo]
   );
   return (
-    <div className="qor-reply-banner select-none">
-      <UserAvatar username={replyTo.sender} size="xs" className="qor-reply-banner-avatar" />
-      <div className="qor-reply-banner-copy">
-        <span className="qor-reply-banner-name">{displaySender}</span>
-        <div className="qor-reply-banner-preview">
+    <div className="qorc-reply-banner select-none">
+      <UserAvatar username={replyTo.sender} size="xs" className="qorc-reply-banner-avatar" />
+      <div className="qorc-reply-banner-copy">
+        <span className="qorc-reply-banner-name">{displaySender}</span>
+        <div className="qorc-reply-banner-preview">
           {isFileMsg ? (
             <>
               <MaterialFileIcon
                 fileName={replyTo.filename}
-                className="qor-reply-banner-preview-icon"
+                className="qorc-reply-banner-preview-icon"
               />
-              <span className="qor-reply-banner-preview-text">
+              <span className="qorc-reply-banner-preview-text">
                 {isVoiceMsg ? 'Voice message' : replyTo.filename || 'File'}
               </span>
             </>
@@ -50,13 +50,13 @@ export function ReplyBanner({ replyTo, onCancelReply, displaySender }: ReplyBann
               contentVersion={replyTo.controlState?.editOperationId}
             />
           ) : (
-            <span className="qor-reply-banner-preview-text">Message</span>
+            <span className="qorc-reply-banner-preview-text">Message</span>
           )}
         </div>
       </div>
       <button
         type="button"
-        className="qor-reply-banner-close"
+        className="qorc-reply-banner-close"
         onClick={onCancelReply}
         aria-label="Cancel reply"
         title="Cancel reply"

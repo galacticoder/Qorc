@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::account_vault::AccountSession;
 use crate::crypto::post_quantum;
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 const ML_DSA_PUBLIC_BYTES: usize = 2592;
 const ML_DSA_SIGNATURE_BYTES: usize = 4627;
 const OUTER_SALT_BYTES: usize = 32;
@@ -133,11 +133,11 @@ struct SealedPlaintext {
     payload: serde_json::Value,
 }
 
-fn invalid_envelope() -> QorError {
-    QorError::DecryptionFailed("Invalid authenticated hybrid envelope".to_string())
+fn invalid_envelope() -> QorcError {
+    QorcError::DecryptionFailed("Invalid authenticated hybrid envelope".to_string())
 }
 
-fn decode_exact<const N: usize>(value: &str) -> QorResult<Zeroizing<[u8; N]>> {
+fn decode_exact<const N: usize>(value: &str) -> QorcResult<Zeroizing<[u8; N]>> {
     let mut decoded = BASE64.decode(value).map_err(|_| invalid_envelope())?;
     if decoded.len() != N || BASE64.encode(&decoded) != value {
         decoded.zeroize();
@@ -149,7 +149,7 @@ fn decode_exact<const N: usize>(value: &str) -> QorResult<Zeroizing<[u8; N]>> {
     Ok(Zeroizing::new(output))
 }
 
-fn decode_bounded(value: &str, max: usize) -> QorResult<Zeroizing<Vec<u8>>> {
+fn decode_bounded(value: &str, max: usize) -> QorcResult<Zeroizing<Vec<u8>>> {
     if value.is_empty() || value.len() > max.saturating_mul(4).saturating_add(4) / 3 + 4 {
         return Err(invalid_envelope());
     }
@@ -194,7 +194,7 @@ fn hkdf_blake3(
     salt: &[u8],
     info: &[u8],
     length: usize,
-) -> QorResult<Zeroizing<Vec<u8>>> {
+) -> QorcResult<Zeroizing<Vec<u8>>> {
     if length == 0 || length > 255 * 32 {
         return Err(invalid_envelope());
     }
@@ -216,7 +216,7 @@ fn derive_layer_keys(
     salt: &[u8],
     prefix: &str,
     routing_digest: &[u8; 32],
-) -> QorResult<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>)> {
+) -> QorcResult<(Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>)> {
     let info = Zeroizing::new(format!("{prefix}:{}", BASE64.encode(routing_digest)));
     let okm = hkdf_blake3(secret, salt, info.as_bytes(), 64)?;
     let mut first = [0u8; 32];
@@ -239,7 +239,7 @@ fn decrypt_double_aead(
     tag: &[u8; INNER_TAG_BYTES],
     key: &[u8; 32],
     aad: &[u8],
-) -> QorResult<Zeroizing<Vec<u8>>> {
+) -> QorcResult<Zeroizing<Vec<u8>>> {
     let expanded = Zeroizing::new(Sha3_512::digest(key).to_vec());
     let k1: &[u8; 32] = expanded[..32].try_into().map_err(|_| invalid_envelope())?;
     let k2: &[u8; 32] = expanded[32..].try_into().map_err(|_| invalid_envelope())?;
@@ -278,7 +278,7 @@ fn validate_header(
     envelope: &HybridEnvelope,
     expected_sender: &str,
     recipient: &str,
-) -> QorResult<()> {
+) -> QorcResult<()> {
     if envelope.version != crate::protocol_keys::HYBRID_ENVELOPE_VERSION
         || envelope.routing_signature.algorithm != "ML-DSA-87"
         || envelope.algorithms.outer != "ML-KEM-1024"
@@ -302,8 +302,8 @@ pub fn decrypt(
     session: &AccountSession,
     envelope_json: &str,
     expected_sender_public: &str,
-) -> QorResult<NativeHybridPlaintext> {
-    let result = (|| -> QorResult<NativeHybridPlaintext> {
+) -> QorcResult<NativeHybridPlaintext> {
+    let result = (|| -> QorcResult<NativeHybridPlaintext> {
         if envelope_json.is_empty() || envelope_json.len() > MAX_ENVELOPE_JSON_BYTES {
             return Err(invalid_envelope());
         }
@@ -429,7 +429,7 @@ pub fn decrypt(
 pub fn decrypt_sealed(
     session: &AccountSession,
     envelope_json: &str,
-) -> QorResult<Option<serde_json::Value>> {
+) -> QorcResult<Option<serde_json::Value>> {
     const STANDARD_FRAME: usize = 131_072;
     const LARGE_FRAME: usize = 262_144;
     const HEADER: usize = 18;

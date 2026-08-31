@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::post_quantum;
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::protocol_keys;
 use crate::storage::SecureStorage;
 use crate::storage_keys;
@@ -110,7 +110,7 @@ impl AccountSession {
         bytes
     }
 
-    pub(crate) fn ml_kem_decapsulate(&self, ciphertext: &[u8]) -> QorResult<Zeroizing<Vec<u8>>> {
+    pub(crate) fn ml_kem_decapsulate(&self, ciphertext: &[u8]) -> QorcResult<Zeroizing<Vec<u8>>> {
         let private_key = self.ml_kem_private_key();
         post_quantum::ml_kem_decapsulate(ciphertext, private_key.as_slice())
     }
@@ -118,25 +118,25 @@ impl AccountSession {
     pub(crate) fn x25519_shared_secret(
         &self,
         peer_public: &[u8; X25519_SECRET_BYTES],
-    ) -> QorResult<Zeroizing<[u8; X25519_SECRET_BYTES]>> {
+    ) -> QorcResult<Zeroizing<[u8; X25519_SECRET_BYTES]>> {
         let shared = x25519_dalek::x25519(*self.x25519_secret, *peer_public);
         if shared.iter().all(|byte| *byte == 0) {
-            return Err(QorError::Verification(
+            return Err(QorcError::Verification(
                 "X25519 peer public key was rejected".to_string(),
             ));
         }
         Ok(Zeroizing::new(shared))
     }
 
-    pub(crate) fn sign_device(&self, message: &[u8]) -> QorResult<Vec<u8>> {
+    pub(crate) fn sign_device(&self, message: &[u8]) -> QorcResult<Vec<u8>> {
         sign_ml_dsa(&self.device_ml_dsa_seed, message)
     }
 
-    pub(crate) fn sign_account_root(&self, message: &[u8]) -> QorResult<Vec<u8>> {
+    pub(crate) fn sign_account_root(&self, message: &[u8]) -> QorcResult<Vec<u8>> {
         sign_ml_dsa(&self.account_root_seed, message)
     }
 
-    pub(crate) fn sign_recovery(&self, message: &[u8]) -> QorResult<Vec<u8>> {
+    pub(crate) fn sign_recovery(&self, message: &[u8]) -> QorcResult<Vec<u8>> {
         sign_ml_dsa(&self.recovery_seed, message)
     }
 
@@ -144,9 +144,9 @@ impl AccountSession {
         &self,
         server_scope: &str,
         vault_kind: &str,
-    ) -> QorResult<Zeroizing<[u8; 32]>> {
+    ) -> QorcResult<Zeroizing<[u8; 32]>> {
         if !valid_account_owner(server_scope) || !valid_token_vault_kind(vault_kind) {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid token-vault server scope".to_string(),
             ));
         }
@@ -167,9 +167,9 @@ impl AccountSession {
         &self,
         server_scope: &str,
         vault_kind: &str,
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         if !valid_account_owner(server_scope) || !valid_token_vault_kind(vault_kind) {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid token-vault server scope".to_string(),
             ));
         }
@@ -194,9 +194,9 @@ impl AccountSession {
         server_scope: &str,
         vault_kind: &str,
         plaintext: &[u8],
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         if plaintext.len() > TOKEN_VAULT_MAX_PLAINTEXT_BYTES {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Token vault exceeds its size limit".to_string(),
             ));
         }
@@ -216,7 +216,7 @@ impl AccountSession {
         aad.push(0);
         aad.extend_from_slice(server_scope.as_bytes());
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice())
-            .map_err(|_| QorError::EncryptionFailed("Token-vault key setup failed".to_string()))?;
+            .map_err(|_| QorcError::EncryptionFailed("Token-vault key setup failed".to_string()))?;
         let ciphertext = Zeroizing::new(
             cipher
                 .encrypt(
@@ -227,7 +227,7 @@ impl AccountSession {
                     },
                 )
                 .map_err(|_| {
-                    QorError::EncryptionFailed("Token-vault encryption failed".to_string())
+                    QorcError::EncryptionFailed("Token-vault encryption failed".to_string())
                 })?,
         );
         serde_json::to_string(&PersistedTokenVault {
@@ -235,7 +235,7 @@ impl AccountSession {
             nonce_base64: BASE64.encode(nonce.as_slice()),
             ciphertext_base64: BASE64.encode(ciphertext.as_slice()),
         })
-        .map_err(|_| QorError::EncryptionFailed("Token-vault encoding failed".to_string()))
+        .map_err(|_| QorcError::EncryptionFailed("Token-vault encoding failed".to_string()))
     }
 
     pub(crate) fn open_token_vault(
@@ -243,9 +243,9 @@ impl AccountSession {
         server_scope: &str,
         vault_kind: &str,
         encoded: &str,
-    ) -> QorResult<Zeroizing<Vec<u8>>> {
+    ) -> QorcResult<Zeroizing<Vec<u8>>> {
         if encoded.len() > TOKEN_VAULT_MAX_PLAINTEXT_BYTES + 64 * 1024 {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Token vault exceeds its size limit".to_string(),
             ));
         }
@@ -255,21 +255,21 @@ impl AccountSession {
             8,
             TOKEN_VAULT_MAX_PLAINTEXT_BYTES + 32 * 1024,
         )
-        .map_err(|_| QorError::DecryptionFailed("Invalid token-vault format".to_string()))?;
+        .map_err(|_| QorcError::DecryptionFailed("Invalid token-vault format".to_string()))?;
         let persisted: PersistedTokenVault = serde_json::from_str(encoded)
-            .map_err(|_| QorError::DecryptionFailed("Invalid token-vault format".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("Invalid token-vault format".to_string()))?;
         if persisted.version != TOKEN_VAULT_VERSION {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Unsupported token-vault version".to_string(),
             ));
         }
         let nonce =
             Zeroizing::new(BASE64.decode(&persisted.nonce_base64).map_err(|_| {
-                QorError::DecryptionFailed("Invalid token-vault nonce".to_string())
+                QorcError::DecryptionFailed("Invalid token-vault nonce".to_string())
             })?);
         let ciphertext =
             Zeroizing::new(BASE64.decode(&persisted.ciphertext_base64).map_err(|_| {
-                QorError::DecryptionFailed("Invalid token-vault ciphertext".to_string())
+                QorcError::DecryptionFailed("Invalid token-vault ciphertext".to_string())
             })?);
         if nonce.len() != VAULT_NONCE_BYTES
             || BASE64.encode(nonce.as_slice()) != persisted.nonce_base64
@@ -277,7 +277,7 @@ impl AccountSession {
             || ciphertext.len() > TOKEN_VAULT_MAX_PLAINTEXT_BYTES + VAULT_TAG_BYTES
             || BASE64.encode(ciphertext.as_slice()) != persisted.ciphertext_base64
         {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid token-vault encoding".to_string(),
             ));
         }
@@ -296,7 +296,7 @@ impl AccountSession {
         aad.push(0);
         aad.extend_from_slice(server_scope.as_bytes());
         let cipher = XChaCha20Poly1305::new_from_slice(key.as_slice())
-            .map_err(|_| QorError::DecryptionFailed("Token-vault key setup failed".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("Token-vault key setup failed".to_string()))?;
         let plaintext = Zeroizing::new(
             cipher
                 .decrypt(
@@ -307,11 +307,11 @@ impl AccountSession {
                     },
                 )
                 .map_err(|_| {
-                    QorError::DecryptionFailed("Token-vault authentication failed".to_string())
+                    QorcError::DecryptionFailed("Token-vault authentication failed".to_string())
                 })?,
         );
         if plaintext.len() > TOKEN_VAULT_MAX_PLAINTEXT_BYTES {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Token vault exceeds its size limit".to_string(),
             ));
         }
@@ -324,9 +324,9 @@ impl AccountSession {
         publication_window: u64,
         purpose: &str,
         counter: u16,
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         if !valid_account_owner(server_scope) || !matches!(purpose, "id" | "padding") {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid discovery publication context".to_string(),
             ));
         }
@@ -343,11 +343,11 @@ impl AccountSession {
     }
 }
 
-fn sign_ml_dsa(seed: &[u8; ML_DSA_SEED_BYTES], message: &[u8]) -> QorResult<Vec<u8>> {
+fn sign_ml_dsa(seed: &[u8; ML_DSA_SEED_BYTES], message: &[u8]) -> QorcResult<Vec<u8>> {
     use ml_dsa::signature::{SignatureEncoding, Signer};
 
     let signing_key = SigningKey::<MlDsa87>::new_from_slice(seed)
-        .map_err(|_| QorError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
     let signature = signing_key.sign(message);
     let bytes = signature.to_vec();
     drop(signing_key);
@@ -373,9 +373,9 @@ fn valid_username(value: &str) -> bool {
         })
 }
 
-fn storage_key(account_owner: &str) -> QorResult<String> {
+fn storage_key(account_owner: &str) -> QorcResult<String> {
     if !valid_account_owner(account_owner) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid native account owner".to_string(),
         ));
     }
@@ -385,9 +385,9 @@ fn storage_key(account_owner: &str) -> QorResult<String> {
     ))
 }
 
-fn put_len_prefixed(target: &mut Zeroizing<Vec<u8>>, value: &[u8]) -> QorResult<()> {
+fn put_len_prefixed(target: &mut Zeroizing<Vec<u8>>, value: &[u8]) -> QorcResult<()> {
     let length = u32::try_from(value.len())
-        .map_err(|_| QorError::InvalidArgument("Credential input is too large".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Credential input is too large".to_string()))?;
     target.extend_from_slice(&length.to_be_bytes());
     target.extend_from_slice(value);
     Ok(())
@@ -397,14 +397,14 @@ fn credential_input(
     username: &str,
     password: &str,
     passphrase: &str,
-) -> QorResult<Zeroizing<Vec<u8>>> {
+) -> QorcResult<Zeroizing<Vec<u8>>> {
     if !valid_username(username)
         || password.is_empty()
         || passphrase.is_empty()
         || password.len() > MAX_CREDENTIAL_BYTES
         || passphrase.len() > MAX_CREDENTIAL_BYTES
     {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid native account credentials".to_string(),
         ));
     }
@@ -426,14 +426,14 @@ fn credential_input(
 fn derive_unlock_key(
     input: &[u8],
     salt: &[u8; VAULT_SALT_BYTES],
-) -> QorResult<Zeroizing<[u8; 32]>> {
+) -> QorcResult<Zeroizing<[u8; 32]>> {
     let params = Params::new(ARGON_MEMORY_KIB, ARGON_ITERATIONS, ARGON_LANES, Some(32))
-        .map_err(|_| QorError::EncryptionFailed("Native account KDF setup failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("Native account KDF setup failed".to_string()))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut output = Zeroizing::new([0u8; 32]);
     argon
         .hash_password_into(input, salt, output.as_mut())
-        .map_err(|_| QorError::EncryptionFailed("Native account KDF failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("Native account KDF failed".to_string()))?;
     Ok(output)
 }
 
@@ -443,14 +443,14 @@ fn public_keys_from_seeds(
     x25519_secret: &[u8; X25519_SECRET_BYTES],
     account_root_seed: &[u8; ML_DSA_SEED_BYTES],
     recovery_seed: &[u8; ML_DSA_SEED_BYTES],
-) -> QorResult<AccountPublicKeys> {
+) -> QorcResult<AccountPublicKeys> {
     let kem_pair = mlkem1024::generate_key_pair(*ml_kem_seed);
     let device_key = SigningKey::<MlDsa87>::new_from_slice(device_seed)
-        .map_err(|_| QorError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
     let root_key = SigningKey::<MlDsa87>::new_from_slice(account_root_seed)
-        .map_err(|_| QorError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
     let recovery_key = SigningKey::<MlDsa87>::new_from_slice(recovery_seed)
-        .map_err(|_| QorError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("ML-DSA key initialization failed".to_string()))?;
     let x25519_public = x25519_dalek::x25519(*x25519_secret, x25519_dalek::X25519_BASEPOINT_BYTES);
 
     let public = AccountPublicKeys {
@@ -467,7 +467,7 @@ fn public_keys_from_seeds(
     Ok(public)
 }
 
-fn validate_public_keys(keys: &AccountPublicKeys) -> QorResult<()> {
+fn validate_public_keys(keys: &AccountPublicKeys) -> QorcResult<()> {
     let mut kem = decode_exact::<{ post_quantum::ML_KEM_PUBLIC_KEY_SIZE }>(
         &keys.kyber_public_base64,
         "native ML-KEM public key",
@@ -489,7 +489,7 @@ fn validate_public_keys(keys: &AccountPublicKeys) -> QorResult<()> {
         "native recovery ML-DSA public key",
     )?;
     let result = if device == root || device == recovery || root == recovery {
-        Err(QorError::Verification(
+        Err(QorcError::Verification(
             "Native signing roles must use distinct keys".to_string(),
         ))
     } else {
@@ -535,13 +535,13 @@ fn vault_aad(
     aad
 }
 
-fn decode_exact<const N: usize>(value: &str, label: &str) -> QorResult<[u8; N]> {
+fn decode_exact<const N: usize>(value: &str, label: &str) -> QorcResult<[u8; N]> {
     let mut decoded = BASE64
         .decode(value)
-        .map_err(|_| QorError::DecryptionFailed(format!("Invalid {label}")))?;
+        .map_err(|_| QorcError::DecryptionFailed(format!("Invalid {label}")))?;
     if decoded.len() != N || BASE64.encode(&decoded) != value {
         decoded.zeroize();
-        return Err(QorError::DecryptionFailed(format!("Invalid {label}")));
+        return Err(QorcError::DecryptionFailed(format!("Invalid {label}")));
     }
     let mut output = [0u8; N];
     output.copy_from_slice(&decoded);
@@ -570,7 +570,7 @@ fn encode_payload(
 
 fn decode_payload(
     payload: &[u8],
-) -> QorResult<(
+) -> QorcResult<(
     Zeroizing<[u8; MASTER_BYTES]>,
     Zeroizing<[u8; ML_KEM_SEED_BYTES]>,
     Zeroizing<[u8; ML_DSA_SEED_BYTES]>,
@@ -582,7 +582,7 @@ fn decode_payload(
         || &payload[..protocol_keys::ACCOUNT_VAULT_PAYLOAD_MAGIC.len()]
             != protocol_keys::ACCOUNT_VAULT_PAYLOAD_MAGIC
     {
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native account vault payload".to_string(),
         ));
     }
@@ -612,7 +612,7 @@ fn session_from_payload(
     username: String,
     payload: &[u8],
     expected_public: &AccountPublicKeys,
-) -> QorResult<Arc<AccountSession>> {
+) -> QorcResult<Arc<AccountSession>> {
     let (master_key, ml_kem_seed, device_seed, x25519_secret, account_root_seed, recovery_seed) =
         decode_payload(payload)?;
     let derived_public = public_keys_from_seeds(
@@ -623,7 +623,7 @@ fn session_from_payload(
         &recovery_seed,
     )?;
     if &derived_public != expected_public {
-        return Err(QorError::Verification(
+        return Err(QorcError::Verification(
             "Native account public/private key binding failed".to_string(),
         ));
     }
@@ -646,15 +646,15 @@ pub async fn create(
     username: String,
     password: Zeroizing<String>,
     passphrase: Zeroizing<String>,
-) -> QorResult<Arc<AccountSession>> {
+) -> QorcResult<Arc<AccountSession>> {
     let key = storage_key(&account_owner)?;
     if storage.has(&key).await? {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Native account vault already exists".to_string(),
         ));
     }
     if !valid_username(&username) {
-        return Err(QorError::InvalidArgument(
+        return Err(QorcError::InvalidArgument(
             "Invalid native account username".to_string(),
         ));
     }
@@ -679,7 +679,7 @@ pub async fn create(
         recovery_seed.as_mut_slice(),
     ] {
         getrandom::fill(target)
-            .map_err(|_| QorError::EncryptionFailed("Secure randomness failed".to_string()))?;
+            .map_err(|_| QorcError::EncryptionFailed("Secure randomness failed".to_string()))?;
     }
 
     let public_keys = public_keys_from_seeds(
@@ -704,10 +704,10 @@ pub async fn create(
         tokio::task::spawn_blocking(move || derive_unlock_key(&input_for_kdf, &salt_for_kdf))
             .await
             .map_err(|_| {
-                QorError::EncryptionFailed("Native account KDF task failed".to_string())
+                QorcError::EncryptionFailed("Native account KDF task failed".to_string())
             })??;
     let cipher = XChaCha20Poly1305::new_from_slice(unlock_key.as_slice())
-        .map_err(|_| QorError::EncryptionFailed("Native vault key setup failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("Native vault key setup failed".to_string()))?;
     let ciphertext = Zeroizing::new(
         cipher
             .encrypt(
@@ -718,7 +718,7 @@ pub async fn create(
                 },
             )
             .map_err(|_| {
-                QorError::EncryptionFailed("Native vault encryption failed".to_string())
+                QorcError::EncryptionFailed("Native vault encryption failed".to_string())
             })?,
     );
 
@@ -732,14 +732,14 @@ pub async fn create(
         public_keys: public_keys.clone(),
     };
     let serialized = Zeroizing::new(serde_json::to_string(&persisted).map_err(|_| {
-        QorError::EncryptionFailed("Native vault serialization failed".to_string())
+        QorcError::EncryptionFailed("Native vault serialization failed".to_string())
     })?);
     storage.set(&key, &serialized).await?;
     let verified = storage.get(&key).await?.ok_or_else(|| {
-        QorError::StorageInitFailed("Native vault persistence failed".to_string())
+        QorcError::StorageInitFailed("Native vault persistence failed".to_string())
     })?;
     if verified != *serialized {
-        return Err(QorError::StorageInitFailed(
+        return Err(QorcError::StorageInitFailed(
             "Native vault persistence verification failed".to_string(),
         ));
     }
@@ -753,24 +753,24 @@ pub async fn unlock(
     username: String,
     password: Zeroizing<String>,
     passphrase: Zeroizing<String>,
-) -> QorResult<Arc<AccountSession>> {
+) -> QorcResult<Arc<AccountSession>> {
     let key = storage_key(&account_owner)?;
     let raw = Zeroizing::new(storage.get(&key).await?.ok_or_else(|| {
-        QorError::DecryptionFailed("Native account vault is unavailable".to_string())
+        QorcError::DecryptionFailed("Native account vault is unavailable".to_string())
     })?);
     if raw.is_empty() || raw.len() > MAX_VAULT_JSON_CHARS {
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native account vault".to_string(),
         ));
     }
     let persisted: PersistedAccountVault = serde_json::from_str(&raw)
-        .map_err(|_| QorError::DecryptionFailed("Invalid native account vault".to_string()))?;
+        .map_err(|_| QorcError::DecryptionFailed("Invalid native account vault".to_string()))?;
     if persisted.version != VAULT_VERSION
         || persisted.account_owner != account_owner
         || persisted.username != username
         || !valid_username(&persisted.username)
     {
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native account vault".to_string(),
         ));
     }
@@ -787,13 +787,13 @@ pub async fn unlock(
     )?);
     let mut ciphertext =
         Zeroizing::new(BASE64.decode(&persisted.ciphertext_base64).map_err(|_| {
-            QorError::DecryptionFailed("Invalid native vault ciphertext".to_string())
+            QorcError::DecryptionFailed("Invalid native vault ciphertext".to_string())
         })?);
     if ciphertext.len() != PAYLOAD_BYTES + VAULT_TAG_BYTES
         || BASE64.encode(ciphertext.as_slice()) != persisted.ciphertext_base64
     {
         ciphertext.zeroize();
-        return Err(QorError::DecryptionFailed(
+        return Err(QorcError::DecryptionFailed(
             "Invalid native vault ciphertext".to_string(),
         ));
     }
@@ -804,10 +804,10 @@ pub async fn unlock(
         tokio::task::spawn_blocking(move || derive_unlock_key(&input_for_kdf, &salt_for_kdf))
             .await
             .map_err(|_| {
-                QorError::DecryptionFailed("Native account KDF task failed".to_string())
+                QorcError::DecryptionFailed("Native account KDF task failed".to_string())
             })??;
     let cipher = XChaCha20Poly1305::new_from_slice(unlock_key.as_slice())
-        .map_err(|_| QorError::DecryptionFailed("Native vault key setup failed".to_string()))?;
+        .map_err(|_| QorcError::DecryptionFailed("Native vault key setup failed".to_string()))?;
     let plaintext = Zeroizing::new(
         cipher
             .decrypt(
@@ -817,7 +817,7 @@ pub async fn unlock(
                     aad: aad.as_slice(),
                 },
             )
-            .map_err(|_| QorError::DecryptionFailed("Incorrect account credentials".to_string()))?,
+            .map_err(|_| QorcError::DecryptionFailed("Incorrect account credentials".to_string()))?,
     );
     session_from_payload(
         account_owner,
@@ -827,7 +827,7 @@ pub async fn unlock(
     )
 }
 
-pub async fn exists(storage: &SecureStorage, account_owner: &str) -> QorResult<bool> {
+pub async fn exists(storage: &SecureStorage, account_owner: &str) -> QorcResult<bool> {
     storage.has(&storage_key(account_owner)?).await
 }
 

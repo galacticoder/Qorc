@@ -6,7 +6,7 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 const SNAPSHOT_INTERVAL_MS = 2_000;
 const OPERATION_WINDOW_MS = 60_000;
 const OPERATION_SAMPLE_LIMIT = 8_192;
-const TELEMETRY_PATH = process.env.QOR_SERVER_TELEMETRY_PATH || '/app/logs/server-telemetry.json';
+const TELEMETRY_PATH = process.env.QORC_SERVER_TELEMETRY_PATH || '/app/logs/server-telemetry.json';
 const startedAt = Date.now();
 const operationSamples = [];
 const storageSamples = { postgres: [], redis: [] };

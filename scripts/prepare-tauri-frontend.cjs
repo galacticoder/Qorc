@@ -14,10 +14,10 @@ execFileSync(process.execPath, [path.join(__dirname, 'stage-webkitgtk-runtime.cj
     windowsHide: true
 });
 
-if (process.env.QOR_FRONTEND_PREBUILT === '1') {
+if (process.env.QORC_FRONTEND_PREBUILT === '1') {
     const entrypoint = path.join(repoRoot, 'dist', 'index.html');
     if (!fs.statSync(entrypoint, { throwIfNoEntry: false })?.isFile()) {
-        throw new Error('QOR_FRONTEND_PREBUILT=1 but dist/index.html is missing');
+        throw new Error('QORC_FRONTEND_PREBUILT=1 but dist/index.html is missing');
     }
     console.log('[frontend] using the separately built frontend bundle');
 } else {

@@ -121,14 +121,14 @@ mod tests {
     fn allows_known_exact_and_prefixed_keys() {
         assert!(!secure_key_allowed("last_authenticated_username"));
         assert!(!secure_key_allowed(&format!(
-            "qor_token_vault:{}",
+            "qorc_token_vault:{}",
             "a".repeat(64)
         )));
         assert!(!secure_key_allowed(&format!(
-            "qor_token_vault:{}",
+            "qorc_token_vault:{}",
             "A".repeat(64)
         )));
-        assert!(!secure_key_allowed("qor_token_vault"));
+        assert!(!secure_key_allowed("qorc_token_vault"));
         assert!(!secure_key_allowed("vault:alice"));
         assert!(!secure_key_allowed(&format!("vault:{}", "a".repeat(64))));
         assert!(!secure_key_allowed(&format!("wmk:{}", "a".repeat(64))));

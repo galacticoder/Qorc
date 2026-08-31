@@ -80,27 +80,27 @@ pub async fn p2p_send(
 ) -> Result<P2PSendResult, String> {
     let headers = request.headers();
     let connection_id = headers
-        .get("x-qor-p2p-connection")
+        .get("x-qorc-p2p-connection")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "Invalid P2P connection identifier".to_string())?;
     let connection_token = headers
-        .get("x-qor-p2p-token")
+        .get("x-qorc-p2p-token")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| "Invalid P2P connection token".to_string())?;
     let deadline_ms = headers
-        .get("x-qor-p2p-deadline")
+        .get("x-qorc-p2p-deadline")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0);
     let audio_endpoint = headers
-        .get("x-qor-p2p-audio-endpoint")
+        .get("x-qorc-p2p-audio-endpoint")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let audio_lane_rtt_ceiling_ms = headers
-        .get("x-qor-p2p-audio-rtt-ceiling")
+        .get("x-qorc-p2p-audio-rtt-ceiling")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=60_000).contains(value));

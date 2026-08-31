@@ -235,7 +235,7 @@ export class WebSocketHandshake {
           signature: 'ML-DSA-87',
           classicalKeyAgreement: 'X25519',
           kdf: 'BLAKE3-HKDF-SHA256-DOMAIN-SEPARATED',
-          aead: 'QOR-PQ-AEAD'
+          aead: 'QORC-PQ-AEAD'
         },
         sessionId,
         timestamp,

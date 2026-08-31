@@ -1,4 +1,4 @@
-//! TLS profiles for Qor-controlled transports.
+//! TLS profiles for qorc-controlled transports.
 
 use std::sync::Arc;
 

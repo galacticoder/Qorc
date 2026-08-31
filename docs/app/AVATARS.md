@@ -1,4 +1,4 @@
-# Qor-Chat Avatar System
+# qorc Avatar System
 
 ## Overview
 

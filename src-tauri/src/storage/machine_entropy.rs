@@ -2,7 +2,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 #[cfg(target_os = "linux")]
 const MAX_MACHINE_ID_BYTES: u64 = 256;
@@ -76,7 +76,7 @@ fn read_windows_machine_guid() -> Option<String> {
     String::from_utf16(&value[..end]).ok()
 }
 
-pub async fn get_machine_context() -> QorResult<Zeroizing<Vec<u8>>> {
+pub async fn get_machine_context() -> QorcResult<Zeroizing<Vec<u8>>> {
     #[cfg(target_os = "linux")]
     {
         if let Some(machine_id) = read_linux_machine_id().await
@@ -103,7 +103,7 @@ pub async fn get_machine_context() -> QorResult<Zeroizing<Vec<u8>>> {
         }
     }
 
-    Err(QorError::StorageInitFailed(
+    Err(QorcError::StorageInitFailed(
         "Stable machine identifier is unavailable".to_string(),
     ))
 }

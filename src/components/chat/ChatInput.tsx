@@ -279,15 +279,15 @@ export function ChatInput({
 
   const fileProgressPercent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
   const fileProgressStyle = {
-    '--qor-file-send-progress': `${fileProgressPercent}%`,
+    '--qorc-file-send-progress': `${fileProgressPercent}%`,
   } as React.CSSProperties;
 
   return (
     <>
-      <div className="qor-input-shell">
+      <div className="qorc-input-shell">
         {isSendingFile && (
           <div
-            className="qor-file-send-banner"
+            className="qorc-file-send-banner"
             style={fileProgressStyle}
             role="progressbar"
             aria-live="polite"
@@ -296,15 +296,15 @@ export function ChatInput({
             aria-valuemax={100}
             aria-valuenow={fileProgressPercent}
           >
-            <span className="qor-file-send-banner-fill" aria-hidden="true" />
-            <MaterialFileIcon fileName={fileName} className="qor-file-send-banner-icon" />
-            <span className="qor-file-send-banner-name" title={fileName || 'File'}>
+            <span className="qorc-file-send-banner-fill" aria-hidden="true" />
+            <MaterialFileIcon fileName={fileName} className="qorc-file-send-banner-icon" />
+            <span className="qorc-file-send-banner-name" title={fileName || 'File'}>
               {fileName || 'File'}
             </span>
-            <span className="qor-file-send-banner-percent">{fileProgressPercent}%</span>
+            <span className="qorc-file-send-banner-percent">{fileProgressPercent}%</span>
             <button
               type="button"
-              className="qor-file-send-banner-cancel"
+              className="qorc-file-send-banner-cancel"
               onClick={cancelCurrent}
               aria-label="Cancel file transfer"
               title="Cancel file transfer"
@@ -332,13 +332,13 @@ export function ChatInput({
           />
         )}
         <div
-          className={`qor-message-box ${isSendingFile || editingMessage || replyTo || showVoiceRecorder ? 'has-banner' : ''}`}
+          className={`qorc-message-box ${isSendingFile || editingMessage || replyTo || showVoiceRecorder ? 'has-banner' : ''}`}
         >
             {/* File Upload */}
-            <div className="qor-file-upload-wrapper">
+            <div className="qorc-file-upload-wrapper">
               <button
                 type="button"
-                className="qor-composer-icon-btn"
+                className="qorc-composer-icon-btn"
                 title="Add a file"
                 aria-label="Add a file"
                 disabled={disabled || isSendingFile || isSending}
@@ -356,7 +356,7 @@ export function ChatInput({
             </div>
 
             {/* Voice Recorder Button */}
-            <div className="qor-voice-button-wrap">
+            <div className="qorc-voice-button-wrap">
               <VoiceRecorderButton
                 onClick={() => setShowVoiceRecorder(true)}
                 disabled={isSendingFile || isSending || showVoiceRecorder || disabled}
@@ -377,7 +377,7 @@ export function ChatInput({
               onChange={handleMessageChange}
               onKeyDown={handleKeyDown}
               disabled={disabled}
-              className={`qor-message-input${disabledPlaceholder ? ' is-blocked-placeholder' : ''}`}
+              className={`qorc-message-input${disabledPlaceholder ? ' is-blocked-placeholder' : ''}`}
             />
 
             {/* Send Button */}
@@ -385,7 +385,7 @@ export function ChatInput({
               id="sendButton"
               onClick={handleSend}
               disabled={!message.trim() || !selectedConversation || disabled}
-              className="qor-send-button"
+              className="qorc-send-button"
               title="Send message"
               aria-label="Send message"
             >

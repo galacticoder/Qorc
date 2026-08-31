@@ -6,7 +6,7 @@ Discovery maps a user handle to an encrypted, certified peer bundle without
 sending the plaintext handle or peer bundle to the server. It uses a verifiable
 OPRF, fixed-size encrypted records, fixed-count bucket requests, Tor circuit
 isolation, delayed publication, and local identity verification.
-The account root inside a candidate must also match Qor's append-only private
+The account root inside a candidate must also match qorc's append-only private
 key-transparency state before any Signal, Hybrid, or P2P key is installed.
 
 This is not fully oblivious retrieval. The server sees publication bucket sets,
@@ -73,7 +73,7 @@ reveals nothing about which handle is being checked. See
 This prevents the current server from silently returning one account root to
 one established client and an attacker root to another without producing a
 detectable inconsistent history. It does not prove real-world identity: the
-first valid account that registers a transparency label controls that Qor
+first valid account that registers a transparency label controls that qorc
 handle. A fresh install also pins the first server ML-DSA signer it sees for the
 configured endpoint. See `docs/app/KEY_TRANSPARENCY.md`.
 

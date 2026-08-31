@@ -5,7 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 /// Encrypt with XChaCha20-Poly1305
 pub fn xchacha_encrypt(
@@ -13,9 +13,9 @@ pub fn xchacha_encrypt(
     nonce: &[u8; 24],
     plaintext: &[u8],
     aad: &[u8],
-) -> QorResult<Vec<u8>> {
+) -> QorcResult<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|_| QorError::EncryptionFailed("XChaCha key init failed".to_string()))?;
+        .map_err(|_| QorcError::EncryptionFailed("XChaCha key init failed".to_string()))?;
 
     let nonce_obj = XNonce::from_slice(nonce);
     cipher
@@ -26,7 +26,7 @@ pub fn xchacha_encrypt(
                 aad,
             },
         )
-        .map_err(|_| QorError::EncryptionFailed("XChaCha20-Poly1305 encryption failed".to_string()))
+        .map_err(|_| QorcError::EncryptionFailed("XChaCha20-Poly1305 encryption failed".to_string()))
 }
 
 /// Decrypt with XChaCha20-Poly1305
@@ -35,9 +35,9 @@ pub fn xchacha_decrypt(
     nonce: &[u8; 24],
     ciphertext: &[u8],
     aad: &[u8],
-) -> QorResult<Vec<u8>> {
+) -> QorcResult<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|_| QorError::DecryptionFailed("XChaCha key init failed".to_string()))?;
+        .map_err(|_| QorcError::DecryptionFailed("XChaCha key init failed".to_string()))?;
 
     let nonce_obj = XNonce::from_slice(nonce);
     cipher
@@ -48,5 +48,5 @@ pub fn xchacha_decrypt(
                 aad,
             },
         )
-        .map_err(|_| QorError::DecryptionFailed("XChaCha20-Poly1305 decryption failed".to_string()))
+        .map_err(|_| QorcError::DecryptionFailed("XChaCha20-Poly1305 decryption failed".to_string()))
 }

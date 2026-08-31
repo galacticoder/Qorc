@@ -7,7 +7,7 @@ export const REQUIRED_WS_PQ_HANDSHAKE = Object.freeze({
   signature: 'ML-DSA-87',
   classicalKeyAgreement: 'X25519',
   kdf: 'BLAKE3-HKDF-SHA256-DOMAIN-SEPARATED',
-  aead: 'QOR-PQ-AEAD',
+  aead: 'QORC-PQ-AEAD',
 });
 
 export function validateWsWireProtection({ hasPqSession, isPqProtected, messageType } = {}) {

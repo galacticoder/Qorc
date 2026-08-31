@@ -14,7 +14,7 @@ function sanitizeInstanceId(value: unknown): string {
 
 function readInstanceIdFromWindow(): string | null {
   try {
-    const value = (globalThis as any).__QOR_INSTANCE_ID;
+    const value = (globalThis as any).__QORC_INSTANCE_ID;
     return typeof value === 'string' && value.trim() ? sanitizeInstanceId(value) : null;
   } catch {
     return null;
@@ -24,7 +24,7 @@ function readInstanceIdFromWindow(): string | null {
 function readInstanceIdFromUrl(): string | null {
   try {
     const params = new URLSearchParams(globalThis.location?.search || '');
-    const value = params.get('qorInstanceId') || params.get('instanceId');
+    const value = params.get('qorcInstanceId') || params.get('instanceId');
     return value ? sanitizeInstanceId(value) : null;
   } catch {
     return null;
@@ -35,7 +35,7 @@ function cacheInstanceId(value: string): string {
   const sanitized = sanitizeInstanceId(value);
   cachedInstanceId = sanitized;
   try {
-    (globalThis as any).__QOR_INSTANCE_ID = sanitized;
+    (globalThis as any).__QORC_INSTANCE_ID = sanitized;
   } catch { }
   return sanitized;
 }

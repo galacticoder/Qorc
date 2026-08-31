@@ -602,14 +602,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, []);
 
   return (
-    <div className={`qor-chat-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
+    <div className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
       <div
-        className="qor-chat-toolbar"
+        className="qorc-toolbar"
       >
         <div className="min-w-0 flex-1 pr-3" />
         <div className="flex items-center gap-2">
           {selectedConversation && (
-            <div className="qor-call-pill" role="group" aria-label="Conversation actions">
+            <div className="qorc-call-pill" role="group" aria-label="Conversation actions">
               {!keyChangePending && !hasAttachedCall && (
                 <>
                   <Button
@@ -617,7 +617,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     variant="outline"
                     onClick={handleAudioCall}
                     disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                    className="qor-call-pill-btn"
+                    className="qorc-call-pill-btn"
                     title="Audio call"
                   >
                     <CallIcon className="w-4 h-4" />
@@ -627,7 +627,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     variant="outline"
                     onClick={handleVideoCall}
                     disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                    className="qor-call-pill-btn"
+                    className="qorc-call-pill-btn"
                     title="Video call"
                   >
                     <Video className="w-4 h-4" />
@@ -654,25 +654,25 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           <div className="min-w-0">
             <div className="font-semibold">Account-key recovery pending for {selectedConversation}</div>
             <p className="mt-0.5 text-xs leading-relaxed text-amber-100/85">
-              Qor verified a recovery-key-authorized replacement request. The existing key remains active until{' '}
+              qorc verified a recovery-key-authorized replacement request. The existing key remains active until{' '}
               {new Date(keyTransparencyEpochStartMs(recoveryWarning.activatesAtEpoch)).toLocaleString()}. Treat unexpected recovery as a security warning.
             </p>
           </div>
         </div>
       )}
       <ScrollArea
-        className="qor-message-scroll"
+        className="qorc-message-scroll"
         ref={scrollAreaRef}
       >
-        <div className="qor-message-stack">
+        <div className="qorc-message-stack">
           {}
           {isLoadingMore && (
-            <div className="qor-thread-loading" role="status" aria-label="Loading earlier messages">
-              <span className="qor-thread-loading-spinner" aria-hidden="true" />
+            <div className="qorc-thread-loading" role="status" aria-label="Loading earlier messages">
+              <span className="qorc-thread-loading-spinner" aria-hidden="true" />
             </div>
           )}
           {messages.length === 0 && !isLoadingMore ? (
-            <div className="qor-thread-empty">
+            <div className="qorc-thread-empty">
               No messages yet. Start the conversation!
             </div>
           ) : (
@@ -712,10 +712,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       </ScrollArea>
 
       <div
-        className="qor-chat-composer-wrap"
+        className="qorc-composer-wrap"
       >
         {keyChangePending ? (
-          <div className="qor-chat-composer-blocked px-4 py-3 text-center text-sm text-amber-200/90" role="status">
+          <div className="qorc-composer-blocked px-4 py-3 text-center text-sm text-amber-200/90" role="status">
             {selectedConversation}'s new security keys are awaiting automatic
             key-transparency verification. Messaging and calls remain locked.
           </div>

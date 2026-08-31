@@ -451,18 +451,18 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   };
 
   return (
-    <div className="qor-voice-recorder" role="region" aria-label="Voice note recorder">
+    <div className="qorc-voice-recorder" role="region" aria-label="Voice note recorder">
       {error ? (
         error === MICROPHONE_PERMISSION_ERROR ? (
-          <div className="qor-voice-recorder-error" role="status">{error}</div>
+          <div className="qorc-voice-recorder-error" role="status">{error}</div>
         ) : (
           <>
-            <div className="qor-voice-recorder-error">{error}</div>
-            <div className="qor-voice-recorder-actions">
+            <div className="qorc-voice-recorder-error">{error}</div>
+            <div className="qorc-voice-recorder-actions">
               <button
                 type="button"
                 onClick={onCancel}
-                className="qor-voice-recorder-button qor-voice-recorder-cancel"
+                className="qorc-voice-recorder-button qorc-voice-recorder-cancel"
                 title="Discard voice note"
                 aria-label="Discard voice note"
               >
@@ -473,27 +473,27 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         )
       ) : !recordedBlob ? (
         <>
-          <div className="qor-voice-recorder-status">
-            <span className="qor-voice-recorder-dot" aria-hidden="true" />
-            <span className="qor-voice-recorder-label">Recording</span>
-            <span className="qor-voice-recorder-time">{formatClockDurationSeconds(duration)}</span>
+          <div className="qorc-voice-recorder-status">
+            <span className="qorc-voice-recorder-dot" aria-hidden="true" />
+            <span className="qorc-voice-recorder-label">Recording</span>
+            <span className="qorc-voice-recorder-time">{formatClockDurationSeconds(duration)}</span>
           </div>
 
-          <div className="qor-voice-recorder-meter-wrap">
+          <div className="qorc-voice-recorder-meter-wrap">
             <canvas
               ref={canvasRef}
               width={200}
               height={32}
-              className="qor-voice-recorder-meter"
+              className="qorc-voice-recorder-meter"
               aria-hidden="true"
             />
           </div>
 
-          <div className="qor-voice-recorder-actions">
+          <div className="qorc-voice-recorder-actions">
             <button
               type="button"
               onClick={onCancel}
-              className="qor-voice-recorder-button qor-voice-recorder-cancel"
+              className="qorc-voice-recorder-button qorc-voice-recorder-cancel"
               title="Discard voice note"
               aria-label="Discard voice note"
             >
@@ -503,7 +503,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
               type="button"
               onClick={stopRecording}
               disabled={disabled || !isRecording}
-              className="qor-voice-recorder-button qor-voice-recorder-stop"
+              className="qorc-voice-recorder-button qorc-voice-recorder-stop"
               title="Stop recording"
               aria-label="Stop recording"
             >
@@ -516,30 +516,30 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
           <button
             type="button"
             onClick={isPlaying ? pausePlayback : playRecording}
-            className="qor-voice-recorder-button"
+            className="qorc-voice-recorder-button"
             title={isPlaying ? 'Pause voice note' : 'Play voice note'}
             aria-label={isPlaying ? 'Pause voice note' : 'Play voice note'}
           >
             {isPlaying ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}
           </button>
 
-          <div className="qor-voice-recorder-review">
-            <div className="qor-voice-recorder-progress">
+          <div className="qorc-voice-recorder-review">
+            <div className="qorc-voice-recorder-progress">
               <div
-                className="qor-voice-recorder-progress-fill"
+                className="qorc-voice-recorder-progress-fill"
                 style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
               />
             </div>
-            <span className="qor-voice-recorder-review-time">
+            <span className="qorc-voice-recorder-review-time">
               {formatClockDurationSeconds(currentTime)} / {formatClockDurationSeconds(duration)}
             </span>
           </div>
 
-          <div className="qor-voice-recorder-actions">
+          <div className="qorc-voice-recorder-actions">
             <button
               type="button"
               onClick={onCancel}
-              className="qor-voice-recorder-button qor-voice-recorder-cancel"
+              className="qorc-voice-recorder-button qorc-voice-recorder-cancel"
               title="Discard voice note"
               aria-label="Discard voice note"
             >
@@ -549,7 +549,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
               type="button"
               onClick={sendVoiceNote}
               disabled={disabled}
-              className="qor-send-button qor-voice-recorder-send"
+              className="qorc-send-button qorc-voice-recorder-send"
               title="Send voice note"
               aria-label="Send voice note"
             >

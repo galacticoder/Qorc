@@ -12,7 +12,7 @@ const path = require('node:path');
 const repoRoot = path.resolve(__dirname, '..');
 const cargoDir = path.join(repoRoot, 'workers', 'ypir');
 const outDir = path.join(repoRoot, 'src-tauri', 'binaries');
-const ALL_BINARIES = ['qor-pir-worker', 'qor-pir-client'];
+const ALL_BINARIES = ['qorc-pir-worker', 'qorc-pir-client'];
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -66,15 +66,18 @@ function main() {
 
   const target = requestedTarget || hostTriple();
   validateTarget(target);
-  const binaries = clientOnly ? ['qor-pir-client'] : ALL_BINARIES;
+  const binaries = clientOnly ? ['qorc-pir-client'] : ALL_BINARIES;
   const cargoArgs = ['build', '--release', '--offline'];
   if (requestedTarget) cargoArgs.push('--target', target);
   for (const binary of binaries) cargoArgs.push('--bin', binary);
 
   console.log(`[pir] building ${binaries.join(', ')} for ${target}`);
+  const remapFlag = `--remap-path-prefix=${repoRoot}=qorc-source`;
+  const rustFlags = [process.env.RUSTFLAGS, remapFlag].filter(Boolean).join(' ');
   execFileSync('cargo', cargoArgs, {
     cwd: cargoDir,
-    stdio: 'inherit'
+    stdio: 'inherit',
+    env: { ...process.env, RUSTFLAGS: rustFlags }
   });
 
   const executableSuffix = target.includes('windows') ? '.exe' : '';

@@ -1,4 +1,4 @@
-//! Client side PIR driven through `qor-pir-client` sidecar
+//! Client side PIR driven through `qorc-pir-client` sidecar
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded_pir_client.rs"));
@@ -53,13 +53,13 @@ fn embedded_file_matches(path: &Path) -> bool {
     blake3::hash(&bytes).as_bytes() == &embedded::EMBEDDED_PIR_CLIENT_HASH
 }
 
-fn secure_embedded_directory(path: &Path) -> QorResult<()> {
+fn secure_embedded_directory(path: &Path) -> QorcResult<()> {
     fs::create_dir_all(path)
-        .map_err(|_| QorError::Internal("PIR runtime directory is unavailable".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR runtime directory is unavailable".to_string()))?;
     let metadata = fs::symlink_metadata(path)
-        .map_err(|_| QorError::Internal("PIR runtime directory is unavailable".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR runtime directory is unavailable".to_string()))?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(QorError::Internal(
+        return Err(QorcError::Internal(
             "PIR runtime directory is invalid".to_string(),
         ));
     }
@@ -68,59 +68,59 @@ fn secure_embedded_directory(path: &Path) -> QorResult<()> {
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(QorError::Internal(
+            return Err(QorcError::Internal(
                 "PIR runtime directory has the wrong owner".to_string(),
             ));
         }
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
-            QorError::Internal("PIR runtime directory permissions failed".to_string())
+            QorcError::Internal("PIR runtime directory permissions failed".to_string())
         })?;
     }
 
     Ok(())
 }
 
-fn write_embedded_client(path: &Path) -> QorResult<()> {
+fn write_embedded_client(path: &Path) -> QorcResult<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| QorError::Internal("Invalid PIR runtime path".to_string()))?;
+        .ok_or_else(|| QorcError::Internal("Invalid PIR runtime path".to_string()))?;
     let temp = parent.join(format!(
-        ".qor-pir-client-{}.tmp",
+        ".qorc-pir-client-{}.tmp",
         uuid::Uuid::new_v4().simple()
     ));
-    let result = (|| -> QorResult<()> {
+    let result = (|| -> QorcResult<()> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         let mut file = options
             .open(&temp)
-            .map_err(|_| QorError::Internal("PIR client extraction failed".to_string()))?;
+            .map_err(|_| QorcError::Internal("PIR client extraction failed".to_string()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             file.set_permissions(fs::Permissions::from_mode(0o700))
-                .map_err(|_| QorError::Internal("PIR client permissions failed".to_string()))?;
+                .map_err(|_| QorcError::Internal("PIR client permissions failed".to_string()))?;
         }
         file.write_all(embedded::EMBEDDED_PIR_CLIENT)
             .and_then(|_| file.sync_all())
-            .map_err(|_| QorError::Internal("PIR client extraction failed".to_string()))?;
+            .map_err(|_| QorcError::Internal("PIR client extraction failed".to_string()))?;
         drop(file);
 
         if path.exists() && !embedded_file_matches(path) {
             fs::remove_file(path).map_err(|_| {
-                QorError::Internal("Invalid PIR client cannot be replaced".to_string())
+                QorcError::Internal("Invalid PIR client cannot be replaced".to_string())
             })?;
         }
         match fs::rename(&temp, path) {
             Ok(()) => {}
             Err(_) if embedded_file_matches(path) => {}
             Err(_) => {
-                return Err(QorError::Internal(
+                return Err(QorcError::Internal(
                     "PIR client installation failed".to_string(),
                 ));
             }
         }
         if !embedded_file_matches(path) {
-            return Err(QorError::Internal(
+            return Err(QorcError::Internal(
                 "PIR client integrity verification failed".to_string(),
             ));
         }
@@ -132,7 +132,7 @@ fn write_embedded_client(path: &Path) -> QorResult<()> {
     result
 }
 
-fn materialize_embedded_client(directory: &Path) -> QorResult<PathBuf> {
+fn materialize_embedded_client(directory: &Path) -> QorcResult<PathBuf> {
     secure_embedded_directory(&directory)?;
     let hash_prefix = hex::encode(&embedded::EMBEDDED_PIR_CLIENT_HASH[..8]);
     let base_name = embedded::EMBEDDED_PIR_CLIENT_FILE_NAME;
@@ -147,18 +147,18 @@ fn materialize_embedded_client(directory: &Path) -> QorResult<PathBuf> {
     Ok(path)
 }
 
-fn sidecar_path(app: &tauri::AppHandle) -> QorResult<PathBuf> {
+fn sidecar_path(app: &tauri::AppHandle) -> QorcResult<PathBuf> {
     let cache = app
         .path()
         .app_cache_dir()
-        .map_err(|_| QorError::Internal("App cache directory is unavailable".to_string()))?;
+        .map_err(|_| QorcError::Internal("App cache directory is unavailable".to_string()))?;
     materialize_embedded_client(&cache.join("native").join("pir"))
 }
 
-fn validation_started(app: &tauri::AppHandle) -> QorResult<()> {
+fn validation_started(app: &tauri::AppHandle) -> QorcResult<()> {
     let mut guard = SIDECAR
         .lock()
-        .map_err(|_| QorError::Internal("PIR lock".into()))?;
+        .map_err(|_| QorcError::Internal("PIR lock".into()))?;
     if let Some(child) = guard.as_mut() {
         if matches!(child.try_wait(), Ok(None)) {
             return Ok(());
@@ -169,52 +169,52 @@ fn validation_started(app: &tauri::AppHandle) -> QorResult<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| QorError::Internal("PIR sidecar failed to start".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR sidecar failed to start".to_string()))?;
     *guard = Some(child);
     Ok(())
 }
 
-fn call(op: u8, payload: &[u8]) -> QorResult<Vec<u8>> {
+fn call(op: u8, payload: &[u8]) -> QorcResult<Vec<u8>> {
     let mut guard = SIDECAR
         .lock()
-        .map_err(|_| QorError::Internal("PIR lock".into()))?;
+        .map_err(|_| QorcError::Internal("PIR lock".into()))?;
     let child = guard
         .as_mut()
-        .ok_or_else(|| QorError::Internal("PIR sidecar is not running".to_string()))?;
+        .ok_or_else(|| QorcError::Internal("PIR sidecar is not running".to_string()))?;
 
     let stdin = child
         .stdin
         .as_mut()
-        .ok_or_else(|| QorError::Internal("PIR sidecar stdin closed".to_string()))?;
+        .ok_or_else(|| QorcError::Internal("PIR sidecar stdin closed".to_string()))?;
     let length = (payload.len() + 1) as u32;
     stdin
         .write_all(&length.to_le_bytes())
         .and_then(|_| stdin.write_all(&[op]))
         .and_then(|_| stdin.write_all(payload))
         .and_then(|_| stdin.flush())
-        .map_err(|_| QorError::Internal("PIR sidecar write failed".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR sidecar write failed".to_string()))?;
 
     let stdout = child
         .stdout
         .as_mut()
-        .ok_or_else(|| QorError::Internal("PIR sidecar stdout closed".to_string()))?;
+        .ok_or_else(|| QorcError::Internal("PIR sidecar stdout closed".to_string()))?;
     let mut header = [0u8; 4];
     stdout
         .read_exact(&mut header)
-        .map_err(|_| QorError::Internal("PIR sidecar read failed".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR sidecar read failed".to_string()))?;
     let length = u32::from_le_bytes(header) as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
-        return Err(QorError::Internal(
+        return Err(QorcError::Internal(
             "PIR sidecar sent an invalid frame".to_string(),
         ));
     }
     let mut frame = vec![0u8; length];
     stdout
         .read_exact(&mut frame)
-        .map_err(|_| QorError::Internal("PIR sidecar read failed".to_string()))?;
+        .map_err(|_| QorcError::Internal("PIR sidecar read failed".to_string()))?;
 
     if frame[0] != STATUS_OK {
-        return Err(QorError::Internal(
+        return Err(QorcError::Internal(
             "PIR sidecar rejected the request".to_string(),
         ));
     }
@@ -227,12 +227,12 @@ pub async fn pir_generate_query(
     count: u32,
     entry_bytes: u32,
     target_row: u32,
-) -> QorResult<PirQuery> {
+) -> QorcResult<PirQuery> {
     if count == 0 || count > MAX_RECORDS || entry_bytes == 0 || entry_bytes > MAX_ENTRY_BYTES {
-        return Err(QorError::Internal("Invalid PIR database shape".to_string()));
+        return Err(QorcError::Internal("Invalid PIR database shape".to_string()));
     }
     if target_row >= count.next_power_of_two().max(2048) {
-        return Err(QorError::Internal("Invalid PIR row".to_string()));
+        return Err(QorcError::Internal("Invalid PIR row".to_string()));
     }
     validation_started(&app)?;
 
@@ -244,9 +244,9 @@ pub async fn pir_generate_query(
     parse_query_response(call(OP_QUERY, &payload)?)
 }
 
-fn parse_query_response(response: Vec<u8>) -> QorResult<PirQuery> {
+fn parse_query_response(response: Vec<u8>) -> QorcResult<PirQuery> {
     if response.len() < 12 {
-        return Err(QorError::Internal(
+        return Err(QorcError::Internal(
             "PIR sidecar returned a short query".to_string(),
         ));
     }
@@ -254,7 +254,7 @@ fn parse_query_response(response: Vec<u8>) -> QorResult<PirQuery> {
     let query_len = u32::from_le_bytes(response[4..8].try_into().unwrap()) as usize;
     let params_len = u32::from_le_bytes(response[8..12].try_into().unwrap()) as usize;
     if session_id == 0 || response.len() != 12 + query_len + params_len {
-        return Err(QorError::Internal(
+        return Err(QorcError::Internal(
             "PIR sidecar returned a malformed query".to_string(),
         ));
     }
@@ -271,7 +271,7 @@ pub async fn pir_generate_batch_query(
     count: u32,
     entry_bytes: u32,
     target_rows: Vec<u32>,
-) -> QorResult<PirQuery> {
+) -> QorcResult<PirQuery> {
     if count == 0
         || count > MAX_RECORDS
         || entry_bytes == 0
@@ -279,14 +279,14 @@ pub async fn pir_generate_batch_query(
         || target_rows.is_empty()
         || target_rows.len() > MAX_BATCH_QUERIES
     {
-        return Err(QorError::Internal("Invalid PIR database shape".to_string()));
+        return Err(QorcError::Internal("Invalid PIR database shape".to_string()));
     }
     let padded_count = count.next_power_of_two().max(2048);
     if target_rows
         .iter()
         .any(|target_row| *target_row >= padded_count)
     {
-        return Err(QorError::Internal("Invalid PIR row".to_string()));
+        return Err(QorcError::Internal("Invalid PIR row".to_string()));
     }
     validation_started(&app)?;
 
@@ -300,15 +300,15 @@ pub async fn pir_generate_batch_query(
     parse_query_response(call(OP_QUERY_BATCH, &payload)?)
 }
 
-fn decode_response(op: u8, response: String, session_id: u32) -> QorResult<String> {
+fn decode_response(op: u8, response: String, session_id: u32) -> QorcResult<String> {
     if session_id == 0 {
-        return Err(QorError::Internal("Invalid PIR session".to_string()));
+        return Err(QorcError::Internal("Invalid PIR session".to_string()));
     }
     let bytes = BASE64
         .decode(&response)
-        .map_err(|_| QorError::Internal("Invalid PIR response encoding".to_string()))?;
+        .map_err(|_| QorcError::Internal("Invalid PIR response encoding".to_string()))?;
     if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
-        return Err(QorError::Internal("Invalid PIR response".to_string()));
+        return Err(QorcError::Internal("Invalid PIR response".to_string()));
     }
     let mut payload = Vec::with_capacity(4 + bytes.len());
     payload.extend_from_slice(&session_id.to_le_bytes());
@@ -317,19 +317,19 @@ fn decode_response(op: u8, response: String, session_id: u32) -> QorResult<Strin
 }
 
 #[tauri::command]
-pub async fn pir_decode_response(response: String, session_id: u32) -> QorResult<String> {
+pub async fn pir_decode_response(response: String, session_id: u32) -> QorcResult<String> {
     decode_response(OP_DECODE, response, session_id)
 }
 
 #[tauri::command]
-pub async fn pir_decode_batch_response(response: String, session_id: u32) -> QorResult<String> {
+pub async fn pir_decode_batch_response(response: String, session_id: u32) -> QorcResult<String> {
     decode_response(OP_DECODE_BATCH, response, session_id)
 }
 
 #[tauri::command]
-pub async fn pir_discard_query(session_id: u32) -> QorResult<()> {
+pub async fn pir_discard_query(session_id: u32) -> QorcResult<()> {
     if session_id == 0 {
-        return Err(QorError::Internal("Invalid PIR session".to_string()));
+        return Err(QorcError::Internal("Invalid PIR session".to_string()));
     }
     call(OP_DISCARD, &session_id.to_le_bytes())?;
     Ok(())
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn embedded_pir_client_extracts_and_repairs_by_hash() {
         let directory = std::env::temp_dir().join(format!(
-            "qor-embedded-pir-test-{}",
+            "qorc-embedded-pir-test-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let path = materialize_embedded_client(&directory).expect("extract embedded PIR client");

@@ -1,10 +1,10 @@
-Qor client Tor runtime third-party notices
+qorc client Tor runtime third-party notices
 ==========================================
 
-The Linux ARM64 client archive contains Qor's pinned Tor 0.4.9.11 build and
-its private runtime libraries from the authenticated Qor edge runtime.
+The Linux ARM64 client archive contains qorc's pinned Tor 0.4.9.11 build and
+its private runtime libraries from the authenticated qorc edge runtime.
 
-Tor 0.4.9.11, with Qor's hidden-service descriptor publication patch
+Tor 0.4.9.11, with qorc's hidden-service descriptor publication patch
   Source: https://dist.torproject.org/tor-0.4.9.11.tar.gz
   Patch: docker/tor/patches/0001-retry-hsdesc-upload.patch
   License: BSD-3-Clause and other permissive licenses detailed in Tor's LICENSE.

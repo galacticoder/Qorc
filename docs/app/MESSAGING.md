@@ -1,6 +1,6 @@
 # Messaging
 
-Qor-Chat uses one end-to-end message pipeline with two delivery transports:
+qorc uses one end-to-end message pipeline with two delivery transports:
 direct P2P through authenticated Tor onion connections or a server-routed global
 mix spool.
 

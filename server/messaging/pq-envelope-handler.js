@@ -88,7 +88,7 @@ const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map([
   [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
   [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
 ]);
-const VERIFIED_AUTH_CHANNEL_BINDING = Symbol('qor.verified-auth-channel-binding');
+const VERIFIED_AUTH_CHANNEL_BINDING = Symbol('qorc.verified-auth-channel-binding');
 
 export function consumeVerifiedAuthChannelBinding(payload) {
   const binding = payload?.[VERIFIED_AUTH_CHANNEL_BINDING];

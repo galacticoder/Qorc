@@ -9,9 +9,9 @@ pub async fn screen_capture_start(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    tracing::info!(target: "qor_chat_call_diag", "[CALL-DIAG] native-screen-start-enter");
+    tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-start-enter");
     state.screen_capture.start(&session_id).await?;
-    tracing::info!(target: "qor_chat_call_diag", "[CALL-DIAG] native-screen-start-complete");
+    tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-start-complete");
     Ok(true)
 }
 

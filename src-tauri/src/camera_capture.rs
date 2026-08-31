@@ -236,7 +236,7 @@ impl CameraCaptureState {
         let worker_session = session.clone();
         tracing::info!("[CALL-DIAG] camera-worker-spawn-before");
         let worker = thread::Builder::new()
-            .name("qor-camera-capture".to_string())
+            .name("qorc-camera-capture".to_string())
             .spawn(move || {
                 run_capture(
                     worker_session.clone(),

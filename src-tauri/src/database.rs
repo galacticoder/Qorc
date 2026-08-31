@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::crypto::aead::{xchacha_decrypt, xchacha_encrypt};
 use crate::crypto::hash::{hkdf_sha3_derive_32, shake256};
 use crate::crypto::random::random_bytes;
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
 const NATIVE_MESSAGE_CONTENT_MAX_BYTES: usize = 66 * 1024;
@@ -54,7 +54,7 @@ fn database_managed_paths(db_path: &Path) -> [PathBuf; 4] {
     ]
 }
 
-async fn validate_existing_database_paths(paths: &[PathBuf]) -> QorResult<()> {
+async fn validate_existing_database_paths(paths: &[PathBuf]) -> QorcResult<()> {
     for path in paths {
         match tokio::fs::symlink_metadata(path).await {
             Ok(metadata) => crate::storage::file::validate_private_file_metadata(&metadata)?,
@@ -65,7 +65,7 @@ async fn validate_existing_database_paths(paths: &[PathBuf]) -> QorResult<()> {
     Ok(())
 }
 
-async fn secure_database_paths(paths: &[PathBuf]) -> QorResult<()> {
+async fn secure_database_paths(paths: &[PathBuf]) -> QorcResult<()> {
     for path in paths {
         let metadata = match tokio::fs::symlink_metadata(path).await {
             Ok(metadata) => metadata,
@@ -73,7 +73,7 @@ async fn secure_database_paths(paths: &[PathBuf]) -> QorResult<()> {
             Err(error) => return Err(error.into()),
         };
         if !metadata.file_type().is_file() {
-            return Err(QorError::FileOperationFailed(
+            return Err(QorcError::FileOperationFailed(
                 "Database path is not a regular file".to_string(),
             ));
         }
@@ -81,7 +81,7 @@ async fn secure_database_paths(paths: &[PathBuf]) -> QorResult<()> {
         {
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
             if metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(QorError::FileOperationFailed(
+                return Err(QorcError::FileOperationFailed(
                     "Database file has an invalid owner".to_string(),
                 ));
             }
@@ -95,11 +95,11 @@ async fn secure_database_paths(paths: &[PathBuf]) -> QorResult<()> {
 
 impl DatabaseManager {
     /// Initialize a new native encrypted database
-    pub fn new(db_path: PathBuf, master_key: &[u8]) -> QorResult<Self> {
+    pub fn new(db_path: PathBuf, master_key: &[u8]) -> QorcResult<Self> {
         Self::open_impl(db_path, master_key)
     }
 
-    fn open_impl(db_path: PathBuf, master_key: &[u8]) -> QorResult<Self> {
+    fn open_impl(db_path: PathBuf, master_key: &[u8]) -> QorcResult<Self> {
         // Derive triple keys from master key
         let k_disk = Zeroizing::new(hkdf_sha3_derive_32(
             master_key,
@@ -126,24 +126,24 @@ impl DatabaseManager {
             &db_path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
-        .map_err(|e| QorError::StorageInitFailed(format!("Failed to open DB: {}", e)))?;
+        .map_err(|e| QorcError::StorageInitFailed(format!("Failed to open DB: {}", e)))?;
         conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| QorError::StorageInitFailed(format!("DB timeout setup failed: {e}")))?;
+            .map_err(|e| QorcError::StorageInitFailed(format!("DB timeout setup failed: {e}")))?;
 
         // Apply SQLCipher key
         let key_hex = Zeroizing::new(hex::encode(k_disk.as_slice()));
         let key_pragma = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"", key_hex.as_str()));
         conn.execute_batch(key_pragma.as_str())
-            .map_err(|e| QorError::StorageInitFailed(format!("DB key setup failed: {e}")))?;
+            .map_err(|e| QorcError::StorageInitFailed(format!("DB key setup failed: {e}")))?;
 
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| QorError::StorageInitFailed(format!("DB journal setup failed: {e}")))?;
+            .map_err(|e| QorcError::StorageInitFailed(format!("DB journal setup failed: {e}")))?;
 
         conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| QorError::StorageInitFailed(format!("DB sync setup failed: {e}")))?;
+            .map_err(|e| QorcError::StorageInitFailed(format!("DB sync setup failed: {e}")))?;
 
         conn.pragma_update(None, "temp_store", "MEMORY")
-            .map_err(|e| QorError::StorageInitFailed(format!("DB temp setup failed: {e}")))?;
+            .map_err(|e| QorcError::StorageInitFailed(format!("DB temp setup failed: {e}")))?;
 
         // Initialize schema
         Self::validate_schema(&conn)?;
@@ -192,7 +192,7 @@ impl DatabaseManager {
         store.strip_prefix(self.store_prefix.as_str()) == Some("files")
     }
 
-    fn validate_native_message_id(message_id: &str) -> QorResult<()> {
+    fn validate_native_message_id(message_id: &str) -> QorcResult<()> {
         if message_id.is_empty()
             || message_id.len() > NATIVE_MESSAGE_ID_MAX_BYTES
             || message_id.trim() != message_id
@@ -201,7 +201,7 @@ impl DatabaseManager {
                     || matches!(byte, b'.' | b'_' | b'~' | b':' | b'+' | b'/' | b'=' | b'-')
             })
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid native message identifier".to_string(),
             ));
         }
@@ -213,10 +213,10 @@ impl DatabaseManager {
         &self,
         message_id: &str,
         content: &[u8],
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         Self::validate_native_message_id(message_id)?;
         if content.is_empty() || content.len() > NATIVE_MESSAGE_CONTENT_MAX_BYTES {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid native message content".to_string(),
             ));
         }
@@ -226,17 +226,17 @@ impl DatabaseManager {
     pub(crate) fn get_native_message_content(
         &self,
         message_id: &str,
-    ) -> QorResult<Option<Zeroizing<Vec<u8>>>> {
+    ) -> QorcResult<Option<Zeroizing<Vec<u8>>>> {
         Self::validate_native_message_id(message_id)?;
         self.get_secure(&self.native_message_content_store(), message_id)
     }
 
-    pub(crate) fn delete_native_message_content(&self, message_id: &str) -> QorResult<()> {
+    pub(crate) fn delete_native_message_content(&self, message_id: &str) -> QorcResult<()> {
         Self::validate_native_message_id(message_id)?;
         self.delete(&self.native_message_content_store(), message_id)
     }
 
-    fn validate_schema(conn: &Connection) -> QorResult<()> {
+    fn validate_schema(conn: &Connection) -> QorcResult<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS kv_data (
                 store TEXT NOT NULL,
@@ -248,7 +248,7 @@ impl DatabaseManager {
             );",
             [],
         )
-        .map_err(|e| QorError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
+        .map_err(|e| QorcError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
 
         Ok(())
     }
@@ -263,11 +263,11 @@ impl DatabaseManager {
     fn refresh_quota_usage(
         transaction: &Transaction<'_>,
         usage: &mut QuotaUsageCache,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let data_version: i64 = transaction
             .query_row("PRAGMA data_version", [], |row| row.get(0))
             .map_err(|e| {
-                QorError::EncryptionFailed(format!("DB quota version query failed: {e}"))
+                QorcError::EncryptionFailed(format!("DB quota version query failed: {e}"))
             })?;
         if usage.initialized && usage.data_version == data_version {
             return Ok(());
@@ -281,23 +281,23 @@ impl DatabaseManager {
                     "SELECT store, COALESCE(SUM(LENGTH(value)), 0)
                      FROM kv_data GROUP BY store",
                 )
-                .map_err(|e| QorError::EncryptionFailed(format!("DB quota query failed: {e}")))?;
+                .map_err(|e| QorcError::EncryptionFailed(format!("DB quota query failed: {e}")))?;
             let rows = statement
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                 })
-                .map_err(|e| QorError::EncryptionFailed(format!("DB quota query failed: {e}")))?;
+                .map_err(|e| QorcError::EncryptionFailed(format!("DB quota query failed: {e}")))?;
             for row in rows {
                 let (store, total) = row.map_err(|e| {
-                    QorError::EncryptionFailed(format!("DB quota query failed: {e}"))
+                    QorcError::EncryptionFailed(format!("DB quota query failed: {e}"))
                 })?;
                 if total < 0 {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "Database quota total is invalid".to_string(),
                     ));
                 }
                 account_total = account_total.checked_add(total).ok_or_else(|| {
-                    QorError::InvalidArgument("Database quota overflow".to_string())
+                    QorcError::InvalidArgument("Database quota overflow".to_string())
                 })?;
                 store_totals.insert(store, total);
             }
@@ -324,7 +324,7 @@ impl DatabaseManager {
         context
     }
 
-    fn encrypt_bundle(&self, store: &str, key: &str, value: &[u8]) -> QorResult<Vec<u8>> {
+    fn encrypt_bundle(&self, store: &str, key: &str, value: &[u8]) -> QorcResult<Vec<u8>> {
         let nonce_bytes = Zeroizing::new(random_bytes(24)?);
         let nonce: &[u8; 24] = nonce_bytes.as_slice().try_into().unwrap();
         let row_context = Self::row_context(store, key);
@@ -351,7 +351,7 @@ impl DatabaseManager {
     }
 
     /// Write
-    pub fn set_secure(&self, store: &str, key: &str, value: &[u8]) -> QorResult<()> {
+    pub fn set_secure(&self, store: &str, key: &str, value: &[u8]) -> QorcResult<()> {
         let bundle = self.encrypt_bundle(store, key, value)?;
 
         // Save
@@ -365,7 +365,7 @@ impl DatabaseManager {
                 updated_at = excluded.updated_at",
             params![store, key, bundle, now, now],
         )
-        .map_err(|e| QorError::EncryptionFailed(format!("DB save failed: {}", e)))?;
+        .map_err(|e| QorcError::EncryptionFailed(format!("DB save failed: {}", e)))?;
         drop(conn);
         self.invalidate_quota_usage();
 
@@ -378,17 +378,17 @@ impl DatabaseManager {
         key: &str,
         value: &[u8],
         max_store_bytes: u64,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         let bundle = self.encrypt_bundle(store, key, value)?;
         let bundle_len = i64::try_from(bundle.len())
-            .map_err(|_| QorError::InvalidArgument("Database value too large".to_string()))?;
+            .map_err(|_| QorcError::InvalidArgument("Database value too large".to_string()))?;
         let max_bytes = i64::try_from(max_store_bytes)
-            .map_err(|_| QorError::InvalidArgument("Database quota too large".to_string()))?;
+            .map_err(|_| QorcError::InvalidArgument("Database quota too large".to_string()))?;
 
         let mut conn = self.conn.lock();
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| QorError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
         let mut usage = self.quota_usage.lock();
         Self::refresh_quota_usage(&transaction, &mut usage)?;
         let total_bytes = *usage.store_totals.get(store).unwrap_or(&0);
@@ -400,18 +400,18 @@ impl DatabaseManager {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| QorError::EncryptionFailed(format!("DB quota query failed: {}", e)))?
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB quota query failed: {}", e)))?
             .unwrap_or(0);
         let next_total = total_bytes
             .saturating_sub(existing_bytes)
             .checked_add(bundle_len)
-            .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+            .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
         let account_max_bytes = i64::try_from(DB_ACCOUNT_QUOTA_MAX_BYTES)
-            .map_err(|_| QorError::InvalidArgument("Database quota too large".to_string()))?;
+            .map_err(|_| QorcError::InvalidArgument("Database quota too large".to_string()))?;
         let next_account_total = account_total_bytes
             .saturating_sub(existing_bytes)
             .checked_add(bundle_len)
-            .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+            .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
         if (next_total > max_bytes && next_total > total_bytes)
             || (next_account_total > account_max_bytes && next_account_total > account_total_bytes)
         {
@@ -428,10 +428,10 @@ impl DatabaseManager {
                    updated_at = excluded.updated_at",
                 params![store, key, bundle, now, now],
             )
-            .map_err(|e| QorError::EncryptionFailed(format!("DB quota save failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB quota save failed: {}", e)))?;
         transaction
             .commit()
-            .map_err(|e| QorError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
         usage.account_total = next_account_total;
         if next_total == 0 {
             usage.store_totals.remove(store);
@@ -441,7 +441,7 @@ impl DatabaseManager {
         Ok(true)
     }
 
-    pub fn set_secure_batch(&self, entries: &[(&str, &str, &[u8])]) -> QorResult<()> {
+    pub fn set_secure_batch(&self, entries: &[(&str, &str, &[u8])]) -> QorcResult<()> {
         self.mutate_secure_batch(entries, &[])
     }
 
@@ -449,18 +449,18 @@ impl DatabaseManager {
         &self,
         entries: &[(&str, &str, &[u8])],
         deletions: &[(&str, &str)],
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let encrypted = entries
             .iter()
             .map(|(store, key, value)| {
                 self.encrypt_bundle(store, key, value)
                     .map(|bundle| ((*store).to_string(), (*key).to_string(), bundle))
             })
-            .collect::<QorResult<Vec<_>>>()?;
+            .collect::<QorcResult<Vec<_>>>()?;
         let mut conn = self.conn.lock();
         let transaction = conn
             .transaction()
-            .map_err(|e| QorError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
         let now = chrono::Utc::now().timestamp_millis();
         for (store, key, bundle) in encrypted {
             transaction
@@ -472,7 +472,7 @@ impl DatabaseManager {
                        updated_at = excluded.updated_at",
                     params![store, key, bundle, now, now],
                 )
-                .map_err(|e| QorError::EncryptionFailed(format!("DB batch save failed: {}", e)))?;
+                .map_err(|e| QorcError::EncryptionFailed(format!("DB batch save failed: {}", e)))?;
         }
         for (store, key) in deletions {
             transaction
@@ -481,12 +481,12 @@ impl DatabaseManager {
                     params![store, key],
                 )
                 .map_err(|e| {
-                    QorError::EncryptionFailed(format!("DB batch delete failed: {}", e))
+                    QorcError::EncryptionFailed(format!("DB batch delete failed: {}", e))
                 })?;
         }
         transaction
             .commit()
-            .map_err(|e| QorError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
         drop(conn);
         self.invalidate_quota_usage();
         Ok(())
@@ -496,7 +496,7 @@ impl DatabaseManager {
         &self,
         entries: &[(&str, &str, &[u8])],
         deletions: &[(&str, &str)],
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         let mut mutation_targets = HashSet::with_capacity(entries.len() + deletions.len());
         for target in entries
             .iter()
@@ -504,7 +504,7 @@ impl DatabaseManager {
             .chain(deletions.iter().copied())
         {
             if !mutation_targets.insert(target) {
-                return Err(QorError::InvalidArgument(
+                return Err(QorcError::InvalidArgument(
                     "Duplicate database mutation target".to_string(),
                 ));
             }
@@ -515,11 +515,11 @@ impl DatabaseManager {
                 self.encrypt_bundle(store, key, value)
                     .map(|bundle| ((*store).to_string(), (*key).to_string(), bundle))
             })
-            .collect::<QorResult<Vec<_>>>()?;
+            .collect::<QorcResult<Vec<_>>>()?;
         let mut conn = self.conn.lock();
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| QorError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB transaction failed: {}", e)))?;
         let mut usage = self.quota_usage.lock();
         Self::refresh_quota_usage(&transaction, &mut usage)?;
         let account_total = usage.account_total;
@@ -545,11 +545,11 @@ impl DatabaseManager {
                     |row| row.get(0),
                 )
                 .optional()
-                .map_err(|e| QorError::EncryptionFailed(format!("DB quota query failed: {}", e)))?
+                .map_err(|e| QorcError::EncryptionFailed(format!("DB quota query failed: {}", e)))?
                 .unwrap_or(0);
             removed_total = removed_total
                 .checked_add(existing)
-                .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+                .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
             *removed_by_store.entry(store.to_string()).or_default() += existing;
         }
 
@@ -557,17 +557,17 @@ impl DatabaseManager {
         let mut added_total = 0i64;
         for (store, _, bundle) in &encrypted {
             let length = i64::try_from(bundle.len())
-                .map_err(|_| QorError::InvalidArgument("Database value too large".to_string()))?;
+                .map_err(|_| QorcError::InvalidArgument("Database value too large".to_string()))?;
             added_total = added_total
                 .checked_add(length)
-                .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+                .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
             *added_by_store.entry(store.clone()).or_default() += length;
         }
 
         let next_account_total = account_total
             .saturating_sub(removed_total)
             .checked_add(added_total)
-            .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+            .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
         if next_account_total > DB_ACCOUNT_QUOTA_MAX_BYTES as i64
             && next_account_total > account_total
         {
@@ -581,7 +581,7 @@ impl DatabaseManager {
             let next = current
                 .saturating_sub(removed)
                 .checked_add(added)
-                .ok_or_else(|| QorError::InvalidArgument("Database quota overflow".to_string()))?;
+                .ok_or_else(|| QorcError::InvalidArgument("Database quota overflow".to_string()))?;
             let quota = if self.is_renderer_file_store(store) {
                 DB_FILE_STORE_QUOTA_BYTES
             } else {
@@ -604,7 +604,7 @@ impl DatabaseManager {
                        updated_at = excluded.updated_at",
                     params![store, key, bundle, now, now],
                 )
-                .map_err(|e| QorError::EncryptionFailed(format!("DB batch save failed: {}", e)))?;
+                .map_err(|e| QorcError::EncryptionFailed(format!("DB batch save failed: {}", e)))?;
         }
         for (store, key) in deletions {
             transaction
@@ -613,12 +613,12 @@ impl DatabaseManager {
                     params![store, key],
                 )
                 .map_err(|e| {
-                    QorError::EncryptionFailed(format!("DB batch delete failed: {}", e))
+                    QorcError::EncryptionFailed(format!("DB batch delete failed: {}", e))
                 })?;
         }
         transaction
             .commit()
-            .map_err(|e| QorError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
+            .map_err(|e| QorcError::EncryptionFailed(format!("DB commit failed: {}", e)))?;
         usage.account_total = next_account_total;
         for (store, total) in next_store_totals {
             if total == 0 {
@@ -631,16 +631,16 @@ impl DatabaseManager {
     }
 
     /// Read
-    pub fn get_secure(&self, store: &str, key: &str) -> QorResult<Option<Zeroizing<Vec<u8>>>> {
+    pub fn get_secure(&self, store: &str, key: &str) -> QorcResult<Option<Zeroizing<Vec<u8>>>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT value FROM kv_data WHERE store = ? AND key = ?")
-            .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB query failed: {}", e)))?;
 
         let bundle: Option<Vec<u8>> = stmt
             .query_row(params![store, key], |row| row.get(0))
             .optional()
-            .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
         bundle
             .map(|bundle| self.decrypt_bundle(store, key, &bundle))
@@ -648,14 +648,14 @@ impl DatabaseManager {
     }
 
     /// Check whether an encrypted row exists without decrypting or copying its value
-    pub fn has_secure(&self, store: &str, key: &str) -> QorResult<bool> {
+    pub fn has_secure(&self, store: &str, key: &str) -> QorcResult<bool> {
         let conn = self.conn.lock();
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM kv_data WHERE store = ? AND key = ?)",
             params![store, key],
             |row| row.get(0),
         )
-        .map_err(|e| QorError::DecryptionFailed(format!("DB existence query failed: {}", e)))
+        .map_err(|e| QorcError::DecryptionFailed(format!("DB existence query failed: {}", e)))
     }
 
     /// Decrypt bundle
@@ -664,9 +664,9 @@ impl DatabaseManager {
         store: &str,
         key: &str,
         bundle: &[u8],
-    ) -> QorResult<Zeroizing<Vec<u8>>> {
+    ) -> QorcResult<Zeroizing<Vec<u8>>> {
         if bundle.len() < 24 + 16 {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid bundle size".to_string(),
             ));
         }
@@ -699,24 +699,24 @@ impl DatabaseManager {
     }
 
     /// Enumerate only record selectors
-    pub fn list_keys(&self, store: &str, max_entries: usize) -> QorResult<Vec<String>> {
+    pub fn list_keys(&self, store: &str, max_entries: usize) -> QorcResult<Vec<String>> {
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare("SELECT key FROM kv_data WHERE store = ? ORDER BY key LIMIT ?")
-            .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB query failed: {}", e)))?;
 
         let rows = stmt
             .query_map(params![store, max_entries.saturating_add(1)], |row| {
                 row.get(0)
             })
-            .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| QorError::DecryptionFailed(e.to_string()))?);
+            results.push(row.map_err(|e| QorcError::DecryptionFailed(e.to_string()))?);
         }
         if results.len() > max_entries {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Database enumeration limit exceeded".to_string(),
             ));
         }
@@ -727,7 +727,7 @@ impl DatabaseManager {
         &self,
         store_prefix: &str,
         max_entries: usize,
-    ) -> QorResult<Vec<(String, String)>> {
+    ) -> QorcResult<Vec<(String, String)>> {
         let conn = self.conn.lock();
         let pattern = format!("{}%", escape_like(store_prefix));
         let mut stmt = conn
@@ -736,7 +736,7 @@ impl DatabaseManager {
                  WHERE store LIKE ? ESCAPE '\\'
                  ORDER BY store, key LIMIT ?",
             )
-            .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB query failed: {}", e)))?;
 
         let rows = stmt
             .query_map(params![pattern, max_entries.saturating_add(1)], |row| {
@@ -744,14 +744,14 @@ impl DatabaseManager {
                 let key: String = row.get(1)?;
                 Ok((store, key))
             })
-            .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| QorError::DecryptionFailed(e.to_string()))?);
+            results.push(row.map_err(|e| QorcError::DecryptionFailed(e.to_string()))?);
         }
         if results.len() > max_entries {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Database enumeration limit exceeded".to_string(),
             ));
         }
@@ -759,13 +759,13 @@ impl DatabaseManager {
     }
 
     /// Delete a key
-    pub fn delete(&self, store: &str, key: &str) -> QorResult<()> {
+    pub fn delete(&self, store: &str, key: &str) -> QorcResult<()> {
         let conn = self.conn.lock();
         conn.execute(
             "DELETE FROM kv_data WHERE store = ? AND key = ?",
             params![store, key],
         )
-        .map_err(|e| QorError::StorageInitFailed(format!("DB delete failed: {}", e)))?;
+        .map_err(|e| QorcError::StorageInitFailed(format!("DB delete failed: {}", e)))?;
         drop(conn);
         self.invalidate_quota_usage();
         Ok(())
@@ -801,13 +801,13 @@ pub(crate) async fn activate_native_account_database(
     let config_name = app_config_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Qor-chat-client".to_string());
+        .unwrap_or_else(|| "qorc-client".to_string());
     app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
     crate::storage::file::check_dir(&app_config_dir, 0o700)
         .await
         .map_err(|error| error.safe_message())?;
 
-    let db_path = app_config_dir.join(format!("qor_{}.db", account_file_id));
+    let db_path = app_config_dir.join(format!("qorc_{}.db", account_file_id));
     let managed_paths = database_managed_paths(&db_path);
     validate_existing_database_paths(&managed_paths)
         .await
@@ -984,7 +984,7 @@ fn reject_db_name() -> String {
 async fn run_database_task<T, F>(task: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce() -> QorResult<T> + Send + 'static,
+    F: FnOnce() -> QorcResult<T> + Send + 'static,
 {
     tokio::task::spawn_blocking(task)
         .await
@@ -1289,7 +1289,7 @@ mod tests {
     #[test]
     fn encrypted_rows_are_bound_to_store_and_key() {
         let path =
-            std::env::temp_dir().join(format!("qor-db-row-binding-{}.db", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("qorc-db-row-binding-{}.db", uuid::Uuid::new_v4()));
         let manager = DatabaseManager::new(path.clone(), &[9u8; 32]).expect("test database opens");
         let encrypted = manager
             .encrypt_bundle("store-a", "key-a", b"secret")
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn renderer_batch_is_atomic_and_key_enumeration_is_bounded() {
         let path =
-            std::env::temp_dir().join(format!("qor-db-renderer-batch-{}.db", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("qorc-db-renderer-batch-{}.db", uuid::Uuid::new_v4()));
         let mut manager =
             DatabaseManager::new(path.clone(), &[11u8; 32]).expect("test database opens");
         manager.set_account_context("scope_".to_string(), "owner".to_string());
@@ -1396,7 +1396,7 @@ mod tests {
     #[test]
     fn native_message_content_store_is_not_renderer_addressable() {
         let path = std::env::temp_dir().join(format!(
-            "qor-db-native-message-isolation-{}.db",
+            "qorc-db-native-message-isolation-{}.db",
             uuid::Uuid::new_v4()
         ));
         let mut manager =
@@ -1424,7 +1424,7 @@ mod tests {
 
     #[test]
     fn shrinking_or_rejected_quota_write_does_not_replace_existing_value() {
-        let path = std::env::temp_dir().join(format!("qor-db-quota-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("qorc-db-quota-{}.db", uuid::Uuid::new_v4()));
         let manager = DatabaseManager::new(path.clone(), &[12u8; 32]).expect("test database opens");
         manager
             .set_secure("scope_data", "key", b"original")
@@ -1453,7 +1453,7 @@ mod tests {
     #[test]
     fn quota_usage_cache_reuses_totals_and_detects_other_connections() {
         let path =
-            std::env::temp_dir().join(format!("qor-db-quota-cache-{}.db", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("qorc-db-quota-cache-{}.db", uuid::Uuid::new_v4()));
         let key = [13u8; 32];
         let mut manager = DatabaseManager::new(path.clone(), &key).expect("test database opens");
         manager.set_account_context("scope_".to_string(), "owner".to_string());

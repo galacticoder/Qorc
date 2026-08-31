@@ -39,7 +39,7 @@ export function Layout({
     }, []);
 
     return (
-        <div className={`qor-app-shell ${navigationLayout === 'top' ? 'qor-has-top-nav' : ''}`}>
+        <div className={`qorc-app-shell ${navigationLayout === 'top' ? 'qorc-has-top-nav' : ''}`}>
             <Sidebar
                 variant={navigationLayout}
                 activeTab={activeTab}
@@ -47,7 +47,7 @@ export function Layout({
                 currentUser={currentUser}
                 onLogout={onLogout}
             />
-            <main className="qor-main-pane">
+            <main className="qorc-main-pane">
                 {children}
             </main>
         </div>

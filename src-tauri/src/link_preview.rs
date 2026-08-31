@@ -26,7 +26,7 @@ static TITLE_RE: LazyLock<Regex> =
 static HTML_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").expect("valid HTML tag regex"));
 static PREVIEW_ISOLATION_USER: LazyLock<String> =
-    LazyLock::new(|| format!("qor-preview-{}", Uuid::new_v4().simple()));
+    LazyLock::new(|| format!("qorc-preview-{}", Uuid::new_v4().simple()));
 static PUBLIC_WEB_TLS_CONFIG: LazyLock<Result<rustls::ClientConfig, ()>> = LazyLock::new(|| {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -318,7 +318,7 @@ pub async fn fetch_link_preview(
         .use_preconfigured_tls(tls_config.clone())
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
-        .user_agent("Qor Link Preview")
+        .user_agent("qorc Link Preview")
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(18))
         .build()

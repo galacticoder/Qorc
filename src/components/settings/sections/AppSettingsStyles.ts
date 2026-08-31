@@ -1,6 +1,6 @@
 const APP_SETTINGS_CSS = `
-    .qor-settings-host {
-      --settings-bg: var(--qor-chat-bg, #050507);
+    .qorc-settings-host {
+      --settings-bg: var(--qorc-bg, #050507);
       --settings-panel: #0d0d0e;
       --settings-card: rgb(10, 10, 10);
       --settings-hover: rgb(11, 11, 11);
@@ -29,7 +29,7 @@ const APP_SETTINGS_CSS = `
       -webkit-user-select: none;
     }
 
-    .qor-settings-host.light {
+    .qorc-settings-host.light {
       --settings-bg: #ffffff;
       --settings-panel: #f6f7f9;
       --settings-card: #ffffff;
@@ -45,35 +45,35 @@ const APP_SETTINGS_CSS = `
       color-scheme: light;
     }
 
-    .qor-settings-host *,
-    .qor-settings-host *::before,
-    .qor-settings-host *::after {
+    .qorc-settings-host *,
+    .qorc-settings-host *::before,
+    .qorc-settings-host *::after {
       box-sizing: border-box;
     }
 
-    .qor-settings-host button,
-    .qor-settings-host input,
-    .qor-settings-host select {
+    .qorc-settings-host button,
+    .qorc-settings-host input,
+    .qorc-settings-host select {
       font: inherit;
     }
 
-    .qor-settings-host button {
+    .qorc-settings-host button {
       cursor: pointer;
     }
 
-    .qor-settings-host button:disabled,
-    .qor-settings-host input:disabled,
-    .qor-settings-host select:disabled {
+    .qorc-settings-host button:disabled,
+    .qorc-settings-host input:disabled,
+    .qorc-settings-host select:disabled {
       cursor: not-allowed;
       opacity: .5;
     }
 
-    .qor-settings-host input {
+    .qorc-settings-host input {
       user-select: text;
       -webkit-user-select: text;
     }
 
-    .qor-settings-host svg {
+    .qorc-settings-host svg {
       display: block;
     }
 
@@ -279,7 +279,7 @@ const APP_SETTINGS_CSS = `
 
     .navigation-layout-picker button.is-active,
     .navigation-layout-picker button.is-active:hover {
-      background: var(--qor-accent, #7057c8);
+      background: var(--qorc-accent, #7057c8);
       color: #fff;
     }
 
@@ -296,7 +296,7 @@ const APP_SETTINGS_CSS = `
     .action,
     .danger-action,
     .copy-username,
-    .qor-modal-btn {
+    .qorc-modal-btn {
       border: 0;
       box-shadow: none;
       transition: background .15s ease, color .15s ease, opacity .15s ease;
@@ -571,7 +571,7 @@ const APP_SETTINGS_CSS = `
       transition: background .16s ease;
     }
 
-    .qor-settings-host.light .switch {
+    .qorc-settings-host.light .switch {
       background: #cacbd0;
     }
 
@@ -632,11 +632,11 @@ const APP_SETTINGS_CSS = `
     }
 
     .blocked-spinner {
-      animation: qor-blocked-spin .7s linear infinite;
+      animation: qorc-blocked-spin .7s linear infinite;
       color: var(--settings-muted);
     }
 
-    @keyframes qor-blocked-spin {
+    @keyframes qorc-blocked-spin {
       to { transform: rotate(360deg); }
     }
 
@@ -700,7 +700,7 @@ const APP_SETTINGS_CSS = `
       font-weight: 550;
     }
 
-    .qor-modal-overlay {
+    .qorc-modal-overlay {
       position: fixed;
       inset: 0;
       z-index: 60;
@@ -710,11 +710,11 @@ const APP_SETTINGS_CSS = `
       background: rgba(0, 0, 0, .58);
     }
 
-    .qor-settings-host.light .qor-modal-overlay {
+    .qorc-settings-host.light .qorc-modal-overlay {
       background: rgba(17, 24, 39, .32);
     }
 
-    .qor-modal {
+    .qorc-modal {
       width: min(400px, 100%);
       overflow: hidden;
       border: 0;
@@ -724,15 +724,15 @@ const APP_SETTINGS_CSS = `
       box-shadow: 0 18px 46px rgba(0, 0, 0, .34);
     }
 
-    .qor-settings-host.light .qor-modal {
+    .qorc-settings-host.light .qorc-modal {
       box-shadow: 0 18px 46px rgba(17, 24, 39, .18);
     }
 
-    .qor-modal-head {
+    .qorc-modal-head {
       padding: 16px 16px 5px;
     }
 
-    .qor-modal-head h3 {
+    .qorc-modal-head h3 {
       margin: 0 0 5px;
       color: var(--settings-text);
       font-size: 16px;
@@ -741,27 +741,27 @@ const APP_SETTINGS_CSS = `
       letter-spacing: -.01em;
     }
 
-    .qor-modal-head p {
+    .qorc-modal-head p {
       margin: 0;
       color: var(--settings-muted);
       font-size: 12px;
       line-height: 1.45;
     }
 
-    .qor-modal-head p strong {
+    .qorc-modal-head p strong {
       color: var(--settings-text);
       font-weight: 600;
     }
 
-    .qor-modal-body {
+    .qorc-modal-body {
       padding: 13px 16px 3px;
     }
 
-    .qor-modal-field {
+    .qorc-modal-field {
       display: block;
     }
 
-    .qor-modal-field .field-label {
+    .qorc-modal-field .field-label {
       display: block;
       margin: 0 0 6px;
       color: var(--settings-muted);
@@ -770,14 +770,14 @@ const APP_SETTINGS_CSS = `
       font-weight: 550;
     }
 
-    .qor-modal-field .text-input {
+    .qorc-modal-field .text-input {
       width: 100%;
       height: 40px;
       background: var(--settings-input);
       font-size: 13px;
     }
 
-    .qor-modal-error {
+    .qorc-modal-error {
       margin: 8px 0 0;
       padding: 8px 10px;
       border-radius: 8px;
@@ -788,14 +788,14 @@ const APP_SETTINGS_CSS = `
       font-weight: 550;
     }
 
-    .qor-modal-actions {
+    .qorc-modal-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 7px;
       padding: 16px;
     }
 
-    .qor-modal-btn {
+    .qorc-modal-btn {
       height: 38px;
       display: inline-flex;
       align-items: center;
@@ -808,39 +808,39 @@ const APP_SETTINGS_CSS = `
       font-weight: 600;
     }
 
-    .qor-modal-btn:hover,
-    .qor-modal-btn:focus-visible {
+    .qorc-modal-btn:hover,
+    .qorc-modal-btn:focus-visible {
       outline: none;
       background: var(--settings-hover);
     }
 
-    .qor-modal-btn.primary {
+    .qorc-modal-btn.primary {
       background: #e9e9e9;
       color: #101014;
     }
 
-    .qor-settings-host.light .qor-modal-btn.primary {
+    .qorc-settings-host.light .qorc-modal-btn.primary {
       background: #101014;
       color: #fff;
     }
 
-    .qor-modal-btn.primary:hover,
-    .qor-modal-btn.primary:focus-visible {
+    .qorc-modal-btn.primary:hover,
+    .qorc-modal-btn.primary:focus-visible {
       background: #dcdce0;
     }
 
-    .qor-settings-host.light .qor-modal-btn.primary:hover,
-    .qor-settings-host.light .qor-modal-btn.primary:focus-visible {
+    .qorc-settings-host.light .qorc-modal-btn.primary:hover,
+    .qorc-settings-host.light .qorc-modal-btn.primary:focus-visible {
       background: #24242a;
     }
 
-    .qor-modal-btn.danger {
+    .qorc-modal-btn.danger {
       background: var(--settings-danger);
       color: #fff;
     }
 
-    .qor-modal-btn.danger:hover,
-    .qor-modal-btn.danger:focus-visible {
+    .qorc-modal-btn.danger:hover,
+    .qorc-modal-btn.danger:focus-visible {
       background: var(--settings-danger-hover);
     }
 
@@ -899,7 +899,7 @@ export function installAppSettingsStyles(): void {
   if (installed || typeof document === 'undefined') return;
   installed = true;
   const style = document.createElement('style');
-  style.setAttribute('data-qor-app-settings', '');
+  style.setAttribute('data-qorc-app-settings', '');
   style.textContent = APP_SETTINGS_CSS;
   document.head.appendChild(style);
 }

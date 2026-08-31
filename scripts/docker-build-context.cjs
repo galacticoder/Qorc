@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const BUILD_CONTEXT_PREFIX = 'qor-chat-docker-build-';
+const BUILD_CONTEXT_PREFIX = 'qorc-docker-build-';
 const SAFE_SERVER_CONFIG_FILES = Object.freeze([
     'audiences.js',
     'config.js',

@@ -181,7 +181,7 @@ pub struct YPIRParams {
 }
 
 #[cfg(test)]
-mod qor_sizing {
+mod qorc_sizing {
     use super::*;
 
     #[test]

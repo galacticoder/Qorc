@@ -38,8 +38,8 @@ if (!arch) {
 const bundleDir = path.join(tauriDir, 'target', 'release', 'bundle', 'appimage');
 const appDir = path.join(bundleDir, `${productName}.AppDir`);
 const outputPath = path.join(bundleDir, `${productName}_${version}_${arch.package}.AppImage`);
-const binaryPath = path.join(tauriDir, 'target', 'release', 'qor');
-const appDirBinaryPath = path.join(appDir, 'usr', 'bin', 'qor');
+const binaryPath = path.join(tauriDir, 'target', 'release', 'qorc');
+const appDirBinaryPath = path.join(appDir, 'usr', 'bin', 'qorc');
 const pluginsDir = path.join(repoRoot, '.cache', `gstreamer-plugins-${process.arch}`);
 const appDirPluginsDir = path.join(appDir, 'usr', 'lib', 'gstreamer-1.0');
 const captureManifestName = 'capture-runtime-manifest.json';
@@ -65,8 +65,8 @@ const pipeWireRuntimeDir = path.join(pluginsDir, 'runtime');
 const pipeWirePlugin = 'libgstpipewire.so';
 const appDirPipeWireLibrary = path.join(appDir, 'usr', 'lib', 'libpipewire-0.3.so.0');
 const appDirGStreamerControllerLibrary = path.join(appDir, 'usr', 'lib', 'libgstcontroller-1.0.so.0');
-const appDirGStreamerLauncher = path.join(appDir, 'usr', 'bin', 'qor-gst-launch-1.0');
-const appDirGStreamerPluginScanner = path.join(appDir, 'usr', 'bin', 'qor-gst-plugin-scanner');
+const appDirGStreamerLauncher = path.join(appDir, 'usr', 'bin', 'qorc-gst-launch-1.0');
+const appDirGStreamerPluginScanner = path.join(appDir, 'usr', 'bin', 'qorc-gst-plugin-scanner');
 const appDirSpaDir = path.join(appDir, 'usr', 'lib', 'spa-0.2');
 const webKitSourceDir = path.join(tauriDir, 'resources', 'webkitgtk');
 const webKitSourceLibDir = path.join(webKitSourceDir, 'usr', 'lib', arch.libraryTriplet);
@@ -145,7 +145,7 @@ function validateCaptureRuntime(manifestPath, resolveArtifactPath, strictInvento
     } catch {
         throw new Error('GStreamer capture runtime manifest is invalid JSON');
     }
-    if (manifest.format !== 'qor-gstreamer-capture-runtime' || manifest.formatVersion !== 1 ||
+    if (manifest.format !== 'qorc-gstreamer-capture-runtime' || manifest.formatVersion !== 1 ||
         manifest.platform !== 'linux' || manifest.architecture !== process.arch ||
         typeof manifest.gstLaunchVersion !== 'string' || !manifest.gstLaunchVersion.trim() ||
         !Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
@@ -153,8 +153,8 @@ function validateCaptureRuntime(manifestPath, resolveArtifactPath, strictInvento
     }
     const expectedRole = relativePath => {
         if (typeof relativePath !== 'string') return null;
-        if (relativePath === 'bin/qor-gst-launch-1.0') return 'launcher';
-        if (relativePath === 'bin/qor-gst-plugin-scanner') return 'plugin-scanner';
+        if (relativePath === 'bin/qorc-gst-launch-1.0') return 'launcher';
+        if (relativePath === 'bin/qorc-gst-plugin-scanner') return 'plugin-scanner';
         if (relativePath.startsWith('capture-plugins/')) return 'plugin';
         if (relativePath.startsWith('lib/')) return 'library';
         if (relativePath.startsWith('spa-0.2/')) return 'spa';
@@ -186,8 +186,8 @@ function validateCaptureRuntime(manifestPath, resolveArtifactPath, strictInvento
         throw new Error('GStreamer capture runtime manifest artifacts are not canonical');
     }
     for (const requiredPath of [
-        'bin/qor-gst-launch-1.0',
-        'bin/qor-gst-plugin-scanner',
+        'bin/qorc-gst-launch-1.0',
+        'bin/qorc-gst-plugin-scanner',
         ...capturePluginNames.map(plugin => `capture-plugins/${plugin}`),
         ...requiredSpaPaths
     ]) {
@@ -498,16 +498,16 @@ function installWebKitGtkRuntime() {
 function prepareAppRun() {
     const appRunPath = path.join(appDir, 'AppRun');
     const contents = fs.readFileSync(appRunPath, 'utf8');
-    if (contents.includes('qor_appdir_was_set=')) return;
+    if (contents.includes('qorc_appdir_was_set=')) return;
     const withAppDir = contents.replace(
         'this_dir="$(readlink -f "$(dirname "$0")")"\n',
-        'this_dir="$(readlink -f "$(dirname "$0")")"\nqor_appdir_was_set="${APPDIR+x}"\nexport APPDIR="${APPDIR:-$this_dir}"\n'
+        'this_dir="$(readlink -f "$(dirname "$0")")"\nqorc_appdir_was_set="${APPDIR+x}"\nexport APPDIR="${APPDIR:-$this_dir}"\n'
     );
     const prepared = withAppDir.replace(
         'exec "$this_dir"/AppRun.wrapped "$@"\n',
-        'if [[ -z "$qor_appdir_was_set" ]]; then unset APPDIR; fi\n\nexec "$this_dir"/AppRun.wrapped "$@"\n'
+        'if [[ -z "$qorc_appdir_was_set" ]]; then unset APPDIR; fi\n\nexec "$this_dir"/AppRun.wrapped "$@"\n'
     );
-    if (prepared === contents || !prepared.includes('qor_appdir_was_set=')) {
+    if (prepared === contents || !prepared.includes('qorc_appdir_was_set=')) {
         throw new Error('unable to prepare AppRun for extracted launches');
     }
     fs.writeFileSync(appRunPath, prepared, { mode: fs.statSync(appRunPath).mode & 0o777 });
@@ -518,8 +518,8 @@ function installPipeWireRuntime() {
     const pluginSource = path.join(pluginsDir, pipeWirePlugin);
     const controllerLibrarySource = path.join(pipeWireRuntimeDir, 'lib', 'libgstcontroller-1.0.so.0');
     const librarySource = path.join(pipeWireRuntimeDir, 'lib', 'libpipewire-0.3.so.0');
-    const launcherSource = path.join(pipeWireRuntimeDir, 'bin', 'qor-gst-launch-1.0');
-    const scannerSource = path.join(pipeWireRuntimeDir, 'bin', 'qor-gst-plugin-scanner');
+    const launcherSource = path.join(pipeWireRuntimeDir, 'bin', 'qorc-gst-launch-1.0');
+    const scannerSource = path.join(pipeWireRuntimeDir, 'bin', 'qorc-gst-plugin-scanner');
     const capturePluginsSource = path.join(pipeWireRuntimeDir, 'capture-plugins');
     const spaSource = path.join(pipeWireRuntimeDir, 'spa-0.2');
     if (!fs.statSync(pluginSource, { throwIfNoEntry: false })?.isFile() ||
@@ -695,11 +695,11 @@ function findAppIcon() {
         for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
             const candidate = path.join(directory, entry.name);
             if (entry.isDirectory()) pending.push(candidate);
-            else if (entry.isFile() && entry.name.toLowerCase() === 'qor.png') candidates.push(candidate);
+            else if (entry.isFile() && entry.name.toLowerCase() === 'qorc.png') candidates.push(candidate);
         }
     }
     candidates.sort((left, right) => fs.statSync(right).size - fs.statSync(left).size);
-    if (candidates.length === 0) throw new Error('the Debian bundle contains no Qor application icon');
+    if (candidates.length === 0) throw new Error('the Debian bundle contains no qorc application icon');
     return candidates[0];
 }
 

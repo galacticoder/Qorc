@@ -15,7 +15,7 @@ export function ProgressBar({ progress, indeterminate = false }: ProgressBarProp
     <div className="w-full bg-gray-300 rounded h-1.5 overflow-hidden" style={{ marginBottom: 2 }}>
       <div
         className={indeterminate
-          ? "qor-file-progress-indeterminate bg-blue-500 h-1.5 rounded"
+          ? "qorc-file-progress-indeterminate bg-blue-500 h-1.5 rounded"
           : "bg-blue-500 h-1.5 rounded transition-all duration-300"}
         style={{ width: indeterminate ? '35%' : `${progressPercent}%` }}
         role="progressbar"

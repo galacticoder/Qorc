@@ -96,7 +96,7 @@ const ConversationItem = memo<ConversationItemProps>(({
   return (
     <div
       className={cn(
-        "qor-conversation-item group",
+        "qorc-conversation-item group",
         isSelected && "is-selected"
       )}
       onClick={handleClick}
@@ -114,14 +114,14 @@ const ConversationItem = memo<ConversationItemProps>(({
       <UserAvatar
         username={conversation.username}
         size="md"
-        className={cn("qor-conversation-avatar", isSelected && 'opacity-80')}
+        className={cn("qorc-conversation-avatar", isSelected && 'opacity-80')}
       />
 
-      <div className="qor-conversation-main">
-        <div className="qor-conversation-title-row">
+      <div className="qorc-conversation-main">
+        <div className="qorc-conversation-title-row">
           <span
             className={cn(
-              "qor-conversation-name",
+              "qorc-conversation-name",
               !isSelected && (conversation.unreadCount ?? 0) > 0 ? "font-bold" : "font-medium"
             )}
             title={displayName}
@@ -131,7 +131,7 @@ const ConversationItem = memo<ConversationItemProps>(({
           {(onTogglePin || onRemove) && (
             <div
               className={cn(
-                "qor-conversation-action-pill",
+                "qorc-conversation-action-pill",
                 conversation.isPinned && "is-pinned"
               )}
             >
@@ -140,7 +140,7 @@ const ConversationItem = memo<ConversationItemProps>(({
                   variant="ghost"
                   size="sm"
                   onClick={handleTogglePin}
-                  className="qor-conversation-tiny-btn"
+                  className="qorc-conversation-tiny-btn"
                   aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
                   aria-pressed={conversation.isPinned}
                 >
@@ -156,7 +156,7 @@ const ConversationItem = memo<ConversationItemProps>(({
                   variant="ghost"
                   size="sm"
                   onClick={handleRemove}
-                  className="qor-conversation-tiny-btn danger"
+                  className="qorc-conversation-tiny-btn danger"
                   aria-label={`Remove conversation with ${displayName}`}
                 >
                   <Trash2 className="h-3 w-3" />
@@ -167,7 +167,7 @@ const ConversationItem = memo<ConversationItemProps>(({
           {conversation.lastMessageTime && (
             <span
               className={cn(
-                "qor-conversation-time",
+                "qorc-conversation-time",
                 !isSelected && (conversation.unreadCount ?? 0) > 0 && "font-bold"
               )}
             >
@@ -179,35 +179,35 @@ const ConversationItem = memo<ConversationItemProps>(({
         {/* Show unread indicator if there are unread messages and conversation is not selected */}
         {isTyping && conversation.lastMessageTime ? (
           <div
-            className="qor-conversation-preview qor-conversation-preview-typing"
+            className="qorc-conversation-preview qorc-conversation-preview-typing"
             role="status"
             aria-label={`${displayName} is typing`}
           >
             <span>Typing</span>
-            <span className="qor-conversation-typing-dots" aria-hidden="true">
+            <span className="qorc-conversation-typing-dots" aria-hidden="true">
               <span />
               <span />
               <span />
             </span>
           </div>
         ) : !isSelected && (conversation.unreadCount ?? 0) > 0 ? (
-          <div className="qor-conversation-preview">
+          <div className="qorc-conversation-preview">
             <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
           </div>
         ) : conversation.secureContentId ? (
-          <div className="qor-conversation-preview">
+          <div className="qorc-conversation-preview">
             <BannerMessagePreview
               messageId={conversation.secureContentId}
               contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
               maxWidth={800}
               fontSize={12}
-              color="var(--qor-conversation-preview-text)"
-              className="qor-conversation-secure-message-preview"
+              color="var(--qorc-conversation-preview-text)"
+              className="qorc-conversation-secure-message-preview"
             />
           </div>
         ) : conversation.lastMessage ? (
           <div
-            className="qor-conversation-preview"
+            className="qorc-conversation-preview"
             title={conversation.lastMessage}
           >
             {conversation.lastMessage}
@@ -216,7 +216,7 @@ const ConversationItem = memo<ConversationItemProps>(({
       </div>
 
       {callStatus && (
-        <div className="qor-conversation-controls">
+        <div className="qorc-conversation-controls">
           <div
             className={cn(
               "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
@@ -261,7 +261,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
 
   return (
     <div
-      className="qor-cm-row"
+      className="qorc-cm-row"
       role="button"
       tabIndex={0}
       onClick={() => onChat(username)}
@@ -273,20 +273,20 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
       }}
       aria-label={`Open chat with ${displayName}`}
     >
-      <UserAvatar username={username} size="md" className="qor-cm-row-avatar" />
+      <UserAvatar username={username} size="md" className="qorc-cm-row-avatar" />
 
-      <div className="qor-cm-row-main">
-        <span className="qor-cm-row-name" title={displayName}>{displayName}</span>
+      <div className="qorc-cm-row-main">
+        <span className="qorc-cm-row-name" title={displayName}>{displayName}</span>
         {displayName.toLowerCase() !== username.toLowerCase() && (
-          <span className="qor-cm-row-username" title={username}>@{username}</span>
+          <span className="qorc-cm-row-username" title={username}>@{username}</span>
         )}
       </div>
 
-      <div className="qor-call-pill qor-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+      <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
         <Button
           size="sm"
           variant="outline"
-          className="qor-call-pill-btn"
+          className="qorc-call-pill-btn"
           title="Audio call"
           aria-label={`Call ${displayName}`}
           disabled={blocked || !onCall}
@@ -297,7 +297,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
         <Button
           size="sm"
           variant="outline"
-          className="qor-call-pill-btn"
+          className="qorc-call-pill-btn"
           title="Video call"
           aria-label={`Video call ${displayName}`}
           disabled={blocked || !onCall}
@@ -564,21 +564,21 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, [onSelectConversation, handleNewChatOpenChange]);
 
   return (
-    <div className="qor-conversation-list">
+    <div className="qorc-conversation-list">
       <Dialog open={showNewChatInput} onOpenChange={handleNewChatOpenChange}>
         <DialogContent
-          className="qor-cm-dialog"
+          className="qorc-cm-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="conversation-modal-title"
         >
-          <div className="qor-cm-head">
-            <div className="qor-cm-head-text">
+          <div className="qorc-cm-head">
+            <div className="qorc-cm-head-text">
               <DialogTitle id="conversation-modal-title">Add and manage your conversations</DialogTitle>
             </div>
             <button
               type="button"
-              className="qor-cm-close"
+              className="qorc-cm-close"
               onClick={() => handleNewChatOpenChange(false)}
               aria-label="Close"
             >
@@ -586,8 +586,8 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </button>
           </div>
 
-          <div className={cn("qor-cm-search", isAdding && "is-searching")}>
-            <span className="qor-cm-search-icon" aria-hidden="true">
+          <div className={cn("qorc-cm-search", isAdding && "is-searching")}>
+            <span className="qorc-cm-search-icon" aria-hidden="true">
               {isAdding ? <Loader2 className="animate-spin" /> : <Search />}
             </span>
             <Input
@@ -595,7 +595,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
               placeholder="Search or enter a username"
               value={newChatUsername}
               onChange={(e) => setNewChatUsername(e.target.value)}
-              className="qor-cm-search-input"
+              className="qorc-cm-search-input"
               disabled={isAdding}
               autoFocus
               spellCheck={false}
@@ -610,7 +610,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             {isAdding && (
               <button
                 type="button"
-                className="qor-cm-search-cancel"
+                className="qorc-cm-search-cancel"
                 onClick={cancelActiveDiscovery}
                 aria-label="Cancel user search"
                 title="Cancel search"
@@ -621,27 +621,27 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           </div>
 
           {(filteredConversations.length > 0 || canAddTyped) ? (
-            <ScrollArea className="qor-cm-body">
-              <div className="qor-cm-scroll-inner">
+            <ScrollArea className="qorc-cm-body">
+              <div className="qorc-cm-scroll-inner">
                 {canAddTyped && (
                   <button
                     type="button"
-                    className="qor-cm-add-row"
+                    className="qorc-cm-add-row"
                     onClick={handleAddChat}
                     disabled={isAdding}
                   >
-                    <span className="qor-cm-add-icon" aria-hidden="true">
+                    <span className="qorc-cm-add-icon" aria-hidden="true">
                       {isAdding ? <Loader2 className="animate-spin" /> : <Plus />}
                     </span>
-                    <span className="qor-cm-add-copy">
-                      <strong className="qor-cm-add-name">{newChatUsername.trim()}</strong>
-                      <span className="qor-cm-add-text">Start a new conversation</span>
+                    <span className="qorc-cm-add-copy">
+                      <strong className="qorc-cm-add-name">{newChatUsername.trim()}</strong>
+                      <span className="qorc-cm-add-text">Start a new conversation</span>
                     </span>
                   </button>
                 )}
 
                 {filteredConversations.length > 0 && (
-                  <div className="qor-cm-list" data-block-version={blockVersion}>
+                  <div className="qorc-cm-list" data-block-version={blockVersion}>
                     {filteredConversations.map((c) => (
                       <ConversationManageRow
                         key={c.id}
@@ -657,13 +657,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
               </div>
             </ScrollArea>
           ) : (
-            <div className="qor-cm-body qor-cm-body-static">
-              <div className="qor-cm-scroll-inner">
-                <div className="qor-cm-empty">
-                  <span className="qor-cm-empty-icon" aria-hidden="true">
+            <div className="qorc-cm-body qorc-cm-body-static">
+              <div className="qorc-cm-scroll-inner">
+                <div className="qorc-cm-empty">
+                  <span className="qorc-cm-empty-icon" aria-hidden="true">
                     <Search />
                   </span>
-                  <div className="qor-cm-empty-copy">
+                  <div className="qorc-cm-empty-copy">
                     <h3>{trimmedQuery ? "No matches" : "No conversations yet"}</h3>
                     <p>
                       {trimmedQuery
@@ -679,17 +679,17 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       </Dialog>
 
       {conversations.length === 0 ? (
-        <div className="qor-conversation-static">
-          <div className="qor-conversation-scroll-inner">
+        <div className="qorc-conversation-static">
+          <div className="qorc-conversation-scroll-inner">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="qor-conversation-empty"
+              className="qorc-conversation-empty"
             >
               <div>
                 <h3>No conversations yet</h3>
               </div>
-              <div className="conversation-empty-lines qor-conversation-empty-lines" aria-hidden="true">
+              <div className="conversation-empty-lines qorc-conversation-empty-lines" aria-hidden="true">
                 {Array.from({ length: 14 }).map((_, index) => (
                   <span key={index} />
                 ))}
@@ -698,13 +698,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           </div>
         </div>
       ) : (
-        <ScrollArea className="qor-conversation-scroll">
-          <div className="qor-conversation-scroll-inner">
-            <div className="qor-conversation-items">
+        <ScrollArea className="qorc-conversation-scroll">
+          <div className="qorc-conversation-scroll-inner">
+            <div className="qorc-conversation-items">
               {itemsToRender.map((item) => {
                 if (item.type === 'header') {
                   return (
-                    <div key={item.id} className="qor-conversation-section-label">
+                    <div key={item.id} className="qorc-conversation-section-label">
                       {item.label}
                     </div>
                   );
@@ -732,14 +732,14 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
       <Dialog open={showConfirmDialog} onOpenChange={handleRemoveDialogOpenChange}>
         <DialogContent
-          className="qor-delete-conversation-dialog"
+          className="qorc-delete-conversation-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="delete-conversation-title"
           aria-describedby="delete-conversation-description"
         >
-          <div className="qor-delete-conversation-head">
-            <div className="qor-delete-conversation-head-copy">
+          <div className="qorc-delete-conversation-head">
+            <div className="qorc-delete-conversation-head-copy">
               <DialogTitle id="delete-conversation-title">Delete conversation</DialogTitle>
               <DialogDescription id="delete-conversation-description">
                 This permanently deletes this conversation and its messages from this device. This cannot be undone.
@@ -747,7 +747,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </div>
             <button
               type="button"
-              className="qor-delete-conversation-close"
+              className="qorc-delete-conversation-close"
               onClick={handleCancelRemove}
               aria-label="Close delete conversation dialog"
               title="Close"
@@ -756,20 +756,20 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </button>
           </div>
 
-          <div className="qor-delete-conversation-target">
+          <div className="qorc-delete-conversation-target">
             <UserAvatar
               username={conversationToDelete || ''}
               size="md"
-              className="qor-delete-conversation-avatar"
+              className="qorc-delete-conversation-avatar"
             />
-            <div className="qor-delete-conversation-user-copy">
-              <span className="qor-delete-conversation-name" title={displayUsername}>{displayUsername}</span>
+            <div className="qorc-delete-conversation-user-copy">
+              <span className="qorc-delete-conversation-name" title={displayUsername}>{displayUsername}</span>
               {conversationToDelete && displayUsername.toLowerCase() !== conversationToDelete.toLowerCase() && (
-                <span className="qor-delete-conversation-username" title={conversationToDelete}>@{conversationToDelete}</span>
+                <span className="qorc-delete-conversation-username" title={conversationToDelete}>@{conversationToDelete}</span>
               )}
             </div>
             <button
-              className="qor-delete-conversation-delete"
+              className="qorc-delete-conversation-delete"
               type="button"
               onClick={handleConfirmRemove}
               aria-label="Delete conversation"

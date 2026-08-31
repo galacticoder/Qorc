@@ -201,7 +201,7 @@ impl ScreenCaptureState {
                 let result = run_portal_capture(task_session.clone(), task_notifier.clone()).await;
                 if let Err(error) = result {
                     notify_start(&task_notifier, Err(error.clone()));
-                    tracing::warn!(target: "qor_chat_call_diag", error = %error, "[CALL-DIAG] native-screen-capture-failed");
+                    tracing::warn!(target: "qorc_call_diag", error = %error, "[CALL-DIAG] native-screen-capture-failed");
                 }
                 task_session.finish();
                 if let Some(state) = task_state.upgrade()
@@ -316,7 +316,7 @@ async fn run_portal_capture(
     notifier: StartNotifier,
 ) -> Result<(), String> {
     let portal_started_at = Instant::now();
-    tracing::info!(target: "qor_chat_call_diag", "[CALL-DIAG] native-screen-portal-create-before");
+    tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-portal-create-before");
     let proxy = portal_step(
         &session,
         Screencast::new(),
@@ -324,7 +324,7 @@ async fn run_portal_capture(
     )
     .await?;
     tracing::info!(
-        target: "qor_chat_call_diag",
+        target: "qorc_call_diag",
         elapsed_ms = portal_started_at.elapsed().as_millis(),
         "[CALL-DIAG] native-screen-portal-create-after"
     );
@@ -369,11 +369,11 @@ async fn run_portal_capture(
             .response()
             .map_err(|error| format!("screen source selection was not allowed: {error}"))?;
         tracing::info!(
-            target: "qor_chat_call_diag",
+            target: "qorc_call_diag",
             elapsed_ms = portal_started_at.elapsed().as_millis(),
             "[CALL-DIAG] native-screen-portal-select-after"
         );
-        tracing::info!(target: "qor_chat_call_diag", "[CALL-DIAG] native-screen-portal-start-before");
+        tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-portal-start-before");
         let start_request = portal_step(
             &session,
             proxy.start(&portal_session, None, Default::default()),
@@ -384,7 +384,7 @@ async fn run_portal_capture(
             .response()
             .map_err(|error| format!("screen capture was not allowed: {error}"))?;
         tracing::info!(
-            target: "qor_chat_call_diag",
+            target: "qorc_call_diag",
             elapsed_ms = portal_started_at.elapsed().as_millis(),
             "[CALL-DIAG] native-screen-portal-start-after"
         );
@@ -400,7 +400,7 @@ async fn run_portal_capture(
         )
         .await?;
         tracing::info!(
-            target: "qor_chat_call_diag",
+            target: "qorc_call_diag",
             node_id,
             elapsed_ms = portal_started_at.elapsed().as_millis(),
             "[CALL-DIAG] native-screen-pipewire-ready"
@@ -476,7 +476,7 @@ fn run_gstreamer_capture(
         return Err("bundled GStreamer plugin scanner is unavailable".to_string());
     }
     tracing::info!(
-        target: "qor_chat_call_diag",
+        target: "qorc_call_diag",
         launcher = %launcher.display(),
         plugin_path = %plugin_path.display(),
         target_fps = CAPTURE_FRAME_RATE,
@@ -577,7 +577,7 @@ fn run_gstreamer_capture(
         .spawn()
         .map_err(|error| format!("GStreamer screen capture could not start: {error}"))?;
     tracing::info!(
-        target: "qor_chat_call_diag",
+        target: "qorc_call_diag",
         spawn_ms = capture_started_at.elapsed().as_millis(),
         process_id = child.id(),
         "[CALL-DIAG] native-screen-gstreamer-start-after"
@@ -646,7 +646,7 @@ fn run_gstreamer_capture(
                     }
                     if sequence == 1 {
                         tracing::info!(
-                            target: "qor_chat_call_diag",
+                            target: "qorc_call_diag",
                             startup_ms = capture_started_at.elapsed().as_millis(),
                             jpeg_bytes,
                             "[CALL-DIAG] native-screen-first-frame"
@@ -676,7 +676,7 @@ fn run_gstreamer_capture(
         if report_started_at.elapsed() >= Duration::from_secs(5) {
             let elapsed_seconds = report_started_at.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
-                target: "qor_chat_call_diag",
+                target: "qorc_call_diag",
                 frames = report_frames,
                 fps = report_frames as f64 / elapsed_seconds,
                 overwritten_frames,
@@ -692,7 +692,7 @@ fn run_gstreamer_capture(
     drain_capture_stderr(&mut stderr, &mut stderr_input, &mut stderr_output);
     let stderr = String::from_utf8_lossy(&stderr_output).into_owned();
     tracing::info!(
-        target: "qor_chat_call_diag",
+        target: "qorc_call_diag",
         frames = sequence,
         total_jpeg_bytes,
         overwritten_frames,
@@ -793,7 +793,7 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_launcher() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QOR_GSTREAMER_LAUNCH") {
+    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_LAUNCH") {
         let configured = PathBuf::from(configured);
         if configured.is_file() {
             return Some(configured);
@@ -803,15 +803,15 @@ fn resolve_gstreamer_launcher() -> Option<PathBuf> {
     if let Ok(executable) = std::env::current_exe()
         && let Some(binary_dir) = executable.parent()
     {
-        candidates.push(binary_dir.join("qor-gst-launch-1.0"));
+        candidates.push(binary_dir.join("qorc-gst-launch-1.0"));
         if let Some(usr_dir) = binary_dir.parent() {
             candidates.push(
                 usr_dir
                     .join("lib")
-                    .join("Qor")
+                    .join("qorc")
                     .join("webkitgtk")
                     .join("bin")
-                    .join("qor-gst-launch-1.0"),
+                    .join("qorc-gst-launch-1.0"),
             );
         }
     }
@@ -824,7 +824,7 @@ fn resolve_gstreamer_launcher() -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_plugins(launcher: &std::path::Path) -> Option<PathBuf> {
-    let mut candidates = std::env::var_os("QOR_GSTREAMER_CAPTURE_PLUGINS")
+    let mut candidates = std::env::var_os("QORC_GSTREAMER_CAPTURE_PLUGINS")
         .map(PathBuf::from)
         .into_iter()
         .collect::<Vec<_>>();
@@ -848,14 +848,14 @@ fn resolve_gstreamer_plugins(launcher: &std::path::Path) -> Option<PathBuf> {
         candidates.push(
             usr_dir
                 .join("lib")
-                .join("Qor")
+                .join("qorc")
                 .join("webkitgtk")
                 .join("capture-plugins"),
         );
         candidates.push(
             usr_dir
                 .join("lib")
-                .join("Qor")
+                .join("qorc")
                 .join("screen-capture")
                 .join("gstreamer-1.0"),
         );
@@ -881,7 +881,7 @@ fn resolve_gstreamer_plugins(launcher: &std::path::Path) -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_library_path(plugin_path: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QOR_GSTREAMER_RUNTIME_LIB") {
+    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_RUNTIME_LIB") {
         let configured = PathBuf::from(configured);
         if configured.is_dir() {
             return Some(configured);
@@ -908,7 +908,7 @@ fn resolve_gstreamer_library_path(plugin_path: &std::path::Path) -> Option<PathB
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_spa_path(plugin_path: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QOR_GSTREAMER_SPA_PLUGINS") {
+    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_SPA_PLUGINS") {
         let configured = PathBuf::from(configured);
         return configured.is_dir().then_some(configured);
     }
@@ -958,7 +958,7 @@ pub(crate) fn spa_runtime_is_complete(spa_root: &std::path::Path) -> bool {
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_scanner(launcher: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QOR_GSTREAMER_PLUGIN_SCANNER") {
+    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_PLUGIN_SCANNER") {
         let configured = PathBuf::from(configured);
         if configured.is_file() {
             return Some(configured);
@@ -966,19 +966,19 @@ fn resolve_gstreamer_scanner(launcher: &std::path::Path) -> Option<PathBuf> {
     }
     launcher
         .parent()
-        .map(|path| path.join("qor-gst-plugin-scanner"))
+        .map(|path| path.join("qorc-gst-plugin-scanner"))
         .filter(|candidate| candidate.is_file())
 }
 
 #[cfg(target_os = "linux")]
 fn require_bundled_gstreamer() -> bool {
-    std::env::var_os("QOR_GSTREAMER_REQUIRE_BUNDLED")
+    std::env::var_os("QORC_GSTREAMER_REQUIRE_BUNDLED")
         .is_some_and(|value| value == std::ffi::OsStr::new("1"))
 }
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_registry_path() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QOR_GSTREAMER_REGISTRY") {
+    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_REGISTRY") {
         let configured = PathBuf::from(configured);
         if let Some(parent) = configured.parent()
             && std::fs::create_dir_all(parent).is_ok()
@@ -990,7 +990,7 @@ fn resolve_gstreamer_registry_path() -> Option<PathBuf> {
     if !runtime_dir.is_absolute() || !runtime_dir.is_dir() {
         return None;
     }
-    let registry_dir = runtime_dir.join("qor-chat");
+    let registry_dir = runtime_dir.join("qorc");
     std::fs::create_dir_all(&registry_dir).ok()?;
     Some(registry_dir.join("gstreamer-registry-1.0.bin"))
 }

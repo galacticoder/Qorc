@@ -965,17 +965,17 @@ const ChatApp: React.FC = () => {
         }}
         onLogout={async () => await Authentication.logout(Database.secureDBRef)}
       >
-        <div className="qor-chat-stage">
+        <div className="qorc-stage">
           <PeerIdentityVerificationAlert />
           <div className={sidebarActiveTab === 'chats' ? 'h-full w-full' : 'hidden'}>
             <div className="flex h-full">
               <div
-                className="qor-chats-panel hidden md:flex flex-col relative"
+                className="qorc-conversations-panel hidden md:flex flex-col relative"
                 style={{ width: `${conversationPanelWidth}px` }}
               >
                 {/* Resize Handle */}
                 <div
-                  className="qor-resize-line"
+                  className="qorc-resize-line"
                   onMouseDown={(e) => {
                     e.preventDefault();
                     setIsResizing(true);
@@ -1002,15 +1002,15 @@ const ChatApp: React.FC = () => {
                   style={{ cursor: isResizing ? 'col-resize' : undefined }}
                 />
 
-                <div className="qor-chats-head">
+                <div className="qorc-conversations-head">
                   <h2>Chats</h2>
-                  <div className="qor-head-actions">
+                  <div className="qorc-head-actions">
                     <TorIndicator />
                     <Button
                       variant="ghost"
                       size="icon"
                       onClick={() => setShowNewChatInput(true)}
-                      className="qor-icon-btn qor-compose-btn"
+                      className="qorc-icon-btn qorc-compose-btn"
                       aria-label="Add conversation"
                     >
                       <ComposeIcon className="h-4 w-4" />
@@ -1038,7 +1038,7 @@ const ChatApp: React.FC = () => {
                 </div>
               </div>
 
-              <div className="qor-chat-pane">
+              <div className="qorc-pane">
                 {selectedConversation ? (
                   <EmojiPickerProvider>
                     <ChatInterface

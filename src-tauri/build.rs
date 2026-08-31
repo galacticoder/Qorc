@@ -28,7 +28,7 @@ fn embedded_tor_bundle(target: &str) -> (&'static str, &'static str, &'static st
             "linux",
             "aarch64",
             "linux-aarch64",
-            "a529a053d39c24dcbe53afe961b0d284b2c739d1f9ad54211ce6e5b76a50cf4f",
+            "ce2afbc62b1370bfb9c24a999eda25d217b315673d82d3a59ca0a3b5d7561cbf",
         ),
         "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => (
             "windows",
@@ -52,7 +52,7 @@ fn main() {
     } else {
         ""
     };
-    let staged_name = format!("qor-pir-client-{target}{executable_suffix}");
+    let staged_name = format!("qorc-pir-client-{target}{executable_suffix}");
     let staged_path = manifest_dir.join("binaries").join(&staged_name);
 
     println!("cargo:rerun-if-env-changed=TARGET");
@@ -60,7 +60,7 @@ fn main() {
 
     let bytes = fs::read(&staged_path).unwrap_or_else(|error| {
         panic!(
-            "embedded PIR client is missing at {} ({error}); run pnpm run build:pir first",
+            "embedded PIR client is missing at {} ({error}), run pnpm run build:pir first",
             staged_path.display()
         )
     });
@@ -71,7 +71,7 @@ fn main() {
         "pub static EMBEDDED_PIR_CLIENT: &[u8] = include_bytes!({source_path});\n\
          pub const EMBEDDED_PIR_CLIENT_HASH: [u8; 32] = [{digest_literal}];\n\
          pub const EMBEDDED_PIR_CLIENT_FILE_NAME: &str = {file_name:?};\n",
-        file_name = format!("qor-pir-client{executable_suffix}")
+        file_name = format!("qorc-pir-client{executable_suffix}")
     );
     let output = PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR"))
         .join("embedded_pir_client.rs");

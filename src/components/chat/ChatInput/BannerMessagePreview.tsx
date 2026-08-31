@@ -16,7 +16,7 @@ export function BannerMessagePreview({
   contentVersion,
   maxWidth = 800,
   fontSize = 11,
-  color = 'var(--qor-reply-banner-preview-text)',
+  color = 'var(--qorc-reply-banner-preview-text)',
   className,
   maxLines = 1,
 }: BannerMessagePreviewProps) {
@@ -57,7 +57,7 @@ export function BannerMessagePreview({
   return (
     <div
       ref={previewRef}
-      className={`qor-reply-banner-secure-preview${className ? ` ${className}` : ''}`}
+      className={`qorc-reply-banner-secure-preview${className ? ` ${className}` : ''}`}
     >
       <SecureCanvasText
         messageId={messageId}

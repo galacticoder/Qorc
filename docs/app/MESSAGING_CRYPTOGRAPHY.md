@@ -12,8 +12,8 @@ P2P protocols. `docs/app/MESSAGING.md` describes delivery and durability.
 | Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
 | Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and call-stream subkeys |
 | WebSocket session | `pq-ws-8` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
-| Anonymous HTTP tunnel | `qor-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
-| Account-root transparency | `qor-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+| Anonymous HTTP tunnel | `qorc-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
+| Account-root transparency | `qorc-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
 | Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 key establishment, no classical KEX fallback |
 
 These wire forms and algorithm bindings are required. Classical-only message
@@ -55,7 +55,7 @@ subkeys. They are not required to have the same bytes.
 
 Before accepting those certified subkeys, the client verifies that their account
 root matches the current append-only transparency commitment for the handle.
-This authorizes continuity of the Qor cryptographic identity, it does not prove
+This authorizes continuity of the qorc cryptographic identity, it does not prove
 who owns the handle in the real world.
 
 Persistent receive keys are native-only. Rust verifies the canonical signed
@@ -131,8 +131,8 @@ connection, or transport objects.
 
 Message streams use the directional session key. Each call stream derives a
 32-byte subkey with HKDF-BLAKE3, the salt
-`qor-call-stream-key-salt-v1`, and the info value
-`qor-call-stream-key-v1:<completeStreamId>`. Accepted contexts are
+`qorc-call-stream-key-salt-v1`, and the info value
+`qorc-call-stream-key-v1:<completeStreamId>`. Accepted contexts are
 `call-audio`, `call-video`, `call-telemetry`, and `call-screen` followed by a
 16–64 character lowercase hexadecimal identifier. The complete stream ID is
 also AEAD additional data, so changing the media kind, call ID, or screen stream
@@ -253,7 +253,7 @@ This does not make the entire app or network path post-quantum:
 
 - Signal identity signatures and parts of the Double Ratchet remain classical,
   PQXDH, SPQR v1, and the required outer ML-KEM envelope supplement them.
-- Qor-controlled client-facing TLS permits only `X25519MLKEM768`, a hybrid
+- qorc-controlled client-facing TLS permits only `X25519MLKEM768`, a hybrid
   ML-KEM-768 + X25519 group. TLS certificate signatures remain classical, while
   the pinned application ML-DSA/P2P transcript authentication supplies the
   additional PQ identity layer. The P2P transport is a Tor onion stream whose

@@ -10,10 +10,10 @@ const releaseDir = path.join(targetDir, 'release');
 const force = process.argv.includes('--force');
 const dryRun = process.argv.includes('--dry-run');
 const defaultLimitGiB = 24;
-const configuredLimit = Number.parseFloat(process.env.QOR_CLIENT_TARGET_MAX_GIB || `${defaultLimitGiB}`);
+const configuredLimit = Number.parseFloat(process.env.QORC_CLIENT_TARGET_MAX_GIB || `${defaultLimitGiB}`);
 
 if (!Number.isFinite(configuredLimit) || configuredLimit < 4 || configuredLimit > 1024) {
-    console.error('[target-cache] QOR_CLIENT_TARGET_MAX_GIB must be between 4 and 1024');
+    console.error('[target-cache] QORC_CLIENT_TARGET_MAX_GIB must be between 4 and 1024');
     process.exit(1);
 }
 
@@ -76,7 +76,7 @@ function pruneReleaseCompilerCache() {
             if (entry.isFile() && (
                 entry.name === '.cargo-lock' ||
                 entry.name.endsWith('.d') ||
-                /^libqor(?:_chat_lib)?\.(?:a|rlib|so)$/.test(entry.name)
+                /^libqorc(?:_lib)?\.(?:a|rlib|so)$/.test(entry.name)
             )) {
                 removed += removeCachePath(path.join(releaseDir, entry.name));
             }
@@ -111,4 +111,3 @@ if (force || currentSize > limitBytes) {
 
 const finalSize = dryRun ? Math.max(0, initialSize - reclaimed) : pathSize(targetDir);
 console.log(`[target-cache] ${dryRun ? 'estimated' : 'current'} size ${formatBytes(finalSize)}; ${dryRun ? 'reclaimable' : 'reclaimed'} ${formatBytes(reclaimed)}`);
-

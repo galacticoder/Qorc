@@ -1,6 +1,6 @@
 pub const BACKGROUND_SESSION_ACTIVE: &str = "bg_session_active";
 pub const DISCOVERY_MATERIAL_PREFIX: &str = "discmat:v1:";
-pub const EXPLICIT_LOGOUT: &str = "qor_explicit_logout_v1";
+pub const EXPLICIT_LOGOUT: &str = "qorc_explicit_logout_v1";
 pub const KEY_TRANSPARENCY_AUTHORIZATION_PREFIX: &str = "kt-authorizations:";
 pub const KEY_TRANSPARENCY_CONTACT_PREFIX: &str = "kt-contact:";
 pub const KEY_TRANSPARENCY_HEAD_PREFIX: &str = "kt-head:";
@@ -21,11 +21,11 @@ pub const SERVER_PQ_PIN: &str = "server_pq_pin_v4";
 pub const SPOOL_CONSUMED_PROBES_PREFIX: &str = "spoolconsumed:v1:";
 pub const SPOOL_DETECTION_PREFIX: &str = "spooldet:v1:";
 pub const SPOOL_PEER_DETECTION_PREFIX: &str = "spoolpeerdet:v1:";
-pub const TOR_AUTO_CONNECT: &str = "qor_tor_auto_connect_v1";
-pub const TOR_AUTO_START: &str = "qor_tor_auto_start_v1";
-pub const TOR_BRIDGES_ENABLED: &str = "qor_tor_bridges_enabled_v1";
-pub const TOR_BRIDGE_LINES: &str = "qor_tor_bridge_lines_v1";
-pub const TOR_BRIDGE_TRANSPORT: &str = "qor_tor_bridge_transport_v1";
+pub const TOR_AUTO_CONNECT: &str = "qorc_tor_auto_connect_v1";
+pub const TOR_AUTO_START: &str = "qorc_tor_auto_start_v1";
+pub const TOR_BRIDGES_ENABLED: &str = "qorc_tor_bridges_enabled_v1";
+pub const TOR_BRIDGE_LINES: &str = "qorc_tor_bridge_lines_v1";
+pub const TOR_BRIDGE_TRANSPORT: &str = "qorc_tor_bridge_transport_v1";
 
 pub const RENDERER_EXACT_KEYS: &[&str] = &[
     SERVER_PQ_PIN,

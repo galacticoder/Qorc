@@ -403,7 +403,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   useLayoutEffect(() => {
     if (!isAttached) return;
-    const pane = document.querySelector<HTMLElement>('.qor-chat-pane');
+    const pane = document.querySelector<HTMLElement>('.qorc-pane');
     if (!pane) return;
     const updateBounds = () => {
       const bounds = pane.getBoundingClientRect();
@@ -655,7 +655,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       : { left: position.x, bottom: position.bottom };
   const callModalStyle = {
     ...modalStyle,
-    '--qor-call-ring-color': peerAvatarColor,
+    '--qorc-call-ring-color': peerAvatarColor,
   } as React.CSSProperties;
 
   return (
@@ -664,7 +664,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       className={cn(
         'fixed select-none bg-background shadow-xl [&_button]:cursor-pointer',
         isForeground ? 'z-[60]' : 'z-50',
-        isRinging ? 'qor-call-modal-ringing isolate overflow-visible' : 'overflow-hidden',
+        isRinging ? 'qorc-call-modal-ringing isolate overflow-visible' : 'overflow-hidden',
         isExpandedScreenShare && 'left-[5vw] top-[5vh] h-[90vh] w-[90vw] rounded-2xl border border-border',
         !isExpandedScreenShare && !isDocked && 'aspect-video w-[min(92vw,520px)] rounded-2xl border border-border',
         isDocked && 'rounded-xl border border-border shadow-none',
@@ -674,12 +674,12 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     >
       {isRinging && (
         <>
-          <span className="qor-call-ring-wave is-left" aria-hidden="true">
+          <span className="qorc-call-ring-wave is-left" aria-hidden="true">
             <svg viewBox="0 0 30 100" preserveAspectRatio="none">
               <polyline points="21,0 9,5 21,10 9,15 21,20 9,25 21,30 9,35 21,40 9,45 21,50 9,55 21,60 9,65 21,70 9,75 21,80 9,85 21,90 9,95 21,100" />
             </svg>
           </span>
-          <span className="qor-call-ring-wave is-right" aria-hidden="true">
+          <span className="qorc-call-ring-wave is-right" aria-hidden="true">
             <svg viewBox="0 0 30 100" preserveAspectRatio="none">
               <polyline points="9,0 21,5 9,10 21,15 9,20 21,25 9,30 21,35 9,40 21,45 9,50 21,55 9,60 21,65 9,70 21,75 9,80 21,85 9,90 21,95 9,100" />
             </svg>
@@ -811,11 +811,11 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             <UserAvatar
               username={call.peer || ''}
               size="xs"
-              className={isDocked ? 'qor-docked-call-avatar' : undefined}
+              className={isDocked ? 'qorc-docked-call-avatar' : undefined}
             />
             <div className={cn(
               'flex min-w-0 flex-col justify-center',
-              isDocked ? 'qor-docked-call-copy' : 'text-shadow-sm'
+              isDocked ? 'qorc-docked-call-copy' : 'text-shadow-sm'
             )}>
               <span className="max-w-48 truncate text-sm font-semibold leading-none">{displayPeerName}</span>
               {isConnected && (

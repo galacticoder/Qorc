@@ -5,7 +5,7 @@ import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 import { toast } from "sonner";
 import { system } from "../../lib/tauri-bindings";
 import { EventType } from "../../lib/types/event-types.ts";
-import { QorBrandLogo } from "../ui/QorBrandLogo";
+import { QorcBrandLogo } from "../ui/QorcBrandLogo";
 import { ThemeToggleButton } from "../ui/ThemeToggleButton";
 
 interface LoginProps {
@@ -26,8 +26,8 @@ interface LoginProps {
   readonly setIsRegistrationMode?: (val: boolean) => void;
 }
 
-const TERMS_URL = "https://www.qor-chat.com/terms";
-const PRIVACY_URL = "https://www.qor-chat.com/privacy";
+const TERMS_URL = "https://www.qorc.com/terms";
+const PRIVACY_URL = "https://www.qorc.com/privacy";
 
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
   try {
@@ -161,9 +161,9 @@ export const Login = React.memo<LoginProps>(({
     <section className={`screen screen-${prefix}`}>
       <div className={`${prefix}-scene`}>
         <header className={`${prefix}-topbar`}>
-          <div className={`${prefix}-screen-brand`} aria-label="Qor">
-            <QorBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
-            <span className={`${prefix}-brand-name`}>Qor</span>
+          <div className={`${prefix}-screen-brand`} aria-label="qorc">
+            <QorcBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
+            <span className={`${prefix}-brand-name`}>qorc</span>
           </div>
 
         </header>

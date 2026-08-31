@@ -1,6 +1,6 @@
 # Environment variables
 
-This is the inventory of supported Qor Chat runtime and deployment environment
+This is the inventory of supported qorc runtime and deployment environment
 variables. Defaults are the values used after parsing.
 
 ## Required security material
@@ -270,9 +270,9 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `OPENSSL_CONF` | Generated edge configuration | load-balancer modules | OpenSSL configuration that loads the bundled providers. |
-| `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qor-edge`; external overrides are not accepted. |
-| `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qor-edge`; external overrides are not accepted. |
-| `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qor-edge`; inherited paths are not used by HAProxy or Tor. |
+| `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qorc-edge`; external overrides are not accepted. |
+| `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qorc-edge`; external overrides are not accepted. |
+| `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qorc-edge`; inherited paths are not used by HAProxy or Tor. |
 | `OQS_SIG` | Tool-selected | `scripts/setup-quantum-haproxy.cjs` | Preferred supported PQ signature algorithm for generated PQ certificate tooling. |
 | `TLS_REDIS_SERVER` | Installer-generated path | `scripts/start-server.cjs` | Repository-local TLS Redis executable override. |
 | `REDIS_SERVER_BIN` | `redis-server` | same | System Redis executable fallback. |
@@ -284,24 +284,24 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `VITE_WS_URL` | Unset | `src/components/setup/ConnectSetup.tsx` | Packaged web-client websocket endpoint, for example `wss://localhost:8443`. |
-| `QOR_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and `logs/instance-<id>-logs.txt` output for multi instance testing. |
+| `QORC_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and `logs/instance-<id>-logs.txt` output for multi instance testing. |
 | `PROTOC` | Auto-detected | `scripts/start-client.cjs` | Explicit Protocol Buffers compiler path. |
-| `QOR_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
-| `QOR_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
-| `QOR_STRAWBERRY_PERL_URL` | Pinned Strawberry Perl download URL | same | Windows native-build dependency URL. |
-| `QOR_CHAT_SOFTWARE_RENDERING` | Unset | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | When present on Linux, defaults `LIBGL_ALWAYS_SOFTWARE` to `1`. This is a diagnostic compatibility fallback, not the normal rendering path. |
+| `QORC_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
+| `QORC_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
+| `QORC_STRAWBERRY_PERL_URL` | Pinned Strawberry Perl download URL | same | Windows native-build dependency URL. |
+| `QORC_SOFTWARE_RENDERING` | Unset | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | When present on Linux, defaults `LIBGL_ALWAYS_SOFTWARE` to `1`. This is a diagnostic compatibility fallback, not the normal rendering path. |
 | `WEBKIT_DMABUF_RENDERER_FORCE_SHM` | `1` on Linux | same | WebKitGTK rendering compatibility setting. An explicit inherited value is preserved. |
 | `GSTREAMER_PLUGINS_DIR` | `.cache/gstreamer-plugins-<arch>` during client builds | `scripts/start-client.cjs`, Linux bundle scripts | Build-time location of the staged curated GStreamer tree. It is not required by an installed package. |
-| `QOR_GSTREAMER_SYSTEM_PLUGINS_DIR` | `pkg-config` result or a standard system directory | `scripts/stage-gstreamer-plugins.cjs` | Advanced build-time override for the GStreamer plugin directory copied into the private staged runtime. |
-| `QOR_GSTREAMER_LAUNCH_SOURCE` | `/usr/bin/gst-launch-1.0` or `/bin/gst-launch-1.0` | same | Advanced build-time override for the `gst-launch-1.0` executable copied into the private capture runtime. |
-| `QOR_GSTREAMER_PLUGIN_SCANNER_SOURCE` | Auto-detected system scanner | same | Advanced build-time override for the GStreamer plugin scanner copied into the private capture runtime. |
-| `QOR_GSTREAMER_REQUIRE_BUNDLED` | `1` for packaged Linux launches and staged development launches | native Linux startup and screen capture | Exact `1` disables automatic fallback to system capture libraries, plugins, launcher, or scanner. Normal launch paths also supply the private runtime locations automatically. |
-| `QOR_GSTREAMER_LAUNCH` | Packaged or staged private launcher | native Linux screen capture | Advanced runtime override for the private GStreamer capture launcher. Normal builds set it automatically. |
-| `QOR_GSTREAMER_CAPTURE_PLUGINS` | Packaged or staged capture-plugin directory | same | Advanced runtime override for the curated capture-only plugin directory. |
-| `QOR_GSTREAMER_RUNTIME_LIB` | Packaged or staged private library directory | same | Advanced runtime override for the capture process dynamic-library directory. |
-| `QOR_GSTREAMER_SPA_PLUGINS` | Packaged or staged `spa-0.2` directory | same | Advanced runtime override for the private PipeWire SPA root. It must contain support modules plus the video adapter used by screen capture; this replaces rather than extends the host SPA path. |
-| `QOR_GSTREAMER_PLUGIN_SCANNER` | Packaged or staged private scanner | same | Advanced runtime override for the GStreamer plugin scanner. |
-| `QOR_GSTREAMER_REGISTRY` | `$XDG_RUNTIME_DIR/qor-chat/gstreamer-registry-1.0.bin` | same | Advanced override for the per-session GStreamer registry file used by native screen capture. |
+| `QORC_GSTREAMER_SYSTEM_PLUGINS_DIR` | `pkg-config` result or a standard system directory | `scripts/stage-gstreamer-plugins.cjs` | Advanced build-time override for the GStreamer plugin directory copied into the private staged runtime. |
+| `QORC_GSTREAMER_LAUNCH_SOURCE` | `/usr/bin/gst-launch-1.0` or `/bin/gst-launch-1.0` | same | Advanced build-time override for the `gst-launch-1.0` executable copied into the private capture runtime. |
+| `QORC_GSTREAMER_PLUGIN_SCANNER_SOURCE` | Auto-detected system scanner | same | Advanced build-time override for the GStreamer plugin scanner copied into the private capture runtime. |
+| `QORC_GSTREAMER_REQUIRE_BUNDLED` | `1` for packaged Linux launches and staged development launches | native Linux startup and screen capture | Exact `1` disables automatic fallback to system capture libraries, plugins, launcher, or scanner. Normal launch paths also supply the private runtime locations automatically. |
+| `QORC_GSTREAMER_LAUNCH` | Packaged or staged private launcher | native Linux screen capture | Advanced runtime override for the private GStreamer capture launcher. Normal builds set it automatically. |
+| `QORC_GSTREAMER_CAPTURE_PLUGINS` | Packaged or staged capture-plugin directory | same | Advanced runtime override for the curated capture-only plugin directory. |
+| `QORC_GSTREAMER_RUNTIME_LIB` | Packaged or staged private library directory | same | Advanced runtime override for the capture process dynamic-library directory. |
+| `QORC_GSTREAMER_SPA_PLUGINS` | Packaged or staged `spa-0.2` directory | same | Advanced runtime override for the private PipeWire SPA root. It must contain support modules plus the video adapter used by screen capture; this replaces rather than extends the host SPA path. |
+| `QORC_GSTREAMER_PLUGIN_SCANNER` | Packaged or staged private scanner | same | Advanced runtime override for the GStreamer plugin scanner. |
+| `QORC_GSTREAMER_REGISTRY` | `$XDG_RUNTIME_DIR/qorc/gstreamer-registry-1.0.bin` | same | Advanced override for the per-session GStreamer registry file used by native screen capture. |
 | `PIPEWIRE_DEBUG` | `1` for the capture child unless inherited | PipeWire library inherited by the capture child | Advanced Linux screen-capture diagnostics. Level `1` retains errors; level `4` traces SPA factory loading and stream state. Do not enable verbose levels for normal releases. |
 | `GST_DEBUG` | Unset | GStreamer inherited by the capture child | Advanced GStreamer category/level diagnostics, for example `pipewiresrc:7,pipewirestream:7`. Verbose output can be large and may expose device metadata. |
 
@@ -317,7 +317,7 @@ server-runtime use above.
 | `POSTGRES_BIND_HOST` | `127.0.0.1` | Host interface for the published TLS PostgreSQL port. |
 | `PG_ALLOWED_CIDR` | `172.16.0.0/12` | Network allowed by the generated `hostssl ... scram-sha-256` rules. Tighten it before exposing PostgreSQL to another host. |
 | `POSTGRES_PASSWORD` | Required by the PostgreSQL entrypoint, Compose supplies `DATABASE_PASSWORD` | Initial PostgreSQL role password. |
-| `POSTGRES_DB` | `Qor`, Compose supplies `DB_NAME` | Database initialized by the PostgreSQL entrypoint. |
+| `POSTGRES_DB` | `qorc`, Compose supplies `DB_NAME` | Database initialized by the PostgreSQL entrypoint. |
 | `DB_PORT` | Required by current Compose file | Host-side PostgreSQL published port. |
 | `PORT` | `3000` | Host-side server published port. |
 | `HAPROXY_HTTPS_PORT` | `8443` | Host-side load-balancer HTTPS port. |
@@ -331,6 +331,6 @@ accepts remote traffic only through TLS with SCRAM-SHA-256 authentication.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BROADCAST_LANE_COVER_PERCENT` | `25` | Share of server cover traffic written to the first-contact lane. Without cover on that lane its entry count is a live readout of how fast new relationships form. |
-| `QOR_PIR_WORKER_PATH` | `workers/ypir/target/release/qor-pir-worker` | Optional override. The Docker image builds the worker to the default path, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
+| `QORC_PIR_WORKER_PATH` | `workers/ypir/target/release/qorc-pir-worker` locally; `/app/bin/qorc-pir-worker` in Docker | Optional override. The Docker image bundles and verifies the worker at `/app/bin/qorc-pir-worker`, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
 | `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400` (24h) | Spool retention. No longer tied to a paging ceiling for the tagged lane, which PIR serves directly. |
 | `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768` | Caps retained logical records. PIR packs each retained record into nine 16 KiB rows, pads the database to a supported matrix shape, and keeps two snapshots during rotation. Memory grows at matrix size boundaries rather than one fixed amount. |

@@ -1,10 +1,10 @@
-# Contributing to Qor-Chat
+# Contributing to qorc
 
-Thank you for considering contributing to Qor-Chat! Contributions from everyone are welcome.
+Thank you for considering contributing to qorc! Contributions from everyone are welcome.
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the [Qor Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
+This project and everyone participating in it is governed by the [qorc Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
 
 ## Getting Started
 
@@ -20,8 +20,8 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/galacticoder/Qor-Chat.git
-    cd Qor-Chat
+    git clone https://github.com/galacticoder/qorc.git
+    cd qorc
     ```
 
 2.  **Start a complete Docker server:**
@@ -55,12 +55,12 @@ BuildKit layer caches, and the frontend has a separate stage so UI edits retain
 compiled Rust dependencies. Linux Docker Engine users can run
 `node scripts/install-deps.cjs --client-arm64` to install Buildx. ARM64 builds
 must run on a native ARM64 host or through a native remote builder selected by
-`QOR_ARM64_BUILDER`; QEMU and binfmt emulation are intentionally unsupported.
+`QORC_ARM64_BUILDER`; QEMU and binfmt emulation are intentionally unsupported.
 On a native ARM64 host,
 `node scripts/start-client.cjs --bundle-only --target arm64` builds directly.
 
 Linux AppImages are prepared from the Debian payload, populated by linuxdeploy,
-then compressed once after Qor's private WebKitGTK and GStreamer runtimes are
+then compressed once after qorc's private WebKitGTK and GStreamer runtimes are
 installed. The old intermediate compressed AppImage pass is not part of the
 build path.
 
@@ -125,8 +125,8 @@ If you find a bug, please create an issue on GitHub. Include:
 *   Screenshots if applicable.
 *   Your OS and environment details.
 *   For call or device failures reproduced through the client launcher, the
-    relevant `logs/instance-<QOR_INSTANCE_ID>-logs.txt` file. Use a different
-    `QOR_INSTANCE_ID` for each simultaneously running test client so their
+    relevant `logs/instance-<QORC_INSTANCE_ID>-logs.txt` file. Use a different
+    `QORC_INSTANCE_ID` for each simultaneously running test client so their
     native data and logs remain separate.
 
 ## Suggesting Enhancements

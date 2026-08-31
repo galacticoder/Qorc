@@ -17,8 +17,8 @@ const ONION_AUDIO_VIRTUAL_PORT: u16 = 9_736;
 const ONION_DIAL_TIMEOUT_SECS: u64 = 45;
 const ONION_PUBLISH_RETRY_SECS: u64 = 5;
 const ONION_PUBLISH_RETRY_MAX_SECS: u64 = 120;
-const AUDIO_LANE_OFFER_PREFIX: &[u8] = b"QOR-AUDIO-LANE-OFFER-v2\0";
-const AUDIO_LANE_PREAMBLE_PREFIX: &[u8] = b"QOR-AUDIO-LANE-v2\0";
+const AUDIO_LANE_OFFER_PREFIX: &[u8] = b"QORC-AUDIO-LANE-OFFER-v2\0";
+const AUDIO_LANE_PREAMBLE_PREFIX: &[u8] = b"QORC-AUDIO-LANE-v2\0";
 const AUDIO_LANE_TOKEN_BYTES: usize = 32;
 const AUDIO_LANE_TARGET_COUNT: usize = 4;
 const AUDIO_LANE_ACTIVE_COUNT: usize = 1;
@@ -148,27 +148,27 @@ pub fn set_tor_manager(tor: Arc<crate::tor::TorManager>) {
     let _ = TOR.set(tor);
 }
 
-fn tor_manager() -> Result<&'static Arc<crate::tor::TorManager>, QorError> {
+fn tor_manager() -> Result<&'static Arc<crate::tor::TorManager>, QorcError> {
     TOR.get()
-        .ok_or_else(|| QorError::NotInitialized("Tor manager unavailable for P2P".to_string()))
+        .ok_or_else(|| QorcError::NotInitialized("Tor manager unavailable for P2P".to_string()))
 }
 
 /// Publish onion service
-async fn create_onion_endpoint() -> QorResult<OnionEndpoint> {
+async fn create_onion_endpoint() -> QorcResult<OnionEndpoint> {
     let tor = tor_manager()?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
-        .map_err(|e| QorError::Network(format!("Failed to bind P2P listener: {}", e)))?;
+        .map_err(|e| QorcError::Network(format!("Failed to bind P2P listener: {}", e)))?;
     let local_port = listener
         .local_addr()
-        .map_err(|e| QorError::Network(format!("Failed to read P2P listener port: {}", e)))?
+        .map_err(|e| QorcError::Network(format!("Failed to read P2P listener port: {}", e)))?
         .port();
     let audio_listener = TcpListener::bind(("127.0.0.1", 0))
         .await
-        .map_err(|e| QorError::Network(format!("Failed to bind P2P audio listener: {}", e)))?;
+        .map_err(|e| QorcError::Network(format!("Failed to bind P2P audio listener: {}", e)))?;
     let audio_local_port = audio_listener
         .local_addr()
-        .map_err(|e| QorError::Network(format!("Failed to read P2P audio listener port: {}", e)))?
+        .map_err(|e| QorcError::Network(format!("Failed to read P2P audio listener port: {}", e)))?
         .port();
     let onion_service = tor
         .publish_onion_service(&[
@@ -448,7 +448,7 @@ async fn connect_onion_audio_peer(
     Ok(PeerConnection::new(onion_host.to_string(), stream))
 }
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 const REQUEST_TIMEOUT_SECS: u64 = ONION_DIAL_TIMEOUT_SECS + 15;
 const _: () = assert!(
@@ -984,21 +984,21 @@ fn spawn_onion_endpoint_acceptor(
     })
 }
 
-fn validate_handshake_identity(identity: &str) -> QorResult<()> {
+fn validate_handshake_identity(identity: &str) -> QorcResult<()> {
     let len = identity.len();
     if !(3..=100).contains(&len)
         || !identity.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
     {
-        return Err(QorError::Network(
+        return Err(QorcError::Network(
             "Invalid P2P handshake identity".to_string(),
         ));
     }
     Ok(())
 }
 
-fn validate_connection_id(connection_id: &str) -> QorResult<()> {
+fn validate_connection_id(connection_id: &str) -> QorcResult<()> {
     let synthetic_inbound = connection_id
         .strip_prefix("inbound:")
         .is_some_and(|suffix| {
@@ -1018,7 +1018,7 @@ fn validate_connection_id(connection_id: &str) -> QorResult<()> {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
     {
-        return Err(QorError::Network(
+        return Err(QorcError::Network(
             "Invalid P2P connection identifier".to_string(),
         ));
     }
@@ -1032,17 +1032,17 @@ fn build_private_endpoint_url(onion_host: &str) -> String {
     format!("onion://{}", onion_host)
 }
 
-fn parse_private_endpoint_url(endpoint_url: &str) -> QorResult<String> {
+fn parse_private_endpoint_url(endpoint_url: &str) -> QorcResult<String> {
     let trimmed = endpoint_url.trim();
     if trimmed != endpoint_url || trimmed.is_empty() || trimmed.len() > 512 {
-        return Err(QorError::Network("Invalid endpoint length".to_string()));
+        return Err(QorcError::Network("Invalid endpoint length".to_string()));
     }
     let host = trimmed
         .strip_prefix("onion://")
-        .ok_or_else(|| QorError::Network("Endpoint must use onion://".to_string()))?
+        .ok_or_else(|| QorcError::Network("Endpoint must use onion://".to_string()))?
         .to_ascii_lowercase();
     if !is_valid_onion_host(&host) {
-        return Err(QorError::Network("Invalid onion endpoint".to_string()));
+        return Err(QorcError::Network("Invalid onion endpoint".to_string()));
     }
     Ok(host)
 }
@@ -1477,7 +1477,7 @@ impl IrohWorker {
     async fn new(
         self_command_tx: mpsc::UnboundedSender<WorkerCommand>,
         local_node_id: Arc<RwLock<Option<String>>>,
-    ) -> QorResult<Self> {
+    ) -> QorcResult<Self> {
         let identity_generation = Arc::new(AtomicU64::new(1));
         spawn_onion_endpoint_publisher(self_command_tx.clone(), 1);
 
@@ -3683,7 +3683,7 @@ impl P2PTransportHandler {
         &self,
         connection_id: &str,
         endpoint_url: &str,
-    ) -> QorResult<P2PConnectResult> {
+    ) -> QorcResult<P2PConnectResult> {
         validate_connection_id(connection_id)?;
         let onion_host = parse_private_endpoint_url(endpoint_url)?;
         let Some(permit) = try_reserve_control_command() else {
@@ -3710,7 +3710,7 @@ impl P2PTransportHandler {
             })
             .is_err()
         {
-            return Err(QorError::Network("P2P worker unavailable".to_string()));
+            return Err(QorcError::Network("P2P worker unavailable".to_string()));
         }
 
         match tokio::time::timeout_at(
@@ -3738,10 +3738,10 @@ impl P2PTransportHandler {
         deadline_ms: Option<u64>,
         audio_endpoint: Option<String>,
         audio_lane_rtt_ceiling_ms: Option<u64>,
-    ) -> QorResult<P2PSendResult> {
+    ) -> QorcResult<P2PSendResult> {
         validate_connection_id(connection_id)?;
         if connection_token == 0 {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid P2P connection token".to_string(),
             ));
         }
@@ -3803,7 +3803,7 @@ impl P2PTransportHandler {
             })
             .is_err()
         {
-            return Err(QorError::Network("P2P worker unavailable".to_string()));
+            return Err(QorcError::Network("P2P worker unavailable".to_string()));
         }
 
         match tokio::time::timeout_at(
@@ -3826,10 +3826,10 @@ impl P2PTransportHandler {
         &self,
         connection_id: &str,
         connection_token: Option<u64>,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         validate_connection_id(connection_id)?;
         if connection_token == Some(0) {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid P2P connection token".to_string(),
             ));
         }
@@ -3847,7 +3847,7 @@ impl P2PTransportHandler {
             })
             .is_err()
         {
-            return Err(QorError::Network("P2P worker unavailable".to_string()));
+            return Err(QorcError::Network("P2P worker unavailable".to_string()));
         }
 
         match tokio::time::timeout(
@@ -3861,9 +3861,9 @@ impl P2PTransportHandler {
         }
     }
 
-    pub async fn rotate_identity(&self) -> QorResult<String> {
+    pub async fn rotate_identity(&self) -> QorcResult<String> {
         let Some(permit) = try_reserve_control_command() else {
-            return Err(QorError::Network("P2P control queue full".to_string()));
+            return Err(QorcError::Network("P2P control queue full".to_string()));
         };
         let (tx, rx) = oneshot::channel();
         let rotation_generation = self.begin_identity_rotation();
@@ -3875,7 +3875,7 @@ impl P2PTransportHandler {
             })
             .is_err()
         {
-            return Err(QorError::Network("P2P worker unavailable".to_string()));
+            return Err(QorcError::Network("P2P worker unavailable".to_string()));
         }
         match tokio::time::timeout(
             std::time::Duration::from_secs(ROTATE_RESPONSE_TIMEOUT_SECS),
@@ -3885,14 +3885,14 @@ impl P2PTransportHandler {
         {
             Ok(Ok(Ok(endpoint_url))) => {
                 if !self.publish_completed_rotation(rotation_generation, &endpoint_url) {
-                    return Err(QorError::Network(
+                    return Err(QorcError::Network(
                         "P2P identity rotation was superseded".to_string(),
                     ));
                 }
                 Ok(endpoint_url)
             }
-            Ok(Ok(Err(error))) => Err(QorError::Network(error)),
-            Ok(Err(_)) | Err(_) => Err(QorError::Network("P2P worker did not respond".to_string())),
+            Ok(Ok(Err(error))) => Err(QorcError::Network(error)),
+            Ok(Err(_)) | Err(_) => Err(QorcError::Network("P2P worker did not respond".to_string())),
         }
     }
 
@@ -3900,10 +3900,10 @@ impl P2PTransportHandler {
         &self,
         connection_id: &str,
         connection_token: u64,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         validate_connection_id(connection_id)?;
         if connection_token == 0 {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid P2P connection token".to_string(),
             ));
         }
@@ -3921,7 +3921,7 @@ impl P2PTransportHandler {
             })
             .is_err()
         {
-            return Err(QorError::Network("P2P worker unavailable".to_string()));
+            return Err(QorcError::Network("P2P worker unavailable".to_string()));
         }
 
         match tokio::time::timeout(
@@ -3954,7 +3954,7 @@ impl Drop for P2PTransportHandler {
     }
 }
 
-pub async fn init() -> QorResult<Arc<P2PTransportHandler>> {
+pub async fn init() -> QorcResult<Arc<P2PTransportHandler>> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let local_node_id = Arc::new(RwLock::new(None));
     let worker = IrohWorker::new(cmd_tx.clone(), local_node_id.clone()).await?;

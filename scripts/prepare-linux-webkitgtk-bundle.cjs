@@ -70,7 +70,7 @@ const gStreamerPlugins = [
   'libgstvideorate.so',
   'libgstvolume.so'
 ];
-const binaryPath = path.join(tauriDir, 'target', 'release', 'qor');
+const binaryPath = path.join(tauriDir, 'target', 'release', 'qorc');
 const libraries = [
   'libwebkit2gtk-4.1.so.0',
   'libjavascriptcoregtk-4.1.so.0'
@@ -117,7 +117,7 @@ function validateCaptureRuntime(runtimeDir, strictInventory) {
   } catch {
     throw new Error('GStreamer capture runtime manifest is invalid JSON');
   }
-  if (manifest.format !== 'qor-gstreamer-capture-runtime' || manifest.formatVersion !== 1 ||
+  if (manifest.format !== 'qorc-gstreamer-capture-runtime' || manifest.formatVersion !== 1 ||
       manifest.platform !== 'linux' || manifest.architecture !== process.arch ||
       typeof manifest.gstLaunchVersion !== 'string' || !manifest.gstLaunchVersion.trim() ||
       !Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
@@ -125,8 +125,8 @@ function validateCaptureRuntime(runtimeDir, strictInventory) {
   }
   const expectedRoles = relativePath => {
     if (typeof relativePath !== 'string') return null;
-    if (relativePath === 'bin/qor-gst-launch-1.0') return 'launcher';
-    if (relativePath === 'bin/qor-gst-plugin-scanner') return 'plugin-scanner';
+    if (relativePath === 'bin/qorc-gst-launch-1.0') return 'launcher';
+    if (relativePath === 'bin/qorc-gst-plugin-scanner') return 'plugin-scanner';
     if (relativePath.startsWith('capture-plugins/')) return 'plugin';
     if (relativePath.startsWith('lib/')) return 'library';
     if (relativePath.startsWith('spa-0.2/')) return 'spa';
@@ -158,8 +158,8 @@ function validateCaptureRuntime(runtimeDir, strictInventory) {
     throw new Error('GStreamer capture runtime manifest artifacts are not canonical');
   }
   for (const requiredPath of [
-    'bin/qor-gst-launch-1.0',
-    'bin/qor-gst-plugin-scanner',
+    'bin/qorc-gst-launch-1.0',
+    'bin/qorc-gst-plugin-scanner',
     ...capturePluginNames.map(plugin => `capture-plugins/${plugin}`),
     ...requiredSpaPaths
   ]) {
@@ -266,14 +266,14 @@ function main() {
       recursive: true,
       force: true
     });
-    const gStreamerLauncher = 'qor-gst-launch-1.0';
+    const gStreamerLauncher = 'qorc-gst-launch-1.0';
     fs.mkdirSync(path.join(stagingDir, 'bin'), { recursive: true });
     fs.copyFileSync(
       path.join(pipeWireRuntimeSource, 'bin', gStreamerLauncher),
       path.join(stagingDir, 'bin', gStreamerLauncher)
     );
     fs.chmodSync(path.join(stagingDir, 'bin', gStreamerLauncher), 0o755);
-    const gStreamerPluginScanner = 'qor-gst-plugin-scanner';
+    const gStreamerPluginScanner = 'qorc-gst-plugin-scanner';
     fs.copyFileSync(
       path.join(pipeWireRuntimeSource, 'bin', gStreamerPluginScanner),
       path.join(stagingDir, 'bin', gStreamerPluginScanner)

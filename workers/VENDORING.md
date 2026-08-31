@@ -52,10 +52,10 @@ nightly cannot parse.
 cd workers/ypir && cargo build --release --offline
 ```
 
-This produces the library plus `qor-pir-worker`, the persistent PIR worker Qor
-runs. Qor-specific code is confined to two files so the upstream pins stay easy
-to move: `src/qor_spool.rs` (record packing and wire framing) and
-`src/bin/qor-pir-worker.rs`. `src/m512.rs` is the SIMD port described below.
+This produces the library plus `qorc-pir-worker`, the persistent PIR worker qorc
+runs. qorc-specific code is confined to two files so the upstream pins stay easy
+to move: `src/qorc_spool.rs` (record packing and wire framing) and
+`src/bin/qorc-pir-worker.rs`. `src/m512.rs` is the SIMD port described below.
 
 ## SIMD Paths, And Why `src/m512.rs` Exists
 
@@ -117,7 +117,7 @@ and a real client-side query-generation round trip pass. The Docker server
 builds its worker natively when its Linux container runtime reports `arm64`,
 while the desktop build stages the client matching its Rust target triple.
 
-The desktop build requests only `qor-pir-client`, the server worker is not
+The desktop build requests only `qorc-pir-client`, the server worker is not
 linked a second time during every app build. Release builders can stage a
 specific architecture explicitly, for example:
 

@@ -107,21 +107,21 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
   const displayName = useDisplayUsername({ username });
 
   return (
-    <div className="qor-modal-overlay" onClick={onCancel}>
+    <div className="qorc-modal-overlay" onClick={onCancel}>
       <div
-        className="qor-modal"
+        className="qorc-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="unblock-modal-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="qor-modal-head">
+        <div className="qorc-modal-head">
           <h3 id="unblock-modal-title">Unblock user?</h3>
           <p><strong>{displayName}</strong> will be able to message and call you again.</p>
         </div>
-        <div className="qor-modal-actions">
-          <button className="qor-modal-btn" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="qor-modal-btn primary" type="button" onClick={onConfirm} disabled={busy}>
+        <div className="qorc-modal-actions">
+          <button className="qorc-modal-btn" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="qorc-modal-btn primary" type="button" onClick={onConfirm} disabled={busy}>
             {busy ? 'Unblocking…' : 'Unblock'}
           </button>
         </div>
@@ -583,7 +583,7 @@ export const AppSettings = React.memo(function AppSettings({
 
   return (
     <>
-      <div className={`qor-settings-host ${themeClass}`}>
+      <div className={`qorc-settings-host ${themeClass}`}>
         <main className="settings-screen">
           <section className="settings-content">
             <h1 className="settings-brand"><strong>Settings</strong></h1>
@@ -719,7 +719,7 @@ export const AppSettings = React.memo(function AppSettings({
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Minimize to system tray on close</div>
-                      <div className="setting-description">Closing the window keeps Qor running in the background.</div>
+                      <div className="setting-description">Closing the window keeps qorc running in the background.</div>
                     </div>
                     <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
                   </div>
@@ -834,20 +834,20 @@ export const AppSettings = React.memo(function AppSettings({
         </main>
 
         {blockModalOpen && (
-          <div className="qor-modal-overlay" onClick={closeBlockModal}>
+          <div className="qorc-modal-overlay" onClick={closeBlockModal}>
             <div
-              className="qor-modal"
+              className="qorc-modal"
               role="dialog"
               aria-modal="true"
               aria-labelledby="block-modal-title"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="qor-modal-head">
+              <div className="qorc-modal-head">
                 <h3 id="block-modal-title">Block a user</h3>
                 <p>Enter the username of the person you want to block.</p>
               </div>
-              <div className="qor-modal-body">
-                <label className="qor-modal-field">
+              <div className="qorc-modal-body">
+                <label className="qorc-modal-field">
                   <span className="field-label">Username</span>
                   <input
                     className="text-input"
@@ -862,11 +862,11 @@ export const AppSettings = React.memo(function AppSettings({
                     onKeyDown={(e) => { if (e.key === 'Enter') confirmBlock(); }}
                   />
                 </label>
-                {blockModalError && <div className="qor-modal-error">{blockModalError}</div>}
+                {blockModalError && <div className="qorc-modal-error">{blockModalError}</div>}
               </div>
-              <div className="qor-modal-actions">
-                <button className="qor-modal-btn" type="button" onClick={closeBlockModal} disabled={blockChecking}>Cancel</button>
-                <button className="qor-modal-btn danger" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
+              <div className="qorc-modal-actions">
+                <button className="qorc-modal-btn" type="button" onClick={closeBlockModal} disabled={blockChecking}>Cancel</button>
+                <button className="qorc-modal-btn danger" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
                   {blockChecking ? 'Checking…' : 'Block user'}
                 </button>
               </div>

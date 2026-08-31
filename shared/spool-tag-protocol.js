@@ -20,7 +20,7 @@ import { PostQuantumHash } from './post-quantum-hash.js';
  * pseudonym, which at least yields 1-of-N/B.
  */
 
-export const SPOOL_TAG_PROTOCOL = 'qor-spool-tag-v1';
+export const SPOOL_TAG_PROTOCOL = 'qorc-spool-tag-v1';
 
 export const SPOOL_TAG_BYTES = 8;
 export const SPOOL_TAG_HEX_CHARS = SPOOL_TAG_BYTES * 2;

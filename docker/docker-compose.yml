@@ -2,7 +2,7 @@ services:
   redis:
     profiles: ["server", "loadbalancer", "redis-standalone"]
     build:
-      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
+      context: "${QORC_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.redis
     hostname: redis
     environment:
@@ -13,7 +13,7 @@ services:
       - redis-data:/data
       - redis-certs:/certs
     networks:
-      - Qor-Chat-net
+      - qorc-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --tls --cert /certs/redis-client.crt --key /certs/redis-client.key --cacert /certs/redis-ca.crt ping | grep -qx PONG"]
@@ -24,7 +24,7 @@ services:
   postgres:
     profiles: ["server"]
     build:
-      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
+      context: "${QORC_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.postgres
     hostname: postgres
     environment:
@@ -36,7 +36,7 @@ services:
     ports:
       - "${POSTGRES_BIND_HOST:-127.0.0.1}:${DB_PORT}:5432"
     networks:
-      - Qor-Chat-net
+      - qorc-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h localhost"]
@@ -47,7 +47,7 @@ services:
   server:
     profiles: ["server"]
     build:
-      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
+      context: "${QORC_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.server
     hostname: server
     ports:
@@ -63,6 +63,7 @@ services:
       - PGSSLROOTCERT=/app/postgres-certs/root.crt
       - DB_TLS_SERVERNAME=postgres
       - REDIS_URL=rediss://redis:6379
+      - QORC_PIR_WORKER_PATH=/app/bin/qorc-pir-worker
       - NO_GUI
     depends_on:
       postgres:
@@ -72,7 +73,7 @@ services:
     env_file:
       - ../.env
     networks:
-      - Qor-Chat-net
+      - qorc-net
     volumes:
       - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
@@ -86,7 +87,7 @@ services:
   loadbalancer:
     profiles: ["loadbalancer"]
     build:
-      context: "${QOR_DOCKER_BUILD_CONTEXT:-..}"
+      context: "${QORC_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.loadbalancer
     hostname: loadbalancer
     ports:
@@ -108,7 +109,7 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - Qor-Chat-net
+      - qorc-net
     volumes:
       - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
@@ -120,7 +121,7 @@ services:
     restart: unless-stopped
 
 networks:
-  Qor-Chat-net:
+  qorc-net:
     driver: bridge
 
 volumes:

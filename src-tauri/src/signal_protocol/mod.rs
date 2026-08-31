@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::crypto::{hash, post_quantum, random};
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
 mod store;
@@ -67,9 +67,9 @@ fn static_ml_kem_binding_payload(
     registration_id: u32,
     device_id: u32,
     public_key: &[u8],
-) -> QorResult<Vec<u8>> {
+) -> QorcResult<Vec<u8>> {
     let username_len = u16::try_from(username.len())
-        .map_err(|_| QorError::InvalidArgument("Username too long".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Username too long".to_string()))?;
     let mut payload = Vec::with_capacity(
         crate::protocol_keys::SIGNAL_STATIC_ML_KEM_BINDING.len()
             + 2
@@ -90,21 +90,21 @@ fn decode_exact_signal_base64(
     value: &str,
     expected_bytes: usize,
     label: &str,
-) -> QorResult<Vec<u8>> {
+) -> QorcResult<Vec<u8>> {
     let expected_encoded = expected_bytes
         .checked_add(2)
         .and_then(|length| length.checked_div(3))
         .and_then(|length| length.checked_mul(4))
-        .ok_or_else(|| QorError::InvalidArgument(format!("Invalid {}", label)))?;
+        .ok_or_else(|| QorcError::InvalidArgument(format!("Invalid {}", label)))?;
     if value.len() != expected_encoded || !value.is_ascii() {
-        return Err(QorError::InvalidArgument(format!("Invalid {}", label)));
+        return Err(QorcError::InvalidArgument(format!("Invalid {}", label)));
     }
     let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
-        .map_err(|_| QorError::InvalidArgument(format!("Invalid {}", label)))?;
+        .map_err(|_| QorcError::InvalidArgument(format!("Invalid {}", label)))?;
     if decoded.len() != expected_bytes
         || base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &decoded) != value
     {
-        return Err(QorError::InvalidArgument(format!("Invalid {}", label)));
+        return Err(QorcError::InvalidArgument(format!("Invalid {}", label)));
     }
     Ok(decoded)
 }
@@ -114,26 +114,26 @@ fn decode_bounded_signal_base64(
     min_bytes: usize,
     max_bytes: usize,
     label: &str,
-) -> QorResult<Vec<u8>> {
+) -> QorcResult<Vec<u8>> {
     let max_encoded = max_bytes
         .checked_add(2)
         .and_then(|length| length.checked_div(3))
         .and_then(|length| length.checked_mul(4))
-        .ok_or_else(|| QorError::InvalidArgument(format!("Invalid {}", label)))?;
+        .ok_or_else(|| QorcError::InvalidArgument(format!("Invalid {}", label)))?;
     if value.is_empty()
         || value.len() > max_encoded
         || !value.len().is_multiple_of(4)
         || !value.is_ascii()
     {
-        return Err(QorError::InvalidArgument(format!("Invalid {}", label)));
+        return Err(QorcError::InvalidArgument(format!("Invalid {}", label)));
     }
     let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
-        .map_err(|_| QorError::InvalidArgument(format!("Invalid {}", label)))?;
+        .map_err(|_| QorcError::InvalidArgument(format!("Invalid {}", label)))?;
     if decoded.len() < min_bytes
         || decoded.len() > max_bytes
         || base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &decoded) != value
     {
-        return Err(QorError::InvalidArgument(format!("Invalid {}", label)));
+        return Err(QorcError::InvalidArgument(format!("Invalid {}", label)));
     }
     Ok(decoded)
 }
@@ -142,32 +142,32 @@ fn read_signal_store<T: DeserializeOwned>(
     db: &crate::database::DatabaseManager,
     store: &str,
     username: &str,
-) -> QorResult<Option<T>> {
+) -> QorcResult<Option<T>> {
     let Some(blob) = db.get_secure(store, username)? else {
         return Ok(None);
     };
     let blob = Zeroizing::new(blob);
     if blob.len() > MAX_SIGNAL_STORE_BLOB_BYTES {
-        return Err(QorError::SignalProtocol(format!(
+        return Err(QorcError::SignalProtocol(format!(
             "Signal store {} exceeds size limit",
             store
         )));
     }
     serde_json::from_slice(&blob)
         .map(Some)
-        .map_err(|_| QorError::SignalProtocol(format!("Invalid Signal store {}", store)))
+        .map_err(|_| QorcError::SignalProtocol(format!("Invalid Signal store {}", store)))
 }
 
 fn serialize_signal_records<K: Serialize>(
     mut records: Vec<(K, Vec<u8>)>,
     label: &str,
-) -> QorResult<Zeroizing<Vec<u8>>> {
+) -> QorcResult<Zeroizing<Vec<u8>>> {
     let serialized = serde_json::to_vec(&records);
     for (_, bytes) in &mut records {
         bytes.zeroize();
     }
     serialized.map(Zeroizing::new).map_err(|_| {
-        QorError::SignalProtocol(format!("Failed to serialize Signal {} store", label))
+        QorcError::SignalProtocol(format!("Failed to serialize Signal {} store", label))
     })
 }
 
@@ -194,25 +194,25 @@ fn signal_device_id_for_identity(identity: &IdentityKey) -> u32 {
 fn validate_signal_device_identity_binding(
     identity: &IdentityKey,
     device_id: u32,
-) -> QorResult<()> {
+) -> QorcResult<()> {
     if device_id != signal_device_id_for_identity(identity) {
-        return Err(QorError::SignalProtocol(
+        return Err(QorcError::SignalProtocol(
             "Signal device id does not match the authenticated identity".to_string(),
         ));
     }
     Ok(())
 }
 
-fn signal_device_id(value: u32, label: &str) -> QorResult<DeviceId> {
+fn signal_device_id(value: u32, label: &str) -> QorcResult<DeviceId> {
     DeviceId::try_from(value).map_err(|_| {
-        QorError::InvalidArgument(format!("Invalid {} Signal device id: {}", label, value))
+        QorcError::InvalidArgument(format!("Invalid {} Signal device id: {}", label, value))
     })
 }
 
-fn signal_rng() -> QorResult<StdRng> {
+fn signal_rng() -> QorcResult<StdRng> {
     let mut seed = Zeroizing::new([0u8; 32]);
     getrandom::fill(seed.as_mut())
-        .map_err(|_| QorError::Internal("Operating-system entropy unavailable".to_string()))?;
+        .map_err(|_| QorcError::Internal("Operating-system entropy unavailable".to_string()))?;
     Ok(StdRng::from_seed(*seed))
 }
 
@@ -311,7 +311,7 @@ impl SignalHandler {
     }
 
     /// Validate username format
-    fn validate_username(username: &str) -> QorResult<()> {
+    fn validate_username(username: &str) -> QorcResult<()> {
         if !(3..=100).contains(&username.len())
             || !username.bytes().all(|byte| {
                 byte.is_ascii_lowercase()
@@ -319,7 +319,7 @@ impl SignalHandler {
                     || matches!(byte, b'.' | b'_' | b'-')
             })
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid canonical Signal username".to_string(),
             ));
         }
@@ -332,7 +332,7 @@ impl SignalHandler {
         owner: &str,
         peer: &str,
         key: Vec<u8>,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         post_quantum::validate_ml_kem_public_key(&key)?;
         let mut keys = self.peer_ml_kem_keys.write();
         let map_key = (owner.to_string(), peer.to_string());
@@ -343,7 +343,7 @@ impl SignalHandler {
                 .count()
                 >= MAX_PEER_ML_KEM_KEYS
         {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Peer ML-KEM key store is full".to_string(),
             ));
         }
@@ -351,17 +351,17 @@ impl SignalHandler {
         Ok(())
     }
 
-    fn peer_static_ml_kem_key(&self, owner: &str, peer: &str) -> QorResult<Vec<u8>> {
+    fn peer_static_ml_kem_key(&self, owner: &str, peer: &str) -> QorcResult<Vec<u8>> {
         self.peer_ml_kem_keys
             .read()
             .get(&(owner.to_string(), peer.to_string()))
             .cloned()
             .ok_or_else(|| {
-                QorError::NotInitialized("Peer static ML-KEM key unavailable".to_string())
+                QorcError::NotInitialized("Peer static ML-KEM key unavailable".to_string())
             })
     }
 
-    pub async fn has_peer_static_ml_kem_key(&self, owner: &str, peer: &str) -> QorResult<bool> {
+    pub async fn has_peer_static_ml_kem_key(&self, owner: &str, peer: &str) -> QorcResult<bool> {
         Self::validate_username(owner)?;
         Self::validate_username(peer)?;
         Ok(self
@@ -370,7 +370,7 @@ impl SignalHandler {
             .contains_key(&(owner.to_string(), peer.to_string())))
     }
 
-    fn serialize_peer_ml_kem_keys(&self, owner: &str) -> QorResult<Zeroizing<Vec<u8>>> {
+    fn serialize_peer_ml_kem_keys(&self, owner: &str) -> QorcResult<Zeroizing<Vec<u8>>> {
         let keys = self.peer_ml_kem_keys.read();
         let mut entries = keys
             .iter()
@@ -378,7 +378,7 @@ impl SignalHandler {
             .map(|((_candidate, peer), key)| (peer.clone(), key.clone()))
             .collect::<Vec<_>>();
         if entries.len() > MAX_PEER_ML_KEM_KEYS {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Peer ML-KEM key store record limit exceeded".to_string(),
             ));
         }
@@ -386,7 +386,7 @@ impl SignalHandler {
         serde_json::to_vec(&entries)
             .map(Zeroizing::new)
             .map_err(|_| {
-                QorError::SignalProtocol("Failed to serialize peer ML-KEM keys".to_string())
+                QorcError::SignalProtocol("Failed to serialize peer ML-KEM keys".to_string())
             })
     }
 
@@ -419,10 +419,10 @@ impl SignalHandler {
         username: &str,
         account_owner: &str,
         expected_epoch: u64,
-    ) -> QorResult<AccountStateLockGuard> {
+    ) -> QorcResult<AccountStateLockGuard> {
         let lifecycle_guard = self.lifecycle_lock.clone().lock_owned().await;
         if self.lifecycle_epoch() != expected_epoch {
-            return Err(QorError::NotInitialized(
+            return Err(QorcError::NotInitialized(
                 "Signal account lifecycle changed".to_string(),
             ));
         }
@@ -434,7 +434,7 @@ impl SignalHandler {
                 active_username == username && active_owner == account_owner
             })
         {
-            return Err(QorError::NotInitialized(
+            return Err(QorcError::NotInitialized(
                 "Signal command does not match the active account".to_string(),
             ));
         }
@@ -452,10 +452,10 @@ impl SignalHandler {
         username: &str,
         account_owner: &str,
         expected_epoch: u64,
-    ) -> QorResult<AccountStateLockGuard> {
+    ) -> QorcResult<AccountStateLockGuard> {
         let lifecycle_guard = self.lifecycle_lock.clone().lock_owned().await;
         if self.lifecycle_epoch() != expected_epoch {
-            return Err(QorError::NotInitialized(
+            return Err(QorcError::NotInitialized(
                 "Signal account lifecycle changed".to_string(),
             ));
         }
@@ -467,7 +467,7 @@ impl SignalHandler {
                 active_username != username || active_owner != account_owner
             })
         {
-            return Err(QorError::NotInitialized(
+            return Err(QorcError::NotInitialized(
                 "A different Signal account is already active".to_string(),
             ));
         }
@@ -480,7 +480,7 @@ impl SignalHandler {
         })
     }
 
-    pub(crate) fn activate_account(&self, username: &str, account_owner: &str) -> QorResult<()> {
+    pub(crate) fn activate_account(&self, username: &str, account_owner: &str) -> QorcResult<()> {
         let mut active = self.active_account.write();
         if active
             .as_ref()
@@ -488,7 +488,7 @@ impl SignalHandler {
                 active_username != username || active_owner != account_owner
             })
         {
-            return Err(QorError::NotInitialized(
+            return Err(QorcError::NotInitialized(
                 "A different Signal account is already active".to_string(),
             ));
         }
@@ -550,17 +550,17 @@ impl SignalHandler {
         )
     }
 
-    async fn own_signal_device_id(&self, username: &str) -> QorResult<u32> {
+    async fn own_signal_device_id(&self, username: &str) -> QorcResult<u32> {
         let (_, identity_store, _, _, _) = self.get_or_create_stores(username);
         let identity_store = identity_store.lock().await;
         let identity = identity_store
             .get_identity_key_pair()
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
         Ok(signal_device_id_for_identity(identity.identity_key()))
     }
 
     /// Generate identity keys for a user
-    pub async fn generate_identity(&self, username: &str) -> QorResult<IdentityBundle> {
+    pub async fn generate_identity(&self, username: &str) -> QorcResult<IdentityBundle> {
         Self::validate_username(username)?;
 
         let (_, identity_store, _, _, _) = self.get_or_create_stores(username);
@@ -607,7 +607,7 @@ impl SignalHandler {
         &self,
         username: &str,
         key_id: u32,
-    ) -> QorResult<SignedPreKey> {
+    ) -> QorcResult<SignedPreKey> {
         Self::validate_username(username)?;
 
         let (_, identity_store, _, signed_prekey_store, _) = self.get_or_create_stores(username);
@@ -616,19 +616,19 @@ impl SignalHandler {
 
         let identity_key_pair = identity_store
             .get_identity_key_pair()
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
 
         let mut rng = signal_rng()?;
         let key_pair = KeyPair::generate(&mut rng);
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|_| QorError::SignalProtocol("System clock predates Unix epoch".to_string()))?
+            .map_err(|_| QorcError::SignalProtocol("System clock predates Unix epoch".to_string()))?
             .as_millis();
 
         let signature = identity_key_pair
             .private_key()
             .calculate_signature(&key_pair.public_key.serialize(), &mut rng)
-            .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+            .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
         let signed_prekey_record = SignedPreKeyRecord::new(
             key_id.into(),
@@ -639,7 +639,7 @@ impl SignalHandler {
 
         signed_prekey_store
             .store_signed_pre_key(key_id.into(), &signed_prekey_record)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
 
         Ok(SignedPreKey {
             key_id,
@@ -658,7 +658,7 @@ impl SignalHandler {
         &self,
         username: &str,
         key_id: u32,
-    ) -> QorResult<MlKemPreKey> {
+    ) -> QorcResult<MlKemPreKey> {
         Self::validate_username(username)?;
 
         let (_, identity_store, _, _, kyber_prekey_store) = self.get_or_create_stores(username);
@@ -667,28 +667,28 @@ impl SignalHandler {
 
         let identity_key_pair = identity_store
             .get_identity_key_pair()
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
 
         let kyber_record = KyberPreKeyRecord::generate(
             KemKeyType::MLKEM1024,
             key_id.into(),
             identity_key_pair.private_key(),
         )
-        .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
         let public_key_bytes = kyber_record
             .public_key()
-            .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+            .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
             .serialize();
 
         let signature = kyber_record
             .signature()
-            .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+            .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
             .to_vec();
 
         kyber_prekey_store
             .store_kyber_pre_key(key_id.into(), &kyber_record)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
 
         Ok(MlKemPreKey {
             key_id,
@@ -704,7 +704,7 @@ impl SignalHandler {
     }
 
     /// Create pre-key bundle for distribution
-    pub async fn create_prekey_bundle(&self, username: &str) -> QorResult<PreKeyBundle> {
+    pub async fn create_prekey_bundle(&self, username: &str) -> QorcResult<PreKeyBundle> {
         Self::validate_username(username)?;
 
         let (_, identity_store, _, signed_prekey_store, kyber_prekey_store) =
@@ -716,7 +716,7 @@ impl SignalHandler {
         const PREKEY_RETENTION_MS: u64 = 7 * PREKEY_ROTATION_MS;
         let now_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| QorError::SignalProtocol(format!("System clock error: {}", e)))?
+            .map_err(|e| QorcError::SignalProtocol(format!("System clock error: {}", e)))?
             .as_millis() as u64;
 
         let latest_signed = signed_prekey_store.lock().await.get_any_signed_pre_key();
@@ -737,7 +737,7 @@ impl SignalHandler {
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or_else(|| {
-                    QorError::SignalProtocol("Signed pre-key ID exhausted".to_string())
+                    QorcError::SignalProtocol("Signed pre-key ID exhausted".to_string())
                 })?;
             self.generate_signed_prekey(username, next_id).await?;
         }
@@ -759,7 +759,7 @@ impl SignalHandler {
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or_else(|| {
-                    QorError::SignalProtocol("Kyber pre-key ID exhausted".to_string())
+                    QorcError::SignalProtocol("Kyber pre-key ID exhausted".to_string())
                 })?;
             self.generate_ml_kem_prekey(username, next_id).await?;
         }
@@ -770,7 +770,7 @@ impl SignalHandler {
             .get(username)
             .map(|(public_key, _)| public_key.clone())
             .ok_or_else(|| {
-                QorError::NotInitialized("Static account ML-KEM key unavailable".to_string())
+                QorcError::NotInitialized("Static account ML-KEM key unavailable".to_string())
             })?;
 
         let identity_store = identity_store.lock().await;
@@ -779,19 +779,19 @@ impl SignalHandler {
 
         let identity_key_pair = identity_store
             .get_identity_key_pair()
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
 
         let registration_id = identity_store
             .get_local_registration_id()
-            .ok_or_else(|| QorError::NotInitialized("No registration ID".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No registration ID".to_string()))?;
 
         let (signed_prekey_id, signed_prekey) = signed_prekey_store
             .get_any_signed_pre_key()
-            .ok_or_else(|| QorError::SignalProtocol("No signed pre-keys available".to_string()))?;
+            .ok_or_else(|| QorcError::SignalProtocol("No signed pre-keys available".to_string()))?;
 
         let (kyber_prekey_id, kyber_prekey) = kyber_prekey_store
             .get_any_kyber_pre_key()
-            .ok_or_else(|| QorError::SignalProtocol("No Kyber pre-keys available".to_string()))?;
+            .ok_or_else(|| QorcError::SignalProtocol("No Kyber pre-keys available".to_string()))?;
         let local_device_id = signal_device_id_for_identity(identity_key_pair.identity_key());
         let static_ml_kem_payload = static_ml_kem_binding_payload(
             username,
@@ -803,7 +803,7 @@ impl SignalHandler {
         let static_ml_kem_signature = identity_key_pair
             .private_key()
             .calculate_signature(&static_ml_kem_payload, &mut signature_rng)
-            .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+            .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
         Ok(PreKeyBundle {
             registration_id,
@@ -818,14 +818,14 @@ impl SignalHandler {
                     &base64::engine::general_purpose::STANDARD,
                     signed_prekey
                         .public_key()
-                        .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
                         .serialize(),
                 ),
                 signature_base64: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     signed_prekey
                         .signature()
-                        .map_err(|e| QorError::SignalProtocol(e.to_string()))?,
+                        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?,
                 ),
             },
             ml_kem_pre_key: MlKemPreKeyInfo {
@@ -834,14 +834,14 @@ impl SignalHandler {
                     &base64::engine::general_purpose::STANDARD,
                     kyber_prekey
                         .public_key()
-                        .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
                         .serialize(),
                 ),
                 signature_base64: base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     kyber_prekey
                         .signature()
-                        .map_err(|e| QorError::SignalProtocol(e.to_string()))?,
+                        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?,
                 ),
             },
             static_ml_kem: StaticMlKemKey {
@@ -863,11 +863,11 @@ impl SignalHandler {
         self_username: &str,
         peer_username: &str,
         bundle: PreKeyBundle,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         Self::validate_username(self_username)?;
         Self::validate_username(peer_username)?;
         if !(1..=16_380).contains(&bundle.registration_id) {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid peer Signal registration ID".to_string(),
             ));
         }
@@ -885,7 +885,7 @@ impl SignalHandler {
         let local_device_id = identity_store
             .get_identity_key_pair()
             .map(|identity| signal_device_id_for_identity(identity.identity_key()))
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
         let local_device = signal_device_id(local_device_id, "local")?;
         let local_address = ProtocolAddress::new(self_username.to_string(), local_device);
         let peer_identity_key = IdentityKey::decode(&decode_exact_signal_base64(
@@ -893,7 +893,7 @@ impl SignalHandler {
             SIGNAL_CURVE_PUBLIC_KEY_BYTES,
             "identity key",
         )?)
-        .map_err(|_| QorError::InvalidArgument("Invalid identity key".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid identity key".to_string()))?;
         validate_signal_device_identity_binding(&peer_identity_key, peer_device_id)?;
 
         let existing_session = session_store.has_session(&peer_address);
@@ -905,15 +905,15 @@ impl SignalHandler {
                 )
                 .await
                 .map_err(|_| {
-                    QorError::SignalProtocol("Failed to read pinned identity".to_string())
+                    QorcError::SignalProtocol("Failed to read pinned identity".to_string())
                 })?
                 .ok_or_else(|| {
-                    QorError::SignalProtocol(
+                    QorcError::SignalProtocol(
                         "Session exists without a pinned peer identity".to_string(),
                     )
                 })?;
             if stored_identity != peer_identity_key {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "untrusted identity key change".to_string(),
                 ));
             }
@@ -924,7 +924,7 @@ impl SignalHandler {
             SIGNAL_CURVE_PUBLIC_KEY_BYTES,
             "signed pre-key",
         )?)
-        .map_err(|_| QorError::InvalidArgument("Invalid signed pre-key".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid signed pre-key".to_string()))?;
 
         let signature = decode_exact_signal_base64(
             &bundle.signed_pre_key.signature_base64,
@@ -937,7 +937,7 @@ impl SignalHandler {
             .public_key()
             .verify_signature(&peer_signed_prekey.serialize(), &signature)
         {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Invalid signed pre-key signature".to_string(),
             ));
         }
@@ -948,9 +948,9 @@ impl SignalHandler {
             SIGNAL_ML_KEM_PUBLIC_KEY_BYTES,
             "ML-KEM pre-key",
         )?)
-        .map_err(|_| QorError::InvalidArgument("Invalid ML-KEM pre-key".to_string()))?;
+        .map_err(|_| QorcError::InvalidArgument("Invalid ML-KEM pre-key".to_string()))?;
         if kyber_pk.key_type() != KemKeyType::MLKEM1024 {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Non-ML-KEM Signal pre-key rejected".to_string(),
             ));
         }
@@ -963,7 +963,7 @@ impl SignalHandler {
             .public_key()
             .verify_signature(&kyber_pk.serialize(), &kyber_sig)
         {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Invalid ML-KEM pre-key signature".to_string(),
             ));
         }
@@ -992,7 +992,7 @@ impl SignalHandler {
             .public_key()
             .verify_signature(&static_ml_kem_payload, &static_ml_kem_signature)
         {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Invalid static ML-KEM key signature".to_string(),
             ));
         }
@@ -1009,13 +1009,13 @@ impl SignalHandler {
             kyber_sig,
             peer_identity_key,
         )
-        .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
         if existing_session {
             let record = session_store.load_session(&peer_address).ok_or_else(|| {
-                QorError::SignalProtocol("Signal session disappeared during validation".to_string())
+                QorcError::SignalProtocol("Signal session disappeared during validation".to_string())
             })?;
-            validate_pq_ratchet_state(&record).map_err(QorError::SignalProtocol)?;
+            validate_pq_ratchet_state(&record).map_err(QorcError::SignalProtocol)?;
             self.set_authenticated_peer_ml_kem_key(
                 self_username,
                 peer_username,
@@ -1041,11 +1041,11 @@ impl SignalHandler {
         match result {
             Ok(_) => {
                 let record = session_store.load_session(&peer_address).ok_or_else(|| {
-                    QorError::SignalProtocol(
+                    QorcError::SignalProtocol(
                         "Signal session was not stored after bundle processing".to_string(),
                     )
                 })?;
-                validate_pq_ratchet_state(&record).map_err(QorError::SignalProtocol)?;
+                validate_pq_ratchet_state(&record).map_err(QorcError::SignalProtocol)?;
                 self.set_authenticated_peer_ml_kem_key(
                     self_username,
                     peer_username,
@@ -1054,12 +1054,12 @@ impl SignalHandler {
                 Ok(true)
             }
 
-            Err(e) => Err(QorError::SignalProtocol(e.to_string())),
+            Err(e) => Err(QorcError::SignalProtocol(e.to_string())),
         }
     }
 
     /// Check if session exists
-    pub async fn has_session(&self, self_username: &str, peer_username: &str) -> QorResult<bool> {
+    pub async fn has_session(&self, self_username: &str, peer_username: &str) -> QorcResult<bool> {
         Self::validate_username(self_username)?;
         Self::validate_username(peer_username)?;
 
@@ -1073,11 +1073,11 @@ impl SignalHandler {
         from_username: &str,
         to_username: &str,
         plaintext: &[u8],
-    ) -> QorResult<EncryptedMessage> {
+    ) -> QorcResult<EncryptedMessage> {
         Self::validate_username(from_username)?;
         Self::validate_username(to_username)?;
         if plaintext.len() > MAX_SIGNAL_PLAINTEXT_BYTES {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Signal plaintext exceeds size limit".to_string(),
             ));
         }
@@ -1106,17 +1106,17 @@ impl SignalHandler {
         from_username: &str,
         to_username: &str,
         plaintext: &[u8],
-    ) -> QorResult<SignalEncryptedMessage> {
+    ) -> QorcResult<SignalEncryptedMessage> {
         let (session_store, identity_store, _, _, _) = self.get_or_create_stores(from_username);
         let mut session_store = session_store.lock().await;
         let mut identity_store = identity_store.lock().await;
         let sender_device_id = identity_store
             .get_identity_key_pair()
             .map(|identity| signal_device_id_for_identity(identity.identity_key()))
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
         let target_device_id =
             first_session_device_id(&session_store, to_username).ok_or_else(|| {
-                QorError::NotInitialized(
+                QorcError::NotInitialized(
                     "No authenticated Signal session for recipient".to_string(),
                 )
             })?;
@@ -1136,16 +1136,16 @@ impl SignalHandler {
             &mut rng,
         )
         .await
-        .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+        .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
         let updated_session = session_store.load_session(&to_address).ok_or_else(|| {
-            QorError::SignalProtocol("Signal session missing after encryption".to_string())
+            QorcError::SignalProtocol("Signal session missing after encryption".to_string())
         })?;
-        validate_pq_ratchet_state(&updated_session).map_err(QorError::SignalProtocol)?;
+        validate_pq_ratchet_state(&updated_session).map_err(QorcError::SignalProtocol)?;
 
         let message_type = message.message_type() as u8;
         if message_type != 2 && message_type != 3 {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Unsupported outgoing Signal message type".to_string(),
             ));
         }
@@ -1166,7 +1166,7 @@ impl SignalHandler {
         signal_message: &SignalEncryptedMessage,
         from_username: &str,
         to_username: &str,
-    ) -> QorResult<PQEnvelope> {
+    ) -> QorcResult<PQEnvelope> {
         let peer_pq_key = self.peer_static_ml_kem_key(from_username, to_username)?;
 
         let kem_result = post_quantum::ml_kem_encapsulate(&peer_pq_key)?;
@@ -1219,7 +1219,7 @@ impl SignalHandler {
         from_username: &str,
         to_username: &str,
         encrypted: &EncryptedMessage,
-    ) -> (QorResult<SignalDecryptOutput>, bool) {
+    ) -> (QorcResult<SignalDecryptOutput>, bool) {
         if let Err(error) = Self::validate_username(from_username) {
             return (Err(error), false);
         }
@@ -1244,7 +1244,7 @@ impl SignalHandler {
         };
         if encrypted.message_type != signal_message.message_type {
             return (
-                Err(QorError::DecryptionFailed(
+                Err(QorcError::DecryptionFailed(
                     "Signal message type binding mismatch".to_string(),
                 )),
                 false,
@@ -1252,7 +1252,7 @@ impl SignalHandler {
         }
         if signal_message.recipient_device_id != local_device_id {
             return (
-                Err(QorError::DecryptionFailed(
+                Err(QorcError::DecryptionFailed(
                     "Signal recipient device mismatch".to_string(),
                 )),
                 false,
@@ -1277,9 +1277,9 @@ impl SignalHandler {
         envelope: &PQEnvelope,
         from_username: &str,
         to_username: &str,
-    ) -> QorResult<SignalEncryptedMessage> {
+    ) -> QorcResult<SignalEncryptedMessage> {
         if envelope.version != crate::protocol_keys::SIGNAL_PQ_ENVELOPE_VERSION {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Unsupported Signal PQ envelope version".to_string(),
             ));
         }
@@ -1287,7 +1287,7 @@ impl SignalHandler {
             || envelope.algorithms.kdf != SIGNAL_PQ_KDF_ALGORITHM
             || envelope.algorithms.aead != SIGNAL_PQ_AEAD_ALGORITHM
         {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Signal PQ envelope algorithm policy mismatch".to_string(),
             ));
         }
@@ -1298,7 +1298,7 @@ impl SignalHandler {
             .get(to_username)
             .map(|(_, secret_key)| secret_key.clone())
             .ok_or_else(|| {
-                QorError::NotInitialized("Static account ML-KEM key unavailable".to_string())
+                QorcError::NotInitialized("Static account ML-KEM key unavailable".to_string())
             })?;
 
         let kem_ciphertext = decode_exact_signal_base64(
@@ -1332,7 +1332,7 @@ impl SignalHandler {
         // Decrypt
         let nonce_array: [u8; 24] = nonce
             .try_into()
-            .map_err(|_| QorError::DecryptionFailed("Invalid nonce length".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("Invalid nonce length".to_string()))?;
 
         let plaintext = Zeroizing::new(crate::crypto::aead::xchacha_decrypt(
             &aes_key,
@@ -1342,7 +1342,7 @@ impl SignalHandler {
         )?);
 
         let signal_message: SignalEncryptedMessage = serde_json::from_slice(&plaintext)
-            .map_err(|e| QorError::DecryptionFailed(format!("Invalid Signal message: {}", e)))?;
+            .map_err(|e| QorcError::DecryptionFailed(format!("Invalid Signal message: {}", e)))?;
 
         Ok(signal_message)
     }
@@ -1353,7 +1353,7 @@ impl SignalHandler {
         to_username: &str,
         signal_message: &SignalEncryptedMessage,
         from_device_id: u32,
-    ) -> QorResult<SignalDecryptOutput> {
+    ) -> QorcResult<SignalDecryptOutput> {
         let (session_store, identity_store, prekey_store, signed_prekey_store, kyber_prekey_store) =
             self.get_or_create_stores(to_username);
         let mut session_store = session_store.lock().await;
@@ -1367,7 +1367,7 @@ impl SignalHandler {
         let local_device_id = identity_store
             .get_identity_key_pair()
             .map(|identity| signal_device_id_for_identity(identity.identity_key()))
-            .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
+            .ok_or_else(|| QorcError::NotInitialized("No identity key pair".to_string()))?;
         let local_device = signal_device_id(local_device_id, "local")?;
         let local_address = ProtocolAddress::new(to_username.to_string(), local_device);
 
@@ -1383,7 +1383,7 @@ impl SignalHandler {
         let mut plaintext = match signal_message.message_type {
             3 => {
                 let prekey_message = PreKeySignalMessage::try_from(message_bytes.as_slice())
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+                    .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
                 validate_signal_device_identity_binding(
                     prekey_message.identity_key(),
                     from_device_id,
@@ -1401,22 +1401,22 @@ impl SignalHandler {
                     &mut rng,
                 )
                 .await
-                .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
             }
             2 => {
                 let signal_msg = SignalMessage::try_from(message_bytes.as_slice())
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+                    .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
 
                 let pinned_identity =
                     identity_store.get_identity(from_username).ok_or_else(|| {
-                        QorError::SignalProtocol(
+                        QorcError::SignalProtocol(
                             "Signal session exists without a pinned peer identity".to_string(),
                         )
                     })?;
                 validate_signal_device_identity_binding(&pinned_identity, from_device_id)?;
 
                 if !session_store.has_session(&from_address) {
-                    return Err(QorError::SignalProtocol(
+                    return Err(QorcError::SignalProtocol(
                         "No Signal session for decryption".to_string(),
                     ));
                 }
@@ -1430,10 +1430,10 @@ impl SignalHandler {
                     &mut rng,
                 )
                 .await
-                .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                .map_err(|e| QorcError::SignalProtocol(e.to_string()))?
             }
             _ => {
-                return Err(QorError::DecryptionFailed(
+                return Err(QorcError::DecryptionFailed(
                     "Unsupported Signal message type".to_string(),
                 ));
             }
@@ -1445,9 +1445,9 @@ impl SignalHandler {
         }
 
         let updated_session = session_store.load_session(&from_address).ok_or_else(|| {
-            QorError::SignalProtocol("Signal session missing after decryption".to_string())
+            QorcError::SignalProtocol("Signal session missing after decryption".to_string())
         })?;
-        validate_pq_ratchet_state(&updated_session).map_err(QorError::SignalProtocol)?;
+        validate_pq_ratchet_state(&updated_session).map_err(QorcError::SignalProtocol)?;
 
         Ok(SignalDecryptOutput::Plaintext(plaintext))
     }
@@ -1457,7 +1457,7 @@ impl SignalHandler {
         &self,
         self_username: &str,
         peer_username: &str,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         Self::validate_username(self_username)?;
         Self::validate_username(peer_username)?;
 
@@ -1478,7 +1478,7 @@ impl SignalHandler {
         self_username: &str,
         peer_username: &str,
         replacement: Option<IdentityKey>,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         Self::validate_username(self_username)?;
         Self::validate_username(peer_username)?;
 
@@ -1487,7 +1487,7 @@ impl SignalHandler {
         let sessions = session_store.lock().await;
         let identities = identity_store.lock().await;
         if replacement.is_some() && !identities.can_insert_identity(peer_username) {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Known peer identity limit exceeded".to_string(),
             ));
         }
@@ -1518,18 +1518,18 @@ impl SignalHandler {
         sessions.delete_all_sessions(peer_username);
         self.peer_ml_kem_keys.write().remove(&peer_map_key);
 
-        let prepared = (|| -> QorResult<SerializedSignalState> {
+        let prepared = (|| -> QorcResult<SerializedSignalState> {
             let session_blob = serialize_signal_records(
-                sessions.dump().map_err(QorError::SignalProtocol)?,
+                sessions.dump().map_err(QorcError::SignalProtocol)?,
                 "session",
             )?;
             let mut identity_data = identities
                 .dump()
-                .ok_or_else(|| QorError::NotInitialized("No local identity state".to_string()))?;
+                .ok_or_else(|| QorcError::NotInitialized("No local identity state".to_string()))?;
             let serialized = serde_json::to_vec(&identity_data);
             identity_data.2.zeroize();
             let identity_blob = Zeroizing::new(serialized.map_err(|_| {
-                QorError::SignalProtocol("Failed to serialize identity store".to_string())
+                QorcError::SignalProtocol("Failed to serialize identity store".to_string())
             })?);
             let peer_ml_kem_blob = self.serialize_peer_ml_kem_keys(self_username)?;
             let pending_decrypt_blob = Self::serialize_pending_decrypts(&pending_decrypts)?;
@@ -1610,14 +1610,14 @@ impl SignalHandler {
         self_username: &str,
         peer_username: &str,
         new_identity_key_base64: &str,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         let decoded = decode_exact_signal_base64(
             new_identity_key_base64,
             SIGNAL_CURVE_PUBLIC_KEY_BYTES,
             "identity key",
         )?;
         let new_identity = IdentityKey::decode(&decoded)
-            .map_err(|_| QorError::InvalidArgument("Invalid identity key".to_string()))?;
+            .map_err(|_| QorcError::InvalidArgument("Invalid identity key".to_string()))?;
         self.persist_transparency_peer_identity(
             db,
             self_username,
@@ -1632,7 +1632,7 @@ impl SignalHandler {
         db: &crate::database::DatabaseManager,
         self_username: &str,
         peer_username: &str,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         self.persist_transparency_peer_identity(db, self_username, peer_username, None)
             .await
     }
@@ -1641,13 +1641,13 @@ impl SignalHandler {
         &self,
         self_username: &str,
         peer_username: &str,
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         Self::validate_username(self_username)?;
         Self::validate_username(peer_username)?;
         let (_, identity_store, _, _, _) = self.get_or_create_stores(self_username);
         let identity_store = identity_store.lock().await;
         let identity = identity_store.get_identity(peer_username).ok_or_else(|| {
-            QorError::NotInitialized("No transparency-verified peer identity".to_string())
+            QorcError::NotInitialized("No transparency-verified peer identity".to_string())
         })?;
         Ok(base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -1660,7 +1660,7 @@ impl SignalHandler {
         from_username: &str,
         to_username: &str,
         encrypted: &EncryptedMessage,
-    ) -> QorResult<Option<String>> {
+    ) -> QorcResult<Option<String>> {
         Self::validate_username(from_username)?;
         Self::validate_username(to_username)?;
 
@@ -1672,7 +1672,7 @@ impl SignalHandler {
         if encrypted.message_type != signal_message.message_type
             || signal_message.recipient_device_id != local_device_id
         {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Signal envelope binding mismatch".to_string(),
             ));
         }
@@ -1686,7 +1686,7 @@ impl SignalHandler {
             "Signal message",
         )?);
         let prekey_message = PreKeySignalMessage::try_from(message_bytes.as_slice())
-            .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+            .map_err(|e| QorcError::SignalProtocol(e.to_string()))?;
         validate_signal_device_identity_binding(
             prekey_message.identity_key(),
             signal_message.sender_device_id,
@@ -1702,13 +1702,13 @@ impl SignalHandler {
         username: &str,
         public_key: Vec<u8>,
         secret_key: Vec<u8>,
-    ) -> QorResult<bool> {
+    ) -> QorcResult<bool> {
         let secret_key = Zeroizing::new(secret_key);
         Self::validate_username(username)?;
 
         if public_key.len() != post_quantum::ML_KEM_PUBLIC_KEY_SIZE {
             log::error!("[set_static_mlkem_keys] Invalid public key length");
-            return Err(QorError::InvalidKeyLength {
+            return Err(QorcError::InvalidKeyLength {
                 expected: post_quantum::ML_KEM_PUBLIC_KEY_SIZE,
                 actual: public_key.len(),
             });
@@ -1716,7 +1716,7 @@ impl SignalHandler {
 
         if secret_key.len() != post_quantum::ML_KEM_SECRET_KEY_SIZE {
             log::error!("[set_static_mlkem_keys] Invalid secret key length");
-            return Err(QorError::InvalidKeyLength {
+            return Err(QorcError::InvalidKeyLength {
                 expected: post_quantum::ML_KEM_SECRET_KEY_SIZE,
                 actual: secret_key.len(),
             });
@@ -1729,7 +1729,7 @@ impl SignalHandler {
             let same_keypair = existing_public == &public_key
                 && crate::crypto::utils::constant_time_eq(existing_secret, &secret_key);
             if !same_keypair {
-                return Err(QorError::Verification(
+                return Err(QorcError::Verification(
                     "Refusing to replace the loaded account static ML-KEM key".to_string(),
                 ));
             }
@@ -1750,7 +1750,7 @@ impl SignalHandler {
         identity_root_fingerprint: &str,
         identity_bundle_fingerprint: &str,
         encrypted: &EncryptedMessage,
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         Self::validate_username(from_username)?;
         Self::validate_username(to_username)?;
         Self::validate_pending_transport_metadata(transport_message_id, application_type)?;
@@ -1780,7 +1780,7 @@ impl SignalHandler {
                 encrypted,
             ))
             .map_err(|_| {
-                QorError::SignalProtocol("Failed to identify encrypted Signal message".to_string())
+                QorcError::SignalProtocol("Failed to identify encrypted Signal message".to_string())
             })?,
         );
         Ok(base64::Engine::encode(
@@ -1789,17 +1789,17 @@ impl SignalHandler {
         ))
     }
 
-    pub(crate) fn validate_pending_decrypt_id(value: &str) -> QorResult<()> {
+    pub(crate) fn validate_pending_decrypt_id(value: &str) -> QorcResult<()> {
         decode_exact_signal_base64(value, 32, "pending decrypt identifier").map(|_| ())
     }
 
-    fn validate_transparency_fingerprint(value: &str, label: &str) -> QorResult<()> {
+    fn validate_transparency_fingerprint(value: &str, label: &str) -> QorcResult<()> {
         if value.len() != 64
             || !value
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         {
-            return Err(QorError::InvalidArgument(format!("Invalid {}", label)));
+            return Err(QorcError::InvalidArgument(format!("Invalid {}", label)));
         }
         Ok(())
     }
@@ -1807,7 +1807,7 @@ impl SignalHandler {
     fn validate_pending_transport_metadata(
         transport_message_id: &str,
         application_type: &str,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         if transport_message_id.is_empty()
             || transport_message_id.len() > MAX_PENDING_TRANSPORT_MESSAGE_ID_BYTES
             || !transport_message_id.is_ascii()
@@ -1816,7 +1816,7 @@ impl SignalHandler {
                     || matches!(byte, b'.' | b'_' | b'~' | b':' | b'+' | b'/' | b'=' | b'-')
             })
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid pending decrypt transport message identifier".to_string(),
             ));
         }
@@ -1827,14 +1827,14 @@ impl SignalHandler {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid pending decrypt application type".to_string(),
             ));
         }
         Ok(())
     }
 
-    fn validate_pending_decrypted_message(entry: &PendingDecryptedMessage) -> QorResult<usize> {
+    fn validate_pending_decrypted_message(entry: &PendingDecryptedMessage) -> QorcResult<usize> {
         Self::validate_username(&entry.from_username)?;
         Self::validate_pending_decrypt_id(&entry.pending_id)?;
         decode_exact_signal_base64(
@@ -1855,7 +1855,7 @@ impl SignalHandler {
             &entry.application_type,
         )?;
         if entry.plaintext.len() > MAX_PENDING_DECRYPT_PLAINTEXT_BYTES {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Pending decrypt plaintext limit exceeded".to_string(),
             ));
         }
@@ -1871,18 +1871,18 @@ impl SignalHandler {
         ]
         .into_iter()
         .try_fold(0usize, |total, length| total.checked_add(length))
-        .ok_or_else(|| QorError::SignalProtocol("Pending decrypt size overflow".to_string()))
+        .ok_or_else(|| QorcError::SignalProtocol("Pending decrypt size overflow".to_string()))
     }
 
     pub(crate) fn load_pending_decrypts(
         db: &crate::database::DatabaseManager,
         username: &str,
-    ) -> QorResult<Vec<PendingDecryptedMessage>> {
+    ) -> QorcResult<Vec<PendingDecryptedMessage>> {
         Self::validate_username(username)?;
         let pending: Vec<PendingDecryptedMessage> =
             read_signal_store(db, "signal_pending_decrypt_store_v4", username)?.unwrap_or_default();
         if pending.len() > MAX_PENDING_DECRYPTS {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Pending decrypt store record limit exceeded".to_string(),
             ));
         }
@@ -1892,15 +1892,15 @@ impl SignalHandler {
         for entry in &pending {
             let entry_bytes = Self::validate_pending_decrypted_message(entry)?;
             if !ids.insert(entry.pending_id.as_str()) {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "Duplicate pending decrypt identifier".to_string(),
                 ));
             }
             total_bytes = total_bytes.checked_add(entry_bytes).ok_or_else(|| {
-                QorError::SignalProtocol("Pending decrypt size overflow".to_string())
+                QorcError::SignalProtocol("Pending decrypt size overflow".to_string())
             })?;
             if total_bytes > MAX_PENDING_DECRYPT_TOTAL_BYTES {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "Pending decrypt total size limit exceeded".to_string(),
                 ));
             }
@@ -1910,9 +1910,9 @@ impl SignalHandler {
 
     pub(crate) fn serialize_pending_decrypts(
         pending: &[PendingDecryptedMessage],
-    ) -> QorResult<Zeroizing<Vec<u8>>> {
+    ) -> QorcResult<Zeroizing<Vec<u8>>> {
         if pending.len() > MAX_PENDING_DECRYPTS {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Pending decrypt store is full".to_string(),
             ));
         }
@@ -1921,15 +1921,15 @@ impl SignalHandler {
         for entry in pending {
             let entry_bytes = Self::validate_pending_decrypted_message(entry)?;
             if !ids.insert(entry.pending_id.as_str()) {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "Invalid or duplicate pending decrypt identifier".to_string(),
                 ));
             }
             total_bytes = total_bytes.checked_add(entry_bytes).ok_or_else(|| {
-                QorError::SignalProtocol("Pending decrypt size overflow".to_string())
+                QorcError::SignalProtocol("Pending decrypt size overflow".to_string())
             })?;
             if total_bytes > MAX_PENDING_DECRYPT_TOTAL_BYTES {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "Pending decrypt total size limit exceeded".to_string(),
                 ));
             }
@@ -1937,7 +1937,7 @@ impl SignalHandler {
         serde_json::to_vec(pending)
             .map(Zeroizing::new)
             .map_err(|_| {
-                QorError::SignalProtocol("Failed to serialize pending decrypt store".to_string())
+                QorcError::SignalProtocol("Failed to serialize pending decrypt store".to_string())
             })
     }
 
@@ -1945,7 +1945,7 @@ impl SignalHandler {
         &self,
         db: &crate::database::DatabaseManager,
         username: &str,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         Self::validate_username(username)?;
         let (session_store, identity_store, _prekey_store, signed_prekey_store, kyber_prekey_store) =
             self.get_or_create_stores(username);
@@ -1955,7 +1955,7 @@ impl SignalHandler {
                 .lock()
                 .await
                 .dump()
-                .map_err(QorError::SignalProtocol)?,
+                .map_err(QorcError::SignalProtocol)?,
             "session",
         )?;
         let signed_prekeys_blob = serialize_signal_records(
@@ -1963,7 +1963,7 @@ impl SignalHandler {
                 .lock()
                 .await
                 .dump()
-                .map_err(QorError::SignalProtocol)?,
+                .map_err(QorcError::SignalProtocol)?,
             "signed pre-key",
         )?;
         let kyber_prekeys_blob = serialize_signal_records(
@@ -1971,13 +1971,13 @@ impl SignalHandler {
                 .lock()
                 .await
                 .dump()
-                .map_err(QorError::SignalProtocol)?,
+                .map_err(QorcError::SignalProtocol)?,
             "Kyber pre-key",
         )?;
         let kyber_replay_state = kyber_prekey_store.lock().await.dump_replay_state();
         let kyber_replay_blob =
             Zeroizing::new(serde_json::to_vec(&kyber_replay_state).map_err(|_| {
-                QorError::SignalProtocol("Failed to serialize Kyber replay state".to_string())
+                QorcError::SignalProtocol("Failed to serialize Kyber replay state".to_string())
             })?);
 
         let identity_blob = identity_store
@@ -1988,7 +1988,7 @@ impl SignalHandler {
                 let serialized = serde_json::to_vec(&identity_data);
                 identity_data.2.zeroize();
                 serialized.map(Zeroizing::new).map_err(|_| {
-                    QorError::SignalProtocol("Failed to serialize identity store".to_string())
+                    QorcError::SignalProtocol("Failed to serialize identity store".to_string())
                 })
             })
             .transpose()?;
@@ -2003,7 +2003,7 @@ impl SignalHandler {
                 let serialized = serde_json::to_vec(&keypair);
                 keypair.1.zeroize();
                 serialized.map(Zeroizing::new).map_err(|_| {
-                    QorError::SignalProtocol("Failed to serialize static ML-KEM store".to_string())
+                    QorcError::SignalProtocol("Failed to serialize static ML-KEM store".to_string())
                 })
             })
             .transpose()?;
@@ -2056,7 +2056,7 @@ impl SignalHandler {
         db: &crate::database::DatabaseManager,
         username: &str,
         full: bool,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         self.persist_messaging_state_inner(db, username, full, None)
             .await
     }
@@ -2066,7 +2066,7 @@ impl SignalHandler {
         db: &crate::database::DatabaseManager,
         username: &str,
         pending_decrypt_blob: &[u8],
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         self.persist_messaging_state_inner(db, username, true, Some(pending_decrypt_blob))
             .await
     }
@@ -2077,7 +2077,7 @@ impl SignalHandler {
         username: &str,
         full: bool,
         pending_decrypt_blob: Option<&[u8]>,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         Self::validate_username(username)?;
         let (session_store, identity_store, _prekey_store, _signed, kyber_prekey_store) =
             self.get_or_create_stores(username);
@@ -2087,7 +2087,7 @@ impl SignalHandler {
                 .lock()
                 .await
                 .dump()
-                .map_err(QorError::SignalProtocol)?,
+                .map_err(QorcError::SignalProtocol)?,
             "session",
         )?;
 
@@ -2100,14 +2100,14 @@ impl SignalHandler {
                     let serialized = serde_json::to_vec(&identity_data);
                     identity_data.2.zeroize();
                     serialized.map(Zeroizing::new).map_err(|_| {
-                        QorError::SignalProtocol("Failed to serialize identity store".to_string())
+                        QorcError::SignalProtocol("Failed to serialize identity store".to_string())
                     })
                 })
                 .transpose()?;
             let kyber_replay_state = kyber_prekey_store.lock().await.dump_replay_state();
             let kyber_replay_blob =
                 Zeroizing::new(serde_json::to_vec(&kyber_replay_state).map_err(|_| {
-                    QorError::SignalProtocol("Failed to serialize Kyber replay state".to_string())
+                    QorcError::SignalProtocol("Failed to serialize Kyber replay state".to_string())
                 })?);
             let peer_ml_kem_blob = self.serialize_peer_ml_kem_keys(username)?;
             let mut entries = vec![
@@ -2151,7 +2151,7 @@ impl SignalHandler {
         &self,
         db: &crate::database::DatabaseManager,
         username: &str,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         Self::validate_username(username)?;
 
         let session_store = InMemorySessionStore::new();
@@ -2159,7 +2159,7 @@ impl SignalHandler {
             read_signal_store(db, "signal_session_store_v1", username)?.unwrap_or_default();
         session_store
             .load(sessions)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
 
         let identity_store = InMemoryIdentityKeyStore::new();
         if let Some((reg_id, identity_key, private_key, known_identities)) =
@@ -2171,7 +2171,7 @@ impl SignalHandler {
         {
             identity_store
                 .load(reg_id, identity_key, private_key, known_identities)
-                .map_err(QorError::SignalProtocol)?;
+                .map_err(QorcError::SignalProtocol)?;
         }
 
         let prekey_store = InMemoryPreKeyStore::new();
@@ -2181,39 +2181,39 @@ impl SignalHandler {
             read_signal_store(db, "signal_signed_prekey_store_v1", username)?.unwrap_or_default();
         signed_prekey_store
             .load(signed_prekeys)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
 
         let kyber_prekey_store = InMemoryKyberPreKeyStore::new();
         let kyber_prekeys: Vec<(u32, Vec<u8>)> =
             read_signal_store(db, "signal_mlkem_prekey_store_v1", username)?.unwrap_or_default();
         kyber_prekey_store
             .load(kyber_prekeys)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
         if signed_prekey_store.get_any_signed_pre_key().is_some()
             || kyber_prekey_store.get_any_kyber_pre_key().is_some()
         {
             let identity = identity_store.get_identity_key_pair().ok_or_else(|| {
-                QorError::SignalProtocol(
+                QorcError::SignalProtocol(
                     "Signal pre-key stores exist without a local identity".to_string(),
                 )
             })?;
             signed_prekey_store
                 .validate_signatures(identity.identity_key())
-                .map_err(QorError::SignalProtocol)?;
+                .map_err(QorcError::SignalProtocol)?;
             kyber_prekey_store
                 .validate_signatures(identity.identity_key())
-                .map_err(QorError::SignalProtocol)?;
+                .map_err(QorcError::SignalProtocol)?;
         }
         let replay_state: Vec<(u32, u32, Vec<Vec<u8>>)> =
             read_signal_store(db, "signal_mlkem_replay_store_v1", username)?.unwrap_or_default();
         kyber_prekey_store
             .load_replay_state(replay_state)
-            .map_err(QorError::SignalProtocol)?;
+            .map_err(QorcError::SignalProtocol)?;
 
         let peer_ml_kem_entries: Vec<(String, Vec<u8>)> =
             read_signal_store(db, "signal_peer_mlkem_store_v1", username)?.unwrap_or_default();
         if peer_ml_kem_entries.len() > MAX_PEER_ML_KEM_KEYS {
-            return Err(QorError::SignalProtocol(
+            return Err(QorcError::SignalProtocol(
                 "Peer ML-KEM key store record limit exceeded".to_string(),
             ));
         }
@@ -2221,10 +2221,10 @@ impl SignalHandler {
         for (peer, key) in peer_ml_kem_entries {
             Self::validate_username(&peer)?;
             post_quantum::validate_ml_kem_public_key(&key).map_err(|_| {
-                QorError::SignalProtocol("Invalid peer ML-KEM public key store".to_string())
+                QorcError::SignalProtocol("Invalid peer ML-KEM public key store".to_string())
             })?;
             if loaded_peer_ml_kem_keys.insert(peer, key).is_some() {
-                return Err(QorError::SignalProtocol(
+                return Err(QorcError::SignalProtocol(
                     "Duplicate peer ML-KEM public key".to_string(),
                 ));
             }
@@ -2237,13 +2237,13 @@ impl SignalHandler {
                     if public_key.len() != post_quantum::ML_KEM_PUBLIC_KEY_SIZE
                         || secret_key.len() != post_quantum::ML_KEM_SECRET_KEY_SIZE
                     {
-                        return Err(QorError::SignalProtocol(
+                        return Err(QorcError::SignalProtocol(
                             "Invalid static ML-KEM keypair store".to_string(),
                         ));
                     }
                     post_quantum::validate_ml_kem_keypair(&public_key, &secret_key).map_err(
                         |_| {
-                            QorError::SignalProtocol(
+                            QorcError::SignalProtocol(
                                 "Invalid static ML-KEM keypair store".to_string(),
                             )
                         },
@@ -2320,7 +2320,7 @@ pub(crate) struct AccountStateLockGuard {
 }
 
 /// Generate random registration ID
-fn generate_registration_id() -> QorResult<u32> {
+fn generate_registration_id() -> QorcResult<u32> {
     loop {
         let bytes = random::random_bytes(2)?;
         let candidate = u16::from_le_bytes([bytes[0], bytes[1]]) as u32 & 0x3fff;
@@ -2419,7 +2419,7 @@ pub struct PQEnvelopeAlgorithms {
     pub aead: String,
 }
 
-pub async fn init(state: &AppState) -> QorResult<()> {
+pub async fn init(state: &AppState) -> QorcResult<()> {
     let handler = SignalHandler::new();
     *state.signal_handler.write() = Some(Arc::new(handler));
 

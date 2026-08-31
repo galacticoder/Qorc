@@ -1,32 +1,32 @@
 FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc AS edge-runtime
 
-COPY docker/edge-runtime/qor-edge-runtime-linux-x86_64-v1.tar.gz /tmp/qor-edge-runtime-linux-amd64-v1.tar.gz
-COPY docker/edge-runtime/qor-edge-runtime-linux-arm64-v1.tar.gz /tmp/qor-edge-runtime-linux-arm64-v1.tar.gz
+COPY docker/edge-runtime/qorc-edge-runtime-linux-x86_64-v1.tar.gz /tmp/qorc-edge-runtime-linux-amd64-v1.tar.gz
+COPY docker/edge-runtime/qorc-edge-runtime-linux-arm64-v1.tar.gz /tmp/qorc-edge-runtime-linux-arm64-v1.tar.gz
 
 RUN architecture="$(dpkg --print-architecture)" \
     && case "$architecture" in \
-      amd64) archive=/tmp/qor-edge-runtime-linux-amd64-v1.tar.gz; expected=c3a9cf4759fb29f17b9e0e4e4da5e6213dd5cd7a8602f9ed695cb12be89e4c33 ;; \
-      arm64) archive=/tmp/qor-edge-runtime-linux-arm64-v1.tar.gz; expected=92be78df8acccba83c7c5afe5c21ed8cacb0996c665212a3f5373a4cdf46b1b2 ;; \
+      amd64) archive=/tmp/qorc-edge-runtime-linux-amd64-v1.tar.gz; expected=41876029965386aa0623f4d34c8956aac664ac4f9e85e39ae3309fb0d0d3b095 ;; \
+      arm64) archive=/tmp/qorc-edge-runtime-linux-arm64-v1.tar.gz; expected=f24331e5685b04ba73ecc79b61a3deead1453537e97ba6816e3ed543c1f21fb0 ;; \
       *) echo "Unsupported edge-runtime architecture: $architecture" >&2; exit 1 ;; \
     esac \
     && echo "$expected  $archive" | sha256sum -c - \
     && tar --extract --gzip --file "$archive" \
       --directory /opt --no-same-owner --no-same-permissions \
-    && test -x /opt/qor-edge/bin/haproxy \
-    && test -x /opt/qor-edge/tor/tor
+    && test -x /opt/qorc-edge/bin/haproxy \
+    && test -x /opt/qorc-edge/tor/tor
 
 FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LD_LIBRARY_PATH=/opt/qor-edge/lib
+ENV LD_LIBRARY_PATH=/opt/qorc-edge/lib
 
-LABEL org.qor-chat.tor.version="0.4.9.11" \
-      org.qor-chat.tor.source-sha256="2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed" \
-      org.qor-chat.tor.patch-sha256="0e1f8eea86ba7ce2798c11cd4656b1e6a8d5b9d5eaaaa8349102c787040a1b51" \
-      org.qor-chat.haproxy.version="3.2.21" \
-      org.qor-chat.haproxy.source-sha256="0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339" \
-      org.qor-chat.edge-runtime.amd64.sha256="c3a9cf4759fb29f17b9e0e4e4da5e6213dd5cd7a8602f9ed695cb12be89e4c33" \
-      org.qor-chat.edge-runtime.arm64.sha256="92be78df8acccba83c7c5afe5c21ed8cacb0996c665212a3f5373a4cdf46b1b2"
+LABEL org.qorc.tor.version="0.4.9.11" \
+      org.qorc.tor.source-sha256="2e6c1720118c812acf0079fd47cf91b6bfaba5d766c321c4d3d2a28d6a11a8ed" \
+      org.qorc.tor.patch-sha256="d7a6dcf124a9402f0c72ba41aa3dac5f3ca1c699814ac4ebda3411a7935e07f4" \
+      org.qorc.haproxy.version="3.2.21" \
+      org.qorc.haproxy.source-sha256="0cb8818a26c5f888e0cb1c40f1b3acb9fb952527d1733f769ce688fedd680339" \
+      org.qorc.edge-runtime.amd64.sha256="41876029965386aa0623f4d34c8956aac664ac4f9e85e39ae3309fb0d0d3b095" \
+      org.qorc.edge-runtime.arm64.sha256="f24331e5685b04ba73ecc79b61a3deead1453537e97ba6816e3ed543c1f21fb0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -43,8 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=edge-runtime /opt/qor-edge /opt/qor-edge
-COPY docker/edge-runtime/THIRD_PARTY_NOTICES.txt /opt/qor-edge/THIRD_PARTY_NOTICES.txt
+COPY --from=edge-runtime /opt/qorc-edge /opt/qorc-edge
+COPY docker/edge-runtime/THIRD_PARTY_NOTICES.txt /opt/qorc-edge/THIRD_PARTY_NOTICES.txt
 
 WORKDIR /app
 

@@ -4,7 +4,7 @@ import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
 import { cn } from '@/lib/utils/shared-utils';
 import { UserAvatar } from './UserAvatar';
 import { useTheme } from '../../contexts/ThemeContext';
-import { QorBrandLogo } from './QorBrandLogo';
+import { QorcBrandLogo } from './QorcBrandLogo';
 
 interface SidebarProps {
     variant?: 'sidebar' | 'top';
@@ -128,24 +128,24 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
 
     if (variant === 'top') {
         return (
-            <header className="qor-top-nav">
-                <div className="qor-top-nav-cluster">
-                    <div className="qor-top-nav-brand" aria-hidden="true">
-                        <QorBrandLogo className="brand-square qor-brand-square" imageClassName="qor-brand-logo" />
+            <header className="qorc-top-nav">
+                <div className="qorc-top-nav-cluster">
+                    <div className="qorc-top-nav-brand" aria-hidden="true">
+                        <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
                     </div>
-                    <nav className="qor-top-nav-sections" aria-label="Qor sections">
+                    <nav className="qorc-top-nav-sections" aria-label="qorc sections">
                         {navItems.map((item) => (
                             <button
                                 key={item.id}
                                 type="button"
                                 onClick={() => onTabChange(item.id)}
-                                className={cn("qor-top-nav-button", activeTab === item.id && "is-active")}
+                                className={cn("qorc-top-nav-button", activeTab === item.id && "is-active")}
                                 aria-label={item.label}
                                 title={item.label}
                                 aria-pressed={activeTab === item.id}
                             >
                                 <item.icon
-                                    className={cn("qor-top-nav-icon", activeTab === item.id ? "fill-current" : "fill-none")}
+                                    className={cn("qorc-top-nav-icon", activeTab === item.id ? "fill-current" : "fill-none")}
                                     width={22}
                                     height={22}
                                     strokeWidth={activeTab === item.id ? 2.5 : 2}
@@ -156,13 +156,13 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         <button
                             type="button"
                             onClick={() => onTabChange('settings')}
-                            className={cn("qor-top-nav-button qor-top-nav-settings", activeTab === 'settings' && "is-active")}
+                            className={cn("qorc-top-nav-button qorc-top-nav-settings", activeTab === 'settings' && "is-active")}
                             aria-label="Settings"
                             title="Settings"
                             aria-pressed={activeTab === 'settings'}
                         >
                             <SettingsIcon
-                                className={cn("qor-top-nav-icon", activeTab === 'settings' ? "fill-current" : "fill-none")}
+                                className={cn("qorc-top-nav-icon", activeTab === 'settings' ? "fill-current" : "fill-none")}
                                 width={22}
                                 height={22}
                                 strokeWidth={activeTab === 'settings' ? 2.5 : 2}
@@ -171,7 +171,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         </button>
                         <button
                             type="button"
-                            className="qor-top-nav-button qor-top-nav-theme theme-toggle-btn"
+                            className="qorc-top-nav-button qorc-top-nav-theme theme-toggle-btn"
                             onClick={() => setTheme(activeTheme === 'dark' ? 'light' : 'dark')}
                             aria-label={activeTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                             title="Theme"
@@ -181,7 +181,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         {currentUser && (
                             <button
                                 type="button"
-                                className={cn("qor-top-nav-button qor-top-nav-profile", isHoldingLogout && "is-holding")}
+                                className={cn("qorc-top-nav-button qorc-top-nav-profile", isHoldingLogout && "is-holding")}
                                 onPointerDown={handleLogoutPointerDown}
                                 onPointerUp={cancelLogoutHold}
                                 onPointerLeave={cancelLogoutHold}
@@ -189,9 +189,9 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                                 aria-label="Hold to logout"
                                 title="Hold to logout"
                             >
-                                <span className="qor-logout-progress" style={{ width: `${logoutProgress}%` }} aria-hidden="true" />
-                                <UserAvatar username={currentUser.username} isCurrentUser={true} size="sm" className="qor-profile-avatar" />
-                                <LogOut className="qor-logout-icon" aria-hidden="true" />
+                                <span className="qorc-logout-progress" style={{ width: `${logoutProgress}%` }} aria-hidden="true" />
+                                <UserAvatar username={currentUser.username} isCurrentUser={true} size="sm" className="qorc-profile-avatar" />
+                                <LogOut className="qorc-logout-icon" aria-hidden="true" />
                             </button>
                         )}
                     </nav>
@@ -201,36 +201,36 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
     }
 
     return (
-        <aside className={cn("qor-rail", !isCollapsed && "is-expanded")}>
+        <aside className={cn("qorc-rail", !isCollapsed && "is-expanded")}>
             <button
                 type="button"
-                className="qor-rail-row qor-rail-head"
+                className="qorc-rail-row qorc-rail-head"
                 onClick={() => setIsCollapsed(!isCollapsed)}
                 title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
                 aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
-                <span className="qor-rail-icon-slot">
-                    <QorBrandLogo className="brand-square qor-brand-square" imageClassName="qor-brand-logo" />
+                <span className="qorc-rail-icon-slot">
+                    <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
                 </span>
-                <span className="qor-rail-label qor-brand-label">Qor</span>
+                <span className="qorc-rail-label qorc-brand-label">qorc</span>
             </button>
 
-            <div className="qor-rail-spacer">
+            <div className="qorc-rail-spacer">
                 {navItems.map((item) => (
                     <button
                         key={item.id}
                         type="button"
                         onClick={() => onTabChange(item.id)}
                         className={cn(
-                            "qor-rail-row qor-rail-button",
+                            "qorc-rail-row qorc-rail-button",
                             activeTab === item.id && "is-active"
                         )}
                         aria-pressed={activeTab === item.id}
                     >
-                        <span className="qor-rail-icon-slot">
+                        <span className="qorc-rail-icon-slot">
                             <item.icon
                                 className={cn(
-                                    "qor-rail-icon",
+                                    "qorc-rail-icon",
                                     activeTab === item.id ? "fill-current" : "fill-none"
                                 )}
                                 width={22}
@@ -239,37 +239,37 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                                 aria-hidden="true"
                             />
                         </span>
-                        <span className="qor-rail-label">{item.label}</span>
+                        <span className="qorc-rail-label">{item.label}</span>
                     </button>
                 ))}
             </div>
 
-            <div className="qor-rail-foot">
+            <div className="qorc-rail-foot">
                 <button
                     type="button"
-                    className="qor-rail-row qor-rail-theme theme-toggle-btn"
+                    className="qorc-rail-row qorc-rail-theme theme-toggle-btn"
                     onClick={() => setTheme(activeTheme === 'dark' ? 'light' : 'dark')}
                     aria-label={activeTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
                 >
-                    <span className="qor-rail-icon-slot">
+                    <span className="qorc-rail-icon-slot">
                         {themeIcon}
                     </span>
-                    <span className="qor-rail-label">Theme</span>
+                    <span className="qorc-rail-label">Theme</span>
                 </button>
 
                 <button
                     type="button"
                     onClick={() => onTabChange('settings')}
                     className={cn(
-                        "qor-rail-row qor-rail-button",
+                        "qorc-rail-row qorc-rail-button",
                         activeTab === 'settings' && "is-active"
                     )}
                     aria-pressed={activeTab === 'settings'}
                 >
-                    <span className="qor-rail-icon-slot">
+                    <span className="qorc-rail-icon-slot">
                         <SettingsIcon
                             className={cn(
-                                "qor-rail-icon",
+                                "qorc-rail-icon",
                                 activeTab === 'settings' ? "fill-current" : "fill-none"
                             )}
                             width={22}
@@ -278,14 +278,14 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                             aria-hidden="true"
                         />
                     </span>
-                    <span className="qor-rail-label">Settings</span>
+                    <span className="qorc-rail-label">Settings</span>
                 </button>
 
                 {currentUser && (
                     <button
                         type="button"
                         className={cn(
-                            "qor-rail-row qor-rail-profile",
+                            "qorc-rail-row qorc-rail-profile",
                             isHoldingLogout && "is-holding"
                         )}
                         onPointerDown={handleLogoutPointerDown}
@@ -295,22 +295,22 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         aria-label="Hold to logout"
                     >
                         <span
-                            className="qor-logout-progress"
+                            className="qorc-logout-progress"
                             style={{ width: `${logoutProgress}%` }}
                             aria-hidden="true"
                         />
-                        <span className="qor-rail-icon-slot qor-profile-icon-slot">
+                        <span className="qorc-rail-icon-slot qorc-profile-icon-slot">
                             <UserAvatar
                                 username={currentUser.username}
                                 isCurrentUser={true}
                                 size="sm"
-                                className="qor-profile-avatar"
+                                className="qorc-profile-avatar"
                             />
-                            <LogOut className="qor-logout-icon" aria-hidden="true" />
+                            <LogOut className="qorc-logout-icon" aria-hidden="true" />
                         </span>
-                        <span className="qor-profile-stack">
-                            <span className="qor-profile-name">{isHoldingLogout ? 'Logging out' : currentUser.username}</span>
-                            <span className="qor-profile-help">{isHoldingLogout ? 'Hold to confirm' : 'Hold to logout'}</span>
+                        <span className="qorc-profile-stack">
+                            <span className="qorc-profile-name">{isHoldingLogout ? 'Logging out' : currentUser.username}</span>
+                            <span className="qorc-profile-help">{isHoldingLogout ? 'Hold to confirm' : 'Hold to logout'}</span>
                         </span>
                     </button>
                 )}

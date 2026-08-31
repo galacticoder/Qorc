@@ -27,7 +27,7 @@ const MAX_CACHE_ENTRIES = 48;
 const MAX_CACHE_BYTES = 24 * 1024 * 1024;
 const MAX_RECORD_BYTES = 3 * 1024 * 1024;
 const MAX_IMAGE_DATA_URL_LENGTH = 2_100_000;
-const CACHE_KEY_DOMAIN = 'qor-link-preview-cache-v1';
+const CACHE_KEY_DOMAIN = 'qorc-link-preview-cache-v1';
 const writeChains = new WeakMap<SecureDB, Promise<void>>();
 const encoder = new TextEncoder();
 

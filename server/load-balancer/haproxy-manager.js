@@ -14,9 +14,9 @@ const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH ||
     path.join('/app/server/config', 'haproxy-auto.cfg');
 const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE ||
     (IS_ROOT && process.platform !== 'win32' ? `/var/run/${HAPROXY_PID_FILENAME}` : path.join(TEMP_DIRECTORY, HAPROXY_PID_FILENAME));
-const BUNDLED_HAPROXY_BIN = '/opt/qor-edge/bin/haproxy';
-const BUNDLED_LIBRARY_DIR = '/opt/qor-edge/lib';
-const BUNDLED_OQS_MODULE = '/opt/qor-edge/lib/ossl-modules/oqsprovider.so';
+const BUNDLED_HAPROXY_BIN = '/opt/qorc-edge/bin/haproxy';
+const BUNDLED_LIBRARY_DIR = '/opt/qorc-edge/lib';
+const BUNDLED_OQS_MODULE = '/opt/qorc-edge/lib/ossl-modules/oqsprovider.so';
 
 export class HAProxyManager {
     constructor() {

@@ -1,10 +1,10 @@
-//! Error types for Qor-Chat
+//! Error types for qorc
 
 use thiserror::Error;
 
 /// Main error type
 #[derive(Error, Debug)]
-pub enum QorError {
+pub enum QorcError {
     // ============================================
     // Cryptographic Errors
     // ============================================
@@ -84,11 +84,11 @@ pub enum QorError {
     Tauri(#[from] tauri::Error),
 }
 
-/// Result type alias for Qor operations
-pub type QorResult<T> = Result<T, QorError>;
+/// Result type alias for qorc operations
+pub type QorcResult<T> = Result<T, QorcError>;
 
-/// Convert QorError to a serializable error response
-impl QorError {
+/// Convert QorcError to a serializable error response
+impl QorcError {
     fn safe_signal_message(message: &str) -> String {
         let normalized = message.to_ascii_lowercase();
         if normalized.contains("untrusted") || normalized.contains("identity mismatch") {
@@ -138,7 +138,7 @@ impl QorError {
     /// Check if error requires key refresh
     pub fn requires_key_refresh(&self) -> bool {
         match self {
-            QorError::SignalProtocol(e) => {
+            QorcError::SignalProtocol(e) => {
                 e.contains("untrusted")
                     || e.contains("Untrusted")
                     || e.contains("identity mismatch")
@@ -149,35 +149,35 @@ impl QorError {
 
     pub fn safe_message(&self) -> String {
         match self {
-            QorError::EncryptionFailed(_) => "Encryption failed".to_string(),
-            QorError::DecryptionFailed(_) => "Decryption failed".to_string(),
-            QorError::MacVerificationFailed => "Data verification failed".to_string(),
-            QorError::InvalidKeyLength { .. } => "Invalid key length".to_string(),
-            QorError::SignalProtocol(message) => Self::safe_signal_message(message),
-            QorError::KemEncapsulationFailed => "ML-KEM encapsulation failed".to_string(),
-            QorError::KemDecapsulationFailed => "ML-KEM decapsulation failed".to_string(),
-            QorError::Verification(_) => "Verification failed".to_string(),
-            QorError::StorageInitFailed(_) => "Storage operation failed".to_string(),
-            QorError::TorControl(_) | QorError::TorProcess(_) => "Tor operation failed".to_string(),
-            QorError::Network(message) => Self::safe_network_message(message),
-            QorError::FileOperationFailed(_) | QorError::FileSystem(_) | QorError::Io(_) => {
+            QorcError::EncryptionFailed(_) => "Encryption failed".to_string(),
+            QorcError::DecryptionFailed(_) => "Decryption failed".to_string(),
+            QorcError::MacVerificationFailed => "Data verification failed".to_string(),
+            QorcError::InvalidKeyLength { .. } => "Invalid key length".to_string(),
+            QorcError::SignalProtocol(message) => Self::safe_signal_message(message),
+            QorcError::KemEncapsulationFailed => "ML-KEM encapsulation failed".to_string(),
+            QorcError::KemDecapsulationFailed => "ML-KEM decapsulation failed".to_string(),
+            QorcError::Verification(_) => "Verification failed".to_string(),
+            QorcError::StorageInitFailed(_) => "Storage operation failed".to_string(),
+            QorcError::TorControl(_) | QorcError::TorProcess(_) => "Tor operation failed".to_string(),
+            QorcError::Network(message) => Self::safe_network_message(message),
+            QorcError::FileOperationFailed(_) | QorcError::FileSystem(_) | QorcError::Io(_) => {
                 "File operation failed".to_string()
             }
-            QorError::NotSupported(_) => "Operation is not supported".to_string(),
-            QorError::SystemError(_) => "System operation failed".to_string(),
-            QorError::NotificationFailed(_) => "Notification failed".to_string(),
-            QorError::NotInitialized(message) => format!("Not initialized: {message}"),
-            QorError::InvalidArgument(message) => format!("Invalid argument: {message}"),
-            QorError::Internal(_) => "Internal operation failed".to_string(),
-            QorError::Json(_) => "Invalid data".to_string(),
-            QorError::Reqwest(_) => "Network operation failed".to_string(),
-            QorError::Url(_) => "Invalid URL".to_string(),
-            QorError::Tauri(_) => "Application operation failed".to_string(),
+            QorcError::NotSupported(_) => "Operation is not supported".to_string(),
+            QorcError::SystemError(_) => "System operation failed".to_string(),
+            QorcError::NotificationFailed(_) => "Notification failed".to_string(),
+            QorcError::NotInitialized(message) => format!("Not initialized: {message}"),
+            QorcError::InvalidArgument(message) => format!("Invalid argument: {message}"),
+            QorcError::Internal(_) => "Internal operation failed".to_string(),
+            QorcError::Json(_) => "Invalid data".to_string(),
+            QorcError::Reqwest(_) => "Network operation failed".to_string(),
+            QorcError::Url(_) => "Invalid URL".to_string(),
+            QorcError::Tauri(_) => "Application operation failed".to_string(),
         }
     }
 }
 
-impl serde::Serialize for QorError {
+impl serde::Serialize for QorcError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -188,25 +188,25 @@ impl serde::Serialize for QorError {
 
 #[cfg(test)]
 mod tests {
-    use super::QorError;
+    use super::QorcError;
 
     #[test]
     fn safe_messages_do_not_expose_internal_details() {
         assert_eq!(
-            QorError::StorageInitFailed("/home/alice/private.db: locked".to_string())
+            QorcError::StorageInitFailed("/home/alice/private.db: locked".to_string())
                 .safe_message(),
             "Storage operation failed"
         );
         assert_eq!(
-            QorError::Network("SOCKS5 failed for secret.onion: refused".to_string()).safe_message(),
+            QorcError::Network("SOCKS5 failed for secret.onion: refused".to_string()).safe_message(),
             "Host unreachable"
         );
         assert_eq!(
-            QorError::Internal("task panicked at /home/alice/src.rs".to_string()).safe_message(),
+            QorcError::Internal("task panicked at /home/alice/src.rs".to_string()).safe_message(),
             "Internal operation failed"
         );
         assert_eq!(
-            QorError::Network("connection in progress for secret.onion".to_string()).safe_message(),
+            QorcError::Network("connection in progress for secret.onion".to_string()).safe_message(),
             "Connection in progress"
         );
     }
@@ -214,16 +214,16 @@ mod tests {
     #[test]
     fn signal_messages_keep_only_required_recovery_classes() {
         assert_eq!(
-            QorError::SignalProtocol("untrusted identity for alice".to_string()).safe_message(),
+            QorcError::SignalProtocol("untrusted identity for alice".to_string()).safe_message(),
             "Untrusted Signal identity"
         );
         assert_eq!(
-            QorError::SignalProtocol("old counter with internal details".to_string())
+            QorcError::SignalProtocol("old counter with internal details".to_string())
                 .safe_message(),
             "Duplicate Signal message"
         );
         assert_eq!(
-            QorError::SignalProtocol("session decode failed for alice".to_string()).safe_message(),
+            QorcError::SignalProtocol("session decode failed for alice".to_string()).safe_message(),
             "Signal session unavailable"
         );
     }

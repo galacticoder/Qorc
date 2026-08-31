@@ -116,8 +116,8 @@ scripts/test-*.cjs
 
 # Rust executable sources are not generated build output.
 !workers/ypir/src/bin/
-!workers/ypir/src/bin/qor-pir-client.rs
-!workers/ypir/src/bin/qor-pir-worker.rs
+!workers/ypir/src/bin/qorc-pir-client.rs
+!workers/ypir/src/bin/qorc-pir-worker.rs
 **/*.test.*
 **/*.spec.*
 commit-message.txt

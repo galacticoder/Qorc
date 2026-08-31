@@ -164,7 +164,7 @@ index 4492cca..51ddb7b 100644
 +  }
 +
 +  if (descriptor_kind) {
-+    log_notice(LD_REND, "QOR_HS_DESC_PUBLISHED %s", descriptor_kind);
++    log_notice(LD_REND, "QORC_HS_DESC_READY %s", descriptor_kind);
    }
  }
  

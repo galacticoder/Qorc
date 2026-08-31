@@ -25,7 +25,7 @@ function databaseEndpoint() {
   }
   const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
   const port = process.env.PGPORT || '5432';
-  const database = process.env.PGDATABASE || process.env.DB_NAME || 'Qor';
+  const database = process.env.PGDATABASE || process.env.DB_NAME || 'qorc';
   return `postgres://${host}:${port}/${database}`;
 }
 

@@ -76,18 +76,18 @@ const CallLogOptions = React.memo(function CallLogOptions({
                 <Button
                     size="sm"
                     variant="ghost"
-                    className="qor-call-pill-btn"
+                    className="qorc-call-pill-btn"
                     title="Options"
                     aria-label={`Options for call with ${displayName}`}
                 >
                     <MoreVertical className="w-4 h-4" aria-hidden="true" />
                 </Button>
             </PopoverTrigger>
-            <PopoverContent className="qor-call-log-popover select-none" align="end">
-                <div className="qor-call-log-popover-title">Options</div>
+            <PopoverContent className="qorc-call-log-popover select-none" align="end">
+                <div className="qorc-call-log-popover-title">Options</div>
                 <button
                     type="button"
-                    className="qor-call-log-popover-action is-danger"
+                    className="qorc-call-log-popover-action is-danger"
                     onClick={handleDelete}
                 >
                     <Trash2 aria-hidden="true" />
@@ -118,26 +118,26 @@ const CallLogItem = React.memo(function CallLogItem({
     const hasDistinctDisplayName = displayName.toLowerCase() !== log.peerUsername.toLowerCase();
 
     return (
-        <article className="qor-call-log-row">
+        <article className="qorc-call-log-row">
             <button
                 type="button"
-                className="qor-call-log-person"
+                className="qorc-call-log-person"
                 onClick={() => onOpenConversation?.(log.peerUsername)}
                 disabled={!onOpenConversation}
                 aria-label={onOpenConversation ? `Open conversation with ${displayName}` : undefined}
             >
-                <UserAvatar username={log.peerUsername} size="lg" className="qor-call-log-avatar" />
+                <UserAvatar username={log.peerUsername} size="lg" className="qorc-call-log-avatar" />
 
-                <span className="qor-call-log-copy">
-                    <span className="qor-call-log-name-line">
-                        <span className="qor-call-log-name" title={displayName}>{displayName}</span>
+                <span className="qorc-call-log-copy">
+                    <span className="qorc-call-log-name-line">
+                        <span className="qorc-call-log-name" title={displayName}>{displayName}</span>
                         {hasDistinctDisplayName && (
-                            <span className="qor-call-log-handle" title={log.peerUsername}>@{log.peerUsername}</span>
+                            <span className="qorc-call-log-handle" title={log.peerUsername}>@{log.peerUsername}</span>
                         )}
                     </span>
 
-                    <span className="qor-call-log-detail-line">
-                        <span className={`qor-call-log-result${isUnanswered ? ' is-unanswered' : ''}`}>
+                    <span className="qorc-call-log-detail-line">
+                        <span className={`qorc-call-log-result${isUnanswered ? ' is-unanswered' : ''}`}>
                             {log.type === 'video' ? (
                                 <Video aria-hidden="true" />
                             ) : (
@@ -147,7 +147,7 @@ const CallLogItem = React.memo(function CallLogItem({
                         </span>
 
                         {log.status === 'completed' && log.duration !== undefined && log.duration > 0 && (
-                            <span className="qor-call-log-duration">
+                            <span className="qorc-call-log-duration">
                                 <Clock3 aria-hidden="true" />
                                 <span>{formatCallDurationSeconds(log.duration)}</span>
                             </span>
@@ -157,19 +157,19 @@ const CallLogItem = React.memo(function CallLogItem({
             </button>
 
             <time
-                className="qor-call-log-time"
+                className="qorc-call-log-time"
                 dateTime={new Date(log.startTime).toISOString()}
                 title={format(new Date(log.startTime), 'PPpp')}
             >
                 {format(new Date(log.startTime), 'h:mm a')}
             </time>
 
-            <div className="qor-call-pill qor-call-log-actions" role="group" aria-label={`Actions for ${displayName}`}>
+            <div className="qorc-call-pill qorc-call-log-actions" role="group" aria-label={`Actions for ${displayName}`}>
                 {onOpenConversation && (
                     <Button
                         size="sm"
                         variant="ghost"
-                        className="qor-call-pill-btn"
+                        className="qorc-call-pill-btn"
                         title="Open chat"
                         aria-label={`Open chat with ${displayName}`}
                         onClick={() => onOpenConversation(log.peerUsername)}
@@ -180,7 +180,7 @@ const CallLogItem = React.memo(function CallLogItem({
                 <Button
                     size="sm"
                     variant="ghost"
-                    className="qor-call-pill-btn"
+                    className="qorc-call-pill-btn"
                     title="Audio call"
                     aria-label={`Audio call ${displayName}`}
                     disabled={callsDisabled || !onStartCall}
@@ -191,7 +191,7 @@ const CallLogItem = React.memo(function CallLogItem({
                 <Button
                     size="sm"
                     variant="ghost"
-                    className="qor-call-pill-btn"
+                    className="qorc-call-pill-btn"
                     title="Video call"
                     aria-label={`Video call ${displayName}`}
                     disabled={callsDisabled || !onStartCall}
@@ -315,14 +315,14 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     }, [clearLogs]);
 
     return (
-        <section className="qor-call-log-page">
-            <header className="qor-call-log-header">
-                <div className="qor-call-log-heading">
+        <section className="qorc-call-log-page">
+            <header className="qorc-call-log-header">
+                <div className="qorc-call-log-heading">
                     <h1>Calls</h1>
                 </div>
 
-                <div className="qor-call-log-header-actions">
-                    <div className={`qor-call-log-search${logs.length === 0 ? ' is-disabled' : ''}`}>
+                <div className="qorc-call-log-header-actions">
+                    <div className={`qorc-call-log-search${logs.length === 0 ? ' is-disabled' : ''}`}>
                         <Search aria-hidden="true" />
                         <input
                             type="text"
@@ -349,18 +349,18 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                             <Button
                                 size="sm"
                                 variant="ghost"
-                                className="qor-icon-btn"
+                                className="qorc-icon-btn"
                                 title="Call history options"
                                 aria-label="Call history options"
                             >
                                 <MoreVertical className="w-4 h-4" aria-hidden="true" />
                             </Button>
                         </PopoverTrigger>
-                        <PopoverContent className="qor-call-log-popover select-none" align="end">
-                            <div className="qor-call-log-popover-title">Options</div>
+                        <PopoverContent className="qorc-call-log-popover select-none" align="end">
+                            <div className="qorc-call-log-popover-title">Options</div>
                             <button
                                 type="button"
-                                className="qor-call-log-popover-action is-danger"
+                                className="qorc-call-log-popover-action is-danger"
                                 onClick={handleClearLogs}
                                 disabled={logs.length === 0}
                             >
@@ -372,16 +372,16 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                 </div>
             </header>
 
-            <ScrollArea ref={scrollAreaRef} className="qor-call-log-scroll">
-                <div className="qor-call-log-content">
+            <ScrollArea ref={scrollAreaRef} className="qorc-call-log-scroll">
+                <div className="qorc-call-log-content">
                     {isLoading ? (
-                        <div className="qor-call-log-empty" role="status" aria-label="Loading call history">
-                            <Loader2 className="qor-call-log-loader" aria-hidden="true" />
+                        <div className="qorc-call-log-empty" role="status" aria-label="Loading call history">
+                            <Loader2 className="qorc-call-log-loader" aria-hidden="true" />
                             <strong>Loading calls</strong>
                         </div>
                     ) : groupedLogs.length === 0 ? (
-                        <div className="qor-call-log-empty">
-                            <span className="qor-call-log-empty-icon" aria-hidden="true">
+                        <div className="qorc-call-log-empty">
+                            <span className="qorc-call-log-empty-icon" aria-hidden="true">
                                 {isSearching ? <Search /> : <CallIcon />}
                             </span>
                             <strong>{isSearching ? 'No matching calls' : 'No calls yet'}</strong>
@@ -389,9 +389,9 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                         </div>
                     ) : (
                         groupedLogs.map((group) => (
-                            <section className="qor-call-log-group" key={group.key} aria-labelledby={`call-group-${group.key}`}>
+                            <section className="qorc-call-log-group" key={group.key} aria-labelledby={`call-group-${group.key}`}>
                                 <h2 id={`call-group-${group.key}`}>{group.label}</h2>
-                                <div className="qor-call-log-list">
+                                <div className="qorc-call-log-list">
                                     {group.logs.map((log) => (
                                         <CallLogItem
                                             key={log.id}

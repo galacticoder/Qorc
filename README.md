@@ -1,6 +1,6 @@
-# Qor
+# qorc
 
-Qor is a Tauri desktop chat app for messaging, files, and audio/video/screen
+qorc is a Tauri desktop chat app for messaging, files, and audio/video/screen
 calls. Every network path the client uses runs over Tor, and every application
 payload is protected by a hybrid post-quantum layer on top of the Signal Double
 Ratchet.
@@ -40,11 +40,11 @@ Current architecture docs:
 - Self-hosted deployment with Redis, Postgres, optional clustering,
   and an HAProxy edge tier.
 
-Qor-Chat is not a metadata-free system. The server can still observe timing,
+qorc is not a metadata-free system. The server can still observe timing,
 connection state, traffic volume, rounded database sizes, and some bucketed or
 cover-traffic protocol artifacts.
 
-## Run a Qor server with Docker
+## Run a qorc server with Docker
 
 This is the source and terminal setup. It works with Docker Linux containers on
 64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
@@ -80,7 +80,7 @@ When you run it, the helper:
 4. Detects occupied host ports and saves available replacements automatically.
 5. Asks whether to run in the background; pressing Enter accepts the normal
    background mode.
-6. Builds and starts PostgreSQL, Redis, the Qor server, HAProxy, and the Tor
+6. Builds and starts PostgreSQL, Redis, the qorc server, HAProxy, and the Tor
    onion-service edge. TLS certificates are generated inside the stack.
 
 The first build pulls the Docker base images and installs the Node server
@@ -119,7 +119,7 @@ advanced or multi-host deployments, but a normal single host server should use
 ## Build the desktop client from source
 
 Building the desktop application has additional requirements that are not
-needed for a Docker server or for an installed Qor app:
+needed for a Docker server or for an installed qorc app:
 
 - Node.js 18 or newer.
 - pnpm through Corepack (`corepack enable pnpm`).
@@ -190,11 +190,11 @@ For the fastest x86_64-hosted path, point the command at a native remote ARM64
 Docker context and select its Buildx builder:
 
 ```bash
-docker buildx create --name qor-arm64 --driver docker-container arm64-host
-QOR_ARM64_BUILDER=qor-arm64 node scripts/start-client.cjs --bundle-only --target arm64
+docker buildx create --name qorc-arm64 --driver docker-container arm64-host
+QORC_ARM64_BUILDER=qorc-arm64 node scripts/start-client.cjs --bundle-only --target arm64
 ```
 
-On an x86_64 host, `QOR_ARM64_BUILDER` is required and must point to a native
+On an x86_64 host, `QORC_ARM64_BUILDER` is required and must point to a native
 ARM64 node. Install the
 client tooling and Buildx with:
 
@@ -232,8 +232,8 @@ Every boundary below has a named wire form with a required algorithm binding. Th
 | Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
 | Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and per-call-stream subkeys |
 | Client to server WebSocket | `pq-ws-8` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
-| Anonymous HTTP tunnel | `qor-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM contribution, ML-DSA-87, padded AEAD |
-| Account-root transparency | `qor-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+| Anonymous HTTP tunnel | `qorc-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM contribution, ML-DSA-87, padded AEAD |
+| Account-root transparency | `qorc-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
 | Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 |
 
 - **Authentication.** Signup and login run an OPAQUE-style password envelope
@@ -309,13 +309,13 @@ Every boundary below has a named wire form with a required algorithm binding. Th
 
 ### Quantum-resistance boundary
 
-Qor-Chat is a hybrid system, not a claim that every dependency and network layer
+qorc is a hybrid system, not a claim that every dependency and network layer
 is post-quantum. Current message payloads require ML-KEM-1024 confidentiality and
 ML-DSA-87 authentication layers, and Signal sessions require PQXDH plus SPQR v1.
 The classical X25519 contributions remain in the hybrid derivations so security
 does not depend on only one primitive family.
 
-Qor-controlled client-facing TLS is pinned to TLS 1.3 only, with
+qorc-controlled client-facing TLS is pinned to TLS 1.3 only, with
 `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256` as the only
 ciphersuites and the hybrid `X25519MLKEM768` group as the only key-exchange
 group, on both the Node origin and the HAProxy edge tier. Session tickets,
@@ -395,7 +395,7 @@ cryptography, retry, and cleanup architecture is in [Calling](docs/app/CALLING.m
 ## Bundled desktop runtimes, Tor, and PIR client
 
 Linux and Windows desktop releases embed the target-matched Tor Expert Bundle
-and PIR client into `qor` or `qor.exe`. The build refuses to compile unless the
+and PIR client into `qorc` or `qorc.exe`. The build refuses to compile unless the
 vendored Tor archive matches its release-pinned SHA-256, and hashes the PIR
 client with BLAKE3 into the binary. Both digests are re-checked at runtime before
 either artifact is materialized on disk, so a tampered on-disk copy cannot be
@@ -410,7 +410,7 @@ processes obtained from release-pinned, SHA-256-verified packages. Native Linux
 screen capture carries a curated GStreamer/PipeWire runtime, launcher, plugin
 scanner, SPA support, PipeWire audio/video conversion adapters, and an artifact
 manifest containing every staged file's SHA-256. Package validation rejects a
-runtime missing either adapter. At runtime Qor selects only a complete private
+runtime missing either adapter. At runtime qorc selects only a complete private
 SPA root and disables GStreamer's system plugin search for the capture process,
 so a user's installed GStreamer or SPA plugin set does not replace the packaged
 capture implementation.

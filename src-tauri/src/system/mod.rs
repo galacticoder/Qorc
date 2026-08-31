@@ -2,7 +2,7 @@
 //!
 //! Platform-specific system integration
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 pub mod notification;
 pub mod power;
@@ -26,13 +26,13 @@ fn valid_instance_id(value: &str) -> Option<&str> {
     }
 }
 
-pub fn get_instance_id() -> QorResult<String> {
-    match std::env::var("QOR_INSTANCE_ID") {
+pub fn get_instance_id() -> QorcResult<String> {
+    match std::env::var("QORC_INSTANCE_ID") {
         Ok(value) => valid_instance_id(&value)
             .map(str::to_owned)
-            .ok_or_else(|| QorError::InvalidArgument("Invalid instance identifier".to_string())),
+            .ok_or_else(|| QorcError::InvalidArgument("Invalid instance identifier".to_string())),
         Err(std::env::VarError::NotPresent) => Ok(DEFAULT_INSTANCE_ID.to_string()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(QorError::InvalidArgument(
+        Err(std::env::VarError::NotUnicode(_)) => Err(QorcError::InvalidArgument(
             "Invalid instance identifier".to_string(),
         )),
     }

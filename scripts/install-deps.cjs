@@ -178,7 +178,7 @@ async function installRedisTlsLocal() {
     return false;
   }
 
-  console.log('[INFO] Building Redis with TLS support...');
+  console.log('[INFO] Building Redis...');
   try {
     await execFileAsync('make', ['BUILD_TLS=yes'], { cwd: extractedDir, stdio: 'inherit' });
   } catch (e) {
@@ -214,7 +214,7 @@ async function installRedisTlsLocal() {
     fs.writeFileSync(envPath, newEnv, 'utf8');
     console.log('[INFO] TLS Redis binary installed at', redisBin, 'and recorded as TLS_REDIS_SERVER in .env');
   } catch (e) {
-    console.log('[INFO] TLS Redis installed at', redisBin, 'but failed to persist TLS_REDIS_SERVER in .env:', e.message);
+    console.log('[INFO] TLS Redis installed at', redisBin, 'but failed to save TLS_REDIS_SERVER in .env:', e.message);
   }
 
   return true;
@@ -474,7 +474,7 @@ async function installComponent(name) {
         await execFileAsync('sh', [tmpScript, '-y'], { stdio: 'inherit' });
         return true;
       } catch {
-        console.log('[INFO] Failed to install Rust via rustup');
+        console.log('[INFO] Failed to install Rust through rustup');
         return false;
       }
     }

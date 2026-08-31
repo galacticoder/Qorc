@@ -165,12 +165,12 @@ export function VoiceMessage({
   }, [mediaRequested, seekTo]);
 
   const bars = DEFAULT_WAVEFORM;
-  const playedColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'var(--qor-accent)';
-  const restColor = isCurrentUser ? 'rgba(255,255,255,0.38)' : 'color-mix(in srgb, var(--qor-accent) 32%, transparent)';
+  const playedColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'var(--qorc-accent)';
+  const restColor = isCurrentUser ? 'rgba(255,255,255,0.38)' : 'color-mix(in srgb, var(--qorc-accent) 32%, transparent)';
 
   if (error || urlError) {
     return (
-      <div className="qor-deleted-message-bubble qor-voice-message-error">
+      <div className="qorc-deleted-message-bubble qorc-voice-message-error">
         {urlError || error || 'Failed to load audio'}
       </div>
     );
@@ -178,8 +178,8 @@ export function VoiceMessage({
 
   return (
     <div
-      className={cn('qor-voice', isCurrentUser && 'is-mine')}
-      style={isCurrentUser ? { background: 'var(--qor-accent)' } : undefined}
+      className={cn('qorc-voice', isCurrentUser && 'is-mine')}
+      style={isCurrentUser ? { background: 'var(--qorc-accent)' } : undefined}
     >
       <audio
         ref={audioRef}
@@ -197,7 +197,7 @@ export function VoiceMessage({
 
       <button
         type="button"
-        className="qor-voice-play"
+        className="qorc-voice-play"
         onClick={togglePlayback}
         aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
       >
@@ -208,8 +208,8 @@ export function VoiceMessage({
             : <Play className="w-[18px] h-[18px] translate-x-[1px]" />}
       </button>
 
-      <div className="qor-voice-body">
-        <div className="qor-voice-bars" onClick={handleBarsClick} role="slider" aria-label="Seek voice message" aria-valuenow={Math.round(progress * 100)} tabIndex={0}>
+      <div className="qorc-voice-body">
+        <div className="qorc-voice-bars" onClick={handleBarsClick} role="slider" aria-label="Seek voice message" aria-valuenow={Math.round(progress * 100)} tabIndex={0}>
           {bars.map((amp, i) => (
             <span
               key={i}
@@ -220,9 +220,9 @@ export function VoiceMessage({
             />
           ))}
         </div>
-        <div className="qor-voice-foot">
+        <div className="qorc-voice-foot">
           <Mic className="w-3 h-3 opacity-70" />
-          <span className="qor-voice-time">{formatClockDurationSeconds(remaining)}</span>
+          <span className="qorc-voice-time">{formatClockDurationSeconds(remaining)}</span>
         </div>
       </div>
     </div>

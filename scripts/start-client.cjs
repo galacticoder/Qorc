@@ -12,8 +12,8 @@ const { spawn, execFileSync, execSync } = require('child_process');
 const repoRoot = path.resolve(__dirname, '..');
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 const tauriDir = path.join(repoRoot, 'src-tauri');
-const protocVersion = process.env.QOR_PROTOC_VERSION || '33.0';
-const strawberryPerlUrl = process.env.QOR_STRAWBERRY_PERL_URL ||
+const protocVersion = process.env.QORC_PROTOC_VERSION || '33.0';
+const strawberryPerlUrl = process.env.QORC_STRAWBERRY_PERL_URL ||
     'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip';
 const cliArgs = process.argv.slice(2);
 
@@ -46,10 +46,10 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
     console.log('For x86-to-ARM64 builds, run `node scripts/install-deps.cjs --client-arm64`.');
-    console.log('QOR_ARM64_BUILDER must select a native ARM64 Buildx builder; emulation is unsupported.');
+    console.log('QORC_ARM64_BUILDER must select a native ARM64 Buildx builder; emulation is unsupported.');
     console.log('Native bundles are written to src-tauri/target/release/bundle.');
     console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
-    console.log('Logs are mirrored to logs/instance-<QOR_INSTANCE_ID>-logs.txt');
+    console.log('Logs are mirrored to logs/instance-<QORC_INSTANCE_ID>-logs.txt');
     process.exit(0);
 }
 
@@ -69,7 +69,7 @@ try {
 }
 
 if (process.platform !== 'linux' && process.platform !== 'win32') {
-    logErr('Qor desktop supports only Linux and Windows.');
+    logErr('qorc desktop supports only Linux and Windows.');
     process.exit(1);
 }
 
@@ -102,9 +102,9 @@ if (requestedTarget && targetArchitecture !== process.arch && !(process.arch ===
     process.exit(1);
 }
 
-const instanceId = (process.env.QOR_INSTANCE_ID || '1').trim() || '1';
+const instanceId = (process.env.QORC_INSTANCE_ID || '1').trim() || '1';
 if (instanceId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(instanceId)) {
-    logErr('QOR_INSTANCE_ID must contain only letters, numbers, underscores, or hyphens.');
+    logErr('QORC_INSTANCE_ID must contain only letters, numbers, underscores, or hyphens.');
     process.exit(1);
 }
 const logsDir = path.join(repoRoot, 'logs');
@@ -249,30 +249,30 @@ function clientRuntimeEnv(options = {}) {
             const runtimePath = path.join(gStreamerPluginsPath, 'runtime');
             const runtimeLibPath = path.join(runtimePath, 'lib');
             const gStreamerCapturePluginsPath = path.join(runtimePath, 'capture-plugins');
-            const gStreamerLauncher = path.join(runtimePath, 'bin', 'qor-gst-launch-1.0');
-            const gStreamerPluginScanner = path.join(runtimePath, 'bin', 'qor-gst-plugin-scanner');
+            const gStreamerLauncher = path.join(runtimePath, 'bin', 'qorc-gst-launch-1.0');
+            const gStreamerPluginScanner = path.join(runtimePath, 'bin', 'qorc-gst-plugin-scanner');
             const spaPluginPath = path.join(runtimePath, 'spa-0.2');
             prependPath('GST_PLUGIN_PATH_1_0', gStreamerPluginsPath);
             prependPath('LD_LIBRARY_PATH', runtimeLibPath);
-            env.QOR_GSTREAMER_REQUIRE_BUNDLED = '1';
+            env.QORC_GSTREAMER_REQUIRE_BUNDLED = '1';
             if (fs.statSync(gStreamerCapturePluginsPath, { throwIfNoEntry: false })?.isDirectory()) {
-                env.QOR_GSTREAMER_CAPTURE_PLUGINS = gStreamerCapturePluginsPath;
+                env.QORC_GSTREAMER_CAPTURE_PLUGINS = gStreamerCapturePluginsPath;
             } else {
-                delete env.QOR_GSTREAMER_CAPTURE_PLUGINS;
+                delete env.QORC_GSTREAMER_CAPTURE_PLUGINS;
             }
-            env.QOR_GSTREAMER_RUNTIME_LIB = runtimeLibPath;
+            env.QORC_GSTREAMER_RUNTIME_LIB = runtimeLibPath;
             delete env.SPA_PLUGIN_DIR;
-            delete env.QOR_GSTREAMER_SPA_PLUGINS;
+            delete env.QORC_GSTREAMER_SPA_PLUGINS;
             if (spaRuntimeIsComplete(spaPluginPath)) {
                 env.SPA_PLUGIN_DIR = spaPluginPath;
-                env.QOR_GSTREAMER_SPA_PLUGINS = spaPluginPath;
+                env.QORC_GSTREAMER_SPA_PLUGINS = spaPluginPath;
             }
             if (fs.statSync(gStreamerLauncher, { throwIfNoEntry: false })?.isFile()) {
-                env.QOR_GSTREAMER_LAUNCH = gStreamerLauncher;
+                env.QORC_GSTREAMER_LAUNCH = gStreamerLauncher;
             }
             if (fs.statSync(gStreamerPluginScanner, { throwIfNoEntry: false })?.isFile()) {
                 env.GST_PLUGIN_SCANNER_1_0 = gStreamerPluginScanner;
-                env.QOR_GSTREAMER_PLUGIN_SCANNER = gStreamerPluginScanner;
+                env.QORC_GSTREAMER_PLUGIN_SCANNER = gStreamerPluginScanner;
             }
         }
         const localLib = path.join(os.homedir(), '.local', 'lib');
@@ -281,7 +281,7 @@ function clientRuntimeEnv(options = {}) {
         }
         env.WEBKIT_DMABUF_RENDERER_FORCE_SHM ??= '1';
         env.GST_PLUGIN_FEATURE_RANK ??= 'pulsesrc:512,pulsesink:512';
-        if (env.QOR_CHAT_SOFTWARE_RENDERING) {
+        if (env.QORC_SOFTWARE_RENDERING) {
             env.LIBGL_ALWAYS_SOFTWARE ??= '1';
         }
     }
@@ -331,7 +331,7 @@ function checkWindowsProtoc() {
     }
 
     const zipPath = path.join(repoRoot, '.cache', 'protoc', `protoc-${protocVersion}-win64.zip`);
-    const url = process.env.QOR_PROTOC_URL ||
+    const url = process.env.QORC_PROTOC_URL ||
         `https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip`;
     console.log(`[CLIENT] protoc not found; downloading ${url}`);
 
@@ -530,7 +530,7 @@ function launchApp() {
 
     try { fs.mkdirSync(logsDir, { recursive: true }); } catch { }
     const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
-    logStream.write(`# Qor client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
+    logStream.write(`# qorc client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
     console.log(`[CLIENT] Launching built app (instance ${instanceId})... logging to ${path.relative(repoRoot, logFilePath)}`);
 
     const runProc = spawn(runPath, [], {
@@ -552,7 +552,7 @@ function launchApp() {
     });
 
     runProc.on('close', (exitCode, signal) => {
-        const line = `# Qor client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
+        const line = `# qorc client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
         logStream.end(line, () => process.exit(exitCode ?? 1));
     });
 }
@@ -571,7 +571,7 @@ function getTauriBinaryName() {
         }
     } catch { }
 
-    return process.platform === 'win32' ? 'qor.exe' : 'qor';
+    return process.platform === 'win32' ? 'qorc.exe' : 'qorc';
 }
 
 function removeOldBundleArtifacts() {

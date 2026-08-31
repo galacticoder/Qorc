@@ -4,7 +4,7 @@ use hkdf::Hkdf;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Digest, Sha3_256, Sha3_512, Shake256};
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 /// SHA3-512 hash
 pub fn sha3_512(data: &[u8]) -> [u8; 64] {
@@ -35,10 +35,10 @@ pub fn blake3(data: &[u8]) -> [u8; 32] {
 }
 
 /// HKDF-SHA3-256 key derivation
-pub fn hkdf_sha3_derive_32(input_key: &[u8], salt: &[u8], info: &[u8]) -> QorResult<[u8; 32]> {
+pub fn hkdf_sha3_derive_32(input_key: &[u8], salt: &[u8], info: &[u8]) -> QorcResult<[u8; 32]> {
     let hk = Hkdf::<Sha3_256>::new(Some(salt), input_key);
     let mut output = [0u8; 32];
     hk.expand(info, &mut output)
-        .map_err(|_| QorError::Internal("HKDF expansion failed".to_string()))?;
+        .map_err(|_| QorcError::Internal("HKDF expansion failed".to_string()))?;
     Ok(output)
 }

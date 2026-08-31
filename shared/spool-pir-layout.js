@@ -4,7 +4,7 @@
 
 import { ML_KEM_1024_CIPHERTEXT_BYTES } from './crypto-sizes.js';
 
-export const SPOOL_PIR_LAYOUT = 'qor-spool-pir-v2';
+export const SPOOL_PIR_LAYOUT = 'qorc-spool-pir-v2';
 export const SPOOL_PIR_EPOCH_UNAVAILABLE = 'spool_pir_epoch_unavailable';
 
 export const SPOOL_PIR_RECORD_BYTES = ML_KEM_1024_CIPHERTEXT_BYTES + 12 + (131072 + 16);

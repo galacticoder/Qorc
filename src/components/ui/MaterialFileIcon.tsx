@@ -64,16 +64,16 @@ export function MaterialFileIcon({ fileName, className }: MaterialFileIconProps)
   const { baseUrl, lightUrl } = resolveMaterialFileIcon(fileName);
   const hasLightVariant = lightUrl !== baseUrl;
   const rootClassName = [
-    'qor-material-file-icon',
+    'qorc-material-file-icon',
     hasLightVariant ? 'has-light-variant' : '',
     className || '',
   ].filter(Boolean).join(' ');
 
   return (
     <span className={rootClassName} aria-hidden="true">
-      <img className="qor-material-file-icon-base" src={baseUrl} alt="" draggable={false} />
+      <img className="qorc-material-file-icon-base" src={baseUrl} alt="" draggable={false} />
       {hasLightVariant && (
-        <img className="qor-material-file-icon-light" src={lightUrl} alt="" draggable={false} />
+        <img className="qorc-material-file-icon-light" src={lightUrl} alt="" draggable={false} />
       )}
     </span>
   );

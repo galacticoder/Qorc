@@ -104,7 +104,7 @@ impl Drop for ExternalDialogGuard {
     }
 }
 
-/// Get the runtime qor instance id used for per instance storage paths
+/// Get the runtime qorc instance id used for per instance storage paths
 #[tauri::command]
 pub fn get_instance_id() -> Result<String, String> {
     crate::system::get_instance_id().map_err(|error| error.safe_message())
@@ -209,7 +209,7 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         let confirmed = confirm_native_dialog(
             &app,
             "Show media devices",
-            format!("Allow Qor to list your {description}?"),
+            format!("Allow qorc to list your {description}?"),
             "Show devices",
         )
         .await;
@@ -229,9 +229,9 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
                 "Allow media access"
             },
             if enumeration_only {
-                format!("Allow Qor to list your {description}?")
+                format!("Allow qorc to list your {description}?")
             } else {
-                format!("Allow Qor to access your {description} for this action?")
+                format!("Allow qorc to access your {description} for this action?")
             },
             if enumeration_only {
                 "Show devices"
@@ -270,7 +270,7 @@ pub async fn get_screen_sources(app: AppHandle) -> Result<Vec<ScreenSource>, Str
     let confirmed = confirm_native_dialog(
         &app,
         "Show screen sources",
-        "Show Qor the names of your open windows and displays for the screen-share picker? Nothing is shared until you select a source."
+        "Show qorc the names of your open windows and displays for the screen-share picker? Nothing is shared until you select a source."
             .to_string(),
         "Show sources",
     )

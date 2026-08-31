@@ -20,7 +20,7 @@ use tokio::io::AsyncReadExt;
 use tracing::{error, info, warn};
 use zeroize::Zeroize;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded_tor_bundle.rs"));
@@ -50,8 +50,8 @@ const TOR_KEEPALIVE_PERIOD_SECS: u32 = 60;
 const TRANSPORT_DIR: &str = "pluggable_transports";
 const DEFAULT_TRANSPORT: &str = "lyrebird";
 const BUNDLE_MARKER_FILE: &str = ".bundle-version";
-fn invalid_tor_bundle(message: impl Into<String>) -> QorError {
-    QorError::Verification(format!("Invalid Tor bundle: {}", message.into()))
+fn invalid_tor_bundle(message: impl Into<String>) -> QorcError {
+    QorcError::Verification(format!("Invalid Tor bundle: {}", message.into()))
 }
 
 fn is_tor_bundle_directory(relative: &Path) -> bool {
@@ -107,7 +107,7 @@ fn is_allowed_tor_bundle_path(relative: &Path) -> bool {
     is_managed_tor_top_level_name(first)
 }
 
-fn normalize_tor_bundle_path(path: &Path) -> QorResult<Option<PathBuf>> {
+fn normalize_tor_bundle_path(path: &Path) -> QorcResult<Option<PathBuf>> {
     let encoded = path
         .to_str()
         .ok_or_else(|| invalid_tor_bundle("entry path is not valid UTF-8"))?;
@@ -151,7 +151,7 @@ fn normalize_tor_bundle_path(path: &Path) -> QorResult<Option<PathBuf>> {
     Ok(Some(relative))
 }
 
-fn is_reviewed_ignored_bundle_path(path: &Path) -> QorResult<bool> {
+fn is_reviewed_ignored_bundle_path(path: &Path) -> QorcResult<bool> {
     let encoded = path
         .to_str()
         .ok_or_else(|| invalid_tor_bundle("entry path is not valid UTF-8"))?;
@@ -218,7 +218,7 @@ struct BundleFileDigest {
     sha256: [u8; 32],
 }
 
-fn bundle_relative_string(path: &Path) -> QorResult<String> {
+fn bundle_relative_string(path: &Path) -> QorcResult<String> {
     let value = path
         .to_str()
         .ok_or_else(|| invalid_tor_bundle("managed path is not valid UTF-8"))?;
@@ -235,7 +235,7 @@ fn digest_reader<R: Read>(
     reader: &mut R,
     expected_size: u64,
     total_bytes: &mut u64,
-) -> QorResult<[u8; 32]> {
+) -> QorcResult<[u8; 32]> {
     *total_bytes = total_bytes
         .checked_add(expected_size)
         .ok_or_else(|| invalid_tor_bundle("expanded data is too large"))?;
@@ -248,7 +248,7 @@ fn digest_reader<R: Read>(
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = reader.read(&mut buffer).map_err(|error| {
-            QorError::FileSystem(format!("Failed to hash Tor bundle file: {}", error))
+            QorcError::FileSystem(format!("Failed to hash Tor bundle file: {}", error))
         })?;
         if read == 0 {
             break;
@@ -269,7 +269,7 @@ fn digest_reader<R: Read>(
 
 fn authenticated_archive_manifest_from_reader<R: Read>(
     reader: R,
-) -> QorResult<Vec<BundleFileDigest>> {
+) -> QorcResult<Vec<BundleFileDigest>> {
     let decoder = flate2::read::GzDecoder::new(reader);
     let mut archive = tar::Archive::new(decoder);
     let mut files = Vec::new();
@@ -336,22 +336,22 @@ fn authenticated_archive_manifest_from_reader<R: Read>(
     Ok(files)
 }
 
-fn authenticated_embedded_archive_manifest() -> QorResult<Vec<BundleFileDigest>> {
+fn authenticated_embedded_archive_manifest() -> QorcResult<Vec<BundleFileDigest>> {
     if embedded::EMBEDDED_TOR_BUNDLE.len() as u64 > MAX_TOR_BUNDLE_BYTES {
-        return Err(QorError::Verification(
+        return Err(QorcError::Verification(
             "Embedded Tor bundle exceeds its size limit".to_string(),
         ));
     }
     authenticated_archive_manifest_from_reader(Cursor::new(embedded::EMBEDDED_TOR_BUNDLE))
 }
 
-fn installed_bundle_manifest(root: &Path) -> QorResult<Vec<BundleFileDigest>> {
+fn installed_bundle_manifest(root: &Path) -> QorcResult<Vec<BundleFileDigest>> {
     let mut pending = Vec::new();
     for entry in std::fs::read_dir(root).map_err(|error| {
-        QorError::FileSystem(format!("Failed to inspect installed Tor bundle: {}", error))
+        QorcError::FileSystem(format!("Failed to inspect installed Tor bundle: {}", error))
     })? {
         let entry = entry.map_err(|error| {
-            QorError::FileSystem(format!("Failed to inspect installed Tor entry: {}", error))
+            QorcError::FileSystem(format!("Failed to inspect installed Tor entry: {}", error))
         })?;
         if is_managed_tor_top_level_name(&entry.file_name()) {
             pending.push((PathBuf::from(entry.file_name()), entry.path()));
@@ -369,7 +369,7 @@ fn installed_bundle_manifest(root: &Path) -> QorResult<Vec<BundleFileDigest>> {
             return Err(invalid_tor_bundle("too many installed entries"));
         }
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            QorError::FileSystem(format!("Failed to inspect installed Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to inspect installed Tor file: {}", error))
         })?;
         if metadata.file_type().is_symlink() {
             return Err(invalid_tor_bundle("installed bundle contains a link"));
@@ -381,13 +381,13 @@ fn installed_bundle_manifest(root: &Path) -> QorResult<Vec<BundleFileDigest>> {
                 ));
             }
             for entry in std::fs::read_dir(&path).map_err(|error| {
-                QorError::FileSystem(format!(
+                QorcError::FileSystem(format!(
                     "Failed to inspect installed Tor directory: {}",
                     error
                 ))
             })? {
                 let entry = entry.map_err(|error| {
-                    QorError::FileSystem(format!(
+                    QorcError::FileSystem(format!(
                         "Failed to inspect installed Tor entry: {}",
                         error
                     ))
@@ -411,10 +411,10 @@ fn installed_bundle_manifest(root: &Path) -> QorResult<Vec<BundleFileDigest>> {
             options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
         let mut file = options.open(&path).map_err(|error| {
-            QorError::FileSystem(format!("Failed to open installed Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to open installed Tor file: {}", error))
         })?;
         let opened = file.metadata().map_err(|error| {
-            QorError::FileSystem(format!("Failed to inspect installed Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to inspect installed Tor file: {}", error))
         })?;
         if !opened.file_type().is_file() || opened.len() != metadata.len() {
             return Err(invalid_tor_bundle(
@@ -433,13 +433,13 @@ fn installed_bundle_manifest(root: &Path) -> QorResult<Vec<BundleFileDigest>> {
     Ok(files)
 }
 
-fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut String) -> QorResult<usize> {
+fn read_bounded_line<R: BufRead>(reader: &mut R, line: &mut String) -> QorcResult<usize> {
     line.clear();
     let mut limited = reader.take((MAX_CONTROL_LINE_BYTES + 1) as u64);
     let read = limited.read_line(line)?;
     if read > MAX_CONTROL_LINE_BYTES {
         line.zeroize();
-        return Err(QorError::TorControl(
+        return Err(QorcError::TorControl(
             "Tor control or log line exceeds the size limit".to_string(),
         ));
     }
@@ -452,12 +452,12 @@ fn is_regular_file_without_links(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn remove_managed_path(path: &Path) -> QorResult<()> {
+fn remove_managed_path(path: &Path) -> QorcResult<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            return Err(QorError::FileSystem(format!(
+            return Err(QorcError::FileSystem(format!(
                 "Failed to inspect managed Tor path: {}",
                 error
             )));
@@ -473,22 +473,22 @@ fn remove_managed_path(path: &Path) -> QorResult<()> {
         std::fs::remove_file(path)
     };
     result.map_err(|error| {
-        QorError::FileSystem(format!("Failed to remove managed Tor path: {}", error))
+        QorcError::FileSystem(format!("Failed to remove managed Tor path: {}", error))
     })
 }
 
-fn validate_private_directory(path: &Path) -> QorResult<()> {
+fn validate_private_directory(path: &Path) -> QorcResult<()> {
     std::fs::create_dir_all(path).map_err(|error| {
-        QorError::FileSystem(format!("Failed to create private Tor directory: {}", error))
+        QorcError::FileSystem(format!("Failed to create private Tor directory: {}", error))
     })?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        QorError::FileSystem(format!(
+        QorcError::FileSystem(format!(
             "Failed to inspect private Tor directory: {}",
             error
         ))
     })?;
     if !metadata.file_type().is_dir() {
-        return Err(QorError::FileSystem(
+        return Err(QorcError::FileSystem(
             "Private Tor path is not a directory".to_string(),
         ));
     }
@@ -497,26 +497,26 @@ fn validate_private_directory(path: &Path) -> QorResult<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
             |error| {
-                QorError::FileSystem(format!("Failed to secure private Tor directory: {}", error))
+                QorcError::FileSystem(format!("Failed to secure private Tor directory: {}", error))
             },
         )?;
     }
     Ok(())
 }
 
-fn write_private_file(path: &Path, contents: &[u8]) -> QorResult<()> {
+fn write_private_file(path: &Path, contents: &[u8]) -> QorcResult<()> {
     let parent = path.parent().ok_or_else(|| {
-        QorError::FileSystem("Private Tor file has no parent directory".to_string())
+        QorcError::FileSystem("Private Tor file has no parent directory".to_string())
     })?;
     validate_private_directory(parent)?;
 
     let file_name = path
         .file_name()
         .and_then(OsStr::to_str)
-        .ok_or_else(|| QorError::FileSystem("Private Tor file name is invalid".to_string()))?;
+        .ok_or_else(|| QorcError::FileSystem("Private Tor file name is invalid".to_string()))?;
     let temporary = parent.join(format!(".{}-{}.tmp", file_name, uuid::Uuid::new_v4()));
 
-    let result = (|| -> QorResult<()> {
+    let result = (|| -> QorcResult<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -527,13 +527,13 @@ fn write_private_file(path: &Path, contents: &[u8]) -> QorResult<()> {
                 .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
         let mut file = options.open(&temporary).map_err(|error| {
-            QorError::FileSystem(format!("Failed to create private Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to create private Tor file: {}", error))
         })?;
         file.write_all(contents).map_err(|error| {
-            QorError::FileSystem(format!("Failed to write private Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to write private Tor file: {}", error))
         })?;
         file.sync_all().map_err(|error| {
-            QorError::FileSystem(format!("Failed to finalize private Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to finalize private Tor file: {}", error))
         })?;
 
         let rename_result = std::fs::rename(&temporary, path);
@@ -551,7 +551,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> QorResult<()> {
             }
         };
         rename_result.map_err(|error| {
-            QorError::FileSystem(format!("Failed to install private Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to install private Tor file: {}", error))
         })?;
         if let Ok(directory) = std::fs::File::open(parent) {
             let _ = directory.sync_all();
@@ -565,12 +565,12 @@ fn write_private_file(path: &Path, contents: &[u8]) -> QorResult<()> {
     result
 }
 
-fn read_private_text_file(path: &Path, max_bytes: usize) -> QorResult<String> {
+fn read_private_text_file(path: &Path, max_bytes: usize) -> QorcResult<String> {
     let link_metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        QorError::FileSystem(format!("Failed to inspect private Tor file: {}", error))
+        QorcError::FileSystem(format!("Failed to inspect private Tor file: {}", error))
     })?;
     if !link_metadata.file_type().is_file() || link_metadata.len() > max_bytes as u64 {
-        return Err(QorError::FileSystem(
+        return Err(QorcError::FileSystem(
             "Private Tor file has an invalid format".to_string(),
         ));
     }
@@ -583,13 +583,13 @@ fn read_private_text_file(path: &Path, max_bytes: usize) -> QorResult<String> {
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
     let file = options.open(path).map_err(|error| {
-        QorError::FileSystem(format!("Failed to open private Tor file: {}", error))
+        QorcError::FileSystem(format!("Failed to open private Tor file: {}", error))
     })?;
     let metadata = file.metadata().map_err(|error| {
-        QorError::FileSystem(format!("Failed to inspect private Tor file: {}", error))
+        QorcError::FileSystem(format!("Failed to inspect private Tor file: {}", error))
     })?;
     if !metadata.file_type().is_file() || metadata.len() > max_bytes as u64 {
-        return Err(QorError::FileSystem(
+        return Err(QorcError::FileSystem(
             "Private Tor file has an invalid format".to_string(),
         ));
     }
@@ -597,7 +597,7 @@ fn read_private_text_file(path: &Path, max_bytes: usize) -> QorResult<String> {
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(QorError::FileSystem(
+            return Err(QorcError::FileSystem(
                 "Private Tor file permissions are too broad".to_string(),
             ));
         }
@@ -607,16 +607,16 @@ fn read_private_text_file(path: &Path, max_bytes: usize) -> QorResult<String> {
     file.take((max_bytes as u64).saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            QorError::FileSystem(format!("Failed to read private Tor file: {}", error))
+            QorcError::FileSystem(format!("Failed to read private Tor file: {}", error))
         })?;
     if bytes.len() > max_bytes {
         bytes.zeroize();
-        return Err(QorError::FileSystem(
+        return Err(QorcError::FileSystem(
             "Private Tor file has an invalid format".to_string(),
         ));
     }
     String::from_utf8(bytes)
-        .map_err(|_| QorError::FileSystem("Private Tor file is not valid UTF-8".to_string()))
+        .map_err(|_| QorcError::FileSystem("Private Tor file is not valid UTF-8".to_string()))
 }
 
 lazy_static::lazy_static! {
@@ -748,7 +748,7 @@ fn spawn_managed_tor(command: &mut Command) -> std::io::Result<Child> {
 }
 
 impl TorManager {
-    fn pinned_bundle_target(&self) -> QorResult<(&'static str, &'static str)> {
+    fn pinned_bundle_target(&self) -> QorcResult<(&'static str, &'static str)> {
         if self.platform == embedded::EMBEDDED_TOR_PLATFORM
             && self.arch == embedded::EMBEDDED_TOR_ARCH
         {
@@ -757,7 +757,7 @@ impl TorManager {
                 embedded::EMBEDDED_TOR_BUNDLE_SHA256_HEX,
             ))
         } else {
-            Err(QorError::NotSupported(format!(
+            Err(QorcError::NotSupported(format!(
                 "The embedded Tor bundle targets {}/{}, not {}/{}",
                 embedded::EMBEDDED_TOR_PLATFORM,
                 embedded::EMBEDDED_TOR_ARCH,
@@ -1077,12 +1077,12 @@ impl TorManager {
         self.get_data_dir().join(CONTROL_COOKIE_FILE)
     }
 
-    fn read_control_cookie(path: &Path) -> QorResult<[u8; 32]> {
+    fn read_control_cookie(path: &Path) -> QorcResult<[u8; 32]> {
         let link_metadata = std::fs::symlink_metadata(path).map_err(|error| {
-            QorError::TorControl(format!("Tor control cookie is unavailable: {}", error))
+            QorcError::TorControl(format!("Tor control cookie is unavailable: {}", error))
         })?;
         if !link_metadata.file_type().is_file() {
-            return Err(QorError::TorControl(
+            return Err(QorcError::TorControl(
                 "Tor control cookie is not a regular file".to_string(),
             ));
         }
@@ -1095,13 +1095,13 @@ impl TorManager {
             options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         }
         let mut file = options.open(path).map_err(|error| {
-            QorError::TorControl(format!("Failed to open Tor control cookie: {}", error))
+            QorcError::TorControl(format!("Failed to open Tor control cookie: {}", error))
         })?;
         let metadata = file.metadata().map_err(|error| {
-            QorError::TorControl(format!("Failed to inspect Tor control cookie: {}", error))
+            QorcError::TorControl(format!("Failed to inspect Tor control cookie: {}", error))
         })?;
         if !metadata.file_type().is_file() || metadata.len() != 32 {
-            return Err(QorError::TorControl(
+            return Err(QorcError::TorControl(
                 "Tor control cookie has an invalid format".to_string(),
             ));
         }
@@ -1109,7 +1109,7 @@ impl TorManager {
         {
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(QorError::TorControl(
+                return Err(QorcError::TorControl(
                     "Tor control cookie permissions are too broad".to_string(),
                 ));
             }
@@ -1118,7 +1118,7 @@ impl TorManager {
         let mut cookie = [0u8; 32];
         file.read_exact(&mut cookie).map_err(|error| {
             cookie.zeroize();
-            QorError::TorControl(format!("Failed to read Tor control cookie: {}", error))
+            QorcError::TorControl(format!("Failed to read Tor control cookie: {}", error))
         })?;
         Ok(cookie)
     }
@@ -1178,7 +1178,7 @@ impl TorManager {
         format!("./{}/{}", TRANSPORT_DIR, name)
     }
 
-    fn valid_executable_path(path: &Path) -> QorResult<()> {
+    fn valid_executable_path(path: &Path) -> QorcResult<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1194,7 +1194,7 @@ impl TorManager {
         Ok(())
     }
 
-    fn validate_managed_executables(&self) -> QorResult<()> {
+    fn validate_managed_executables(&self) -> QorcResult<()> {
         if is_regular_file_without_links(&self.tor_path) {
             Self::valid_executable_path(&self.tor_path)?;
         }
@@ -1211,10 +1211,10 @@ impl TorManager {
         &self,
         value: &str,
         required_path: &str,
-    ) -> QorResult<String> {
+    ) -> QorcResult<String> {
         let parts: Vec<&str> = value.split_whitespace().collect();
         if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("exec") {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid ClientTransportPlugin directive".to_string(),
             ));
         }
@@ -1234,19 +1234,19 @@ impl TorManager {
             )
         });
         if methods.is_empty() || !supported {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Unsupported bridge transport method".to_string(),
             ));
         }
 
         if raw_path != required_path {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Only the authenticated bundled bridge transport is allowed".to_string(),
             ));
         }
         let resolved = self.managed_transport_path(DEFAULT_TRANSPORT);
         if !is_regular_file_without_links(&resolved) {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Authenticated bridge transport binary not found".to_string(),
             ));
         }
@@ -1256,21 +1256,21 @@ impl TorManager {
         Ok(format!("{} exec {}", methods, config_path))
     }
 
-    fn normalize_client_transport_plugin_value(&self, value: &str) -> QorResult<String> {
+    fn normalize_client_transport_plugin_value(&self, value: &str) -> QorcResult<String> {
         self.normalize_client_transport_plugin_value_for_path(
             value,
             &Self::managed_transport_input_path(DEFAULT_TRANSPORT),
         )
     }
 
-    fn normalize_stored_transport_plugin_value(&self, value: &str) -> QorResult<String> {
+    fn normalize_stored_transport_plugin_value(&self, value: &str) -> QorcResult<String> {
         self.normalize_client_transport_plugin_value_for_path(
             value,
             &self.managed_transport_config_path(DEFAULT_TRANSPORT),
         )
     }
 
-    async fn normalize_configured_runtime(&self) -> QorResult<()> {
+    async fn normalize_configured_runtime(&self) -> QorcResult<()> {
         let config = read_private_text_file(&self.config_path, MAX_CONFIG_SIZE)?;
         let (normalized, data_dir) = self.validate_stored_config(&config)?;
         let changed = normalized.trim_end() != config.trim_end();
@@ -1286,14 +1286,14 @@ impl TorManager {
     }
 
     /// Get Tor version
-    pub async fn get_tor_version(&self) -> QorResult<String> {
+    pub async fn get_tor_version(&self) -> QorcResult<String> {
         if let Some(version) = self.version_cache.read().clone() {
             return Ok(version);
         }
 
         let (_, checksum) = self.pinned_bundle_target()?;
         if !self.has_current_bundle(checksum) {
-            return Err(QorError::Verification(
+            return Err(QorcError::Verification(
                 "Embedded Tor runtime is unavailable".to_string(),
             ));
         }
@@ -1307,9 +1307,9 @@ impl TorManager {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| QorError::TorProcess(format!("Failed to get version: {}", e)))?;
+            .map_err(|e| QorcError::TorProcess(format!("Failed to get version: {}", e)))?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            QorError::TorProcess("Tor version command did not provide stdout".to_string())
+            QorcError::TorProcess("Tor version command did not provide stdout".to_string())
         })?;
         let mut output = Vec::with_capacity(256);
         let version_result = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1317,11 +1317,11 @@ impl TorManager {
                 .take(4097)
                 .read_to_end(&mut output)
                 .await
-                .map_err(|e| QorError::TorProcess(format!("Failed to read Tor version: {}", e)))?;
+                .map_err(|e| QorcError::TorProcess(format!("Failed to read Tor version: {}", e)))?;
             let status = child.wait().await.map_err(|e| {
-                QorError::TorProcess(format!("Failed to wait for Tor version: {}", e))
+                QorcError::TorProcess(format!("Failed to wait for Tor version: {}", e))
             })?;
-            Ok::<_, QorError>(status)
+            Ok::<_, QorcError>(status)
         })
         .await;
         let status = match version_result {
@@ -1330,14 +1330,14 @@ impl TorManager {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 output.zeroize();
-                return Err(QorError::TorProcess(
+                return Err(QorcError::TorProcess(
                     "Tor version command timed out".to_string(),
                 ));
             }
         };
         if !status.success() || output.len() > 4096 {
             output.zeroize();
-            return Err(QorError::TorProcess(
+            return Err(QorcError::TorProcess(
                 "Tor version command returned invalid output".to_string(),
             ));
         }
@@ -1360,7 +1360,7 @@ impl TorManager {
         Ok("unknown".to_string())
     }
 
-    pub async fn get_info(&self) -> QorResult<TorInfo> {
+    pub async fn get_info(&self) -> QorcResult<TorInfo> {
         self.refresh_bootstrap_from_control().await;
 
         Ok(TorInfo {
@@ -1375,10 +1375,10 @@ impl TorManager {
         })
     }
 
-    async fn materialize_embedded_bundle(&self) -> QorResult<()> {
+    async fn materialize_embedded_bundle(&self) -> QorcResult<()> {
         let _operation_guard = self.operation_lock.lock().await;
         if self.is_running() {
-            return Err(QorError::TorProcess(
+            return Err(QorcError::TorProcess(
                 "Cannot replace the embedded Tor runtime while it is running".to_string(),
             ));
         }
@@ -1391,7 +1391,7 @@ impl TorManager {
 
         let actual_checksum = Sha256::digest(embedded::EMBEDDED_TOR_BUNDLE);
         if actual_checksum.as_slice() != embedded::EMBEDDED_TOR_BUNDLE_SHA256 {
-            return Err(QorError::Verification(
+            return Err(QorcError::Verification(
                 "Embedded Tor bundle failed its runtime integrity check".to_string(),
             ));
         }
@@ -1399,7 +1399,7 @@ impl TorManager {
             .await?;
         self.validate_managed_executables()?;
         if !self.has_current_bundle(expected_checksum) {
-            return Err(QorError::Verification(
+            return Err(QorcError::Verification(
                 "Materialized Tor runtime does not match its embedded archive".to_string(),
             ));
         }
@@ -1410,7 +1410,7 @@ impl TorManager {
         &self,
         archive_bytes: Vec<u8>,
         checksum: &str,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let tor_dir = self.tor_dir.clone();
         let tor_executable = self.executable_name("tor");
         let transport_executable = self.executable_name(DEFAULT_TRANSPORT);
@@ -1419,10 +1419,10 @@ impl TorManager {
 
         tokio::task::spawn_blocking(move || {
             for entry in std::fs::read_dir(&tor_dir).map_err(|error| {
-                QorError::FileSystem(format!("Failed to inspect Tor directory: {}", error))
+                QorcError::FileSystem(format!("Failed to inspect Tor directory: {}", error))
             })? {
                 let entry = entry.map_err(|error| {
-                    QorError::FileSystem(format!("Failed to inspect Tor entry: {}", error))
+                    QorcError::FileSystem(format!("Failed to inspect Tor entry: {}", error))
                 })?;
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else {
@@ -1439,7 +1439,7 @@ impl TorManager {
             let staging_dir =
                 tor_dir.join(format!(".bundle-staging-{}", uuid::Uuid::new_v4().simple()));
             std::fs::create_dir(&staging_dir).map_err(|error| {
-                QorError::FileSystem(format!("Failed to create Tor staging directory: {}", error))
+                QorcError::FileSystem(format!("Failed to create Tor staging directory: {}", error))
             })?;
             #[cfg(unix)]
             {
@@ -1447,14 +1447,14 @@ impl TorManager {
                 std::fs::set_permissions(&staging_dir, std::fs::Permissions::from_mode(0o700))?;
             }
 
-            let result = (|| -> QorResult<()> {
+            let result = (|| -> QorcResult<()> {
                 if archive_bytes.len() as u64 > MAX_TOR_BUNDLE_BYTES {
-                    return Err(QorError::Verification(
+                    return Err(QorcError::Verification(
                         "Embedded Tor archive exceeds its size limit".to_string(),
                     ));
                 }
                 if hex::encode(Sha256::digest(&archive_bytes)) != expected_checksum {
-                    return Err(QorError::Verification(
+                    return Err(QorcError::Verification(
                         "Embedded Tor archive failed authentication before extraction".to_string(),
                     ));
                 }
@@ -1498,7 +1498,7 @@ impl TorManager {
                             ));
                         }
                         std::fs::create_dir_all(&destination).map_err(|error| {
-                            QorError::FileSystem(format!(
+                            QorcError::FileSystem(format!(
                                 "Failed to create Tor bundle directory: {}",
                                 error
                             ))
@@ -1535,7 +1535,7 @@ impl TorManager {
                         .parent()
                         .ok_or_else(|| invalid_tor_bundle("entry has no parent directory"))?;
                     std::fs::create_dir_all(parent).map_err(|error| {
-                        QorError::FileSystem(format!(
+                        QorcError::FileSystem(format!(
                             "Failed to create Tor bundle parent directory: {}",
                             error
                         ))
@@ -1545,13 +1545,13 @@ impl TorManager {
                         .create_new(true)
                         .open(&destination)
                         .map_err(|error| {
-                            QorError::FileSystem(format!(
+                            QorcError::FileSystem(format!(
                                 "Failed to create Tor bundle file: {}",
                                 error
                             ))
                         })?;
                     let copied = std::io::copy(&mut entry, &mut output).map_err(|error| {
-                        QorError::FileSystem(format!(
+                        QorcError::FileSystem(format!(
                             "Failed to extract Tor bundle file: {}",
                             error
                         ))
@@ -1560,7 +1560,7 @@ impl TorManager {
                         return Err(invalid_tor_bundle("entry size does not match its header"));
                     }
                     output.sync_all().map_err(|error| {
-                        QorError::FileSystem(format!(
+                        QorcError::FileSystem(format!(
                             "Failed to finalize Tor bundle file: {}",
                             error
                         ))
@@ -1589,10 +1589,10 @@ impl TorManager {
                 }
 
                 for entry in std::fs::read_dir(&tor_dir).map_err(|error| {
-                    QorError::FileSystem(format!("Failed to inspect Tor directory: {}", error))
+                    QorcError::FileSystem(format!("Failed to inspect Tor directory: {}", error))
                 })? {
                     let entry = entry.map_err(|error| {
-                        QorError::FileSystem(format!("Failed to inspect Tor entry: {}", error))
+                        QorcError::FileSystem(format!("Failed to inspect Tor entry: {}", error))
                     })?;
                     if is_managed_tor_top_level_name(&entry.file_name())
                         || entry.file_name() == OsStr::new(BUNDLE_MARKER_FILE)
@@ -1602,17 +1602,17 @@ impl TorManager {
                 }
 
                 for entry in std::fs::read_dir(&staging_dir).map_err(|error| {
-                    QorError::FileSystem(format!("Failed to inspect staged Tor bundle: {}", error))
+                    QorcError::FileSystem(format!("Failed to inspect staged Tor bundle: {}", error))
                 })? {
                     let entry = entry.map_err(|error| {
-                        QorError::FileSystem(format!("Failed to inspect staged entry: {}", error))
+                        QorcError::FileSystem(format!("Failed to inspect staged entry: {}", error))
                     })?;
                     let name = entry.file_name();
                     if !is_managed_tor_top_level_name(&name) {
                         return Err(invalid_tor_bundle("unexpected staged top-level entry"));
                     }
                     std::fs::rename(entry.path(), tor_dir.join(&name)).map_err(|error| {
-                        QorError::FileSystem(format!(
+                        QorcError::FileSystem(format!(
                             "Failed to install staged Tor entry: {}",
                             error
                         ))
@@ -1620,7 +1620,7 @@ impl TorManager {
                 }
 
                 std::fs::remove_dir(&staging_dir).map_err(|error| {
-                    QorError::FileSystem(format!(
+                    QorcError::FileSystem(format!(
                         "Failed to remove Tor staging directory: {}",
                         error
                     ))
@@ -1639,7 +1639,7 @@ impl TorManager {
             result
         })
         .await
-        .map_err(|e| QorError::Internal(format!("Task failed: {}", e)))??;
+        .map_err(|e| QorcError::Internal(format!("Task failed: {}", e)))??;
 
         Ok(())
     }
@@ -1648,13 +1648,13 @@ impl TorManager {
         &self,
         config: &str,
         stored: bool,
-    ) -> QorResult<(String, Option<PathBuf>)> {
+    ) -> QorcResult<(String, Option<PathBuf>)> {
         if config.is_empty() {
-            return Err(QorError::InvalidArgument("Empty configuration".to_string()));
+            return Err(QorcError::InvalidArgument("Empty configuration".to_string()));
         }
 
         if config.len() > MAX_CONFIG_SIZE {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Configuration too large".to_string(),
             ));
         }
@@ -1663,7 +1663,7 @@ impl TorManager {
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Configuration contains forbidden characters".to_string(),
             ));
         }
@@ -1686,7 +1686,7 @@ impl TorManager {
             }
 
             if trimmed.len() > 1024 {
-                return Err(QorError::InvalidArgument(
+                return Err(QorcError::InvalidArgument(
                     "Configuration line too long".to_string(),
                 ));
             }
@@ -1696,7 +1696,7 @@ impl TorManager {
             let value = parts.get(1).map(|s| s.trim()).unwrap_or("");
 
             if !ALLOWED_DIRECTIVES.contains(directive) {
-                return Err(QorError::InvalidArgument(format!(
+                return Err(QorcError::InvalidArgument(format!(
                     "Forbidden directive: {}",
                     directive
                 )));
@@ -1704,7 +1704,7 @@ impl TorManager {
 
             if directive == "DataDirectory" {
                 if saw_data_directory {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "Duplicate DataDirectory directive".to_string(),
                     ));
                 }
@@ -1716,7 +1716,7 @@ impl TorManager {
                     self.tor_dir.join(supplied)
                 };
                 if resolved != managed_data_dir {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "DataDirectory must use the managed Tor data path".to_string(),
                     ));
                 }
@@ -1730,7 +1730,7 @@ impl TorManager {
                 normalized.push(format!("ClientTransportPlugin {}", normalized_value));
             } else if directive == "CookieAuthentication" {
                 if saw_cookie_authentication || value != "1" {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "CookieAuthentication must appear once with value 1".to_string(),
                     ));
                 }
@@ -1738,7 +1738,7 @@ impl TorManager {
                 normalized.push("CookieAuthentication 1".to_string());
             } else if directive == "SafeLogging" {
                 if saw_safe_logging || value != "1" {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "SafeLogging must appear once with value 1".to_string(),
                     ));
                 }
@@ -1746,7 +1746,7 @@ impl TorManager {
                 normalized.push("SafeLogging 1".to_string());
             } else if directive == "ClientOnly" {
                 if saw_client_only || value != "1" {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "ClientOnly must appear once with value 1".to_string(),
                     ));
                 }
@@ -1754,7 +1754,7 @@ impl TorManager {
                 normalized.push("ClientOnly 1".to_string());
             } else if directive == "Log" {
                 if saw_log || value != "notice stdout" {
-                    return Err(QorError::InvalidArgument(
+                    return Err(QorcError::InvalidArgument(
                         "Log must appear once as notice stdout".to_string(),
                     ));
                 }
@@ -1798,15 +1798,15 @@ impl TorManager {
         Ok((normalized.join("\n"), Some(managed_data_dir)))
     }
 
-    fn validate_config(&self, config: &str) -> QorResult<(String, Option<PathBuf>)> {
+    fn validate_config(&self, config: &str) -> QorcResult<(String, Option<PathBuf>)> {
         self.validate_config_with_transport_mode(config, false)
     }
 
-    fn validate_stored_config(&self, config: &str) -> QorResult<(String, Option<PathBuf>)> {
+    fn validate_stored_config(&self, config: &str) -> QorcResult<(String, Option<PathBuf>)> {
         self.validate_config_with_transport_mode(config, true)
     }
 
-    pub async fn configure(&self, config: &TorConfig) -> QorResult<bool> {
+    pub async fn configure(&self, config: &TorConfig) -> QorcResult<bool> {
         let _operation_guard = self.operation_lock.lock().await;
         if self.is_running() {
             self.shutdown_now();
@@ -1826,12 +1826,12 @@ impl TorManager {
         Ok(true)
     }
 
-    pub async fn mirror_configuration_from(&self, source: &TorManager) -> QorResult<bool> {
+    pub async fn mirror_configuration_from(&self, source: &TorManager) -> QorcResult<bool> {
         let source_config = fs::read_to_string(&source.config_path).await.map_err(|_| {
-            QorError::TorProcess("Primary Tor configuration is unavailable".to_string())
+            QorcError::TorProcess("Primary Tor configuration is unavailable".to_string())
         })?;
         if source_config.len() > MAX_CONFIG_SIZE {
-            return Err(QorError::TorProcess(
+            return Err(QorcError::TorProcess(
                 "Primary Tor configuration is too large".to_string(),
             ));
         }
@@ -1852,7 +1852,7 @@ impl TorManager {
     }
 
     /// Start Tor process
-    pub async fn start(&self) -> QorResult<TorStartResult> {
+    pub async fn start(&self) -> QorcResult<TorStartResult> {
         let _operation_guard = self.operation_lock.lock().await;
         self.reap_exited_process();
 
@@ -1948,7 +1948,7 @@ impl TorManager {
             .stderr(Stdio::piped());
 
         let mut child = spawn_managed_tor(&mut command)
-            .map_err(|e| QorError::TorProcess(format!("Failed to start Tor: {}", e)))?;
+            .map_err(|e| QorcError::TorProcess(format!("Failed to start Tor: {}", e)))?;
 
         tokio::time::sleep(Duration::from_millis(250)).await;
         match child.try_wait() {
@@ -1965,7 +1965,7 @@ impl TorManager {
                 let _ = child.kill();
                 let _ = child.wait();
                 self.mark_process_stopped();
-                return Err(QorError::TorProcess(format!(
+                return Err(QorcError::TorProcess(format!(
                     "Failed to inspect Tor process state: {error}"
                 )));
             }
@@ -1975,7 +1975,7 @@ impl TorManager {
             let _ = child.kill();
             let _ = child.wait();
             self.mark_process_stopped();
-            return Err(QorError::TorProcess(
+            return Err(QorcError::TorProcess(
                 "Tor process did not provide a stdout monitor".to_string(),
             ));
         };
@@ -1983,7 +1983,7 @@ impl TorManager {
             let _ = child.kill();
             let _ = child.wait();
             self.mark_process_stopped();
-            return Err(QorError::TorProcess(
+            return Err(QorcError::TorProcess(
                 "Tor process did not provide a stderr monitor".to_string(),
             ));
         };
@@ -2056,7 +2056,7 @@ impl TorManager {
         })
     }
 
-    pub async fn stop(&self) -> QorResult<bool> {
+    pub async fn stop(&self) -> QorcResult<bool> {
         let _operation_guard = self.operation_lock.lock().await;
         self.shutdown_now();
         Ok(true)
@@ -2093,14 +2093,14 @@ impl TorManager {
     pub async fn publish_onion_service(
         &self,
         port_mappings: &[(u16, u16)],
-    ) -> QorResult<PublishedOnionService> {
+    ) -> QorcResult<PublishedOnionService> {
         if port_mappings.is_empty()
             || port_mappings.len() > 8
             || port_mappings
                 .iter()
                 .any(|(virtual_port, local_port)| *virtual_port == 0 || *local_port == 0)
         {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Invalid onion service port".to_string(),
             ));
         }
@@ -2124,7 +2124,7 @@ impl TorManager {
             for _ in 0..MAX_CONTROL_RESPONSE_LINES {
                 let mut line = String::new();
                 if read_bounded_line(&mut conn.reader, &mut line)? == 0 {
-                    return Err(QorError::TorControl(
+                    return Err(QorcError::TorControl(
                         "Tor control closed during onion publish".to_string(),
                     ));
                 }
@@ -2132,7 +2132,7 @@ impl TorManager {
                 if let Some(rest) = trimmed.strip_prefix("250-ServiceID=") {
                     let candidate = rest.trim().to_ascii_lowercase();
                     if !is_valid_onion_service_id(&candidate) {
-                        return Err(QorError::TorControl(
+                        return Err(QorcError::TorControl(
                             "Tor returned a malformed onion service id".to_string(),
                         ));
                     }
@@ -2140,7 +2140,7 @@ impl TorManager {
                 } else if trimmed == "250 OK" {
                     break;
                 } else if trimmed.starts_with('5') {
-                    return Err(QorError::TorControl(
+                    return Err(QorcError::TorControl(
                         "Tor refused the onion service request".to_string(),
                     ));
                 }
@@ -2152,22 +2152,22 @@ impl TorManager {
                     onion_host: format!("{}.onion", id),
                     _control: conn,
                 }),
-                None => Err(QorError::TorControl(
+                None => Err(QorcError::TorControl(
                     "Tor did not return an onion service id".to_string(),
                 )),
             }
         })
         .await
-        .map_err(|e| QorError::Internal(format!("Task failed: {}", e)))?
+        .map_err(|e| QorcError::Internal(format!("Task failed: {}", e)))?
     }
 
-    fn control_authenticate(control_port: u16, cookie_path: &Path) -> QorResult<ControlConnection> {
+    fn control_authenticate(control_port: u16, cookie_path: &Path) -> QorcResult<ControlConnection> {
         let mut cookie = Self::read_control_cookie(cookie_path)?;
         let mut encoded_cookie = hex::encode(cookie);
         cookie.zeroize();
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{}", control_port))
-            .map_err(|e| QorError::TorControl(format!("Failed to connect control port: {}", e)))?;
+            .map_err(|e| QorcError::TorControl(format!("Failed to connect control port: {}", e)))?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
@@ -2178,7 +2178,7 @@ impl TorManager {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut line = String::new();
         if read_bounded_line(&mut reader, &mut line)? == 0 || line.trim_end() != "250 OK" {
-            return Err(QorError::TorControl(
+            return Err(QorcError::TorControl(
                 "Control port authentication failed".to_string(),
             ));
         }
@@ -2189,7 +2189,7 @@ impl TorManager {
     fn control_get_bootstrap_status(
         control_port: u16,
         cookie_path: &Path,
-    ) -> QorResult<(u16, bool)> {
+    ) -> QorcResult<(u16, bool)> {
         let mut conn = Self::control_authenticate(control_port, cookie_path)?;
         let mut line = String::new();
         let mut progress = 0u16;
@@ -2224,19 +2224,19 @@ impl TorManager {
                 saw_terminator = true;
                 break;
             } else if l.starts_with('5') {
-                return Err(QorError::TorControl(format!(
+                return Err(QorcError::TorControl(format!(
                     "GETINFO status/bootstrap-phase failed: {}",
                     l
                 )));
             } else {
-                return Err(QorError::TorControl(
+                return Err(QorcError::TorControl(
                     "Tor control returned an unexpected bootstrap response".to_string(),
                 ));
             }
         }
 
         if !saw_status || !saw_terminator {
-            return Err(QorError::TorControl(
+            return Err(QorcError::TorControl(
                 "Tor control returned an incomplete bootstrap response".to_string(),
             ));
         }
@@ -2295,11 +2295,11 @@ impl TorManager {
     fn control_get_bootstrap_and_circuit_established(
         control_port: u16,
         cookie_path: &Path,
-    ) -> QorResult<()> {
+    ) -> QorcResult<()> {
         let (_, bootstrapped) = Self::control_get_bootstrap_status(control_port, cookie_path)?;
 
         if !bootstrapped {
-            return Err(QorError::TorControl(
+            return Err(QorcError::TorControl(
                 "Tor control reports bootstrap incomplete".to_string(),
             ));
         }
@@ -2307,7 +2307,7 @@ impl TorManager {
         Ok(())
     }
 
-    async fn verify_local_connection(&self) -> QorResult<()> {
+    async fn verify_local_connection(&self) -> QorcResult<()> {
         let control_port = self.get_control_port();
         let socks_port = self.get_socks_port();
         let cookie_path = self.control_cookie_path();
@@ -2316,25 +2316,25 @@ impl TorManager {
             Self::control_get_bootstrap_and_circuit_established(control_port, &cookie_path)
         })
         .await
-        .map_err(|e| QorError::Internal(format!("Task failed: {}", e)))??;
+        .map_err(|e| QorcError::Internal(format!("Task failed: {}", e)))??;
 
         let socks_addr: SocketAddr = format!("127.0.0.1:{}", socks_port)
             .parse()
-            .map_err(|e| QorError::Network(format!("Invalid SOCKS address: {}", e)))?;
+            .map_err(|e| QorcError::Network(format!("Invalid SOCKS address: {}", e)))?;
         tokio::task::spawn_blocking(move || {
             let stream = TcpStream::connect_timeout(&socks_addr, Duration::from_secs(2))
-                .map_err(|e| QorError::Network(format!("SOCKS listener unavailable: {}", e)))?;
+                .map_err(|e| QorcError::Network(format!("SOCKS listener unavailable: {}", e)))?;
             let _ = stream.shutdown(std::net::Shutdown::Both);
-            Ok::<_, QorError>(())
+            Ok::<_, QorcError>(())
         })
         .await
-        .map_err(|e| QorError::Internal(format!("Task failed: {}", e)))??;
+        .map_err(|e| QorcError::Internal(format!("Task failed: {}", e)))??;
 
         Ok(())
     }
 
     /// Verify Tor connection
-    pub async fn verify_connection(&self) -> QorResult<TorVerifyResult> {
+    pub async fn verify_connection(&self) -> QorcResult<TorVerifyResult> {
         if !self.bootstrapped.load(Ordering::Relaxed) {
             self.refresh_bootstrap_from_control().await;
             if !self.bootstrapped.load(Ordering::Relaxed) {
@@ -2369,7 +2369,7 @@ impl TorManager {
     }
 }
 
-pub async fn init(app_data_path: PathBuf) -> QorResult<Arc<TorManager>> {
+pub async fn init(app_data_path: PathBuf) -> QorcResult<Arc<TorManager>> {
     let manager = TorManager::new(app_data_path);
     let _stale = manager.cleanup_orphaned_processes_sync();
     manager.materialize_embedded_bundle().await?;
@@ -2383,7 +2383,7 @@ mod tests {
     #[tokio::test]
     async fn pir_manager_uses_distinct_runtime_and_mirrored_configuration() {
         let root = std::env::temp_dir().join(format!(
-            "qor-pir-tor-test-{}",
+            "qorc-pir-tor-test-{}",
             uuid::Uuid::new_v4().simple()
         ));
         let primary = TorManager::new(root.join("primary"));

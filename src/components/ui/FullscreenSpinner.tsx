@@ -1,14 +1,14 @@
 import { LoaderCircle } from 'lucide-react';
-import { QorBrandLogo } from './QorBrandLogo';
+import { QorcBrandLogo } from './QorcBrandLogo';
 
 export function FullscreenSpinner() {
   return (
-    <div className="qor-fullscreen-spinner" role="status" aria-label="Loading">
-      <QorBrandLogo
-        className="qor-fullscreen-spinner-logo"
-        imageClassName="qor-fullscreen-spinner-logo-image"
+    <div className="qorc-fullscreen-spinner" role="status" aria-label="Loading">
+      <QorcBrandLogo
+        className="qorc-fullscreen-spinner-logo"
+        imageClassName="qorc-fullscreen-spinner-logo-image"
       />
-      <LoaderCircle className="qor-fullscreen-spinner-mark" aria-hidden="true" />
+      <LoaderCircle className="qorc-fullscreen-spinner-mark" aria-hidden="true" />
     </div>
   );
 }

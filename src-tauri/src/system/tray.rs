@@ -10,11 +10,11 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::error::QorResult;
+use crate::error::QorcResult;
 
 static UNREAD_COUNT: AtomicU32 = AtomicU32::new(0);
 
-pub async fn init(app_handle: &AppHandle) -> QorResult<()> {
+pub async fn init(app_handle: &AppHandle) -> QorcResult<()> {
     let app = app_handle.clone();
     let menu = build_tray_menu(&app)?;
     let icon = load_tray_icon();
@@ -22,7 +22,7 @@ pub async fn init(app_handle: &AppHandle) -> QorResult<()> {
     let app_clone = app.clone();
     let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip("Qor")
+        .tooltip("qorc")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(move |_tray, event| match event {
@@ -62,7 +62,7 @@ fn load_tray_icon() -> Image<'static> {
         .unwrap_or_else(|_| Image::new_owned(vec![0, 0, 0, 255], 1, 1))
 }
 
-fn build_tray_menu(app: &AppHandle) -> QorResult<Menu<tauri::Wry>> {
+fn build_tray_menu(app: &AppHandle) -> QorcResult<Menu<tauri::Wry>> {
     let unread = UNREAD_COUNT.load(Ordering::Relaxed);
     let unread_label = if unread > 0 {
         format!(
@@ -79,7 +79,7 @@ fn build_tray_menu(app: &AppHandle) -> QorResult<Menu<tauri::Wry>> {
         &[
             &MenuItem::with_id(app, "unread", &unread_label, false, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "open", "Open Qor", true, None::<&str>)?,
+            &MenuItem::with_id(app, "open", "Open qorc", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
         ],
@@ -98,7 +98,7 @@ fn show_main_window(app: &AppHandle) {
             "main",
             tauri::WebviewUrl::App("index.html".into()),
         )
-        .title("Qor")
+        .title("qorc")
         .inner_size(1200.0, 800.0)
         .min_inner_size(800.0, 600.0)
         .center()

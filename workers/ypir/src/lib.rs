@@ -1,5 +1,5 @@
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-compile_error!("Qor YPIR supports only Linux and Windows");
+compile_error!("qorc YPIR supports only Linux and Windows");
 
 pub mod bits;
 pub mod client;
@@ -13,7 +13,7 @@ pub mod modulus_switch;
 pub mod noise_analysis;
 pub mod packing;
 pub mod params;
-pub mod qor_spool;
+pub mod qorc_spool;
 pub mod scheme;
 pub mod server;
 pub mod transpose;

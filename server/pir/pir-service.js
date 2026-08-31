@@ -21,7 +21,7 @@ const PIR_SNAPSHOT_MIN_REFRESH_MS = Math.max(SPOOL_TAG_INDEX_POLL_INTERVAL_MS, 1
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WORKER_PATH = path.resolve(
   moduleDir,
-  '../../workers/ypir/target/release/qor-pir-worker'
+  '../../workers/ypir/target/release/qorc-pir-worker'
 );
 
 /**
@@ -34,7 +34,7 @@ let lastRefreshAt = 0;
 let started = false;
 
 export function pirWorkerPath() {
-  return process.env.QOR_PIR_WORKER_PATH || DEFAULT_WORKER_PATH;
+  return process.env.QORC_PIR_WORKER_PATH || DEFAULT_WORKER_PATH;
 }
 
 function createSlot(worker) {
@@ -107,11 +107,13 @@ export async function startPirService() {
   } catch (error) {
     await first.stop().catch(() => { });
     await second.stop().catch(() => { });
+    const repairInstruction = process.env.QORC_PIR_WORKER_PATH
+      ? 'Rebuild the server image or correct QORC_PIR_WORKER_PATH.'
+      : 'Build it with `pnpm build:pir` or set QORC_PIR_WORKER_PATH.';
     throw new Error(
       `PIR worker is unavailable at ${binaryPath}: ${error?.message ?? error}. ` +
       'Small spool entries are served only by PIR, so ongoing messages cannot be ' +
-      'delivered until this is fixed. Build it with `pnpm build:pir` or set ' +
-      'QOR_PIR_WORKER_PATH.'
+      `delivered until this is fixed. ${repairInstruction}`
     );
   }
   slots = [createSlot(first), createSlot(second)];

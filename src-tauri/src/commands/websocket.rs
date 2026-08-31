@@ -142,7 +142,7 @@ pub async fn ws_send_binary(
 ) -> Result<SendResult, String> {
     let connection_token = request
         .headers()
-        .get("x-qor-ws-token")
+        .get("x-qorc-ws-token")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)

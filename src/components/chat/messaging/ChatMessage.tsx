@@ -255,7 +255,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const messageReactions = reactionEntries.length > 0 ? (
     <div
       className={cn(
-        "qor-message-reactions",
+        "qorc-message-reactions",
         safeIsCurrentUser ? "is-mine" : "is-received",
       )}
       role="group"
@@ -267,16 +267,16 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           <button
             key={emoji}
             type="button"
-            className="qor-message-reaction"
-            style={{ '--qor-reaction-stack': reactionEntries.length - index } as React.CSSProperties}
+            className="qorc-message-reaction"
+            style={{ '--qorc-reaction-stack': reactionEntries.length - index } as React.CSSProperties}
             onClick={() => onReact?.(message, emoji)}
             disabled={!onReact}
             aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
             aria-pressed={hasReacted}
           >
-            <span className="qor-message-reaction-emoji" aria-hidden="true">{emoji}</span>
+            <span className="qorc-message-reaction-emoji" aria-hidden="true">{emoji}</span>
             {users.length > 1 && (
-              <span className="qor-message-reaction-count" aria-hidden="true">{users.length}</span>
+              <span className="qorc-message-reaction-count" aria-hidden="true">{users.length}</span>
             )}
           </button>
         );
@@ -366,7 +366,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         >
           {message.replyTo && (
             <div
-              className="qor-message-reply-preview mb-1 select-none"
+              className="qorc-message-reply-preview mb-1 select-none"
               role="note"
               aria-label={`Replying to ${displayReplyToSender}`}
               onClick={() => onReplyClick?.(message.replyTo!.id)}
@@ -374,13 +374,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
               <UserAvatar
                 username={message.replyTo.sender || ''}
                 size="xs"
-                className="qor-message-reply-preview-avatar"
+                className="qorc-message-reply-preview-avatar"
               />
-              <div className="qor-message-reply-preview-copy">
-                <span className="qor-message-reply-preview-name">{displayReplyToSender}</span>
-                <div className="qor-message-reply-preview-text">
+              <div className="qorc-message-reply-preview-copy">
+                <span className="qorc-message-reply-preview-name">{displayReplyToSender}</span>
+                <div className="qorc-message-reply-preview-text">
                   {message.replyTo.isDeleted ? (
-                    <span className="qor-message-reply-preview-deleted">Message deleted</span>
+                    <span className="qorc-message-reply-preview-deleted">Message deleted</span>
                   ) : (
                     <BannerMessagePreview
                       messageId={message.replyTo.secureContentId || message.replyTo.id}

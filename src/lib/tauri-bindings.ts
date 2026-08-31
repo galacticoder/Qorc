@@ -482,7 +482,7 @@ export const websocket = {
         invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send', { payloadJson, connectionToken }),
     sendBinary: (cell: Uint8Array, connectionToken: number) =>
         invoke<{ success: boolean; queued?: boolean; error?: string }>('ws_send_binary', cell, {
-            headers: { 'x-qor-ws-token': String(connectionToken) },
+            headers: { 'x-qorc-ws-token': String(connectionToken) },
         }),
     setServerUrl: (url: string) => invoke<void>('ws_set_server_url', { url }),
     getServerUrl: () => invoke<string | null>('ws_get_server_url'),
@@ -514,20 +514,20 @@ export const audioCodec = {
     stop: (sessionId: string) => invoke<boolean>('audio_opus_stop', { sessionId }),
     encode: (sessionId: string, pcm: Uint8Array) =>
         invoke<ArrayBuffer>('audio_opus_encode', pcm, {
-            headers: { 'x-qor-audio-session': sessionId },
+            headers: { 'x-qorc-audio-session': sessionId },
         }).then(value => new Uint8Array(value)),
     decode: (sessionId: string, packet: Uint8Array, fec = false) =>
         invoke<ArrayBuffer>('audio_opus_decode', packet, {
             headers: {
-                'x-qor-audio-session': sessionId,
-                'x-qor-opus-fec': fec ? '1' : '0',
+                'x-qorc-audio-session': sessionId,
+                'x-qorc-opus-fec': fec ? '1' : '0',
             },
         }).then(value => new Uint8Array(value)),
     decodeToPlayback: (sessionId: string, packet: Uint8Array, fec = false) =>
         invoke<boolean>('audio_opus_decode_playback', packet, {
             headers: {
-                'x-qor-audio-session': sessionId,
-                'x-qor-opus-fec': fec ? '1' : '0',
+                'x-qorc-audio-session': sessionId,
+                'x-qorc-opus-fec': fec ? '1' : '0',
             },
         }),
 };
@@ -598,11 +598,11 @@ export const p2p = {
             : new TextEncoder().encode(serializeJsonForNative(message));
         return invoke<{ success: boolean; error?: string; audioLanes?: AudioLaneTelemetry }>('p2p_send', body, {
             headers: {
-                'x-qor-p2p-connection': connectionId,
-                'x-qor-p2p-token': String(connectionToken),
-                'x-qor-p2p-deadline': String(options?.deadline ?? 0),
-                'x-qor-p2p-audio-endpoint': options?.audioEndpoint ?? '',
-                'x-qor-p2p-audio-rtt-ceiling': String(options?.audioLaneRttCeiling ?? 0),
+                'x-qorc-p2p-connection': connectionId,
+                'x-qorc-p2p-token': String(connectionToken),
+                'x-qorc-p2p-deadline': String(options?.deadline ?? 0),
+                'x-qorc-p2p-audio-endpoint': options?.audioEndpoint ?? '',
+                'x-qorc-p2p-audio-rtt-ceiling': String(options?.audioLaneRttCeiling ?? 0),
             },
         });
     },
@@ -616,7 +616,7 @@ export const anonymousHttp = {
         invoke<ArrayBuffer>('anonymous_api_fetch', body, {
             headers: {
                 [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
-                'x-qor-anonymous-transport-lane': lane,
+                'x-qorc-anonymous-transport-lane': lane,
             },
         }),
     prewarm: () => invoke<boolean>('prewarm_anonymous_transport'),

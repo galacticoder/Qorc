@@ -5,7 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const EDGE_RUNTIME_ROOT = '/opt/qor-edge';
+const EDGE_RUNTIME_ROOT = '/opt/qorc-edge';
 const BUNDLED_TOR_DIR = path.join(EDGE_RUNTIME_ROOT, 'tor');
 const BUNDLED_LIBRARY_DIR = path.join(EDGE_RUNTIME_ROOT, 'lib');
 
@@ -98,13 +98,13 @@ export class TorManager {
         const currentPublished = await this.logContainsSince(
             this.hsLogPath,
             startOffset,
-            'QOR_HS_DESC_PUBLISHED current'
+            'QORC_HS_DESC_READY current'
         );
         if (!currentPublished) return false;
         return this.logContainsSince(
             this.hsLogPath,
             startOffset,
-            'QOR_HS_DESC_PUBLISHED next'
+            'QORC_HS_DESC_READY next'
         );
     }
 

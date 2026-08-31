@@ -104,7 +104,7 @@ fn operation_or_restore<T>(
     handler: &std::sync::Arc<crate::signal_protocol::SignalHandler>,
     db: &crate::database::DatabaseManager,
     username: &str,
-    result: crate::error::QorResult<T>,
+    result: crate::error::QorcResult<T>,
 ) -> Result<T, String> {
     result.map_err(|error| {
         restore_signal_snapshot(handler, db, username);

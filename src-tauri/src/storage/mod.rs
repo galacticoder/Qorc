@@ -14,7 +14,7 @@ use sha3::{Digest, Sha3_512};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use crate::error::{QorError, QorResult};
+use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
 pub(crate) mod file;
@@ -46,7 +46,7 @@ pub struct SecureStorage {
 }
 
 impl SecureStorage {
-    pub async fn new(config_dir: PathBuf) -> QorResult<Self> {
+    pub async fn new(config_dir: PathBuf) -> QorcResult<Self> {
         let store_dir = config_dir.join("secure-store");
         let master_key_path = config_dir.join("master.key");
 
@@ -93,7 +93,7 @@ impl SecureStorage {
         })
     }
 
-    async fn scan_store_usage(store_dir: &Path) -> QorResult<StoreUsage> {
+    async fn scan_store_usage(store_dir: &Path) -> QorcResult<StoreUsage> {
         let mut entries = tokio::fs::read_dir(store_dir).await?;
         let mut usage = StoreUsage::default();
         while let Some(entry) = entries.next_entry().await? {
@@ -104,7 +104,7 @@ impl SecureStorage {
             let metadata = tokio::fs::symlink_metadata(&path).await?;
             file::validate_private_file_metadata(&metadata)?;
             if metadata.len() > ENCRYPTED_ITEM_MAX_BYTES as u64 {
-                return Err(QorError::StorageInitFailed(
+                return Err(QorcError::StorageInitFailed(
                     "Storage contains an oversized item".to_string(),
                 ));
             }
@@ -113,7 +113,7 @@ impl SecureStorage {
             if usage.item_count > SECURE_STORE_MAX_ITEMS
                 || usage.total_bytes > SECURE_STORE_MAX_TOTAL_BYTES
             {
-                return Err(QorError::StorageInitFailed(
+                return Err(QorcError::StorageInitFailed(
                     "Storage exceeds its capacity limit".to_string(),
                 ));
             }
@@ -121,17 +121,17 @@ impl SecureStorage {
         Ok(usage)
     }
 
-    async fn load_or_generate_master_key(path: &Path) -> QorResult<Zeroizing<Vec<u8>>> {
+    async fn load_or_generate_master_key(path: &Path) -> QorcResult<Zeroizing<Vec<u8>>> {
         match file::read_file_bounded(path, 64).await {
             Ok(data) => {
                 if data.len() != 64 {
-                    return Err(QorError::StorageInitFailed(
+                    return Err(QorcError::StorageInitFailed(
                         "Invalid master key length".to_string(),
                     ));
                 }
                 Ok(Zeroizing::new(data))
             }
-            Err(QorError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(QorcError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 let candidate: Zeroizing<Vec<u8>> =
                     Zeroizing::new(crate::crypto::random::random_bytes(64)?);
                 if file::atomic_write_if_absent(path, &candidate, 0o600).await? {
@@ -140,7 +140,7 @@ impl SecureStorage {
 
                 let data = file::read_file_bounded(path, 64).await?;
                 if data.len() != 64 {
-                    return Err(QorError::StorageInitFailed(
+                    return Err(QorcError::StorageInitFailed(
                         "Invalid master key length".to_string(),
                     ));
                 }
@@ -191,9 +191,9 @@ impl SecureStorage {
         mac
     }
 
-    pub async fn set_item(&self, key: &str, value: &[u8]) -> QorResult<()> {
+    pub async fn set_item(&self, key: &str, value: &[u8]) -> QorcResult<()> {
         if value.len() > SECURE_VALUE_MAX_BYTES {
-            return Err(QorError::InvalidArgument(
+            return Err(QorcError::InvalidArgument(
                 "Storage value exceeds its size limit".to_string(),
             ));
         }
@@ -213,7 +213,7 @@ impl SecureStorage {
         aad2.extend_from_slice(aes_nonce);
 
         let aes_cipher = Aes256Gcm::new_from_slice(&*self.aes_key)
-            .map_err(|_| QorError::EncryptionFailed("AES key init failed".to_string()))?;
+            .map_err(|_| QorcError::EncryptionFailed("AES key init failed".to_string()))?;
 
         let aes_nonce_obj = AesNonce::from_slice(aes_nonce);
         let layer1_ciphertext = aes_cipher
@@ -224,10 +224,10 @@ impl SecureStorage {
                     aad: &aad1,
                 },
             )
-            .map_err(|_| QorError::EncryptionFailed("AES-GCM encryption failed".to_string()))?;
+            .map_err(|_| QorcError::EncryptionFailed("AES-GCM encryption failed".to_string()))?;
 
         let xchacha_cipher = XChaCha20Poly1305::new_from_slice(&*self.xchacha_key)
-            .map_err(|_| QorError::EncryptionFailed("XChaCha key init failed".to_string()))?;
+            .map_err(|_| QorcError::EncryptionFailed("XChaCha key init failed".to_string()))?;
 
         let xchacha_nonce_obj = XNonce::from_slice(xchacha_nonce);
         let layer2_ciphertext = xchacha_cipher
@@ -239,7 +239,7 @@ impl SecureStorage {
                 },
             )
             .map_err(|_| {
-                QorError::EncryptionFailed("XChaCha20-Poly1305 encryption failed".to_string())
+                QorcError::EncryptionFailed("XChaCha20-Poly1305 encryption failed".to_string())
             })?;
 
         let mut mac_input =
@@ -273,7 +273,7 @@ impl SecureStorage {
         if next_item_count > SECURE_STORE_MAX_ITEMS
             || next_total_bytes > SECURE_STORE_MAX_TOTAL_BYTES
         {
-            return Err(QorError::FileOperationFailed(
+            return Err(QorcError::FileOperationFailed(
                 "Storage capacity exceeded".to_string(),
             ));
         }
@@ -285,18 +285,18 @@ impl SecureStorage {
     }
 
     /// Retrieve and decrypt a value
-    pub async fn get_item(&self, key: &str) -> QorResult<Option<Vec<u8>>> {
+    pub async fn get_item(&self, key: &str) -> QorcResult<Option<Vec<u8>>> {
         let file_path = self.file_path_for_key(key);
 
         let file_data = match file::read_file_bounded(&file_path, ENCRYPTED_ITEM_MAX_BYTES).await {
             Ok(data) => data,
-            Err(QorError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(QorcError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
 
         let min_size = NONCE_SIZE + 16 + MAC_SIZE;
         if file_data.len() < min_size {
-            return Err(QorError::DecryptionFailed(
+            return Err(QorcError::DecryptionFailed(
                 "Invalid encrypted file: too small".to_string(),
             ));
         }
@@ -317,7 +317,7 @@ impl SecureStorage {
         let computed_mac = self.compute_mac(&mac_input);
 
         if !crate::crypto::utils::constant_time_eq(mac, &computed_mac) {
-            return Err(QorError::MacVerificationFailed);
+            return Err(QorcError::MacVerificationFailed);
         }
 
         let mut aad1 = Vec::with_capacity(8 + key.len() + XCHACHA_NONCE_SIZE);
@@ -331,7 +331,7 @@ impl SecureStorage {
         aad2.extend_from_slice(aes_nonce);
 
         let xchacha_cipher = XChaCha20Poly1305::new_from_slice(&*self.xchacha_key)
-            .map_err(|_| QorError::DecryptionFailed("XChaCha key init failed".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("XChaCha key init failed".to_string()))?;
 
         let xchacha_nonce_obj = XNonce::from_slice(xchacha_nonce);
         let layer1_ciphertext = xchacha_cipher
@@ -343,11 +343,11 @@ impl SecureStorage {
                 },
             )
             .map_err(|_| {
-                QorError::DecryptionFailed("XChaCha20-Poly1305 decryption failed".to_string())
+                QorcError::DecryptionFailed("XChaCha20-Poly1305 decryption failed".to_string())
             })?;
 
         let aes_cipher = Aes256Gcm::new_from_slice(&*self.aes_key)
-            .map_err(|_| QorError::DecryptionFailed("AES key init failed".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("AES key init failed".to_string()))?;
 
         let aes_nonce_obj = AesNonce::from_slice(aes_nonce);
         let plaintext = aes_cipher
@@ -358,13 +358,13 @@ impl SecureStorage {
                     aad: &aad1,
                 },
             )
-            .map_err(|_| QorError::DecryptionFailed("AES-GCM decryption failed".to_string()))?;
+            .map_err(|_| QorcError::DecryptionFailed("AES-GCM decryption failed".to_string()))?;
 
         Ok(Some(plaintext))
     }
 
     /// Remove a stored value
-    pub async fn remove_item(&self, key: &str) -> QorResult<()> {
+    pub async fn remove_item(&self, key: &str) -> QorcResult<()> {
         let file_path = self.file_path_for_key(key);
         let mut usage = self.usage.lock().await;
         let existing_bytes = match tokio::fs::symlink_metadata(&file_path).await {
@@ -385,17 +385,17 @@ impl SecureStorage {
     }
 
     /// Alias for set_item
-    pub async fn set(&self, key: &str, value: &str) -> QorResult<()> {
+    pub async fn set(&self, key: &str, value: &str) -> QorcResult<()> {
         self.set_item(key, value.as_bytes()).await
     }
 
     /// Alias for get_item
-    pub async fn get(&self, key: &str) -> QorResult<Option<String>> {
+    pub async fn get(&self, key: &str) -> QorcResult<Option<String>> {
         match self.get_item(key).await? {
             Some(bytes) => {
                 let bytes = Zeroizing::new(bytes);
                 let value = std::str::from_utf8(&bytes).map_err(|_| {
-                    QorError::DecryptionFailed("Stored value is not valid UTF-8".to_string())
+                    QorcError::DecryptionFailed("Stored value is not valid UTF-8".to_string())
                 })?;
                 Ok(Some(value.to_owned()))
             }
@@ -404,12 +404,12 @@ impl SecureStorage {
     }
 
     /// Alias for remove_item
-    pub async fn remove(&self, key: &str) -> QorResult<()> {
+    pub async fn remove(&self, key: &str) -> QorcResult<()> {
         self.remove_item(key).await
     }
 
     /// Check if item exists
-    pub async fn has(&self, key: &str) -> QorResult<bool> {
+    pub async fn has(&self, key: &str) -> QorcResult<bool> {
         let file_path = self.file_path_for_key(key);
         file::private_file_exists(&file_path).await
     }
@@ -419,7 +419,7 @@ impl Drop for SecureStorage {
     fn drop(&mut self) {}
 }
 
-pub async fn init(state: &AppState, config_dir: PathBuf) -> QorResult<()> {
+pub async fn init(state: &AppState, config_dir: PathBuf) -> QorcResult<()> {
     let storage = SecureStorage::new(config_dir).await?;
     *state.storage.write() = Some(Arc::new(storage));
     Ok(())

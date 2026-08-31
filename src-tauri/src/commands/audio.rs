@@ -7,7 +7,7 @@ use tauri::{
 fn session_id(request: &Request<'_>) -> Result<String, String> {
     request
         .headers()
-        .get("x-qor-audio-session")
+        .get("x-qorc-audio-session")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .ok_or_else(|| "invalid audio codec session".to_string())
@@ -52,7 +52,7 @@ pub fn audio_opus_decode(
     let session_id = session_id(&request)?;
     let fec = request
         .headers()
-        .get("x-qor-opus-fec")
+        .get("x-qorc-opus-fec")
         .and_then(|value| value.to_str().ok())
         == Some("1");
     let pcm = state
@@ -69,7 +69,7 @@ pub fn audio_opus_decode_playback(
     let session_id = session_id(&request)?;
     let fec = request
         .headers()
-        .get("x-qor-opus-fec")
+        .get("x-qorc-opus-fec")
         .and_then(|value| value.to_str().ok())
         == Some("1");
     let mut pcm = state

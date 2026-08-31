@@ -12,7 +12,7 @@ const {
 
 const repoRoot = path.resolve(__dirname, '..');
 const dockerfile = path.join('docker', 'Dockerfile.client-bundle');
-const imageName = 'qor-chat-client-bundle:linux-arm64';
+const imageName = 'qorc-client-bundle:linux-arm64';
 const buildCacheDirectory = path.join(repoRoot, '.cache', 'buildkit', 'client-linux-arm64');
 const outputDirectory = path.join(
     repoRoot,
@@ -46,10 +46,10 @@ function checkDocker() {
         throw new Error('ARM64 client bundles require Docker running Linux containers');
     }
 
-    const configuredBuilderName = (process.env.QOR_ARM64_BUILDER || '').trim();
+    const configuredBuilderName = (process.env.QORC_ARM64_BUILDER || '').trim();
     if (!configuredBuilderName) {
         throw new Error(
-            'ARM64 cross-builds require a native ARM64 Buildx builder. Set QOR_ARM64_BUILDER, or run the build directly on an ARM64 machine.'
+            'ARM64 cross-builds require a native ARM64 Buildx builder. Set QORC_ARM64_BUILDER, or run the build directly on an ARM64 machine.'
         );
     }
     const builderName = configuredBuilderName;
@@ -73,7 +73,7 @@ function checkDocker() {
             throw new Error('selected builder does not advertise linux/arm64');
         }
     } catch {
-        throw new Error('QOR_ARM64_BUILDER must select a reachable native ARM64 Buildx builder that advertises linux/arm64. Emulated ARM64 builders are unsupported.');
+        throw new Error('QORC_ARM64_BUILDER must select a reachable native ARM64 Buildx builder that advertises linux/arm64. Emulated ARM64 builders are unsupported.');
     }
     return builderName;
 }
@@ -176,7 +176,7 @@ function main() {
             throw new Error('Docker returned an invalid ARM64 bundle container identifier');
         }
 
-        extractedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qor-chat-arm64-output-'));
+        extractedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qorc-arm64-output-'));
         docker(['cp', `${containerId}:/bundle/.`, extractedRoot]);
         const artifacts = collectArtifacts(extractedRoot);
         validateArtifacts(artifacts);
