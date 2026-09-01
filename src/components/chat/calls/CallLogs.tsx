@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { format, isThisYear, isToday, isYesterday } from 'date-fns';
 import {
     Clock3,
-    Loader2,
     MessageCircle,
     MoreVertical,
     Search,
@@ -19,6 +18,7 @@ import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistory
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { formatCallDurationSeconds } from '../../../lib/utils/date-utils';
 import { NEAR_BOTTOM_THRESHOLD, SCROLL_THRESHOLD } from '../../../lib/constants';
+import { CallLogRowsSkeleton } from '../../ui/ViewSkeletons';
 
 interface CallLogsProps {
     readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -318,6 +318,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
         <section className="qorc-call-log-page">
             <header className="qorc-call-log-header">
                 <div className="qorc-call-log-heading">
+                    <CallIcon className="qorc-call-log-heading-icon" aria-hidden="true" />
                     <h1>Calls</h1>
                 </div>
 
@@ -375,15 +376,9 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
             <ScrollArea ref={scrollAreaRef} className="qorc-call-log-scroll">
                 <div className="qorc-call-log-content">
                     {isLoading ? (
-                        <div className="qorc-call-log-empty" role="status" aria-label="Loading call history">
-                            <Loader2 className="qorc-call-log-loader" aria-hidden="true" />
-                            <strong>Loading calls</strong>
-                        </div>
+                        <CallLogRowsSkeleton />
                     ) : groupedLogs.length === 0 ? (
                         <div className="qorc-call-log-empty">
-                            <span className="qorc-call-log-empty-icon" aria-hidden="true">
-                                {isSearching ? <Search /> : <CallIcon />}
-                            </span>
                             <strong>{isSearching ? 'No matching calls' : 'No calls yet'}</strong>
                             <span>{isSearching ? 'Try another name or call type.' : 'Your recent calls will appear here.'}</span>
                         </div>

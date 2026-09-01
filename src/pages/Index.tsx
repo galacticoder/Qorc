@@ -50,6 +50,7 @@ import { useEventHandlers } from "../hooks/useEventHandlers";
 import { Toaster, toast } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { FullscreenSpinner } from "../components/ui/FullscreenSpinner";
+import { CallLogsSkeleton, SettingsSkeleton } from "../components/ui/ViewSkeletons";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/calling/useCalling";
@@ -1003,9 +1004,7 @@ const ChatApp: React.FC = () => {
                 />
 
                 <div className="qorc-conversations-head">
-                  <h2>Chats</h2>
-                  <div className="qorc-head-actions">
-                    <TorIndicator />
+                  <div className="qorc-conversations-title">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1015,6 +1014,10 @@ const ChatApp: React.FC = () => {
                     >
                       <ComposeIcon className="h-4 w-4" />
                     </Button>
+                    <h2>Chats</h2>
+                  </div>
+                  <div className="qorc-head-actions">
+                    <TorIndicator />
                   </div>
                 </div>
                 <div className="flex-1 overflow-hidden">
@@ -1079,24 +1082,28 @@ const ChatApp: React.FC = () => {
           </div>
 
           <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'calls' && CallLogsPanel && (
-              <CallLogsPanel
-                getDisplayUsername={stableGetDisplayUsername}
-                onOpenConversation={handleOpenCallLogConversation}
-                onStartCall={handleStartCallFromLog}
-                callsDisabled={Boolean(currentCall)}
-              />
+            {sidebarActiveTab === 'calls' && (
+              CallLogsPanel ? (
+                <CallLogsPanel
+                  getDisplayUsername={stableGetDisplayUsername}
+                  onOpenConversation={handleOpenCallLogConversation}
+                  onStartCall={handleStartCallFromLog}
+                  callsDisabled={Boolean(currentCall)}
+                />
+              ) : <CallLogsSkeleton />
             )}
           </div>
 
           <div className={sidebarActiveTab === 'settings' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'settings' && AppSettingsPanel && (
-              <AppSettingsPanel
-                currentUsername={Authentication.loginUsernameRef.current || ''}
-                currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
-                onLogout={async () => await Authentication.logout(Database.secureDBRef)}
-                findUser={findUser}
-              />
+            {sidebarActiveTab === 'settings' && (
+              AppSettingsPanel ? (
+                <AppSettingsPanel
+                  currentUsername={Authentication.loginUsernameRef.current || ''}
+                  currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
+                  onLogout={async () => await Authentication.logout(Database.secureDBRef)}
+                  findUser={findUser}
+                />
+              ) : <SettingsSkeleton />
             )}
           </div>
         </div>

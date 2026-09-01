@@ -41,6 +41,19 @@ export class ReceiptBatcher {
     return account === this.activeAccount && this.peers.get(peer)?.read.has(messageId) === true;
   }
 
+  purgePeer(peer: string): void {
+    const batch = this.peers.get(peer);
+    if (batch?.timer) clearTimeout(batch.timer);
+    if (batch) {
+      batch.timer = null;
+      batch.delivered.clear();
+      batch.read.clear();
+      batch.attempts.clear();
+    }
+    this.peers.delete(peer);
+    this.lastFlushAt.delete(peer);
+  }
+
   private getBatch(peer: string): PeerBatch | null {
     let batch = this.peers.get(peer);
     if (!batch) {

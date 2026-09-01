@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>com.qorc.app</id>
-  <name>qorc</name>
+  <name>Qorc</name>
   <summary>Secure messaging with post-quantum cryptography</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
@@ -14,7 +14,7 @@
 
   <description>
     <p>
-      qorc is a secure messaging application focused on private communication,
+      Qorc is a secure messaging application focused on private communication,
       end-to-end encryption, post-quantum cryptography, and privacy-preserving
       transport.
     </p>

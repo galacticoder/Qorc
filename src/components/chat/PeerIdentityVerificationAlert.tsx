@@ -23,7 +23,7 @@ export function PeerIdentityVerificationAlert() {
             <div className="min-w-0 text-sm">
               <div className="font-semibold">Verifying {peer}'s new security keys</div>
               <p className="mt-0.5 opacity-90">
-                Messaging and calls are paused while qorc checks the exact Signal identity
+                Messaging and calls are paused while Qorc checks the exact Signal identity
                 against the anonymous key-transparency log. Unverified keys cannot be accepted manually.
               </p>
               {heldCount > 0 && (

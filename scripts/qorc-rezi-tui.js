@@ -149,7 +149,7 @@ function groupCell(label, children, options = {}) {
   ]);
 }
 
-function signalRow(label, value, state = 'neutral') {
+function signalRow(label, value, state = 'neutral', linkUrl = null) {
   const signalColor = state === 'good'
     ? COLOR.green
     : state === 'warn'
@@ -157,6 +157,18 @@ function signalRow(label, value, state = 'neutral') {
       : state === 'bad'
         ? COLOR.red
         : COLOR.cyan;
+  const displayValue = truncateMiddle(String(value ?? '—'), 16);
+  const valueNode = linkUrl
+    ? ui.link({
+        url: linkUrl,
+        label: displayValue,
+        style: { fg: COLOR.text, underline: false },
+      })
+    : ui.text(displayValue, {
+        style: { fg: COLOR.text },
+        textOverflow: 'middle',
+        maxWidth: 'full',
+      });
   return ui.row({ width: 'full', gap: 1, align: 'center' }, [
     ui.text('●', { style: { fg: signalColor } }),
     ui.text(label, { style: { fg: COLOR.secondary, bold: true }, maxWidth: 10 }),
@@ -165,11 +177,7 @@ function signalRow(label, value, state = 'neutral') {
       flex: 1,
       minWidth: 0,
       overflow: 'hidden',
-    }, [ui.text(truncateMiddle(String(value ?? '—'), 16), {
-      style: { fg: COLOR.text },
-      textOverflow: 'middle',
-      maxWidth: 'full',
-    })]),
+    }, [valueNode]),
   ]);
 }
 
@@ -369,7 +377,12 @@ function loadBalancerView(state, actions) {
       ]),
     ], { flex: 1.05, raised: true, color: COLOR.purple }),
     groupCell('Edge services', [
-      signalRow('Tor', state.onionUrl || 'Waiting for publication', state.onionUrl ? 'good' : 'warn'),
+      signalRow(
+        'Tor',
+        state.onionUrl || 'Waiting for publication',
+        state.onionUrl ? 'good' : 'warn',
+        state.onionUrl,
+      ),
       signalRow('Redis', state.dataLabel, redisState),
       signalRow('HAProxy', `Admin :${state.statsPort}`, 'good'),
       signalRow('Discovery', state.heartbeatWindow, state.dataState === 'live' ? 'good' : redisState),
@@ -461,6 +474,7 @@ function createDashboard(kind, initialState, externalActions) {
       fpsCap: 30,
       executionMode: 'auto',
       screen: { mode: 'alt' },
+      nativeConfig: kind === 'balancer' ? { plat: { enableMouse: false } } : undefined,
       rootPadding: 0,
     },
   });

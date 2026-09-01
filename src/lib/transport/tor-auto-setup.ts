@@ -158,7 +158,7 @@ export class TorAutoSetup {
 
         this.updateStatus(
           Math.max(90, Math.min(99, 90 + Math.floor(progress / 10))),
-          bootstrapped ? 'Verifying Tor connection...' : `Bootstrapping Tor (${progress || 0}%)`
+          bootstrapped ? 'Verifying Tor connection...' : 'Bootstrapping Tor'
         );
 
         if (bootstrapped) {

@@ -25,6 +25,7 @@ export interface TorPreferences {
 const CONNECT_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 2500;
 const SERVER_CONNECTION_TIMEOUT_MS = 10_000;
+const SERVER_CONNECTION_WATCHDOG_GRACE_MS = 1_000;
 
 const serverConnectionTimeoutError = (): Error => {
   const error = new Error('Server connection timed out after 10 seconds');
@@ -334,18 +335,10 @@ class StartupConnection {
         return;
       }
 
-      void anonymousHttp.prewarm().catch(() => { });
-
       let lastError: unknown = null;
-      const connectionDeadline = Date.now() + SERVER_CONNECTION_TIMEOUT_MS;
       for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
         if (this.generation !== generation) return;
-        this.update({ phase: 'server', step: 'Connecting to server', error: '', failureTarget: null });
-        const remainingMs = connectionDeadline - Date.now();
-        if (remainingMs <= 0) {
-          lastError = serverConnectionTimeoutError();
-          break;
-        }
+        this.update({ phase: 'server', step: 'Connecting to server...', error: '', failureTarget: null });
 
         let timeoutId: ReturnType<typeof setTimeout> | null = null;
         let timedOut = false;
@@ -354,7 +347,7 @@ class StartupConnection {
             timeoutId = setTimeout(() => {
               timedOut = true;
               reject(serverConnectionTimeoutError());
-            }, remainingMs);
+            }, SERVER_CONNECTION_TIMEOUT_MS + SERVER_CONNECTION_WATCHDOG_GRACE_MS);
           });
           await Promise.race([
             websocketClient.connect({ autoReconnectOnFailure: false }),
@@ -362,6 +355,7 @@ class StartupConnection {
           ]);
           if (this.generation !== generation) return;
           this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
+          void anonymousHttp.prewarm().catch(() => { });
           return;
         } catch (error) {
           lastError = error;
@@ -369,10 +363,9 @@ class StartupConnection {
             await websocketClient.close().catch(() => { });
           }
           if (this.generation !== generation) return;
-          if (timedOut || Date.now() >= connectionDeadline) break;
           if (attempt < CONNECT_ATTEMPTS) {
-            this.update({ step: 'Retrying connection' });
-            await delay(Math.min(RETRY_DELAY_MS, Math.max(0, connectionDeadline - Date.now())));
+            this.update({ step: 'Retrying connection...' });
+            await delay(RETRY_DELAY_MS);
           }
         } finally {
           if (timeoutId) clearTimeout(timeoutId);

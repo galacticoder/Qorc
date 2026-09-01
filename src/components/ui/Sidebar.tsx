@@ -133,7 +133,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                     <div className="qorc-top-nav-brand" aria-hidden="true">
                         <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
                     </div>
-                    <nav className="qorc-top-nav-sections" aria-label="qorc sections">
+                    <nav className="qorc-top-nav-sections" aria-label="Qorc sections">
                         {navItems.map((item) => (
                             <button
                                 key={item.id}
@@ -212,7 +212,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                 <span className="qorc-rail-icon-slot">
                     <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
                 </span>
-                <span className="qorc-rail-label qorc-brand-label">qorc</span>
+                <span className="qorc-rail-label qorc-brand-label">Qorc</span>
             </button>
 
             <div className="qorc-rail-spacer">

@@ -12,8 +12,8 @@ use crate::state::AppState;
 
 const RATE_LIMIT_WINDOW_MS: u128 = 60_000;
 const MAX_NOTIFICATIONS_PER_WINDOW: usize = 5;
-const NOTIFICATION_TITLE: &str = "New qorc activity";
-const NOTIFICATION_BODY: &str = "Open qorc to view it";
+const NOTIFICATION_TITLE: &str = "New Qorc activity";
+const NOTIFICATION_BODY: &str = "Open Qorc to view it";
 
 pub struct NotificationHandler {
     enabled: RwLock<bool>,

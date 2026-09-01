@@ -1,6 +1,14 @@
 @import './styles/design-tokens.css';
 @import 'tailwindcss';
 
+@font-face {
+  font-family: "Google Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./assets/fonts/google-sans-variable.ttf') format('truetype');
+}
+
 @theme {
   --color-primary: 263 82% 74%;
   --color-primary-foreground: 0 0% 5%;
@@ -25,6 +33,9 @@
 
 @layer base {
   :root {
+    --qorc-ui-font: "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --qorc-content-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
     /* Premium Light Mode */
     --background: 210 40% 98%;
     /* Soft white/blue tint */
@@ -189,7 +200,9 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    font-family: var(--qorc-ui-font);
     font-feature-settings: "rlig" 1, "calt" 1;
+    font-optical-sizing: auto;
   }
 
   body.overflow-hidden {
@@ -410,7 +423,13 @@ body,
   overflow: hidden;
   background: var(--qorc-app-bg);
   color: var(--qorc-text);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
+}
+
+.qorc-conversation-item,
+.qorc-message-stack,
+.qorc-composer-wrap {
+  font-family: var(--qorc-content-font);
 }
 
 .qorc-main-pane {
@@ -701,8 +720,8 @@ body,
 }
 
 .qorc-brand-label {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-weight: 900;
+  font-family: var(--qorc-ui-font);
+  font-weight: 600;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -838,8 +857,8 @@ html.light .qorc-profile-stack,
 }
 
 .qorc-conversations-head {
-  height: 70px;
-  padding: 16px 18px 10px;
+  height: 68px;
+  padding: 16px 18px 12px;
   border-bottom: 1px solid var(--qorc-border);
   display: flex;
   align-items: center;
@@ -851,10 +870,17 @@ html.light .qorc-profile-stack,
   margin: 0;
   color: var(--qorc-text);
   font-size: 24px;
-  line-height: .9;
-  font-weight: 900;
-  letter-spacing: 0;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -.025em;
   user-select: none;
+}
+
+.qorc-conversations-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .qorc-head-actions {
@@ -957,6 +983,251 @@ html.light .qorc-profile-stack,
   user-select: none;
 }
 
+.qorc-skeleton {
+  --qorc-skeleton-base: color-mix(in srgb, var(--qorc-text) 8%, transparent);
+  --qorc-skeleton-highlight: color-mix(in srgb, var(--qorc-text) 15%, transparent);
+  pointer-events: none;
+  user-select: none;
+}
+
+.qorc-skeleton-block {
+  display: block;
+  overflow: hidden;
+  background-color: var(--qorc-skeleton-base, rgba(128, 128, 128, .12));
+  background-image: linear-gradient(
+    100deg,
+    transparent 18%,
+    var(--qorc-skeleton-highlight, rgba(128, 128, 128, .18)) 48%,
+    transparent 78%
+  );
+  background-position: 180% 0;
+  background-size: 220% 100%;
+  animation: qorc-skeleton-shimmer 1.35s ease-in-out infinite;
+}
+
+@keyframes qorc-skeleton-shimmer {
+  to { background-position: -120% 0; }
+}
+
+.qorc-skeleton-page {
+  background: var(--qorc-bg);
+}
+
+.qorc-call-log-skeleton-title {
+  width: 72px;
+  height: 27px;
+  border-radius: 7px;
+}
+
+.qorc-call-log-skeleton-search {
+  width: min(100%, 360px);
+  height: 40px;
+  flex: 1 1 260px;
+  border-radius: 12px;
+}
+
+.qorc-call-log-skeleton-options {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 10px;
+}
+
+.qorc-call-log-skeleton-rows {
+  display: grid;
+  gap: 6px;
+}
+
+.qorc-call-log-skeleton-group {
+  width: 58px;
+  height: 13px;
+  margin: 0 4px 2px;
+  border-radius: 5px;
+}
+
+.qorc-call-log-skeleton-row {
+  min-width: 0;
+  min-height: 70px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 68px 164px;
+  align-items: center;
+  gap: 12px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--qorc-conversation-card-bg) 72%, transparent);
+}
+
+.qorc-call-log-skeleton-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.qorc-call-log-skeleton-copy {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.qorc-call-log-skeleton-name {
+  width: min(180px, 58%);
+  height: 13px;
+  border-radius: 5px;
+}
+
+.qorc-call-log-skeleton-detail {
+  width: min(260px, 76%);
+  height: 11px;
+  border-radius: 5px;
+}
+
+.qorc-call-log-skeleton-time {
+  width: 58px;
+  height: 11px;
+  border-radius: 5px;
+}
+
+.qorc-call-log-skeleton-actions {
+  width: 164px;
+  height: 38px;
+  border-radius: 9px;
+}
+
+.qorc-call-log-skeleton-heading,
+.qorc-settings-skeleton-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.qorc-settings-skeleton-title-row {
+  min-height: 40px;
+}
+
+.qorc-call-log-skeleton-title-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  margin-inline: 6px;
+  border-radius: 6px;
+}
+
+.qorc-settings-skeleton-title-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  margin-inline: 6px;
+  border-radius: 7px;
+}
+
+.qorc-settings-page-skeleton {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  align-content: start;
+  gap: 44px;
+  overflow: hidden;
+  padding: 16px 18px 72px;
+  background: var(--qorc-bg);
+}
+
+.qorc-settings-skeleton-title {
+  width: 126px;
+  height: 24px;
+  border-radius: 8px;
+}
+
+.qorc-settings-skeleton-section {
+  display: grid;
+  gap: 9px;
+}
+
+.qorc-settings-skeleton-heading-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0 4px 8px;
+}
+
+.qorc-settings-skeleton-heading-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 6px;
+}
+
+.qorc-settings-skeleton-heading {
+  width: 116px;
+  height: 20px;
+  border-radius: 6px;
+}
+
+.qorc-settings-skeleton-row {
+  min-height: 82px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 240px);
+  align-items: center;
+  gap: 24px;
+  border-radius: 8px;
+  padding: 17px 18px;
+  background: color-mix(in srgb, var(--qorc-control-bg) 22%, transparent);
+}
+
+.qorc-settings-skeleton-copy {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+}
+
+.qorc-settings-skeleton-label {
+  width: min(230px, 48%);
+  height: 14px;
+  border-radius: 5px;
+}
+
+.qorc-settings-skeleton-description {
+  width: min(520px, 82%);
+  height: 11px;
+  border-radius: 5px;
+}
+
+.qorc-settings-skeleton-control {
+  width: min(100%, 190px);
+  height: 40px;
+  justify-self: end;
+  border-radius: 9px;
+}
+
+@media (max-width: 720px) {
+  .qorc-call-log-skeleton-row {
+    grid-template-columns: 40px minmax(0, 1fr) 52px;
+  }
+
+  .qorc-call-log-skeleton-actions {
+    display: none;
+  }
+
+  .qorc-settings-page-skeleton {
+    padding-inline: 12px;
+  }
+
+  .qorc-settings-skeleton-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .qorc-settings-skeleton-control {
+    width: min(100%, 220px);
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qorc-skeleton-block {
+    animation: none;
+    background-image: none;
+  }
+}
+
 .qorc-call-log-header,
 .qorc-call-log-content {
   width: 100%;
@@ -967,13 +1238,23 @@ html.light .qorc-profile-stack,
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 16px 12px 12px;
+  padding: 16px 18px 12px;
 }
 
 .qorc-call-log-heading {
   min-width: 0;
-  display: grid;
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.qorc-call-log-heading-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  margin-inline: 6px;
+  color: var(--qorc-text);
+  transform: translateY(-1px);
 }
 
 .qorc-call-log-heading h1,
@@ -984,7 +1265,7 @@ html.light .qorc-profile-stack,
 .qorc-call-log-heading h1 {
   color: var(--qorc-text);
   font-size: 24px;
-  line-height: 1.1;
+  line-height: 1;
   font-weight: 800;
   letter-spacing: -.025em;
 }
@@ -1364,44 +1645,27 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 10px;
   color: var(--qorc-muted-text);
   text-align: center;
 }
 
-.qorc-call-log-empty-icon {
-  width: 46px;
-  height: 46px;
-  display: grid;
-  place-items: center;
-  border-radius: 14px;
-  margin-bottom: 5px;
-  background: var(--qorc-control-bg);
-  color: var(--qorc-soft-text);
-}
-
-.qorc-call-log-empty-icon svg,
-.qorc-call-log-loader {
-  width: 21px;
-  height: 21px;
-}
-
 .qorc-call-log-empty strong {
   color: var(--qorc-text);
-  font-size: 14px;
-  line-height: 1.3;
-  font-weight: 600;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 700;
 }
 
 .qorc-call-log-empty > span:last-child {
-  max-width: 280px;
-  font-size: 12px;
-  line-height: 1.4;
+  max-width: 400px;
+  font-size: 16px;
+  line-height: 1.45;
 }
 
 @media (max-width: 760px) {
   .qorc-call-log-header {
-    padding: 14px 10px 10px;
+    padding: 16px 18px 12px;
   }
 
   .qorc-call-log-content {
@@ -1465,6 +1729,7 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   height: 30px;
   border-radius: 8px;
   color: var(--qorc-text);
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
   font-size: 18px;
   line-height: 1;
 }
@@ -2624,7 +2889,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 .qorc-empty-chat h2 {
   margin: 0;
   color: var(--qorc-text);
-  font-family: Inter, -apple-system, system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
   font-size: clamp(42px, 7vw, 74px);
   line-height: .92;
   font-weight: 950;
@@ -2635,7 +2900,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   max-width: 470px;
   margin: 0;
   color: var(--qorc-soft-text);
-  font-family: Inter, -apple-system, system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
   font-size: 15px;
   line-height: 1.6;
 }
@@ -2733,6 +2998,178 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   flex: 0 0 auto;
   gap: 0;
   padding: 80px 16px 112px;
+}
+
+.qorc-conversation-skeleton .qorc-toolbar,
+.qorc-conversation-skeleton .qorc-composer-wrap {
+  pointer-events: none;
+}
+
+.qorc-conversation-skeleton-actions {
+  width: 108px;
+}
+
+.qorc-conversation-skeleton-action > .qorc-skeleton-block {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+}
+
+.qorc-conversation-skeleton-scroll [data-radix-scroll-area-viewport] {
+  overflow: hidden !important;
+}
+
+.qorc-conversation-skeleton-stack {
+  min-height: 100%;
+  align-content: end;
+}
+
+.qorc-conversation-skeleton-system {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 16px;
+}
+
+.qorc-conversation-skeleton-system > .qorc-skeleton-block {
+  width: 188px;
+  height: 34px;
+  border-radius: 9px;
+}
+
+.qorc-conversation-skeleton-message {
+  width: 100%;
+}
+
+.qorc-conversation-skeleton-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+
+.qorc-conversation-skeleton-meta {
+  height: 17px;
+}
+
+.qorc-conversation-skeleton-name {
+  width: 92px;
+  height: 12px;
+  border-radius: 5px;
+}
+
+.qorc-conversation-skeleton-time {
+  width: 42px;
+  height: 9px;
+  border-radius: 4px;
+}
+
+.qorc-conversation-skeleton-bubble {
+  max-width: min(100%, 350px);
+  border-radius: var(--message-bubble-radius);
+}
+
+.qorc-conversation-skeleton-bubble.is-mine {
+  --qorc-skeleton-base: color-mix(in srgb, var(--color-accent-primary) 72%, var(--qorc-bg));
+  --qorc-skeleton-highlight: color-mix(in srgb, var(--color-accent-primary) 82%, white);
+}
+
+.qorc-conversation-skeleton-bubble.is-received {
+  --qorc-skeleton-base: var(--chat-bubble-received-text-bg, var(--chat-bubble-received-bg));
+  --qorc-skeleton-highlight: color-mix(in srgb, var(--chat-bubble-received-text-bg, var(--chat-bubble-received-bg)) 76%, white);
+}
+
+.qorc-conversation-skeleton-reply {
+  width: min(286px, 100%);
+  cursor: default;
+}
+
+.qorc-conversation-skeleton-reply-avatar {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+}
+
+.qorc-conversation-skeleton-reply-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 4px;
+}
+
+.qorc-conversation-skeleton-reply-copy .qorc-skeleton-block:first-child {
+  width: 72px;
+  height: 9px;
+  border-radius: 4px;
+}
+
+.qorc-conversation-skeleton-reply-copy .qorc-skeleton-block:last-child {
+  width: 88%;
+  height: 8px;
+  border-radius: 4px;
+}
+
+.qorc-conversation-skeleton-file {
+  width: 320px;
+  cursor: default;
+}
+
+.qorc-conversation-skeleton-file-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 9px;
+}
+
+.qorc-conversation-skeleton-file-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 7px;
+}
+
+.qorc-conversation-skeleton-file-copy .qorc-skeleton-block:first-child {
+  width: 72%;
+  height: 11px;
+  border-radius: 4px;
+}
+
+.qorc-conversation-skeleton-file-copy .qorc-skeleton-block:last-child {
+  width: 38%;
+  height: 8px;
+  border-radius: 4px;
+}
+
+.qorc-conversation-skeleton-file-action {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 8px;
+}
+
+.qorc-conversation-skeleton-composer .qorc-message-box {
+  pointer-events: none;
+}
+
+.qorc-conversation-skeleton-composer-button {
+  width: 36px;
+  height: 42px;
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+}
+
+.qorc-conversation-skeleton-composer-button > .qorc-skeleton-block {
+  width: 19px;
+  height: 19px;
+  border-radius: 6px;
+}
+
+.qorc-conversation-skeleton-input {
+  min-width: 60px;
+  height: 11px;
+  flex: 1 1 auto;
+  margin: 0 10px;
+  border-radius: 5px;
 }
 
 .qorc-interface.has-attached-call .qorc-message-stack {
@@ -4344,7 +4781,7 @@ html.light .signup-simple a:hover,
   gap: 10px;
   min-width: 0;
   color: var(--auth-text, hsl(var(--foreground)));
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -4370,7 +4807,7 @@ html.light .signup-simple a:hover,
 .signup-brand-name {
   overflow: hidden;
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: none;
@@ -4403,7 +4840,7 @@ html.light .signup-simple a:hover,
 .signup-simple-head h1 {
   margin: 0;
   color: var(--auth-text);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
   font-size: clamp(40px, 5vw, 50px);
   line-height: 1;
   font-weight: 800;
@@ -4804,7 +5241,7 @@ html.light .screen-signup .auth-simple-message,
 
 .screen-welcome .login-brand-name {
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .screen-welcome .auth-theme-toggle {
@@ -4873,7 +5310,7 @@ html.light .screen-signup .auth-simple-message,
 .welcome-simple-head h1 {
   margin: 0;
   color: var(--welcome-text);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--qorc-ui-font);
   font-size: clamp(40px, 5vw, 50px);
   line-height: 1;
   font-weight: 800;

@@ -47,7 +47,9 @@ fn connection_failure_diagnostic(error: &QorcError) -> (&'static str, &'static s
     };
     let normalized = message.to_ascii_lowercase();
 
-    if normalized.contains("connection timeout") {
+    if normalized.contains("server connection timed out") {
+        ("server-connect", "timeout")
+    } else if normalized.contains("connection timeout") {
         ("tor-socks", "timeout")
     } else if normalized.contains("socks5 connection failed") {
         if normalized.contains("refused") {

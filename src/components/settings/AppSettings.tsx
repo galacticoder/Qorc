@@ -1,7 +1,27 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTheme } from '../../contexts/ThemeContext';
 import { toast } from 'sonner';
-import { Ban, Camera, Check, Copy, LoaderCircle, LogOut, RefreshCw, Trash2 } from 'lucide-react';
+import {
+  Ban,
+  Bell,
+  Camera,
+  Check,
+  ChevronDown,
+  Copy,
+  Headphones,
+  LoaderCircle,
+  LogOut,
+  Mic,
+  Minimize2,
+  PanelLeft,
+  RefreshCw,
+  ShieldCheck,
+  SlidersHorizontal,
+  Trash2,
+  UserRound,
+  Video,
+  Volume2,
+} from 'lucide-react';
 import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
@@ -31,6 +51,8 @@ import {
   writeNavigationLayout,
   type NavigationLayout,
 } from '../../lib/ui/navigation-layout';
+import { SettingsSkeleton } from '../ui/ViewSkeletons';
+import { SettingsIcon } from '../chat/assets/icons';
 
 installAppSettingsStyles();
 
@@ -165,6 +187,7 @@ export const AppSettings = React.memo(function AppSettings({
   const [blockModalError, setBlockModalError] = useState<string | null>(null);
   const [unblockTarget, setUnblockTarget] = useState<string | null>(null);
   const [unblocking, setUnblocking] = useState(false);
+  const [initialSettingsReady, setInitialSettingsReady] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const profilePictureEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
   const blockStatusEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
@@ -236,6 +259,8 @@ export const AppSettings = React.memo(function AppSettings({
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
     const initTraySettings = async () => {
       try {
         setCloseToTray(await tray.getCloseToTray());
@@ -252,9 +277,6 @@ export const AppSettings = React.memo(function AppSettings({
       }
     };
 
-    initTraySettings();
-    initProfilePicture();
-
     try {
       const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
       if (stored) {
@@ -268,7 +290,19 @@ export const AppSettings = React.memo(function AppSettings({
         if (parsed.preferredCameraId) setPreferredCameraId(parsed.preferredCameraId);
       }
     } catch { }
-  }, []);
+
+    const initialize = async () => {
+      await Promise.allSettled([
+        initTraySettings(),
+        initProfilePicture(),
+        blockingAvailable ? loadBlockedUsers() : Promise.resolve(),
+      ]);
+      if (!cancelled) setInitialSettingsReady(true);
+    };
+
+    void initialize();
+    return () => { cancelled = true; };
+  }, [blockingAvailable, loadBlockedUsers]);
 
   useEffect(() => {
     const handleAvatarUpdate = (event: Event) => {
@@ -301,12 +335,6 @@ export const AppSettings = React.memo(function AppSettings({
       window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleAvatarUpdate as EventListener);
     };
   }, []);
-
-  useEffect(() => {
-    if (blockingAvailable) {
-      loadBlockedUsers();
-    }
-  }, [blockingAvailable, loadBlockedUsers]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -425,6 +453,11 @@ export const AppSettings = React.memo(function AppSettings({
   };
 
   const armClearData = useCallback(() => {
+    setLogoutArmed(false);
+    if (logoutTimerRef.current) {
+      clearTimeout(logoutTimerRef.current);
+      logoutTimerRef.current = null;
+    }
     setClearArmed(true);
     if (clearArmTimerRef.current) clearTimeout(clearArmTimerRef.current);
     clearArmTimerRef.current = window.setTimeout(() => setClearArmed(false), 5000);
@@ -457,6 +490,11 @@ export const AppSettings = React.memo(function AppSettings({
   }, [isClearingData]);
 
   const armLogout = useCallback(() => {
+    setClearArmed(false);
+    if (clearArmTimerRef.current) {
+      clearTimeout(clearArmTimerRef.current);
+      clearArmTimerRef.current = null;
+    }
     setLogoutArmed(true);
     if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
     logoutTimerRef.current = window.setTimeout(() => setLogoutArmed(false), 5000);
@@ -581,17 +619,33 @@ export const AppSettings = React.memo(function AppSettings({
     }
   }, [unblockTarget, unblocking, blockingAvailable, loadBlockedUsers]);
 
+  if (!initialSettingsReady) {
+    return (
+      <div className={`qorc-settings-host ${themeClass}`}>
+        <main className="settings-screen">
+          <SettingsSkeleton />
+        </main>
+      </div>
+    );
+  }
+
   return (
     <>
       <div className={`qorc-settings-host ${themeClass}`}>
         <main className="settings-screen">
           <section className="settings-content">
-            <h1 className="settings-brand"><strong>Settings</strong></h1>
+            <h1 className="settings-brand">
+              <SettingsIcon className="settings-brand-icon" aria-hidden="true" />
+              <strong>Settings</strong>
+            </h1>
 
             <section className="pane account-pane" data-settings-pane="account">
               <header className="pane-head">
-                <div>
-                  <h2 className="pane-title">My Account</h2>
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <UserRound className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">My Account</h2>
+                  </div>
                 </div>
               </header>
 
@@ -632,14 +686,8 @@ export const AppSettings = React.memo(function AppSettings({
                         {copiedUsername ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
                       </button>
                     </div>
-                  </div>
 
-                  <div className="account-actions">
-                    <div className="account-action-row account-danger-row">
-                      <div>
-                        <div className="setting-label" style={{ color: 'var(--danger)' }}>Clear All Data</div>
-                        <div className="setting-description">Permanently delete all your local account stored data. You will be logged out.</div>
-                      </div>
+                    <section className="account-actions" aria-label="Account actions">
                       {clearArmed ? (
                         <div className="confirm-inline">
                           <button className="action" type="button" onClick={cancelClearData} disabled={isClearingData}>
@@ -649,19 +697,7 @@ export const AppSettings = React.memo(function AppSettings({
                             {isClearingData ? 'Clearing…' : 'Are you sure?'}
                           </button>
                         </div>
-                      ) : (
-                        <button className="danger-action" type="button" disabled={isClearingData} onClick={armClearData}>
-                          <Trash2 aria-hidden="true" />
-                          <span>Clear Data</span>
-                        </button>
-                      )}
-                    </div>
-                    <div className="account-action-row account-danger-row">
-                      <div>
-                        <div className="setting-label" style={{ color: 'var(--danger)' }}>Log Out</div>
-                        <div className="setting-description">Sign out of your account on this device.</div>
-                      </div>
-                      {logoutArmed ? (
+                      ) : logoutArmed ? (
                         <div className="confirm-inline">
                           <button className="action" type="button" onClick={cancelLogout}>
                             Cancel
@@ -671,12 +707,18 @@ export const AppSettings = React.memo(function AppSettings({
                           </button>
                         </div>
                       ) : (
-                        <button className="danger-action" type="button" onClick={armLogout}>
-                          <LogOut aria-hidden="true" />
-                          <span>Log Out</span>
-                        </button>
+                        <div className="account-action-controls">
+                          <button className="danger-action" type="button" onClick={armLogout}>
+                            <LogOut aria-hidden="true" />
+                            <span>Log Out</span>
+                          </button>
+                          <button className="danger-action" type="button" disabled={isClearingData} onClick={armClearData}>
+                            <Trash2 aria-hidden="true" />
+                            <span>Clear Data</span>
+                          </button>
+                        </div>
                       )}
-                    </div>
+                    </section>
                   </div>
                 </div>
               </div>
@@ -684,8 +726,11 @@ export const AppSettings = React.memo(function AppSettings({
 
             <section className="pane" data-settings-pane="general">
               <header className="pane-head">
-                <div>
-                  <h2 className="pane-title">General</h2>
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <SlidersHorizontal className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">General</h2>
+                  </div>
                   <p className="pane-subtitle">Basic app behavior.</p>
                 </div>
               </header>
@@ -693,9 +738,12 @@ export const AppSettings = React.memo(function AppSettings({
               <div className="settings-section">
                 <div className="settings-list">
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Navigation layout</div>
-                      <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
+                    <div className="setting-row-copy">
+                      <PanelLeft className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Navigation layout</div>
+                        <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
+                      </div>
                     </div>
                     <div className="navigation-layout-picker" role="group" aria-label="Navigation layout">
                       <button
@@ -717,16 +765,22 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Minimize to system tray on close</div>
-                      <div className="setting-description">Closing the window keeps qorc running in the background.</div>
+                    <div className="setting-row-copy">
+                      <Minimize2 className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Minimize to system tray on close</div>
+                        <div className="setting-description">Closing the window keeps Qorc running in the background.</div>
+                      </div>
                     </div>
                     <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Desktop Notifications</div>
-                      <div className="setting-description">Show a notification popup when a new message arrives.</div>
+                    <div className="setting-row-copy">
+                      <Bell className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Desktop Notifications</div>
+                        <div className="setting-description">Show a notification popup when a new message arrives.</div>
+                      </div>
                     </div>
                     <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
                   </div>
@@ -736,8 +790,11 @@ export const AppSettings = React.memo(function AppSettings({
 
             <section className="pane" data-settings-pane="devices">
               <header className="pane-head">
-                <div>
-                  <h2 className="pane-title">Devices</h2>
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <Headphones className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">Devices</h2>
+                  </div>
                   <p className="pane-subtitle">Hardware used for calls.</p>
                 </div>
                 <button
@@ -755,34 +812,52 @@ export const AppSettings = React.memo(function AppSettings({
               <div className="settings-section">
                 <div className="settings-list">
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Microphone</div>
-                      <div className="setting-description">Default microphone for calls.</div>
+                    <div className="setting-row-copy">
+                      <Mic className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Microphone</div>
+                        <div className="setting-description">Default microphone for calls.</div>
+                      </div>
                     </div>
-                    <select className="select" value={preferredMicId} onChange={(event) => handleDevicePreference('preferredMicId', event.target.value)}>
-                      <option value="">System Default</option>
-                      {micDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0, 8)}`}</option>)}
-                    </select>
+                    <div className="device-select">
+                      <select className="select" value={preferredMicId} onChange={(event) => handleDevicePreference('preferredMicId', event.target.value)}>
+                        <option value="">System Default</option>
+                        {micDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0, 8)}`}</option>)}
+                      </select>
+                      <ChevronDown aria-hidden="true" />
+                    </div>
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Speaker</div>
-                      <div className="setting-description">Default speaker for call audio output.</div>
+                    <div className="setting-row-copy">
+                      <Volume2 className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Speaker</div>
+                        <div className="setting-description">Default speaker for call audio output.</div>
+                      </div>
                     </div>
-                    <select className="select" value={preferredSpeakerId} onChange={(event) => handleDevicePreference('preferredSpeakerId', event.target.value)}>
-                      <option value="">System Default</option>
-                      {speakerDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0, 8)}`}</option>)}
-                    </select>
+                    <div className="device-select">
+                      <select className="select" value={preferredSpeakerId} onChange={(event) => handleDevicePreference('preferredSpeakerId', event.target.value)}>
+                        <option value="">System Default</option>
+                        {speakerDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0, 8)}`}</option>)}
+                      </select>
+                      <ChevronDown aria-hidden="true" />
+                    </div>
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Camera</div>
-                      <div className="setting-description">Default camera for video calls.</div>
+                    <div className="setting-row-copy">
+                      <Video className="setting-row-icon" aria-hidden="true" />
+                      <div>
+                        <div className="setting-label">Camera</div>
+                        <div className="setting-description">Default camera for video calls.</div>
+                      </div>
                     </div>
-                    <select className="select" value={preferredCameraId} onChange={(event) => handleDevicePreference('preferredCameraId', event.target.value)}>
-                      <option value="">System Default</option>
-                      {cameraDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId.slice(0, 8)}`}</option>)}
-                    </select>
+                    <div className="device-select">
+                      <select className="select" value={preferredCameraId} onChange={(event) => handleDevicePreference('preferredCameraId', event.target.value)}>
+                        <option value="">System Default</option>
+                        {cameraDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId.slice(0, 8)}`}</option>)}
+                      </select>
+                      <ChevronDown aria-hidden="true" />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -790,8 +865,11 @@ export const AppSettings = React.memo(function AppSettings({
 
             <section className="pane" data-settings-pane="privacy">
               <header className="pane-head">
-                <div>
-                  <h2 className="pane-title">Privacy & Safety</h2>
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <ShieldCheck className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">Privacy & Safety</h2>
+                  </div>
                   <p className="pane-subtitle">Manage who can reach you.</p>
                 </div>
                 <button

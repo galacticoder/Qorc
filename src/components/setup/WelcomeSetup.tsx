@@ -106,19 +106,20 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
   }, [enableBridges, transport, bridgeLines, isConnecting, isRestartingTor]);
 
   const busy = isConnecting || isRestartingTor;
+  const torStep = (startup.step || 'Starting Tor').replace(/\s*\(\d+%\)\s*$/, '');
   const submitLabel = !isConnecting
     ? 'Connect'
     : startup.phase === 'tor'
-      ? `${startup.step || 'Starting Tor'}${startup.torProgress ? ` ${startup.torProgress}%` : ''}`
+      ? `${torStep}${startup.torProgress ? ` (${startup.torProgress}%)` : ''}`
       : startup.step || 'Connecting';
 
   return (
     <section className="screen screen-welcome">
       <div className="welcome-scene">
         <header className="welcome-topbar">
-          <div className="login-screen-brand" aria-label="qorc">
+          <div className="login-screen-brand" aria-label="Qorc">
             <QorcBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
-            <span className="login-brand-name">qorc</span>
+            <span className="login-brand-name">Qorc</span>
           </div>
         </header>
 
@@ -162,7 +163,9 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
               />
             </div>
 
-            {error && <p className="auth-simple-message">{error}</p>}
+            {error && startup.phase !== 'failed' && (
+              <p className="auth-simple-message">{error}</p>
+            )}
 
             <button
               type="submit"

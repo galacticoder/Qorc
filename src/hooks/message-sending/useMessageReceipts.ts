@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react';
 import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { isCanonicalAuthUsername, sanitizeMessageId } from '../../lib/sanitizers';
@@ -34,6 +34,19 @@ type PendingOutgoingReadReceipt = {
   addedAt: number;
   attempts: number;
   nextAttemptAt: number;
+};
+
+type ReceiptPeerPurgeListener = (peer: string) => void;
+
+const receiptPeerPurgeListeners = new Set<ReceiptPeerPurgeListener>();
+
+export const purgeQueuedReceiptsForPeer = (peer: string): void => {
+  const normalizedPeer = peer.trim().toLowerCase();
+  if (!isCanonicalAuthUsername(normalizedPeer)) return;
+  receiptBatcher.purgePeer(normalizedPeer);
+  for (const listener of receiptPeerPurgeListeners) {
+    try { listener(normalizedPeer); } catch { }
+  }
 };
 
 const applyQueuedReceipt = (target: Message, entry: DbQueuedReceipt): Message => {
@@ -90,6 +103,22 @@ export function useMessageReceipts(
     if (dbFlushTimeoutRef.current) clearTimeout(dbFlushTimeoutRef.current);
     dbFlushTimeoutRef.current = null;
   }, [currentUsername]);
+
+  useLayoutEffect(() => {
+    const purgePeer = (peer: string): void => {
+      for (const [key, entry] of pendingOutgoingReadsRef.current) {
+        if (entry.peer === peer) pendingOutgoingReadsRef.current.delete(key);
+      }
+      for (const [key, entry] of pendingReceiptsRef.current) {
+        if (entry.from === peer) pendingReceiptsRef.current.delete(key);
+      }
+      for (const [key, entry] of dbReceiptQueueRef.current) {
+        if (entry.from === peer) dbReceiptQueueRef.current.delete(key);
+      }
+    };
+    receiptPeerPurgeListeners.add(purgePeer);
+    return () => { receiptPeerPurgeListeners.delete(purgePeer); };
+  }, []);
 
   // Mark read receipts as sent only after their batch is confirmed delivered
   useEffect(() => {

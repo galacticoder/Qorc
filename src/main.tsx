@@ -29,7 +29,7 @@ function bootstrap() {
     box.style.background = '#111827';
     box.style.color = '#e5e7eb';
     box.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
-    box.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif';
+    box.style.fontFamily = '"Google Sans", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif';
 
     const title = document.createElement('div');
     title.textContent = 'Desktop app required';

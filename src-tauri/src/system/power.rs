@@ -78,7 +78,7 @@ fn create_blocker() -> QorcResult<BlockerHandle> {
                 "--inhibit",
                 "idle:suspend",
                 "--reason",
-                "qorc call in progress",
+                "Qorc call in progress",
                 sleep,
                 "infinity",
             ])
@@ -99,7 +99,7 @@ fn create_blocker() -> QorcResult<BlockerHandle> {
             .args([
                 "--what=idle:sleep",
                 "--mode=block",
-                "--why=qorc call in progress",
+                "--why=Qorc call in progress",
                 sleep,
                 "infinity",
             ])

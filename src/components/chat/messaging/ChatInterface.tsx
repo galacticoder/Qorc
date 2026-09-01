@@ -35,6 +35,7 @@ import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-
 import type { HybridKeys } from "../../../lib/types/auth-types";
 import type { HybridPublicKeys } from '../../../lib/types/message-sending-types';
 import { toast } from 'sonner';
+import { ConversationSkeleton } from '../../ui/ViewSkeletons';
 
 interface ChatInterfaceProps {
   readonly onSendMessage: (
@@ -73,6 +74,20 @@ const distanceFromChatBottom = (container: Element): number => (
 
 const distanceFromChatTop = (container: Element): number => (
   Math.max(0, container.scrollHeight - container.clientHeight + container.scrollTop)
+);
+
+const READ_RECEIPTABLE_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+  SignalType.MESSAGE,
+  SignalType.TEXT,
+  SignalType.FILE,
+  SignalType.FILE_MESSAGE,
+]);
+
+const shouldCreateReadReceipt = (message: Message, currentUsername: string): boolean => (
+  message.sender !== currentUsername &&
+  !message.isSystemMessage &&
+  READ_RECEIPTABLE_MESSAGE_TYPES.has(message.type || '') &&
+  message.receipt?.read !== true
 );
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({ 
@@ -120,6 +135,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
   const messageActionsDisabled = isUserBlocked || isBlockedByUser;
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
+  const [openingConversation, setOpeningConversation] = useState<string | null>(null);
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
   const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
   const backgroundLoadConversationRef = useRef<string | null>(null);
@@ -170,7 +186,19 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     scrollToBottom(scrollContainer);
     const frame = requestAnimationFrame(() => scrollToBottom(scrollContainer));
     return () => cancelAnimationFrame(frame);
-  }, [selectedConversation, scrollToBottom]);
+  }, [openingConversation, selectedConversation, scrollToBottom]);
+
+  useLayoutEffect(() => {
+    if (
+      !selectedConversation ||
+      !loadMoreMessages ||
+      loadedMessagesCountRef.current.has(selectedConversation)
+    ) {
+      setOpeningConversation(null);
+      return;
+    }
+    setOpeningConversation(selectedConversation);
+  }, [loadMoreMessages, selectedConversation]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -213,6 +241,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       } finally {
         if (isCurrentLoad()) {
           backgroundLoadConversationRef.current = null;
+          setOpeningConversation((current) => current === conversationToLoad ? null : current);
         }
       }
     };
@@ -338,11 +367,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Send read receipt for message
   const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
     const message = messages.find(m => m.id === messageId);
-    if (!message) return;
+    if (!message || message.sender !== sender || !shouldCreateReadReceipt(message, currentUsername)) return;
     const wireMessageId = message.wireMessageId || message.id;
 
     await sendServerReadReceipt(wireMessageId, sender);
-  }, [messages, sendServerReadReceipt]);
+  }, [currentUsername, messages, sendServerReadReceipt]);
 
   useReplyUpdates(messages, setMessages, saveMessageToLocalDB, currentUsername);
 
@@ -426,7 +455,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const handleFocus = () => {
       const currentMessages = messageMapRef.current;
       for (const [msgId, msg] of currentMessages) {
-        if (msg.sender !== currentUsername && !msg.receipt?.read) {
+        if (shouldCreateReadReceipt(msg, currentUsername)) {
           const el = document.getElementById(`message-${msgId}`);
           if (el) {
             const rect = el.getBoundingClientRect();
@@ -461,7 +490,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     if (!observer) return;
 
     for (const msg of messages) {
-      if (msg.sender !== currentUsername && !msg.receipt?.read && !observedMessagesRef.current.has(msg.id)) {
+      if (shouldCreateReadReceipt(msg, currentUsername) && !observedMessagesRef.current.has(msg.id)) {
         const el = document.getElementById(`message-${msg.id}`);
         if (el) {
           el.setAttribute('data-message-id', msg.id);
@@ -601,6 +630,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, []);
 
+  if (openingConversation === selectedConversation) {
+    return <ConversationSkeleton hasAttachedCall={hasAttachedCall} />;
+  }
+
   return (
     <div className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
       <div
@@ -654,7 +687,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           <div className="min-w-0">
             <div className="font-semibold">Account-key recovery pending for {selectedConversation}</div>
             <p className="mt-0.5 text-xs leading-relaxed text-amber-100/85">
-              qorc verified a recovery-key-authorized replacement request. The existing key remains active until{' '}
+              Qorc verified a recovery-key-authorized replacement request. The existing key remains active until{' '}
               {new Date(keyTransparencyEpochStartMs(recoveryWarning.activatesAtEpoch)).toLocaleString()}. Treat unexpected recovery as a security warning.
             </p>
           </div>
@@ -666,11 +699,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       >
         <div className="qorc-message-stack">
           {}
-          {isLoadingMore && (
+          {isLoadingMore ? (
             <div className="qorc-thread-loading" role="status" aria-label="Loading earlier messages">
               <span className="qorc-thread-loading-spinner" aria-hidden="true" />
             </div>
-          )}
+          ) : null}
           {messages.length === 0 && !isLoadingMore ? (
             <div className="qorc-thread-empty">
               No messages yet. Start the conversation!

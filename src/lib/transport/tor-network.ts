@@ -11,7 +11,7 @@ import {
   TOR_DEFAULT_MONITOR_INTERVAL_MS,
   TOR_MAX_BACKOFF_MS
 } from '../constants';
-import { tor as tauriTor, websocket as tauriWebsocket, anonymousHttp, isTauri } from '../tauri-bindings';
+import { tor as tauriTor, websocket as tauriWebsocket, isTauri } from '../tauri-bindings';
 import type { TorInfo, TorStatus } from '../tauri-bindings';
 
 const TOR_DEEP_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -591,9 +591,6 @@ export class TorNetworkManager {
 
   // Notify connection callbacks
   private notifyConnectionCallbacks(connected: boolean): void {
-    if (connected) {
-      void anonymousHttp.prewarm().catch(() => { });
-    }
     this.connectionCallbacks.forEach((callback) => {
       try {
         callback(connected);

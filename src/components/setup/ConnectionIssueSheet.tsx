@@ -29,7 +29,7 @@ export function ConnectionIssueSheet({ error, target, onRetry, onChangeServer }:
           {isTorFailure ? 'Can\'t connect to Tor' : 'Can\'t reach the server'}
         </span>
         <span className="conn-sheet-detail">
-          {error || (isTorFailure ? 'Tor could not start.' : 'qorc could not reach the server.')}
+          {error || (isTorFailure ? 'Tor could not start.' : 'Qorc could not reach the server.')}
         </span>
       </div>
       <div className="conn-sheet-actions">

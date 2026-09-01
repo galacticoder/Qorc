@@ -12,7 +12,7 @@
   background: var(--emoji-picker-bg);
   box-shadow: var(--qorc-shadow, 0 20px 55px rgba(0, 0, 0, 0.3));
   color: var(--qorc-text, hsl(var(--popover-foreground)));
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--qorc-ui-font, "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
   font-size: 13px;
   isolation: isolate;
 }

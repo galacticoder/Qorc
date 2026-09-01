@@ -13,7 +13,7 @@ export function QorcBrandLogo({
   className,
   imageClassName,
   ariaHidden = true,
-  label = 'qorc',
+  label = 'Qorc',
 }: QorcBrandLogoProps) {
   return (
     <span

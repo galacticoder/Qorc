@@ -3,8 +3,10 @@ const APP_SETTINGS_CSS = `
       --settings-bg: var(--qorc-bg, #050507);
       --settings-panel: #0d0d0e;
       --settings-card: rgb(10, 10, 10);
+      --settings-section-bg: #030305;
       --settings-hover: rgb(11, 11, 11);
       --settings-control: #111114;
+      --settings-layout-hover: #0d0d10;
       --settings-input: #111114;
       --settings-text: #f4f4f6;
       --settings-muted: #96969f;
@@ -23,7 +25,7 @@ const APP_SETTINGS_CSS = `
       overflow: hidden;
       background: var(--settings-bg);
       color: var(--settings-text);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      font-family: var(--qorc-ui-font, "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
       font-size: 14px;
       user-select: none;
       -webkit-user-select: none;
@@ -33,8 +35,10 @@ const APP_SETTINGS_CSS = `
       --settings-bg: #ffffff;
       --settings-panel: #f6f7f9;
       --settings-card: #ffffff;
+      --settings-section-bg: #fafafa;
       --settings-hover: #eef0f3;
       --settings-control: #e9e9e9;
+      --settings-layout-hover: #dedede;
       --settings-input: #f7f7f7;
       --settings-text: #17131f;
       --settings-muted: #6f6475;
@@ -43,6 +47,8 @@ const APP_SETTINGS_CSS = `
       --settings-danger-hover: #dc2626;
       --settings-success: #3d8a5a;
       color-scheme: light;
+      -webkit-font-smoothing: antialiased;
+      font-synthesis: none;
     }
 
     .qorc-settings-host *,
@@ -101,7 +107,7 @@ const APP_SETTINGS_CSS = `
       align-items: start;
       gap: 44px;
       overflow-y: auto;
-      padding: 30px 18px 72px;
+      padding: 16px 18px 72px;
       background: var(--settings-bg);
       scrollbar-width: thin;
     }
@@ -122,14 +128,27 @@ const APP_SETTINGS_CSS = `
     .settings-brand {
       grid-area: title;
       margin: 0;
-      padding: 0 4px 8px;
+      min-height: 40px;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .settings-brand-icon {
+      width: 22px;
+      height: 22px;
+      flex: 0 0 22px;
+      margin-inline: 6px;
+      color: var(--settings-text);
+      transform: translateY(-1px);
     }
 
     .settings-brand strong {
       display: block;
       color: var(--settings-text);
-      font-size: 30px;
-      line-height: 1.15;
+      font-size: 24px;
+      line-height: 1;
       font-weight: 800;
       letter-spacing: -.025em;
     }
@@ -139,8 +158,8 @@ const APP_SETTINGS_CSS = `
       min-width: 0;
       overflow: visible;
       border: 0;
-      border-radius: 0;
-      background: transparent;
+      border-radius: 10px;
+      background: var(--settings-section-bg);
     }
 
     .pane[data-settings-pane="account"] {
@@ -166,25 +185,51 @@ const APP_SETTINGS_CSS = `
       justify-content: space-between;
       gap: 14px;
       margin: 0;
-      padding: 0 8px 16px;
+      padding: 17px 18px 12px;
     }
 
     .pane-head > div {
       min-width: 0;
     }
 
+    .pane-heading {
+      display: grid;
+      align-items: start;
+      gap: 7px;
+    }
+
+    .pane-heading > div {
+      min-width: 0;
+    }
+
+    .pane-title-row {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+    }
+
+    .pane-title-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      margin: 0;
+      color: var(--settings-muted);
+      stroke-width: 2;
+      transform: translateY(-1px);
+    }
+
     .pane-title {
       margin: 0;
       color: var(--settings-text);
       font-size: 20px;
-      line-height: 1.2;
+      line-height: 1;
       font-weight: 650;
       letter-spacing: -.01em;
     }
 
     .pane-subtitle {
-      margin: 7px 0 0;
-      color: var(--settings-muted);
+      margin: 0;
+      color: var(--settings-soft);
       font-size: 13px;
       line-height: 1.45;
       font-weight: 450;
@@ -196,14 +241,12 @@ const APP_SETTINGS_CSS = `
     }
 
     .settings-list,
-    .account-actions,
     .blocked-user-list {
       display: grid;
       gap: 9px;
     }
 
-    .setting-row,
-    .account-action-row {
+    .setting-row {
       min-width: 0;
       min-height: 82px;
       display: grid;
@@ -218,15 +261,32 @@ const APP_SETTINGS_CSS = `
     }
 
     .setting-row:hover,
-    .setting-row:focus-within,
-    .account-action-row:hover,
-    .account-action-row:focus-within {
+    .setting-row:focus-within {
       background: var(--settings-hover);
     }
 
-    .setting-row > div,
-    .account-action-row > div {
+    .setting-row > div {
       min-width: 0;
+    }
+
+    .setting-row-copy {
+      display: flex;
+      align-items: flex-start;
+      gap: 11px;
+    }
+
+    .setting-row-copy > div {
+      min-width: 0;
+    }
+
+    .setting-row-icon {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 15px;
+      margin-top: 2px;
+      color: var(--settings-soft);
+      opacity: .72;
+      stroke-width: 1.7;
     }
 
     .setting-label {
@@ -273,7 +333,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .navigation-layout-picker button:hover {
-      background: var(--settings-hover);
+      background: var(--settings-layout-hover);
       color: var(--settings-text);
     }
 
@@ -364,7 +424,7 @@ const APP_SETTINGS_CSS = `
       align-items: center;
       justify-content: flex-start;
       gap: 18px;
-      margin-bottom: 10px;
+      margin-bottom: 0;
       padding: 20px 18px;
       border-radius: 8px;
       background: transparent;
@@ -438,6 +498,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .account-name-row {
+      flex: 0 1 auto;
       max-width: 100%;
       display: flex;
       align-items: center;
@@ -488,15 +549,20 @@ const APP_SETTINGS_CSS = `
     }
 
     .account-actions {
-      margin-top: 4px;
+      width: auto;
+      flex: 0 0 auto;
+      align-self: center;
+      display: flex;
+      justify-content: flex-end;
+      margin: 0 0 0 auto;
     }
 
-    .account-action-row {
-      grid-template-columns: minmax(0, 1fr) auto;
-    }
-
-    .account-danger-row {
-      background: transparent;
+    .account-action-controls {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
     }
 
     .action,
@@ -614,13 +680,49 @@ const APP_SETTINGS_CSS = `
       font-weight: 500;
     }
 
-    .select {
+    .device-select {
+      position: relative;
+      width: min(100%, 340px);
+      height: 44px;
       justify-self: end;
+      overflow: hidden;
+      border-radius: 10px;
+      background: var(--settings-input);
+      transition: background .15s ease, box-shadow .15s ease;
+    }
+
+    .device-select:hover {
+      background: var(--settings-layout-hover);
+    }
+
+    .device-select:focus-within {
+      background: var(--settings-layout-hover);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--settings-muted) 28%, transparent);
+    }
+
+    .device-select > svg {
+      position: absolute;
+      top: 50%;
+      right: 14px;
+      width: 17px;
+      height: 17px;
+      pointer-events: none;
+      color: var(--settings-muted);
+      transform: translateY(-50%);
+      stroke-width: 2;
+    }
+
+    .select {
+      width: 100%;
+      height: 100%;
+      appearance: none;
+      -webkit-appearance: none;
+      border-radius: inherit;
+      padding: 0 44px 0 15px;
+      background: transparent;
       cursor: pointer;
     }
 
-    .select:hover,
-    .select:focus,
     .text-input:hover,
     .text-input:focus {
       background: var(--settings-hover);
@@ -847,7 +949,7 @@ const APP_SETTINGS_CSS = `
     @media (max-width: 900px) {
       .settings-content {
         gap: 36px;
-        padding: 24px 12px 60px;
+        padding: 16px 18px 60px;
       }
 
       .account-preview {
@@ -856,25 +958,35 @@ const APP_SETTINGS_CSS = `
     }
 
     @media (max-width: 580px) {
-      .settings-brand strong {
-        font-size: 22px;
+      .account-preview {
+        flex-wrap: wrap;
+      }
+
+      .account-actions {
+        width: 100%;
+        max-width: none;
+        flex-basis: 100%;
+        margin-left: 0;
       }
 
       .pane-head {
-        padding: 11px 12px;
+        padding: 15px 14px 10px;
       }
 
       .settings-section {
         padding: 0 6px 6px;
       }
 
-      .setting-row,
-      .account-action-row {
+      .setting-row {
         grid-template-columns: minmax(0, 1fr);
         gap: 9px;
       }
 
       .select {
+        width: 100%;
+      }
+
+      .device-select {
         width: 100%;
         justify-self: stretch;
       }
@@ -883,11 +995,16 @@ const APP_SETTINGS_CSS = `
         justify-self: start;
       }
 
-      .account-action-row .confirm-inline {
+      .account-actions .confirm-inline {
         width: 100%;
       }
 
-      .account-action-row .confirm-inline > button {
+      .account-action-controls {
+        width: 100%;
+      }
+
+      .account-action-controls > button,
+      .account-actions .confirm-inline > button {
         flex: 1 1 0;
       }
     }

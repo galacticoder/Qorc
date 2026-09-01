@@ -161,9 +161,9 @@ export const Login = React.memo<LoginProps>(({
     <section className={`screen screen-${prefix}`}>
       <div className={`${prefix}-scene`}>
         <header className={`${prefix}-topbar`}>
-          <div className={`${prefix}-screen-brand`} aria-label="qorc">
+          <div className={`${prefix}-screen-brand`} aria-label="Qorc">
             <QorcBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
-            <span className={`${prefix}-brand-name`}>qorc</span>
+            <span className={`${prefix}-brand-name`}>Qorc</span>
           </div>
 
         </header>
