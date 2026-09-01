@@ -61,7 +61,7 @@
   "bundle": {
     "active": true,
     "publisher": "galacticoderr",
-    "homepage": "https://github.com/galacticoder/qorc",
+    "homepage": "https://github.com/galacticoder/Qorc",
     "targets": [
       "deb",
       "rpm",

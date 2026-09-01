@@ -55,7 +55,7 @@ subkeys. They are not required to have the same bytes.
 
 Before accepting those certified subkeys, the client verifies that their account
 root matches the current append-only transparency commitment for the handle.
-This authorizes continuity of the qorc cryptographic identity, it does not prove
+This authorizes continuity of the Qorc cryptographic identity, it does not prove
 who owns the handle in the real world.
 
 Persistent receive keys are native-only. Rust verifies the canonical signed
@@ -253,7 +253,7 @@ This does not make the entire app or network path post-quantum:
 
 - Signal identity signatures and parts of the Double Ratchet remain classical,
   PQXDH, SPQR v1, and the required outer ML-KEM envelope supplement them.
-- qorc-controlled client-facing TLS permits only `X25519MLKEM768`, a hybrid
+- Qorc-controlled client-facing TLS permits only `X25519MLKEM768`, a hybrid
   ML-KEM-768 + X25519 group. TLS certificate signatures remain classical, while
   the pinned application ML-DSA/P2P transcript authentication supplies the
   additional PQ identity layer. The P2P transport is a Tor onion stream whose

@@ -1,6 +1,6 @@
 # Authentication
 
-qorc keeps account names and passwords on the client. The server stores a
+Qorc keeps account names and passwords on the client. The server stores a
 fixed-size set of opaque credential records and verifies a login across the full
 set. Successful connections authorize delivery with single-use anonymous tokens.
 Separately, a private append-only transparency
@@ -134,7 +134,7 @@ available.
 The transparency update is not part of the opaque-record database transaction.
 The client queries after an ambiguous update and does not enter normal identity
 operation until the current root is verified. A label can be registered only
-once, so the first valid claimant controls the qorc handle on that server.
+once, so the first valid claimant controls the Qorc handle on that server.
 
 See `docs/app/KEY_TRANSPARENCY.md` for proofs, monitoring, gossip, recovery, and
 the exact first-contact trust boundary.

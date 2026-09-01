@@ -1,15 +1,15 @@
-# qorc Privacy Policy
+# Qorc Privacy Policy
 
 Effective Date: June 21, 2026  
 Last Updated: August 6, 2026
 
-This policy describes the default qorc app and server operated by galacticoder.
+This policy describes the default Qorc app and server operated by galacticoder.
 
-qorc is built to be blind by design. The server is not a place where readable user profiles, readable usernames, messages, files, calls, contacts, passwords, passphrases, or keys are kept. In normal use, readable information stays on your device or with the people you choose to communicate with.
+Qorc is built to be blind by design. The server is not a place where readable user profiles, readable usernames, messages, files, calls, contacts, passwords, passphrases, or keys are kept. In normal use, readable information stays on your device or with the people you choose to communicate with.
 
 ## Core Promise
 
-qorc does not require a real world identity for the core app. The default
+Qorc does not require a real world identity for the core app. The default
 server does not use a stable readable user ID, per user messaging mailbox,
 recipient route, or readable contact graph. It does retain one stable,
 fixed-size opaque authentication record and slot for each registered account.
@@ -76,7 +76,7 @@ differently from the default logging policy.
 
 Readable app data is local to your device. That includes your message history, files, local profile information, settings, keys, block lists, and app state.
 
-People you communicate with can read, save, copy, or share what you send them. qorc cannot prevent a recipient from doing that.
+People you communicate with can read, save, copy, or share what you send them. Qorc cannot prevent a recipient from doing that.
 
 ## Discovery
 
@@ -161,7 +161,7 @@ Because the server does not keep a readable user record, there is no readable se
 
 ## Other Notes
 
-qorc is not directed to children under 13.
+Qorc is not directed to children under 13.
 
 We may update this policy by changing the date above and, where appropriate, providing notice.
 

@@ -1,10 +1,10 @@
-# Contributing to qorc
+# Contributing to Qorc
 
-Thank you for considering contributing to qorc! Contributions from everyone are welcome.
+Thank you for considering contributing to Qorc! Contributions from everyone are welcome.
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the [qorc Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
+This project and everyone participating in it is governed by the [Qorc Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
 
 ## Getting Started
 
@@ -20,8 +20,8 @@ This project and everyone participating in it is governed by the [qorc Code of C
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/galacticoder/qorc.git
-    cd qorc
+    git clone https://github.com/galacticoder/Qorc.git
+    cd Qorc
     ```
 
 2.  **Start a complete Docker server:**
@@ -60,7 +60,7 @@ On a native ARM64 host,
 `node scripts/start-client.cjs --bundle-only --target arm64` builds directly.
 
 Linux AppImages are prepared from the Debian payload, populated by linuxdeploy,
-then compressed once after qorc's private WebKitGTK and GStreamer runtimes are
+then compressed once after Qorc's private WebKitGTK and GStreamer runtimes are
 installed. The old intermediate compressed AppImage pass is not part of the
 build path.
 

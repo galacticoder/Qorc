@@ -1,6 +1,6 @@
-# qorc
+# Qorc
 
-qorc is a Tauri desktop chat app for messaging, files, and audio/video/screen
+Qorc is a Tauri desktop chat app for messaging, files, and audio/video/screen
 calls. Every network path the client uses runs over Tor, and every application
 payload is protected by a hybrid post-quantum layer on top of the Signal Double
 Ratchet.
@@ -40,11 +40,11 @@ Current architecture docs:
 - Self-hosted deployment with Redis, Postgres, optional clustering,
   and an HAProxy edge tier.
 
-qorc is not a metadata-free system. The server can still observe timing,
+Qorc is not a metadata-free system. The server can still observe timing,
 connection state, traffic volume, rounded database sizes, and some bucketed or
 cover-traffic protocol artifacts.
 
-## Run a qorc server with Docker
+## Run a Qorc server with Docker
 
 This is the source and terminal setup. It works with Docker Linux containers on
 64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
@@ -80,7 +80,7 @@ When you run it, the helper:
 4. Detects occupied host ports and saves available replacements automatically.
 5. Asks whether to run in the background; pressing Enter accepts the normal
    background mode.
-6. Builds and starts PostgreSQL, Redis, the qorc server, HAProxy, and the Tor
+6. Builds and starts PostgreSQL, Redis, the Qorc server, HAProxy, and the Tor
    onion-service edge. TLS certificates are generated inside the stack.
 
 The first build pulls the Docker base images and installs the Node server
@@ -119,7 +119,7 @@ advanced or multi-host deployments, but a normal single host server should use
 ## Build the desktop client from source
 
 Building the desktop application has additional requirements that are not
-needed for a Docker server or for an installed qorc app:
+needed for a Docker server or for an installed Qorc app:
 
 - Node.js 18 or newer.
 - pnpm through Corepack (`corepack enable pnpm`).
@@ -309,13 +309,13 @@ Every boundary below has a named wire form with a required algorithm binding. Th
 
 ### Quantum-resistance boundary
 
-qorc is a hybrid system, not a claim that every dependency and network layer
+Qorc is a hybrid system, not a claim that every dependency and network layer
 is post-quantum. Current message payloads require ML-KEM-1024 confidentiality and
 ML-DSA-87 authentication layers, and Signal sessions require PQXDH plus SPQR v1.
 The classical X25519 contributions remain in the hybrid derivations so security
 does not depend on only one primitive family.
 
-qorc-controlled client-facing TLS is pinned to TLS 1.3 only, with
+Qorc-controlled client-facing TLS is pinned to TLS 1.3 only, with
 `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256` as the only
 ciphersuites and the hybrid `X25519MLKEM768` group as the only key-exchange
 group, on both the Node origin and the HAProxy edge tier. Session tickets,
@@ -410,7 +410,7 @@ processes obtained from release-pinned, SHA-256-verified packages. Native Linux
 screen capture carries a curated GStreamer/PipeWire runtime, launcher, plugin
 scanner, SPA support, PipeWire audio/video conversion adapters, and an artifact
 manifest containing every staged file's SHA-256. Package validation rejects a
-runtime missing either adapter. At runtime qorc selects only a complete private
+runtime missing either adapter. At runtime Qorc selects only a complete private
 SPA root and disables GStreamer's system plugin search for the capture process,
 so a user's installed GStreamer or SPA plugin set does not replace the packaged
 capture implementation.
@@ -432,4 +432,4 @@ the project issue templates when reporting bugs. Security reports should follow
 
 ## License
 
-[![License: qorc Non-Commercial Copyleft v1.0](https://img.shields.io/badge/License-qorc%20Non--Commercial%20Copyleft%20v1.0-6d4aff.svg)](LICENSE)
+[![License: Qorc Non-Commercial Copyleft v1.0](https://img.shields.io/badge/License-Qorc%20Non--Commercial%20Copyleft%20v1.0-6d4aff.svg)](LICENSE)

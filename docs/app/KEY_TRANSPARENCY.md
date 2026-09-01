@@ -1,6 +1,6 @@
 # Key Transparency
 
-qorc authorizes the account root behind discovered Signal, Hybrid, and P2P
+Qorc authorizes the account root behind discovered Signal, Hybrid, and P2P
 keys against an append-only log. A discovery record is not trusted merely
 because it decrypts correctly: its certified account root must match a root the
 log shows was published, chained forward from the handle's earliest

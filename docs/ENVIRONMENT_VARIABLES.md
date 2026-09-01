@@ -1,6 +1,6 @@
 # Environment variables
 
-This is the inventory of supported qorc runtime and deployment environment
+This is the inventory of supported Qorc runtime and deployment environment
 variables. Defaults are the values used after parsing.
 
 ## Required security material

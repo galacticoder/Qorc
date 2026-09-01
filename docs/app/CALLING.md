@@ -1,6 +1,6 @@
 # Calling
 
-qorc calling has two separate encrypted planes. The signaling plane carries
+Qorc calling has two separate encrypted planes. The signaling plane carries
 offers, answers, declines, hangups, and screen-share authorization through the
 same Signal and hybrid post-quantum application-encryption pipeline used by
 messaging. The media plane carries live audio, camera video, and screen frames
@@ -93,7 +93,7 @@ transparency and messaging machinery.
 These controls serve different purposes:
 
 - key transparency authorizes the cryptographic identity currently bound to a
-  qorc handle,
+  Qorc handle,
 - Signal authenticates and ratchets the call-control conversation,
 - the P2P handshake authenticates the direct onion session and derives media
   transport keys,
@@ -840,7 +840,7 @@ native-screen-portal-create-after
 If the portal and PipeWire phases succeed but every five-second native capture
 window reports zero frames, the failure is before WebCodecs, encryption, media
 lanes, and remote rendering. A `Failed to set pipeline to PAUSED` result after
-about 30 seconds is PipeWire's own source-activation timeout. qorc does not wait
+about 30 seconds is PipeWire's own source-activation timeout. Qorc does not wait
 for that timeout: it validates the SPA factories before spawning GStreamer and
 stops a child that produces no first frame within eight seconds. The
 GStreamer/PipeWire state trace then distinguishes a remote/node connection that
@@ -851,7 +851,7 @@ receive counters move the fault boundary into the encoder or transport stages.
 The private SPA root must contain both its `support` modules and
 `videoconvert/libspa-videoconvert.so`, PipeWire's `client.conf` resolves
 `video.convert.*` through that adapter when `pipewiresrc` creates `video.adapt`.
-Because qorc overrides `SPA_PLUGIN_DIR` instead of extending the host directory,
+Because Qorc overrides `SPA_PLUGIN_DIR` instead of extending the host directory,
 the capture process cannot fall back to a system copy. Staging, both package
 validators, AppImage cache reuse, development launch, and native startup now
 reject an incomplete private root. `PIPEWIRE_DEBUG` defaults to error-level `1`

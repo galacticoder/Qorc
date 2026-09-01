@@ -1,6 +1,6 @@
 # Local Data Security
 
-qorc keeps the persistent account master, account identity keys, Signal
+Qorc keeps the persistent account master, account identity keys, Signal
 state, database keys, and credential-cache encryption keys in the native Rust
 process. The web renderer receives public keys and narrowly scoped operation
 results. It does not receive the persistent private keys or a general-purpose
@@ -95,7 +95,7 @@ application/native-process restart destroys the session and shows the standard
 **Sign in** form in local-unlock mode. That form requires both the account
 password and the local encryption passphrase.
 
-After unlock, qorc attempts a one-time anonymous resume credential. If the
+After unlock, Qorc attempts a one-time anonymous resume credential. If the
 resume pool is empty, it continues through normal private account
 authentication. The expensive local account unlock is not repeated during that
 fallback.
@@ -352,5 +352,5 @@ These checks establish implementation properties, not a formal proof. The
 Argon2, ML-KEM, ML-DSA, X25519, Signal, SQLCipher, AEAD, and composition choices
 still require independent security review. In particular, the RustCrypto
 `ml-dsa` crate used for native account signatures documents that it has not had
-an independent third-party audit, qorc must not describe this boundary as an
+an independent third-party audit, Qorc must not describe this boundary as an
 audited hardware-grade vault.

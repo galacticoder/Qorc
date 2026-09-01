@@ -36,9 +36,9 @@
     <keyword>post-quantum</keyword>
   </keywords>
 
-  <url type="homepage">https://github.com/galacticoder/qorc</url>
-  <url type="bugtracker">https://github.com/galacticoder/qorc/issues</url>
-  <url type="vcs-browser">https://github.com/galacticoder/qorc</url>
+  <url type="homepage">https://github.com/galacticoder/Qorc</url>
+  <url type="bugtracker">https://github.com/galacticoder/Qorc/issues</url>
+  <url type="vcs-browser">https://github.com/galacticoder/Qorc</url>
 
   <content_rating type="oars-1.1">
     <content_attribute id="social-chat">intense</content_attribute>
