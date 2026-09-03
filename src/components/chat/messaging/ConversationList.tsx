@@ -4,7 +4,7 @@ import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
+import { Ban, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -33,6 +33,8 @@ export interface Conversation {
   readonly pinnedAt?: number;
 }
 
+export type ConversationDialogMode = 'manage' | 'block';
+
 interface ConversationListProps {
   readonly currentUsername: string;
   readonly conversations: ReadonlyArray<Conversation>;
@@ -46,6 +48,8 @@ interface ConversationListProps {
   readonly onTogglePin?: (username: string) => void;
   readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
   readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly conversationDialogMode?: ConversationDialogMode;
+  readonly onBlockConversation?: (username: string) => void | Promise<void>;
 }
 
 // Call status type
@@ -245,33 +249,46 @@ const ConversationItem = memo<ConversationItemProps>(({
 interface ConversationManageRowProps {
   readonly username: string;
   readonly blocked: boolean;
+  readonly mode: ConversationDialogMode;
   readonly onChat: (username: string) => void;
   readonly onCall?: (username: string, type: 'audio' | 'video') => void;
   readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly onBlock?: (username: string) => void;
+  readonly blocking?: boolean;
 }
 
 const ConversationManageRow = memo<ConversationManageRowProps>(({
   username,
   blocked,
+  mode,
   onChat,
   onCall,
   onToggleBlock,
+  onBlock,
+  blocking = false,
 }) => {
   const displayName = useDisplayUsername({ username });
+  const handlePrimaryAction = useCallback(() => {
+    if (mode === 'block') {
+      onBlock?.(username);
+      return;
+    }
+    onChat(username);
+  }, [mode, onBlock, onChat, username]);
 
   return (
     <div
       className="qorc-cm-row"
       role="button"
       tabIndex={0}
-      onClick={() => onChat(username)}
+      onClick={handlePrimaryAction}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          onChat(username);
+          handlePrimaryAction();
         }
       }}
-      aria-label={`Open chat with ${displayName}`}
+      aria-label={mode === 'block' ? `Block ${displayName}` : `Open chat with ${displayName}`}
     >
       <UserAvatar username={username} size="md" className="qorc-cm-row-avatar" />
 
@@ -282,36 +299,51 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
         )}
       </div>
 
-      <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
-        <Button
-          size="sm"
-          variant="outline"
-          className="qorc-call-pill-btn"
-          title="Audio call"
-          aria-label={`Call ${displayName}`}
-          disabled={blocked || !onCall}
-          onClick={() => onCall?.(username, 'audio')}
+      {mode === 'block' ? (
+        <button
+          type="button"
+          className="qorc-cm-block-btn"
+          disabled={blocking || !onBlock}
+          onClick={(event) => {
+            event.stopPropagation();
+            onBlock?.(username);
+          }}
         >
-          <CallIcon className="w-4 h-4" aria-hidden="true" />
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="qorc-call-pill-btn"
-          title="Video call"
-          aria-label={`Video call ${displayName}`}
-          disabled={blocked || !onCall}
-          onClick={() => onCall?.(username, 'video')}
-        >
-          <Video className="w-4 h-4" aria-hidden="true" />
-        </Button>
-        <ConversationOptionsPopover
-          username={username}
-          blocked={blocked}
-          onToggleBlock={onToggleBlock}
-          ariaLabel={`Conversation options for ${displayName}`}
-        />
-      </div>
+          {blocking ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
+          <span>{blocking ? 'Blocking…' : 'Block'}</span>
+        </button>
+      ) : (
+        <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="qorc-call-pill-btn"
+            title="Audio call"
+            aria-label={`Call ${displayName}`}
+            disabled={blocked || !onCall}
+            onClick={() => onCall?.(username, 'audio')}
+          >
+            <CallIcon className="w-4 h-4" aria-hidden="true" />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="qorc-call-pill-btn"
+            title="Video call"
+            aria-label={`Video call ${displayName}`}
+            disabled={blocked || !onCall}
+            onClick={() => onCall?.(username, 'video')}
+          >
+            <Video className="w-4 h-4" aria-hidden="true" />
+          </Button>
+          <ConversationOptionsPopover
+            username={username}
+            blocked={blocked}
+            onToggleBlock={onToggleBlock}
+            ariaLabel={`Conversation options for ${displayName}`}
+          />
+        </div>
+      )}
     </div>
   );
 });
@@ -329,7 +361,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   onNewChatOpenChange,
   onTogglePin,
   onStartCall,
-  onToggleBlock
+  onToggleBlock,
+  conversationDialogMode = 'manage',
+  onBlockConversation,
 }: ConversationListProps) {
   const { typingUsers } = useTypingIndicatorContext();
   const [activePeer, setActivePeer] = useState<string | null>(null);
@@ -338,6 +372,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
+  const [blockingPeer, setBlockingPeer] = useState<string | null>(null);
   const activeDiscoveryRef = React.useRef<AbortController | null>(null);
   const [blockVersion, setBlockVersion] = useState(0);
   const typingUserSet = useMemo(() => new Set(typingUsers), [typingUsers]);
@@ -356,19 +391,25 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   // Conversations shown in modal
   const trimmedQuery = newChatUsername.trim().toLowerCase();
+  const availableConversations = useMemo(
+    () => conversationDialogMode === 'block'
+      ? conversations.filter((conversation) => !blockingSystem.isBlockedSync(conversation.username))
+      : conversations,
+    [blockVersion, conversationDialogMode, conversations],
+  );
   const filteredConversations = useMemo(() => {
-    if (!trimmedQuery) return conversations;
-    return conversations.filter((c) =>
+    if (!trimmedQuery) return availableConversations;
+    return availableConversations.filter((c) =>
       c.username.toLowerCase().includes(trimmedQuery) ||
       (c.displayName ?? "").toLowerCase().includes(trimmedQuery)
     );
-  }, [conversations, trimmedQuery]);
+  }, [availableConversations, trimmedQuery]);
 
   const hasExactMatch = useMemo(
     () => conversations.some((c) => c.username.toLowerCase() === trimmedQuery),
     [conversations, trimmedQuery]
   );
-  const canAddTyped = !!newChatUsername.trim() && !hasExactMatch && !!onAddConversation;
+  const canAddTyped = conversationDialogMode === 'manage' && !!newChatUsername.trim() && !hasExactMatch && !!onAddConversation;
 
   // Handle remove conversation click
   const handleRemoveClick = useCallback((username: string) => {
@@ -553,6 +594,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const handleNewChatOpenChange = useCallback((open: boolean) => {
     if (!open) {
       cancelActiveDiscovery();
+      setBlockingPeer(null);
       setNewChatUsername("");
     }
     onNewChatOpenChange?.(open);
@@ -562,6 +604,19 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     onSelectConversation(username);
     handleNewChatOpenChange(false);
   }, [onSelectConversation, handleNewChatOpenChange]);
+
+  const handleBlockFromModal = useCallback(async (username: string) => {
+    if (!onBlockConversation || blockingPeer) return;
+    setBlockingPeer(username);
+    try {
+      await onBlockConversation(username);
+      handleNewChatOpenChange(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to block user');
+    } finally {
+      setBlockingPeer(null);
+    }
+  }, [blockingPeer, handleNewChatOpenChange, onBlockConversation]);
 
   return (
     <div className="qorc-conversation-list">
@@ -574,7 +629,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         >
           <div className="qorc-cm-head">
             <div className="qorc-cm-head-text">
-              <DialogTitle id="conversation-modal-title">Add and manage your conversations</DialogTitle>
+              <DialogTitle id="conversation-modal-title">
+                {conversationDialogMode === 'block' ? 'Choose a conversation to block' : 'Add and manage your conversations'}
+              </DialogTitle>
             </div>
             <button
               type="button"
@@ -586,28 +643,28 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </button>
           </div>
 
-          <div className={cn("qorc-cm-search", isAdding && "is-searching")}>
+          <div className={cn("qorc-cm-search", (isAdding || blockingPeer) && "is-searching")}>
             <span className="qorc-cm-search-icon" aria-hidden="true">
-              {isAdding ? <Loader2 className="animate-spin" /> : <Search />}
+              {isAdding || blockingPeer ? <Loader2 className="animate-spin" /> : <Search />}
             </span>
             <Input
               type="text"
-              placeholder="Search or enter a username"
+              placeholder={conversationDialogMode === 'block' ? 'Search conversations' : 'Search or enter a username'}
               value={newChatUsername}
               onChange={(e) => setNewChatUsername(e.target.value)}
               className="qorc-cm-search-input"
-              disabled={isAdding}
+              disabled={isAdding || Boolean(blockingPeer)}
               autoFocus
               spellCheck={false}
               autoComplete="off"
-              aria-label="Search conversations or enter a username"
+              aria-label={conversationDialogMode === 'block' ? 'Search conversations to block' : 'Search conversations or enter a username'}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !isAdding && canAddTyped) {
                   handleAddChat();
                 }
               }}
             />
-            {isAdding && (
+            {conversationDialogMode === 'manage' && isAdding && (
               <button
                 type="button"
                 className="qorc-cm-search-cancel"
@@ -647,9 +704,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                         key={c.id}
                         username={c.username}
                         blocked={blockingSystem.isBlockedSync(c.username)}
+                        mode={conversationDialogMode}
                         onChat={handleChatFromModal}
                         onCall={onStartCall}
                         onToggleBlock={onToggleBlock}
+                        onBlock={(username) => { void handleBlockFromModal(username); }}
+                        blocking={blockingPeer === c.username}
                       />
                     ))}
                   </div>
@@ -664,11 +724,15 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                     <Search />
                   </span>
                   <div className="qorc-cm-empty-copy">
-                    <h3>{trimmedQuery ? "No matches" : "No conversations yet"}</h3>
+                    <h3>{trimmedQuery ? "No matches" : conversationDialogMode === 'block' ? "No conversations to block" : "No conversations yet"}</h3>
                     <p>
-                      {trimmedQuery
-                        ? "Type a full username above to start a new chat."
-                        : "Search a username above to start your first conversation."}
+                      {conversationDialogMode === 'block'
+                        ? trimmedQuery
+                          ? "Try another conversation name."
+                          : "Only existing, unblocked conversations appear here."
+                        : trimmedQuery
+                          ? "Type a full username above to start a new chat."
+                          : "Search a username above to start your first conversation."}
                     </p>
                   </div>
                 </div>

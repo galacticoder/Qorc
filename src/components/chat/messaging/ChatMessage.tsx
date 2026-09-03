@@ -469,8 +469,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
           {message.isEdited && (
             <span
-              className="italic"
-              style={{ color: 'var(--color-text-secondary)' }}
+              className="qorc-message-edited italic"
               role="status"
               aria-label="Message edited"
             >

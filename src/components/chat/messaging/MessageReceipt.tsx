@@ -15,7 +15,7 @@ export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurre
 
 	if (receipt.sending) {
 		return (
-			<div className={cn('flex items-center gap-1 text-xs text-gray-400 select-none italic', className)} role="status" aria-label="Sending">
+			<div className={cn('qorc-message-receipt qorc-message-receipt--sending flex items-center gap-1 select-none italic', className)} role="status" aria-label="Sending">
 				<Loader2 size={12} className="animate-spin" aria-hidden="true" />
 				<span>Sending...</span>
 			</div>
@@ -27,7 +27,7 @@ export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurre
 
 	if (receipt.read) {
 		return (
-			<div className={cn('flex items-center gap-1 text-xs text-blue-600 select-none', className)} role="status" aria-label={readTime ? `Read at ${readTime}` : 'Read'}>
+			<div className={cn('qorc-message-receipt qorc-message-receipt--read flex items-center gap-1 select-none', className)} role="status" aria-label={readTime ? `Read at ${readTime}` : 'Read'}>
 				<CheckCheck size={12} aria-hidden="true" />
 				<span>{readTime ? `Read ${readTime}` : 'Read'}</span>
 			</div>
@@ -36,7 +36,7 @@ export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurre
 
 	if (receipt.delivered) {
 		return (
-			<div className={cn('flex items-center gap-1 text-xs text-gray-400 select-none', className)} role="status" aria-label={deliveredTime ? `Delivered at ${deliveredTime}` : 'Delivered'}>
+			<div className={cn('qorc-message-receipt qorc-message-receipt--delivered flex items-center gap-1 select-none', className)} role="status" aria-label={deliveredTime ? `Delivered at ${deliveredTime}` : 'Delivered'}>
 				<Check size={12} aria-hidden="true" />
 				<span>{deliveredTime ? `Delivered ${deliveredTime}` : 'Delivered'}</span>
 			</div>
@@ -44,7 +44,7 @@ export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurre
 	}
 
 	return (
-		<div className={cn('flex items-center gap-1 text-xs text-gray-400 select-none', className)} role="status" aria-label="Sent">
+		<div className={cn('qorc-message-receipt qorc-message-receipt--sent flex items-center gap-1 select-none', className)} role="status" aria-label="Sent">
 			<span>Sent</span>
 		</div>
 	);

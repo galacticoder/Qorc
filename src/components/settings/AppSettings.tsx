@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTheme } from '../../contexts/ThemeContext';
 import { toast } from 'sonner';
 import {
   Ban,
-  Bell,
   Camera,
   Check,
   ChevronDown,
@@ -11,16 +11,12 @@ import {
   Headphones,
   LoaderCircle,
   LogOut,
-  Mic,
-  Minimize2,
-  PanelLeft,
   RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
   UserRound,
-  Video,
-  Volume2,
+  X,
 } from 'lucide-react';
 import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
@@ -30,7 +26,6 @@ import { copyTextToClipboard } from '../../lib/clipboard';
 import {
   hasPrototypePollutionKeys,
   isPlainObject,
-  isValidUsername,
   sanitizeEventText,
   sanitizeEventUsername,
 } from '../../lib/sanitizers';
@@ -60,7 +55,7 @@ interface AppSettingsProps {
   currentUsername?: string;
   currentDisplayName?: string;
   onLogout?: () => void | Promise<void>;
-  findUser?: (handle: string, opts?: { forceRefresh?: boolean; monitorContact?: boolean }) => Promise<unknown>;
+  onOpenBlockConversationChooser?: () => void;
 }
 
 interface NotificationSettings {
@@ -118,37 +113,62 @@ const BlockedUserRow = React.memo(function BlockedUserRow({
 const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
   username,
   busy,
+  themeClass,
   onCancel,
   onConfirm,
 }: {
   username: string;
   busy: boolean;
+  themeClass: 'light' | 'dark';
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const displayName = useDisplayUsername({ username });
+  const showUsername = displayName.trim().toLowerCase() !== username.trim().toLowerCase();
 
-  return (
-    <div className="qorc-modal-overlay" onClick={onCancel}>
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
+    <div className={`qorc-settings-host ${themeClass} qorc-unblock-overlay`} onClick={onCancel}>
       <div
-        className="qorc-modal"
+        className="qorc-unblock-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="unblock-modal-title"
+        aria-describedby="unblock-modal-description"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="qorc-modal-head">
-          <h3 id="unblock-modal-title">Unblock user?</h3>
-          <p><strong>{displayName}</strong> will be able to message and call you again.</p>
+        <div className="qorc-unblock-head">
+          <div className="qorc-unblock-head-copy">
+            <h3 id="unblock-modal-title">Unblock user</h3>
+            <p id="unblock-modal-description">They will be able to message and call you again.</p>
+          </div>
+          <button
+            className="qorc-unblock-close"
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="Close unblock user dialog"
+            title="Close"
+          >
+            <X aria-hidden="true" />
+          </button>
         </div>
-        <div className="qorc-modal-actions">
-          <button className="qorc-modal-btn" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="qorc-modal-btn primary" type="button" onClick={onConfirm} disabled={busy}>
-            {busy ? 'Unblocking…' : 'Unblock'}
+
+        <div className="qorc-unblock-target">
+          <UserAvatar username={username} size="md" className="qorc-unblock-avatar" />
+          <div className="qorc-unblock-user-copy">
+            <span className="qorc-unblock-name" title={displayName}>{displayName}</span>
+            {showUsername && <span className="qorc-unblock-username" title={username}>@{username}</span>}
+          </div>
+          <button className="qorc-unblock-confirm" type="button" onClick={onConfirm} disabled={busy}>
+            {busy && <LoaderCircle className="qorc-unblock-spinner" aria-hidden="true" />}
+            <span>{busy ? 'Unblocking…' : 'Unblock'}</span>
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 });
 
@@ -156,7 +176,7 @@ export const AppSettings = React.memo(function AppSettings({
   currentUsername = '',
   currentDisplayName = '',
   onLogout,
-  findUser,
+  onOpenBlockConversationChooser,
 }: AppSettingsProps) {
   const { theme, resolvedTheme } = useTheme();
   const [isClearingData, setIsClearingData] = useState(false);
@@ -181,10 +201,6 @@ export const AppSettings = React.memo(function AppSettings({
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
   const [blockedUsersLoading, setBlockedUsersLoading] = useState(false);
   const [blockedUsersError, setBlockedUsersError] = useState<string | null>(null);
-  const [blockModalOpen, setBlockModalOpen] = useState(false);
-  const [blockInput, setBlockInput] = useState('');
-  const [blockChecking, setBlockChecking] = useState(false);
-  const [blockModalError, setBlockModalError] = useState<string | null>(null);
   const [unblockTarget, setUnblockTarget] = useState<string | null>(null);
   const [unblocking, setUnblocking] = useState(false);
   const [initialSettingsReady, setInitialSettingsReady] = useState(false);
@@ -521,73 +537,6 @@ export const AppSettings = React.memo(function AppSettings({
     if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
   }, []);
 
-  const openBlockModal = useCallback(() => {
-    setBlockInput('');
-    setBlockModalError(null);
-    setBlockChecking(false);
-    setBlockModalOpen(true);
-  }, []);
-
-  const closeBlockModal = useCallback(() => {
-    if (blockChecking) return;
-    setBlockModalOpen(false);
-  }, [blockChecking]);
-
-  const confirmBlock = useCallback(async () => {
-    const username = blockInput.trim();
-    if (!username || blockChecking) return;
-
-    if (!blockingAvailable) {
-      setBlockModalError('Please log in.');
-      return;
-    }
-
-    if (!isValidUsername(username)) {
-      setBlockModalError('That username format is invalid.');
-      return;
-    }
-
-    if (username === currentUsername) {
-      setBlockModalError("You can't block yourself.");
-      return;
-    }
-
-    if (blockedUsers.some((u) => u.username === username)) {
-      setBlockModalError('That user is already blocked.');
-      return;
-    }
-
-    setBlockChecking(true);
-    setBlockModalError(null);
-    try {
-      // Verify the user actually exists in discovery before blocking
-      if (findUser) {
-        let exists = false;
-        try {
-          exists = Boolean(await findUser(username, { monitorContact: false }));
-        } catch {
-          setBlockModalError("Couldn't verify that username right now. Check your connection and try again.");
-          setBlockChecking(false);
-          return;
-        }
-        if (!exists) {
-          setBlockModalError('No user found with that username.');
-          setBlockChecking(false);
-          return;
-        }
-      }
-
-      await blockingSystem.blockUser(username);
-      await loadBlockedUsers();
-      setBlockModalOpen(false);
-    } catch (error) {
-      console.error('Error blocking user:', error);
-      setBlockModalError('Failed to block user. Please try again.');
-    } finally {
-      setBlockChecking(false);
-    }
-  }, [blockInput, blockChecking, blockingAvailable, currentUsername, blockedUsers, findUser, loadBlockedUsers]);
-
   const openUnblockModal = useCallback((username: string) => {
     setUnblockTarget(username);
   }, []);
@@ -738,12 +687,9 @@ export const AppSettings = React.memo(function AppSettings({
               <div className="settings-section">
                 <div className="settings-list">
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <PanelLeft className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Navigation layout</div>
-                        <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Navigation layout</div>
+                      <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
                     </div>
                     <div className="navigation-layout-picker" role="group" aria-label="Navigation layout">
                       <button
@@ -765,22 +711,16 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                   </div>
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <Minimize2 className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Minimize to system tray on close</div>
-                        <div className="setting-description">Closing the window keeps Qorc running in the background.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Minimize to system tray on close</div>
+                      <div className="setting-description">Closing the window keeps Qorc running in the background.</div>
                     </div>
                     <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
                   </div>
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <Bell className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Desktop Notifications</div>
-                        <div className="setting-description">Show a notification popup when a new message arrives.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Desktop Notifications</div>
+                      <div className="setting-description">Show a notification popup when a new message arrives.</div>
                     </div>
                     <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
                   </div>
@@ -812,12 +752,9 @@ export const AppSettings = React.memo(function AppSettings({
               <div className="settings-section">
                 <div className="settings-list">
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <Mic className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Microphone</div>
-                        <div className="setting-description">Default microphone for calls.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Microphone</div>
+                      <div className="setting-description">Default microphone for calls.</div>
                     </div>
                     <div className="device-select">
                       <select className="select" value={preferredMicId} onChange={(event) => handleDevicePreference('preferredMicId', event.target.value)}>
@@ -828,12 +765,9 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                   </div>
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <Volume2 className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Speaker</div>
-                        <div className="setting-description">Default speaker for call audio output.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Speaker</div>
+                      <div className="setting-description">Default speaker for call audio output.</div>
                     </div>
                     <div className="device-select">
                       <select className="select" value={preferredSpeakerId} onChange={(event) => handleDevicePreference('preferredSpeakerId', event.target.value)}>
@@ -844,12 +778,9 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                   </div>
                   <div className="setting-row">
-                    <div className="setting-row-copy">
-                      <Video className="setting-row-icon" aria-hidden="true" />
-                      <div>
-                        <div className="setting-label">Camera</div>
-                        <div className="setting-description">Default camera for video calls.</div>
-                      </div>
+                    <div>
+                      <div className="setting-label">Camera</div>
+                      <div className="setting-description">Default camera for video calls.</div>
                     </div>
                     <div className="device-select">
                       <select className="select" value={preferredCameraId} onChange={(event) => handleDevicePreference('preferredCameraId', event.target.value)}>
@@ -875,8 +806,8 @@ export const AppSettings = React.memo(function AppSettings({
                 <button
                   className="settings-head-action"
                   type="button"
-                  disabled={!blockingAvailable}
-                  onClick={openBlockModal}
+                  disabled={!blockingAvailable || !onOpenBlockConversationChooser}
+                  onClick={onOpenBlockConversationChooser}
                 >
                   <Ban aria-hidden="true" />
                   <span>Block user</span>
@@ -911,51 +842,11 @@ export const AppSettings = React.memo(function AppSettings({
           </section>
         </main>
 
-        {blockModalOpen && (
-          <div className="qorc-modal-overlay" onClick={closeBlockModal}>
-            <div
-              className="qorc-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="block-modal-title"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="qorc-modal-head">
-                <h3 id="block-modal-title">Block a user</h3>
-                <p>Enter the username of the person you want to block.</p>
-              </div>
-              <div className="qorc-modal-body">
-                <label className="qorc-modal-field">
-                  <span className="field-label">Username</span>
-                  <input
-                    className="text-input"
-                    type="text"
-                    value={blockInput}
-                    placeholder="Enter a username"
-                    autoFocus
-                    spellCheck={false}
-                    autoComplete="off"
-                    disabled={blockChecking}
-                    onChange={(e) => { setBlockInput(e.target.value); if (blockModalError) setBlockModalError(null); }}
-                    onKeyDown={(e) => { if (e.key === 'Enter') confirmBlock(); }}
-                  />
-                </label>
-                {blockModalError && <div className="qorc-modal-error">{blockModalError}</div>}
-              </div>
-              <div className="qorc-modal-actions">
-                <button className="qorc-modal-btn" type="button" onClick={closeBlockModal} disabled={blockChecking}>Cancel</button>
-                <button className="qorc-modal-btn danger" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
-                  {blockChecking ? 'Checking…' : 'Block user'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
         {unblockTarget && (
           <UnblockConfirmModal
             username={unblockTarget}
             busy={unblocking}
+            themeClass={themeClass}
             onCancel={closeUnblockModal}
             onConfirm={confirmUnblock}
           />

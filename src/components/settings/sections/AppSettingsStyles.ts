@@ -269,26 +269,6 @@ const APP_SETTINGS_CSS = `
       min-width: 0;
     }
 
-    .setting-row-copy {
-      display: flex;
-      align-items: flex-start;
-      gap: 11px;
-    }
-
-    .setting-row-copy > div {
-      min-width: 0;
-    }
-
-    .setting-row-icon {
-      width: 15px;
-      height: 15px;
-      flex: 0 0 15px;
-      margin-top: 2px;
-      color: var(--settings-soft);
-      opacity: .72;
-      stroke-width: 1.7;
-    }
-
     .setting-label {
       margin: 0 0 6px;
       color: var(--settings-text);
@@ -355,8 +335,7 @@ const APP_SETTINGS_CSS = `
     .settings-head-action,
     .action,
     .danger-action,
-    .copy-username,
-    .qorc-modal-btn {
+    .copy-username {
       border: 0;
       box-shadow: none;
       transition: background .15s ease, color .15s ease, opacity .15s ease;
@@ -652,7 +631,11 @@ const APP_SETTINGS_CSS = `
     }
 
     .switch.on {
-      background: var(--settings-success);
+      background: var(--qorc-accent, #7057c8);
+    }
+
+    .qorc-settings-host.light .switch.on {
+      background: var(--qorc-accent, #7057c8);
     }
 
     .switch.on::before {
@@ -664,8 +647,7 @@ const APP_SETTINGS_CSS = `
       outline-offset: 2px;
     }
 
-    .select,
-    .text-input {
+    .select {
       width: min(100%, 300px);
       height: 42px;
       border: 0;
@@ -723,11 +705,6 @@ const APP_SETTINGS_CSS = `
       cursor: pointer;
     }
 
-    .text-input:hover,
-    .text-input:focus {
-      background: var(--settings-hover);
-    }
-
     .select option {
       background: var(--settings-panel);
       color: var(--settings-text);
@@ -774,6 +751,11 @@ const APP_SETTINGS_CSS = `
       grid-template-columns: minmax(0, 1fr) auto;
     }
 
+    .blocked-user-row .action:hover,
+    .blocked-user-row .action:focus-visible {
+      background: var(--settings-layout-hover);
+    }
+
     .blocked-user-identity {
       min-width: 0;
       display: flex;
@@ -802,7 +784,7 @@ const APP_SETTINGS_CSS = `
       font-weight: 550;
     }
 
-    .qorc-modal-overlay {
+    .qorc-unblock-overlay {
       position: fixed;
       inset: 0;
       z-index: 60;
@@ -810,140 +792,175 @@ const APP_SETTINGS_CSS = `
       place-items: center;
       padding: 18px;
       background: rgba(0, 0, 0, .58);
+      animation: qorc-unblock-overlay-in 200ms cubic-bezier(.16, 1, .3, 1);
     }
 
-    .qorc-settings-host.light .qorc-modal-overlay {
+    .qorc-settings-host.light .qorc-unblock-overlay,
+    .qorc-settings-host.light.qorc-unblock-overlay {
       background: rgba(17, 24, 39, .32);
     }
 
-    .qorc-modal {
-      width: min(400px, 100%);
+    @keyframes qorc-unblock-overlay-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .qorc-unblock-dialog {
+      --unblock-bg: var(--settings-panel);
+      --unblock-card: var(--settings-card);
+      width: min(420px, 100%);
       overflow: hidden;
       border: 0;
       border-radius: 12px;
-      background: var(--settings-panel);
+      background: var(--unblock-bg);
       color: var(--settings-text);
       box-shadow: 0 18px 46px rgba(0, 0, 0, .34);
+      animation: qorc-unblock-dialog-in 200ms cubic-bezier(.16, 1, .3, 1);
     }
 
-    .qorc-settings-host.light .qorc-modal {
+    @keyframes qorc-unblock-dialog-in {
+      from { opacity: 0; transform: scale(.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    .qorc-settings-host.light .qorc-unblock-dialog {
+      --unblock-bg: var(--settings-card);
+      --unblock-card: var(--settings-panel);
       box-shadow: 0 18px 46px rgba(17, 24, 39, .18);
     }
 
-    .qorc-modal-head {
-      padding: 16px 16px 5px;
+    .qorc-unblock-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 16px 14px 12px 16px;
     }
 
-    .qorc-modal-head h3 {
-      margin: 0 0 5px;
+    .qorc-unblock-head-copy {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .qorc-unblock-head h3 {
+      margin: 0;
       color: var(--settings-text);
-      font-size: 16px;
-      line-height: 1.25;
-      font-weight: 650;
+      font-size: 18px;
+      line-height: 1.15;
+      font-weight: 850;
       letter-spacing: -.01em;
     }
 
-    .qorc-modal-head p {
-      margin: 0;
+    .qorc-unblock-head p {
+      max-width: 340px;
+      margin: 6px 0 0;
       color: var(--settings-muted);
       font-size: 12px;
       line-height: 1.45;
     }
 
-    .qorc-modal-head p strong {
-      color: var(--settings-text);
-      font-weight: 600;
-    }
-
-    .qorc-modal-body {
-      padding: 13px 16px 3px;
-    }
-
-    .qorc-modal-field {
-      display: block;
-    }
-
-    .qorc-modal-field .field-label {
-      display: block;
-      margin: 0 0 6px;
-      color: var(--settings-muted);
-      font-size: 11px;
-      line-height: 1.2;
-      font-weight: 550;
-    }
-
-    .qorc-modal-field .text-input {
-      width: 100%;
-      height: 40px;
-      background: var(--settings-input);
-      font-size: 13px;
-    }
-
-    .qorc-modal-error {
-      margin: 8px 0 0;
-      padding: 8px 10px;
-      border-radius: 8px;
-      background: color-mix(in srgb, var(--settings-danger) 12%, var(--settings-card));
-      color: var(--settings-danger);
-      font-size: 11.5px;
-      line-height: 1.4;
-      font-weight: 550;
-    }
-
-    .qorc-modal-actions {
+    .qorc-unblock-close {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 7px;
-      padding: 16px;
+      place-items: center;
+      border: 0;
+      border-radius: 8px;
+      padding: 0;
+      background: transparent;
+      color: var(--settings-muted);
+      cursor: pointer;
+      transition: background .15s ease, color .15s ease;
     }
 
-    .qorc-modal-btn {
-      height: 38px;
+    .qorc-unblock-close:hover,
+    .qorc-unblock-close:focus-visible {
+      outline: none;
+      background: var(--settings-hover);
+      color: var(--settings-text);
+    }
+
+    .qorc-unblock-close svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .qorc-unblock-target {
+      min-width: 0;
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 8px 8px;
+      padding: 7px 8px;
+      border-radius: 10px;
+      background: var(--unblock-card);
+    }
+
+    .qorc-unblock-avatar {
+      flex: 0 0 auto;
+    }
+
+    .qorc-unblock-user-copy {
+      min-width: 0;
+      flex: 1 1 auto;
+      display: grid;
+      gap: 2px;
+    }
+
+    .qorc-unblock-name,
+    .qorc-unblock-username {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .qorc-unblock-name {
+      color: var(--settings-text);
+      font-size: 13.5px;
+      font-weight: 550;
+    }
+
+    .qorc-unblock-username {
+      color: var(--settings-muted);
+      font-size: 11.5px;
+      font-weight: 500;
+    }
+
+    .qorc-unblock-confirm {
+      height: 34px;
+      flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      border-radius: 9px;
-      background: var(--settings-card);
+      gap: 7px;
+      border: 0;
+      border-radius: 8px;
+      padding: 0 14px;
+      background: var(--settings-control);
       color: var(--settings-text);
-      font-size: 12px;
-      line-height: 1;
-      font-weight: 600;
+      font-size: 12.5px;
+      font-weight: 650;
+      cursor: pointer;
+      transition: background .15s ease, color .15s ease, opacity .15s ease;
     }
 
-    .qorc-modal-btn:hover,
-    .qorc-modal-btn:focus-visible {
+    .qorc-unblock-confirm:hover,
+    .qorc-unblock-confirm:focus-visible {
       outline: none;
-      background: var(--settings-hover);
+      background: var(--settings-layout-hover);
     }
 
-    .qorc-modal-btn.primary {
-      background: #e9e9e9;
-      color: #101014;
+    .qorc-unblock-close:disabled,
+    .qorc-unblock-confirm:disabled {
+      cursor: not-allowed;
+      opacity: .55;
     }
 
-    .qorc-settings-host.light .qorc-modal-btn.primary {
-      background: #101014;
-      color: #fff;
-    }
-
-    .qorc-modal-btn.primary:hover,
-    .qorc-modal-btn.primary:focus-visible {
-      background: #dcdce0;
-    }
-
-    .qorc-settings-host.light .qorc-modal-btn.primary:hover,
-    .qorc-settings-host.light .qorc-modal-btn.primary:focus-visible {
-      background: #24242a;
-    }
-
-    .qorc-modal-btn.danger {
-      background: var(--settings-danger);
-      color: #fff;
-    }
-
-    .qorc-modal-btn.danger:hover,
-    .qorc-modal-btn.danger:focus-visible {
-      background: var(--settings-danger-hover);
+    .qorc-unblock-spinner {
+      width: 15px;
+      height: 15px;
+      animation: qorc-blocked-spin .7s linear infinite;
     }
 
     @media (max-width: 900px) {

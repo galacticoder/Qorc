@@ -4,7 +4,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { Login } from "../components/chat/Login";
 import { PeerIdentityVerificationAlert } from "../components/chat/PeerIdentityVerificationAlert";
 import { User } from "../components/chat/messaging/UserList";
-import { ConversationList } from "../components/chat/messaging/ConversationList";
+import { ConversationList, type ConversationDialogMode } from "../components/chat/messaging/ConversationList";
 import { ChatInterface } from "../components/chat/messaging/ChatInterface";
 import { EmptyChatView } from "../components/chat/messaging/EmptyChatView";
 import { Layout } from "../components/ui/Layout";
@@ -48,7 +48,6 @@ import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
 import { Toaster, toast } from 'sonner';
-import { TorIndicator } from "../components/ui/TorIndicator";
 import { FullscreenSpinner } from "../components/ui/FullscreenSpinner";
 import { CallLogsSkeleton, SettingsSkeleton } from "../components/ui/ViewSkeletons";
 import { Button } from "../components/ui/button";
@@ -113,6 +112,7 @@ const ChatApp: React.FC = () => {
   const startup = useStartupConnection();
   const [showSettings, setShowSettings] = useState(false);
   const [showNewChatInput, setShowNewChatInput] = useState(false);
+  const [conversationDialogMode, setConversationDialogMode] = useState<ConversationDialogMode>('manage');
   const [conversationPanelWidth, setConversationPanelWidth] = useState(344);
   const [isResizing, setIsResizing] = useState(false);
   const [floatingCallPosition, setFloatingCallPosition] = useState({ x: 20, bottom: 20 });
@@ -494,6 +494,26 @@ const ChatApp: React.FC = () => {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to update block list');
     }
+  }, []);
+
+  const openConversationDialog = useCallback((mode: ConversationDialogMode) => {
+    setConversationDialogMode(mode);
+    setShowNewChatInput(true);
+  }, []);
+
+  const handleConversationDialogOpenChange = useCallback((open: boolean) => {
+    setShowNewChatInput(open);
+  }, []);
+
+  const handleBlockConversationFromSettings = useCallback(async (username: string) => {
+    if (!username || username === LOCAL_TEST_CHAT_USERNAME) {
+      throw new Error('That conversation cannot be blocked.');
+    }
+    if (blockingSystem.isBlockedSync(username)) {
+      throw new Error('That user is already blocked.');
+    }
+    await blockingSystem.blockUser(username);
+    toast.success('User blocked');
   }, []);
 
   const {
@@ -1008,16 +1028,13 @@ const ChatApp: React.FC = () => {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => setShowNewChatInput(true)}
+                      onClick={() => openConversationDialog('manage')}
                       className="qorc-icon-btn qorc-compose-btn"
                       aria-label="Add conversation"
                     >
                       <ComposeIcon className="h-4 w-4" />
                     </Button>
                     <h2>Chats</h2>
-                  </div>
-                  <div className="qorc-head-actions">
-                    <TorIndicator />
                   </div>
                 </div>
                 <div className="flex-1 overflow-hidden">
@@ -1028,15 +1045,17 @@ const ChatApp: React.FC = () => {
                     onSelectConversation={handleSelectConversation}
                     onAddConversation={async (username, signal) => {
                       await addConversation(username, true, signal);
-                      setShowNewChatInput(false);
+                      handleConversationDialogOpenChange(false);
                     }}
                     getDisplayUsername={stableGetDisplayUsername}
                     showNewChatInput={showNewChatInput}
-                    onNewChatOpenChange={setShowNewChatInput}
+                    onNewChatOpenChange={handleConversationDialogOpenChange}
                     onRemoveConversation={handleRemoveConversation}
                     onTogglePin={toggleConversationPin}
                     onStartCall={(username, type) => { void callingHook.startCall(username, type); }}
                     onToggleBlock={handleToggleBlock}
+                    conversationDialogMode={conversationDialogMode}
+                    onBlockConversation={handleBlockConversationFromSettings}
                   />
                 </div>
               </div>
@@ -1075,7 +1094,7 @@ const ChatApp: React.FC = () => {
                     />
                   </EmojiPickerProvider>
                 ) : (
-                  <EmptyChatView onCreateChat={() => setShowNewChatInput(true)} />
+                  <EmptyChatView onCreateChat={() => openConversationDialog('manage')} />
                 )}
               </div>
             </div>
@@ -1101,7 +1120,7 @@ const ChatApp: React.FC = () => {
                   currentUsername={Authentication.loginUsernameRef.current || ''}
                   currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
                   onLogout={async () => await Authentication.logout(Database.secureDBRef)}
-                  findUser={findUser}
+                  onOpenBlockConversationChooser={() => openConversationDialog('block')}
                 />
               ) : <SettingsSkeleton />
             )}
