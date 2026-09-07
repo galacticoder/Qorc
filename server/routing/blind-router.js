@@ -10,6 +10,7 @@ import { withRedisClient, createSubscriber, closeSubscriber } from '../session/r
 import { envInt } from '../utils/env.js';
 import { BASE64URL_32_RE } from '../utils/patterns.js';
 import { randomDelay } from '../utils/random.js';
+import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
 import { exactRedisScoreArgument } from '../utils/redis-args.js';
 import {
   moveRedisSortedSetLease,
@@ -31,6 +32,19 @@ import {
 import { SPOOL_DETECTION_PROBE_BYTES, SPOOL_TAG_BYTES,
   untargetedProbeHex,
 } from '../../shared/spool-tag-protocol.js';
+import {
+  createSignedGlobalMixPublication,
+  destroyGlobalMixAuthentication,
+  initializeGlobalMixAuthentication,
+  validateGlobalMixPublication,
+} from './global-mix-publication.js';
+
+export {
+  createSignedGlobalMixPublication,
+  destroyGlobalMixAuthentication,
+  initializeGlobalMixAuthentication,
+  validateGlobalMixPublication,
+} from './global-mix-publication.js';
 
 // Configuration
 const DELIVERY_JITTER_MIN_MS = 10;
@@ -65,7 +79,7 @@ const MIXNET_COVER_WRITES_MIN = envInt('MIXNET_COVER_WRITES_MIN', 1, 0, 32);
 const MIXNET_COVER_WRITES_MAX = envInt('MIXNET_COVER_WRITES_MAX', 2, MIXNET_COVER_WRITES_MIN, 64);
 const GLOBAL_MIX_SPOOL_TTL_SECONDS = envInt('GLOBAL_MIX_SPOOL_TTL_SECONDS', 24 * 60 * 60, 60, 7 * 24 * 60 * 60);
 const GLOBAL_MIX_SPOOL_MAX_MESSAGES = envInt('GLOBAL_MIX_SPOOL_MAX_MESSAGES', 32768, 64, 10_000_000);
-const GLOBAL_MIX_SPOOL_MAX_BYTES = envInt('GLOBAL_MIX_SPOOL_MAX_BYTES', 512 * 1024 * 1024, 1024 * 1024, 4 * 1024 * 1024 * 1024);
+const GLOBAL_MIX_SPOOL_MAX_BYTES = envInt('GLOBAL_MIX_SPOOL_MAX_BYTES', 512 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
 const LOCAL_BROADCAST_BUFFERED_MAX_BYTES = envInt('LOCAL_BROADCAST_BUFFERED_MAX_BYTES', 8 * 1024 * 1024, 1024 * 1024, 256 * 1024 * 1024);
 const LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS = envInt('LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS', 30000, 1000, 10 * 60 * 1000);
 const LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS = envInt('LOCAL_BROADCAST_BACKPRESSURE_EVICT_MS', 2 * 60 * 1000, 10 * 1000, 30 * 60 * 1000);
@@ -101,7 +115,7 @@ const GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS = 1_000;
 const GLOBAL_MIX_PUBLICATION_MAX_BYTES = envInt(
   'GLOBAL_MIX_PUBLICATION_MAX_BYTES',
   2 * 1024 * 1024,
-  64 * 1024,
+  512 * 1024,
   16 * 1024 * 1024
 );
 const GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES = envInt(
@@ -129,8 +143,15 @@ const GLOBAL_MIX_PUBLICATION_QUEUE_MAX_BYTES = envInt(
   512 * 1024 * 1024
 );
 const GLOBAL_MIX_PUBLICATION_QUEUE_MAX_AGE_MS = 30_000;
+const GLOBAL_MIX_PUBLICATION_VERIFY_MAX_RPS = envInt(
+  'GLOBAL_MIX_PUBLICATION_VERIFY_MAX_RPS',
+  128,
+  1,
+  2_000
+);
 const GLOBAL_MIX_SPOOL_INDEX_MEMBER_RE =
   /^([A-Za-z0-9_-]{43}):([1-9][0-9]{0,9}):([0-9a-f]{16}):([0-9a-f]{64})$/;
+const GLOBAL_MIX_SPOOL_INDEX_BYTES_LUA_PATTERN = '^[^:]+:([0-9]+):';
 const MIXNET_INDEX_MEMBER_RE = /^([A-Za-z0-9_-]{43}):([1-9][0-9]{0,9})$/;
 
 // Message deduplication cache
@@ -151,6 +172,9 @@ let globalMixDeliveryQueuedBytes = 0;
 let globalMixDeliveryDrainPromise = null;
 let globalMixDeliveryGeneration = 0;
 let globalMixDeliveryPressureLoggedAt = 0;
+const allowGlobalMixPublicationVerification = createTokenBucketRateLimiter(
+  GLOBAL_MIX_PUBLICATION_VERIFY_MAX_RPS
+);
 const globalMixPublicationQueue = [];
 let globalMixPublicationQueuedBytes = 0;
 let globalMixPublicationDrainPromise = null;
@@ -169,6 +193,42 @@ function parseGlobalSpoolIndexMember(value) {
 
 function isCurrentGlobalSpoolRow(row) {
   return row?.bytes === GLOBAL_MIX_SPOOL_MEMBER_BYTES;
+}
+
+export function parseGlobalSpoolStoredEntry(raw, row) {
+  if (
+    !hasExactPlainObjectKeys(row, ['bytes', 'id', 'probe', 'tag']) ||
+    !BASE64URL_32_RE.test(row.id) ||
+    row.bytes !== GLOBAL_MIX_SPOOL_MEMBER_BYTES ||
+    !GLOBAL_MIX_SPOOL_INDEX_MEMBER_RE.test(`${row.id}:${row.bytes}:${row.tag}:${row.probe}`) ||
+    typeof raw !== 'string' ||
+    Buffer.byteLength(raw, 'utf8') !== row.bytes
+  ) return null;
+
+  let stored;
+  try {
+    stored = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (
+    !hasExactPlainObjectKeys(stored, ['envelope', 'id']) ||
+    stored.id !== row.id ||
+    !validateGlobalEnvelope(stored.envelope).valid ||
+    stored.envelope.ciphertext.length !== SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS ||
+    stored.envelope.tag !== row.tag ||
+    stored.envelope.probe !== row.probe
+  ) return null;
+
+  const envelopeHash = getEnvelopeHash(stored.envelope);
+  if (!envelopeHash) return null;
+  const expectedId = Buffer.from(
+    blake3(
+      Buffer.from(`${PROTOCOL_KEYS.GLOBAL_SPOOL_HASH}\0${envelopeHash}`),
+      { dkLen: HASH_OUTPUT_BYTES }
+    )
+  ).toString('base64url');
+  return expectedId === row.id ? stored : null;
 }
 
 function parseMixnetIndexMember(value) {
@@ -625,10 +685,7 @@ async function writeToGlobalMixSpool(sealedEnvelope, options = {}) {
     spoolInserted = await queueGlobalMixMessage(sealedEnvelope);
   }
 
-  const publication = {
-    envelope: sealedEnvelope,
-    publicationId: crypto.randomBytes(32).toString('base64url')
-  };
+  const publication = createSignedGlobalMixPublication(sealedEnvelope);
   const publicationWire = JSON.stringify(publication);
   const localQueued = enqueueGlobalMixDelivery(
     publication,
@@ -977,7 +1034,7 @@ const APPEND_AND_TRIM_GLOBAL_SPOOL_SCRIPT = `
   local trimBatch = tonumber(ARGV[10])
 
   local function indexedBytes(value)
-    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+    return tonumber(string.match(value, '${GLOBAL_MIX_SPOOL_INDEX_BYTES_LUA_PATTERN}') or '0')
   end
 
   local storedTotalBytes = redis.call('GET', bytesKey)
@@ -1047,7 +1104,7 @@ const TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT = `
   local indexTtl = tonumber(ARGV[3])
 
   local function indexedBytes(value)
-    return tonumber(string.match(value, ':([0-9]+)$') or '0')
+    return tonumber(string.match(value, '${GLOBAL_MIX_SPOOL_INDEX_BYTES_LUA_PATTERN}') or '0')
   end
 
   local storedTotalBytes = redis.call('GET', bytesKey)
@@ -1313,7 +1370,9 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
       if (typeof raw[index] !== 'string') {
         throw new Error('global_mix_spool_entry_expired_during_pir_build');
       }
-      const envelope = JSON.parse(raw[index]).envelope;
+      const stored = parseGlobalSpoolStoredEntry(raw[index], rows[index]);
+      if (!stored) throw new Error('invalid_global_mix_spool_entry');
+      const envelope = stored.envelope;
       records.push(Buffer.concat([
         Buffer.from(envelope.ephemeralKey, 'base64'),
         Buffer.from(envelope.nonce, 'base64'),
@@ -1349,25 +1408,6 @@ async function sendToSocket(ws, sealedEnvelope, deliveryTimeoutMs) {
   }
 
   throw new Error('No PQ session available for socket delivery');
-}
-
-function validateGlobalMixPublication(message) {
-  if (
-    !message ||
-    typeof message !== 'object' ||
-    Array.isArray(message) ||
-    (Object.getPrototypeOf(message) !== Object.prototype && Object.getPrototypeOf(message) !== null) ||
-    Object.keys(message).sort().join(',') !== 'envelope,publicationId' ||
-    typeof message.publicationId !== 'string' ||
-    !BASE64URL_32_RE.test(message.publicationId) ||
-    !validateGlobalEnvelope(message.envelope).valid
-  ) {
-    return null;
-  }
-  return {
-    envelope: message.envelope,
-    publicationId: message.publicationId
-  };
 }
 
 function startGlobalMixDeliveryDrain() {
@@ -1460,18 +1500,29 @@ export async function subscribeToBlindDelivery() {
     }
 
     subscriber.on('message', (channel, message) => {
+      const wireBytes = typeof message === 'string'
+        ? Buffer.byteLength(message, 'utf8')
+        : 0;
       if (
         channel !== GLOBAL_MIX_CHANNEL ||
         typeof message !== 'string' ||
-        Buffer.byteLength(message, 'utf8') > GLOBAL_MIX_PUBLICATION_MAX_BYTES
+        wireBytes <= 0 ||
+        wireBytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES ||
+        globalMixDeliveryQueue.length >= GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES ||
+        globalMixDeliveryQueuedBytes + wireBytes > GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES ||
+        !allowGlobalMixPublicationVerification()
       ) {
         return;
       }
       try {
         const parsed = JSON.parse(message);
-        enqueueGlobalMixDelivery(parsed, Buffer.byteLength(message, 'utf8'));
+        enqueueGlobalMixDelivery(parsed, wireBytes);
       } catch {
-        console.error('[BLIND-ROUTER] Invalid global mix delivery message');
+        const now = Date.now();
+        if (now - globalMixDeliveryPressureLoggedAt >= LOCAL_BROADCAST_BACKPRESSURE_LOG_INTERVAL_MS) {
+          globalMixDeliveryPressureLoggedAt = now;
+          console.warn('[BLIND-ROUTER] Invalid global mix delivery message dropped');
+        }
       }
     });
     subscriber.once('end', () => {
@@ -1539,6 +1590,8 @@ export async function stopBlindDeliverySubscription() {
 }
 
 export const BlindRouter = {
+  initializeGlobalMixAuthentication,
+  destroyGlobalMixAuthentication,
   registerLocalSocket,
   unregisterLocalSocket,
   routeToGlobalMix,

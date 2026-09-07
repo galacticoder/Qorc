@@ -1,16 +1,11 @@
-import fs from 'fs';
-import { DOCKER_ENV_PATH } from './infrastructure.js';
 import { envInt } from '../utils/env.js';
 
 function parsePort(portValue) {
-  if (!portValue) return 8443;
-  if (typeof portValue === 'string' && portValue.toLowerCase() === 'dynamic') return 0;
   if (typeof portValue !== 'string' || !/^\d{1,5}$/.test(portValue)) return Number.NaN;
   return Number(portValue);
 }
 
-const isDocker = fs.existsSync(DOCKER_ENV_PATH);
-export const PORT = isDocker ? 3000 : parsePort(process.env.PORT);
+export const PORT = parsePort(process.env.PORT);
 let _serverPasswordGateReady = false;
 
 // Rate limiting config
@@ -27,6 +22,12 @@ export const RATE_LIMIT_CONFIG = {
 
   DISCOVERY_PUBLISH: {
     MAX_ATTEMPTS_PER_CONNECTION: envInt('DISCOVERY_PUBLISH_MAX_PER_MIN', 12, 1, 1_000)
+  },
+
+  CONTROL: {
+    MAX_BOOTSTRAP_REQUESTS_PER_CONNECTION: 24,
+    MAX_HEARTBEATS_PER_MINUTE: 6,
+    MAX_APPLICATION_REQUESTS_PER_MINUTE: 30,
   }
 };
 
@@ -51,14 +52,17 @@ export function validateConfig() {
 
   for (const limit of [
     RATE_LIMIT_CONFIG.AUTHENTICATION.MAX_ATTEMPTS_PER_CONNECTION,
-    RATE_LIMIT_CONFIG.DISCOVERY_PUBLISH.MAX_ATTEMPTS_PER_CONNECTION
+    RATE_LIMIT_CONFIG.DISCOVERY_PUBLISH.MAX_ATTEMPTS_PER_CONNECTION,
+    RATE_LIMIT_CONFIG.CONTROL.MAX_BOOTSTRAP_REQUESTS_PER_CONNECTION,
+    RATE_LIMIT_CONFIG.CONTROL.MAX_HEARTBEATS_PER_MINUTE,
+    RATE_LIMIT_CONFIG.CONTROL.MAX_APPLICATION_REQUESTS_PER_MINUTE,
   ]) {
     if (!Number.isSafeInteger(limit) || limit < 1) {
       throw new Error('Invalid per-connection rate-limit configuration');
     }
   }
 
-  if (!Number.isSafeInteger(PORT) || PORT < 0 || PORT > 65535) {
+  if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error('Invalid PORT configuration');
   }
 }

@@ -4,107 +4,16 @@ import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from './contexts/ThemeContext';
 import App from './App.tsx';
 import './index.css';
-import { isTauri } from './lib/tauri-bindings';
+import { installNativeContextMenuGuard } from './lib/runtime/native-context-menu';
 
-function bootstrap() {
-  if (!isTauri()) {
-    const body = document.body || document.documentElement;
-    const el = document.getElementById('root') || body;
-    const container = document.createElement('div');
-    container.setAttribute('role', 'dialog');
-    container.setAttribute('aria-live', 'assertive');
-    container.style.position = 'fixed';
-    container.style.inset = '0';
-    container.style.display = 'flex';
-    container.style.alignItems = 'center';
-    container.style.justifyContent = 'center';
-    container.style.background = 'rgba(0,0,0,0.5)';
-    container.style.zIndex = '9999';
-
-    const box = document.createElement('div');
-    box.style.maxWidth = '460px';
-    box.style.margin = '16px';
-    box.style.padding = '16px 20px';
-    box.style.borderRadius = '10px';
-    box.style.background = '#111827';
-    box.style.color = '#e5e7eb';
-    box.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
-    box.style.fontFamily = '"Google Sans", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif';
-
-    const title = document.createElement('div');
-    title.textContent = 'Desktop app required';
-    title.style.fontSize = '16px';
-    title.style.fontWeight = '600';
-    title.style.marginBottom = '6px';
-
-    const description = document.createElement('div');
-    description.textContent = 'This application requires the Tauri desktop app. Please download and run the packaged application.';
-    description.style.fontSize = '14px';
-    description.style.lineHeight = '1.45';
-    description.style.opacity = '0.9';
-
-    box.appendChild(title);
-    box.appendChild(description);
-    container.appendChild(box);
-
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.textContent = 'OK';
-    close.style.marginTop = '12px';
-    close.style.padding = '6px 12px';
-    close.style.borderRadius = '6px';
-    close.style.border = '1px solid #374151';
-    close.style.background = '#1f2937';
-    close.style.color = '#e5e7eb';
-    close.style.cursor = 'pointer';
-    close.addEventListener('click', () => container.remove());
-    box.appendChild(close);
-
-    el.appendChild(container);
-    return;
-  }
-
-  const waitForBody = (callback: () => void) => {
-    if (document.body) {
-      callback();
-    } else {
-      const observer = new MutationObserver(() => {
-        if (document.body) {
-          observer.disconnect();
-          callback();
-        }
-      });
-      observer.observe(document.documentElement, { childList: true });
-    }
-  };
-
-  waitForBody(() => {
-    let root = document.getElementById('root');
-    if (!root) {
-      root = document.createElement('div');
-      root.id = 'root';
-      document.body.appendChild(root);
-    }
-
-    if (!root.isConnected || !document.body.contains(root)) {
-      console.error('[React Mount] Root element is not properly attached to DOM');
-      if (!document.body.contains(root)) {
-        document.body.appendChild(root);
-      }
-    }
-
-    createRoot(root as HTMLElement).render(
-      <ThemeProvider>
-        <App />
-      </ThemeProvider>
-    );
-  });
+const root = document.getElementById('root');
+if (!(root instanceof HTMLElement) || !root.isConnected) {
+  throw new Error('Application root is unavailable');
 }
 
-if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-  if (document.readyState === 'loading') {
-    window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
-  } else {
-    bootstrap();
-  }
-}
+installNativeContextMenuGuard(document);
+createRoot(root).render(
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>
+);

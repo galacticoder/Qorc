@@ -17,6 +17,8 @@ import {
   IN_MEMORY_PENDING_RECEIPT_TTL_MS
 } from './receipts';
 import { receiptBatcher } from '../message-handling/receipt-batcher';
+import type { SecureDB } from '../../lib/database/secureDB';
+import type { StoredMessage } from '../../lib/types/database-types';
 
 const MAX_DB_RECEIPT_ATTEMPTS = 8;
 const READ_RECEIPT_RETRY_INTERVAL_MS = 1000;
@@ -49,7 +51,7 @@ export const purgeQueuedReceiptsForPeer = (peer: string): void => {
   }
 };
 
-const applyQueuedReceipt = (target: Message, entry: DbQueuedReceipt): Message => {
+const applyQueuedReceipt = <T extends { receipt?: Message['receipt'] }>(target: T, entry: DbQueuedReceipt): T => {
   const receipt = target.receipt;
   const now = new Date();
   if (entry.kind === 'read') {
@@ -74,7 +76,7 @@ export function useMessageReceipts(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   currentUsername: string,
   saveMessageToLocalDB: (msg: Message) => Promise<void>,
-  secureDBRef?: React.RefObject<any>,
+  secureDBRef: React.RefObject<SecureDB | null>,
 ) {
   const sentReceiptsRef = useRef<Map<string, number>>(new Map());
   const messageIndexRef = useRef<Map<string, number>>(new Map());
@@ -136,7 +138,7 @@ export function useMessageReceipts(
 
   useEffect(() => {
     const flushDBReceipts = async () => {
-      if (!secureDBRef?.current || dbReceiptQueueRef.current.size === 0) return;
+      if (!secureDBRef.current || dbReceiptQueueRef.current.size === 0) return;
       if (dbFlushOwnerRef.current) return;
       const account = isCanonicalAuthUsername(currentUsername) ? currentUsername : null;
       const generation = accountGenerationRef.current;
@@ -193,7 +195,7 @@ export function useMessageReceipts(
 
         for (const [peer, entries] of byPeer) {
           if (!isCurrent()) return;
-          const mutations = new Map<string, (target: Message) => Message>();
+          const mutations = new Map<string, (target: StoredMessage) => StoredMessage>();
           for (const [, entry] of entries) {
             mutations.set(entry.messageId, (target) => {
               if (!receiptOwnershipOk(target, peer, account)) return target;

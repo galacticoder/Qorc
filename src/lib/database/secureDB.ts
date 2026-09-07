@@ -184,7 +184,7 @@ export class SecureDB {
   private storageAad(
     store: string,
     key: string,
-    domain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+    domain: string = PROTOCOL_KEYS.SECURE_DB_AEAD,
   ): Uint8Array {
     const storeBytes = SecureDB.encoder.encode(store);
     const keyBytes = SecureDB.encoder.encode(key);
@@ -213,7 +213,7 @@ export class SecureDB {
     dataBuffer: Uint8Array,
     store: string,
     storageKey: string,
-    aadDomain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+    aadDomain: string = PROTOCOL_KEYS.SECURE_DB_AEAD,
   ): Promise<Uint8Array> {
     const generation = this.lifecycleGeneration;
     this.assertCurrentLifecycle(generation);
@@ -243,7 +243,7 @@ export class SecureDB {
     encryptedData: Uint8Array,
     store: string,
     storageKey: string,
-    aadDomain = PROTOCOL_KEYS.SECURE_DB_AEAD,
+    aadDomain: string = PROTOCOL_KEYS.SECURE_DB_AEAD,
   ): Promise<Uint8Array> {
     const generation = this.lifecycleGeneration;
     this.assertCurrentLifecycle(generation);
@@ -1447,16 +1447,6 @@ export class SecureDB {
     });
   }
 
-  // Load recent messages by conversation
-  async loadRecentMessagesByConversation(): Promise<StoredMessage[]> {
-    return this.withMessageLock(async () => {
-      const metadata = await this.loadIndexedConversationMetadataUnlocked();
-      return metadata
-        .map((entry) => entry.lastMessage)
-        .sort((a, b) => (b.timestamp as number) - (a.timestamp as number));
-    });
-  }
-
   async loadConversationWarmPages(
     limit = CONVERSATION_WARM_MESSAGE_COUNT,
   ): Promise<Array<{ peerUsername: string; messages: StoredMessage[] }>> {
@@ -1705,7 +1695,11 @@ export class SecureDB {
   private startEphemeralCleanup(): void {
     if (this.disposed) throw new Error('Secure database has been disposed');
     if (this.cleanupInterval) clearInterval(this.cleanupInterval);
-    this.cleanupInterval = setInterval(() => { void this.cleanupExpiredData(); }, this.ephemeralConfig.cleanupInterval);
+    this.cleanupInterval = setInterval(() => {
+      void this.cleanupExpiredData().catch((error) => {
+        console.error('[SecureDB] Ephemeral cleanup failed', error);
+      });
+    }, this.ephemeralConfig.cleanupInterval);
   }
 
   // Cleanup expired ephemeral data
@@ -1735,7 +1729,6 @@ export class SecureDB {
                 await kv.deleteMany(store, arr.splice(0, arr.length));
               }
             }
-          } catch {
           } finally {
             value.fill(0);
           }
@@ -1747,7 +1740,6 @@ export class SecureDB {
           }
         }
       });
-    } catch {
     } finally {
       this.cleanupRunning = false;
     }

@@ -24,6 +24,8 @@ export const KEY_TRANSPARENCY_SYNC_POW_DOMAIN = 'qorc-key-transparency-sync-pow-
 export const KEY_TRANSPARENCY_MAX_LOG_SIZE = 10_000_000;
 export const KEY_TRANSPARENCY_DELTA_MAX_RECORDS = 4096;
 export const KEY_TRANSPARENCY_DELTA_MAX_EPOCHS = 720;
+export const KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS = 6;
+export const KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 

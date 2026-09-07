@@ -1,60 +1,27 @@
-import { isTauri, system } from '@/lib/tauri-bindings';
+import { system } from '@/lib/tauri-bindings';
 import { STORAGE_PREFIXES } from '@/lib/database/storage-keys';
-
-const FALLBACK_INSTANCE_ID = 'browser';
 
 let cachedInstanceId: string | null = null;
 let instanceIdPromise: Promise<string> | null = null;
 
-function sanitizeInstanceId(value: unknown): string {
+function validateInstanceId(value: unknown): string {
   const raw = typeof value === 'string' ? value.trim() : '';
-  if (!raw) return FALLBACK_INSTANCE_ID;
-  return raw.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80) || FALLBACK_INSTANCE_ID;
-}
-
-function readInstanceIdFromWindow(): string | null {
-  try {
-    const value = (globalThis as any).__QORC_INSTANCE_ID;
-    return typeof value === 'string' && value.trim() ? sanitizeInstanceId(value) : null;
-  } catch {
-    return null;
+  if (!/^[a-zA-Z0-9_.-]{1,80}$/.test(raw)) {
+    throw new Error('Native application instance identifier is invalid');
   }
-}
-
-function readInstanceIdFromUrl(): string | null {
-  try {
-    const params = new URLSearchParams(globalThis.location?.search || '');
-    const value = params.get('qorcInstanceId') || params.get('instanceId');
-    return value ? sanitizeInstanceId(value) : null;
-  } catch {
-    return null;
-  }
+  return raw;
 }
 
 function cacheInstanceId(value: string): string {
-  const sanitized = sanitizeInstanceId(value);
-  cachedInstanceId = sanitized;
-  try {
-    (globalThis as any).__QORC_INSTANCE_ID = sanitized;
-  } catch { }
-  return sanitized;
+  const instanceId = validateInstanceId(value);
+  cachedInstanceId = instanceId;
+  return instanceId;
 }
 
 export async function getAppInstanceId(): Promise<string> {
   if (cachedInstanceId) return cachedInstanceId;
   if (!instanceIdPromise) {
-    instanceIdPromise = (async () => {
-      const urlInstanceId = readInstanceIdFromUrl();
-      if (urlInstanceId) return cacheInstanceId(urlInstanceId);
-
-      if (isTauri()) {
-        try {
-          return cacheInstanceId(await system.getInstanceId());
-        } catch { }
-      }
-
-      return cacheInstanceId(readInstanceIdFromWindow() || FALLBACK_INSTANCE_ID);
-    })().finally(() => {
+    instanceIdPromise = system.getInstanceId().then(cacheInstanceId).finally(() => {
       instanceIdPromise = null;
     });
   }

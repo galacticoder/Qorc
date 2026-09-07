@@ -79,7 +79,7 @@ function isDeferredAvatarTransportError(message: string): boolean {
     return /Authenticated PQ server transport is unavailable|Authenticated server transport changed|Anonymous server-entry authorization is unavailable|Anonymous account authorization is unavailable/i.test(message);
 }
 
-async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState | null> {
+async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState> {
     const now = Date.now();
     const currentEpoch = Math.floor(now / DISCOVERY_EPOCH_DURATION_MS);
     if (
@@ -87,37 +87,33 @@ async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState
         poolCache.powEpoch === currentEpoch &&
         now - poolCache.fetchedAt < POOL_CACHE_TTL_MS
     ) return poolCache;
-    try {
-        const resp: any = await anonymousHttpFetch(
-            AVATAR_POOL_AUDIENCE,
-            { limit: POOL_SAMPLE_LIMIT },
-            context.serverUrl
-        );
-        await assertCurrentServerContext(context);
-        if (
-            !resp ||
-            typeof resp !== 'object' ||
-            Array.isArray(resp) ||
-            Object.keys(resp).sort().join(',') !== 'ids,ok,powEpoch' ||
-            resp.ok !== true ||
-            !Array.isArray(resp.ids) ||
-            resp.ids.length !== POOL_SAMPLE_LIMIT ||
-            resp.ids.some((x: unknown) => typeof x !== 'string' || !/^[a-f0-9]{64}$/.test(x)) ||
-            new Set(resp.ids).size !== resp.ids.length ||
-            !Number.isSafeInteger(resp.powEpoch) ||
-            resp.powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)
-        ) throw new Error('Invalid avatar pool response');
-        const ids: string[] = resp.ids.slice().sort();
-        poolCache = {
-            ids,
-            powEpoch: resp.powEpoch,
-            fetchedAt: Date.now(),
-            serverScope: context.serverScope
-        };
-        return poolCache;
-    } catch {
-        return null;
-    }
+    const resp: any = await anonymousHttpFetch(
+        AVATAR_POOL_AUDIENCE,
+        { limit: POOL_SAMPLE_LIMIT },
+        context.serverUrl
+    );
+    await assertCurrentServerContext(context);
+    if (
+        !resp ||
+        typeof resp !== 'object' ||
+        Array.isArray(resp) ||
+        Object.keys(resp).sort().join(',') !== 'ids,ok,powEpoch' ||
+        resp.ok !== true ||
+        !Array.isArray(resp.ids) ||
+        resp.ids.length !== POOL_SAMPLE_LIMIT ||
+        resp.ids.some((x: unknown) => typeof x !== 'string' || !/^[a-f0-9]{64}$/.test(x)) ||
+        new Set(resp.ids).size !== resp.ids.length ||
+        !Number.isSafeInteger(resp.powEpoch) ||
+        resp.powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)
+    ) throw new Error('Invalid avatar pool response');
+    const ids: string[] = resp.ids.slice().sort();
+    poolCache = {
+        ids,
+        powEpoch: resp.powEpoch,
+        fetchedAt: Date.now(),
+        serverScope: context.serverScope
+    };
+    return poolCache;
 }
 
 // Random bytes of exactly one PURB's wire size
@@ -326,22 +322,23 @@ export function isValidAvatarRef(value: unknown, expectedHash: string): value is
 }
 
 function parseAvatarUploadState(value: unknown, now = Date.now()): AvatarUploadState | null {
+    if (value === null) return null;
     if (
         !value ||
         typeof value !== 'object' ||
         Array.isArray(value) ||
         Object.getPrototypeOf(value) !== Object.prototype ||
         Object.keys(value).sort().join(',') !== 'expiresAt,hash,ref'
-    ) return null;
+    ) throw new Error('Stored avatar publication state is invalid');
     const state = value as Record<string, unknown>;
     if (
         typeof state.hash !== 'string' ||
         !/^[a-f0-9]{64}$/.test(state.hash) ||
         !Number.isSafeInteger(state.expiresAt) ||
-        (state.expiresAt as number) <= now ||
         (state.expiresAt as number) > now + AVATAR_BLOB_TTL_MS ||
         !isValidAvatarRef(state.ref, state.hash)
-    ) return null;
+    ) throw new Error('Stored avatar publication state is invalid');
+    if ((state.expiresAt as number) <= now) return null;
     return {
         hash: state.hash,
         ref: { ...(state.ref as AvatarRef) },
@@ -352,20 +349,14 @@ function parseAvatarUploadState(value: unknown, now = Date.now()): AvatarUploadS
 async function loadAvatarUploadState(generation: number): Promise<AvatarUploadState | null> {
     if (generation !== accountGeneration) return null;
     if (avatarUploadStateLoadedGeneration === generation) return avatarUploadState;
-    if (!encryptedStorage.isInitialized()) return null;
-    try {
-        const stored = await encryptedStorage.getItem(STORAGE_KEYS.AVATAR_PUBLICATION_STATE);
-        if (generation !== accountGeneration) return null;
-        if (avatarUploadStateLoadedGeneration !== generation) {
-            avatarUploadState = parseAvatarUploadState(stored);
-            avatarUploadStateLoadedGeneration = generation;
-            if (stored !== null && avatarUploadState === null) {
-                await encryptedStorage.removeItem(STORAGE_KEYS.AVATAR_PUBLICATION_STATE).catch(() => { });
-                if (generation !== accountGeneration) return null;
-            }
-        }
-    } catch {
-        return null;
+    if (!encryptedStorage.isInitialized()) {
+        throw new Error('Encrypted storage is not initialized');
+    }
+    const stored = await encryptedStorage.getItem(STORAGE_KEYS.AVATAR_PUBLICATION_STATE);
+    if (generation !== accountGeneration) return null;
+    if (avatarUploadStateLoadedGeneration !== generation) {
+        avatarUploadState = parseAvatarUploadState(stored);
+        avatarUploadStateLoadedGeneration = generation;
     }
     return generation === accountGeneration ? avatarUploadState : null;
 }
@@ -387,13 +378,13 @@ async function saveAvatarUploadState(state: AvatarUploadState, generation: numbe
     };
     if (!encryptedStorage.isInitialized()) {
         rollback();
-        return false;
+        throw new Error('Encrypted storage is not initialized');
     }
     try {
         await encryptedStorage.setItem(STORAGE_KEYS.AVATAR_PUBLICATION_STATE, ownedState);
-    } catch {
+    } catch (error) {
         rollback();
-        return false;
+        throw error;
     }
     return generation === accountGeneration && avatarUploadState === ownedState;
 }
@@ -421,7 +412,7 @@ export async function publishAvatarToStore(avatar: AvatarData): Promise<AvatarRe
         avatar.isDefault !== false ||
         avatar.mimeType !== 'image/webp' ||
         await hashAvatarData(avatar.data) !== avatar.hash
-    ) return null;
+    ) throw new Error('Invalid avatar publication');
     const generation = accountGeneration;
     const now = Date.now();
     const state = await loadAvatarUploadState(generation);
@@ -440,13 +431,9 @@ export async function publishAvatarToStore(avatar: AvatarData): Promise<AvatarRe
     const reuseRef = state && state.hash === avatar.hash ? state.ref : undefined;
     let ref: AvatarRef;
     let purbBase64: string;
-    try {
-        const enc = encryptAvatarToPurb(avatar, reuseRef);
-        ref = enc.ref;
-        purbBase64 = enc.purbBase64;
-    } catch {
-        return null;
-    }
+    const enc = encryptAvatarToPurb(avatar, reuseRef);
+    ref = enc.ref;
+    purbBase64 = enc.purbBase64;
 
     const expiresAt = now + AVATAR_BLOB_TTL_MS;
     if (generation !== accountGeneration) return null;
@@ -496,25 +483,23 @@ function stableDecoysFor(targetBlobId: string, pool: string[], serverScope: stri
  */
 export async function fetchAvatarFromStore(ref: AvatarRef): Promise<AvatarData | null> {
     const expectedHash = typeof ref?.hash === 'string' ? ref.hash : '';
-    if (!isValidAvatarRef(ref, expectedHash)) return null;
-    try {
-        const generation = accountGeneration;
-        const context = await captureCurrentServerContext();
-        const assertOwner = async () => {
-            if (generation !== accountGeneration) throw new Error('Avatar account changed');
-            await assertCurrentServerContext(context);
-        };
-        const poolState = await fetchPool(context);
-        await assertOwner();
-        if (!poolState) return null;
-        if (poolState.powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)) {
-            poolCache = null;
-            return null;
-        }
-        const decoys = stableDecoysFor(ref.blobId, poolState.ids, context.serverScope);
-        if (decoys.length !== AVATAR_COVER_TOTAL_IDS - 1) return null;
-        const ids = PostQuantumRandom.shuffleInPlace(Array.from(new Set([ref.blobId, ...decoys])));
-        if (ids.length !== AVATAR_COVER_TOTAL_IDS) return null;
+    if (!isValidAvatarRef(ref, expectedHash)) throw new Error('Invalid avatar reference');
+    const generation = accountGeneration;
+    const context = await captureCurrentServerContext();
+    const assertOwner = async () => {
+        if (generation !== accountGeneration) throw new Error('Avatar account changed');
+        await assertCurrentServerContext(context);
+    };
+    const poolState = await fetchPool(context);
+    await assertOwner();
+    if (poolState.powEpoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS)) {
+        poolCache = null;
+        throw new Error('Avatar pool epoch changed');
+    }
+    const decoys = stableDecoysFor(ref.blobId, poolState.ids, context.serverScope);
+    if (decoys.length !== AVATAR_COVER_TOTAL_IDS - 1) throw new Error('Avatar cover set is incomplete');
+    const ids = PostQuantumRandom.shuffleInPlace(Array.from(new Set([ref.blobId, ...decoys])));
+    if (ids.length !== AVATAR_COVER_TOTAL_IDS) throw new Error('Avatar cover set is invalid');
 
         const work = await createAnonymousHttpPow(
             PROTOCOL_KEYS.AVATAR_GET_HTTP_POW,
@@ -537,7 +522,7 @@ export async function fetchAvatarFromStore(ref: AvatarRef): Promise<AvatarData |
             resp.ok !== true ||
             !Array.isArray(resp.blobs) ||
             resp.blobs.length !== AVATAR_COVER_TOTAL_IDS
-        ) return null;
+        ) throw new Error('Invalid avatar fetch response');
         const blobs: Array<{ id: string; data: string }> = resp.blobs;
         const responseIds = new Set<string>();
         for (const blob of blobs) {
@@ -550,23 +535,19 @@ export async function fetchAvatarFromStore(ref: AvatarRef): Promise<AvatarData |
                 !ids.includes(blob.id) ||
                 responseIds.has(blob.id) ||
                 typeof blob.data !== 'string'
-            ) return null;
+            ) throw new Error('Invalid avatar fetch response');
             responseIds.add(blob.id);
         }
-        if (responseIds.size !== ids.length) return null;
+        if (responseIds.size !== ids.length) throw new Error('Invalid avatar fetch response');
         const target = blobs.find((b) => b?.id === ref.blobId);
         if (!target || typeof target.data !== 'string') return null;
 
         const avatar = decryptAvatarPurb(target.data, ref);
         if (!avatar) return null;
 
-        // Re verify the content hash so a tampered/substituted blob is rejected
         const computed = await hashAvatarData(avatar.data);
         await assertOwner();
         if (ref.hash && computed !== ref.hash) return null;
         const validated = { ...avatar, hash: computed };
         return isValidAvatarData(validated) ? validated : null;
-    } catch {
-        return null;
-    }
 }

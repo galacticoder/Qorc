@@ -1,9 +1,11 @@
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { MAX_CHUNK_SIZE_BYTES } from "../../lib/constants";
-import { decodeBase64Chunk, validateEnvelope, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
+import { decodeBase64Chunk, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { resolveTrustedPeerDilithiumPublicKey, type PeerIdentityLike } from "../../lib/utils/signal-bundle-utils";
 import { HashingService } from '../../lib/cryptography/hashing';
+import { isHybridEnvelopeWireShape } from '../../lib/transport/envelope-shape';
+import { SignalType } from '../../lib/types/signal-types';
 
 export interface DecryptionContext {
   fileEntry: ExtendedFileState;
@@ -49,10 +51,10 @@ export const decryptEnvelope = async (
   envelope: any,
   accountUsername: string,
   senderUsername: string,
-  users?: PeerIdentityLike[] | null,
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+  users: PeerIdentityLike[],
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ): Promise<{ aesKey: CryptoKey; macKey: Uint8Array } | null> => {
-  if (!envelope || !validateEnvelope(envelope)) {
+  if (!isHybridEnvelopeWireShape(envelope, SignalType.FILE_MESSAGE_CHUNK)) {
     return null;
   }
 
@@ -71,7 +73,7 @@ export const decryptEnvelope = async (
       console.error('[FILE-ENVELOPE-IDENTITY]', senderIdentity.reason || 'UNAUTHORIZED_SENDER_KEY');
       return null;
     }
-    const decrypted = await (CryptoUtils as any).Hybrid.decryptIncoming(
+    const decrypted = await CryptoUtils.Hybrid.decryptIncoming(
       envelope,
       {
         senderDilithiumPublicKey: senderIdentity.expectedDilithium

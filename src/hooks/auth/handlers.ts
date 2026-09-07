@@ -11,8 +11,10 @@ import { solvePowChallenge } from "../../lib/cryptography/proof-of-work";
 import { tokenVault } from "../../lib/database/token-vault";
 import { blake3 } from '@noble/hashes/blake3.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { account, storage } from "../../lib/tauri-bindings";
+import { account, pir, storage } from "../../lib/tauri-bindings";
+import { decodeCanonicalBase64 } from "../../lib/cryptography/base64";
 import { PostQuantumWorker } from "../../lib/cryptography/worker-bridge";
+import { encodeAccountAuthSecret, isValidAccountCredential } from "../../lib/auth/account-credentials";
 import { getCurrentServerScope } from "../../lib/security/local-account-scope";
 import {
   clearRegistrationAttempt,
@@ -34,17 +36,26 @@ import {
 import { REQUEST_ID_RE } from '../../../shared/patterns.js';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 import { STORAGE_PREFIXES } from '../../lib/database/storage-keys';
+import { ACCOUNT_AUTH_PURPOSE } from '../../lib/config/audiences';
+import {
+  PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+  PRIVATE_AUTH_PIR_PUBLIC_PARAMS_BYTES,
+  PRIVATE_AUTH_PIR_QUERY_BYTES,
+  PRIVATE_AUTH_PIR_RECORD_BYTES,
+} from '../../../shared/private-auth-protocol.js';
 
 const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 function privateAuthRequestCommitment(
   blindedElement: Uint8Array,
-  publicKeys: Uint8Array[]
+  query: Uint8Array,
+  pubParams: Uint8Array
 ): string {
   const hash = sha256.create();
   hash.update(new TextEncoder().encode(PROTOCOL_KEYS.PRIVATE_AUTH_REQUEST));
   hash.update(blindedElement);
-  for (const publicKey of publicKeys) hash.update(publicKey);
+  hash.update(query);
+  hash.update(pubParams);
   const digest = hash.digest();
   try {
     return PostQuantumUtils.uint8ArrayToBase64(digest);
@@ -61,21 +72,8 @@ async function deriveCompositeSecret(username: string, password: string, passphr
   const p = password || "";
   const pp = passphrase || "";
 
-  if (!u || u.length > 128 || !p || p.length > 1024 || pp.length > 1024) {
-    throw new Error('Invalid authentication secret');
-  }
-
+  const data = encodeAccountAuthSecret(u, p, pp);
   const encoder = new TextEncoder();
-  const usernameBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_USERNAME_PREFIX}${u}`);
-  const passwordBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_PASSWORD_PREFIX}${p}`);
-  const passphraseBytes = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_PASSPHRASE_PREFIX}${pp}`);
-  const data = new Uint8Array(usernameBytes.length + passwordBytes.length + passphraseBytes.length + 2);
-  let offset = 0;
-  data.set(usernameBytes, offset);
-  offset += usernameBytes.length + 1;
-  data.set(passwordBytes, offset);
-  offset += passwordBytes.length + 1;
-  data.set(passphraseBytes, offset);
   const saltInput = encoder.encode(`${PROTOCOL_KEYS.ACCOUNT_AUTH_KDF}${u}`);
   let salt: Uint8Array | null = null;
   let workerHash: Uint8Array | null = null;
@@ -97,9 +95,6 @@ async function deriveCompositeSecret(username: string, password: string, passphr
     }
     return new Uint8Array(workerHash);
   } finally {
-    usernameBytes.fill(0);
-    passwordBytes.fill(0);
-    passphraseBytes.fill(0);
     data.fill(0);
     saltInput.fill(0);
     salt?.fill(0);
@@ -323,6 +318,10 @@ export const createHandleAccountSubmit = (
       setters.setLoginError('Invalid username format');
       return;
     }
+    if (!isValidAccountCredential(password) || !isValidAccountCredential(passphrase)) {
+      setters.setLoginError('Password and passphrase must contain valid Unicode without NUL characters');
+      return;
+    }
     if (mode === 'register') {
       if (
         password.length < PASSWORD_MIN_LENGTH ||
@@ -442,7 +441,7 @@ export const createHandleAccountSubmit = (
       }
 
       setters.setAuthStatus("Preparing private authentication connection...");
-      await awaitCurrent(websocketClient.switchToLinkedAuthenticationMode(operation.signal));
+      await awaitCurrent(websocketClient.validateLinkedAuthenticationMode(operation.signal));
 
       await awaitCurrent(helpers.waitForServerKeys(operation.signal));
       if (
@@ -466,7 +465,7 @@ export const createHandleAccountSubmit = (
       // OPAQUE Flow
       let compositeSecret: Uint8Array | null = null;
       const opaqueClient = new OPAQUEClient();
-      const ppClient = new PrivacyPassClient();
+      const ppClient = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
       try {
         setters.setAuthStatus("Initializing OPAQUE...");
         await awaitCurrent(yieldToEventLoop());
@@ -474,7 +473,6 @@ export const createHandleAccountSubmit = (
 
         if (mode === "register") {
           let registrationBlindedElement: Uint8Array | null = null;
-          let registrationBlindingFactor: Uint8Array | null = null;
           let registrationBlindedTokens: Uint8Array[] = [];
           let registrationTokenSecrets: any[] = [];
           let pendingRegistrationTokens: any[] = [];
@@ -484,9 +482,8 @@ export const createHandleAccountSubmit = (
           setters.setAuthStatus("Blinding credentials...");
           await awaitCurrent(yieldToEventLoop());
 
-          const registrationStart = await awaitCurrent(opaqueClient.startOTRegistration(compositeSecret));
+          const registrationStart = await awaitCurrent(opaqueClient.startRegistration(compositeSecret));
           registrationBlindedElement = registrationStart.blindedElement;
-          registrationBlindingFactor = registrationStart.blindingFactor;
 
           setters.setAuthStatus("Requesting registration proof...");
           await awaitCurrent(yieldToEventLoop());
@@ -495,15 +492,15 @@ export const createHandleAccountSubmit = (
           let serverResponse: any = null;
           for (let round = 0; round < 3; round += 1) {
             const responseWaiter = createSignalResponseWaiter<any>(
-              SignalType.AUTH_OT_REGISTER_RESPONSE,
-              60000,
+              SignalType.AUTH_REGISTER_RESPONSE,
+              240000,
               'Registration response timeout',
               operation.signal,
               authRequestId
             );
             try {
               await awaitCurrent(websocketClient.sendSecureControlMessage({
-                type: SignalType.AUTH_OT_REGISTER_REQUEST,
+                type: SignalType.AUTH_REGISTER_REQUEST,
                 authRequestId,
                 blindedElement: PostQuantumUtils.uint8ArrayToBase64(registrationBlindedElement),
                 preflightPowSolution: registrationPreflightSolution
@@ -530,14 +527,13 @@ export const createHandleAccountSubmit = (
           setters.setAuthStatus("Creating envelope...");
           await awaitCurrent(yieldToEventLoop());
 
-          // Finish OT registration
+          // Finish registration
           decodedRegistrationResponse = OPAQUEClientHelpers.decodeResponse(serverResponse, {
             evaluatedElement: 32,
             serverNonce: 32
           });
-          registrationFinalize = await awaitCurrent(opaqueClient.finishOTRegistration(
+          registrationFinalize = await awaitCurrent(opaqueClient.finishRegistration(
             compositeSecret,
-            registrationBlindingFactor,
             decodedRegistrationResponse
           ));
 
@@ -545,7 +541,7 @@ export const createHandleAccountSubmit = (
             getOrCreateRegistrationAttempt(trimmedUsername)
           );
           const readyWaiter = createSignalResponseWaiter<any>(
-            SignalType.AUTH_OT_REGISTER_READY,
+            SignalType.AUTH_REGISTER_READY,
             120000,
             'Registration staging timeout',
             operation.signal,
@@ -553,7 +549,7 @@ export const createHandleAccountSubmit = (
           );
           try {
             await awaitCurrent(websocketClient.sendSecureControlMessage({
-              type: SignalType.AUTH_OT_REGISTER_FINALIZE,
+              type: SignalType.AUTH_REGISTER_FINALIZE,
               authRequestId,
               registrationAttemptId,
               ...OPAQUEClientHelpers.encodeRequest({
@@ -640,7 +636,7 @@ export const createHandleAccountSubmit = (
           const finalizationWaiter = createAuthFinalizeWaiter(120000, operation.signal, authRequestId);
           try {
             await awaitCurrent(websocketClient.sendSecureControlMessage({
-              type: SignalType.AUTH_OT_REGISTER_CONFIRM,
+              type: SignalType.AUTH_REGISTER_CONFIRM,
               authRequestId,
               registrationAttemptId,
               blindedTokens: pendingRegistrationTokens.map((candidate) =>
@@ -669,7 +665,6 @@ export const createHandleAccountSubmit = (
           setters.setIsSubmittingAuth(false);
           } finally {
             registrationBlindedElement?.fill(0);
-            registrationBlindingFactor?.fill(0);
             for (const token of registrationBlindedTokens) token.fill(0);
             for (const token of registrationTokenSecrets) {
               token.tokenSecret?.fill(0);
@@ -691,12 +686,17 @@ export const createHandleAccountSubmit = (
           }
         } else {
           let loginBlindedElement: Uint8Array | null = null;
-          let loginPublicKeys: Uint8Array[] = [];
+          let loginPirQuery: string | null = null;
+          let loginPirPublicParams: string | null = null;
+          let loginPirSessionId = 0;
+          let loginPirRecord: Uint8Array | null = null;
+          let loginEnvelope: Uint8Array | null = null;
+          let loginSalt: Uint8Array | null = null;
           let evaluatedElement: Uint8Array | null = null;
           let loginServerNonce: Uint8Array | null = null;
           let loginAuthChannelBinding: Uint8Array | null = null;
           let loginFinalize: any = null;
-          let otResponse: any = null;
+          let pirResponse: any = null;
           let pendingAccountTokens: any[] = [];
           try {
             setters.setAuthStatus("Preparing anonymous lookup...");
@@ -708,65 +708,94 @@ export const createHandleAccountSubmit = (
             );
             const privateAuthSlotRaw = await awaitCurrent(storage.get(`${STORAGE_PREFIXES.PRIVATE_AUTH_SLOT}${privateAuthStorageId}`));
             let myIndex: number | null = null;
-            if (privateAuthSlotRaw && typeof privateAuthSlotRaw === 'string') {
-              try {
-                const parsed = JSON.parse(privateAuthSlotRaw);
-                if (
-                  !parsed ||
-                  Array.isArray(parsed) ||
-                  Object.getPrototypeOf(parsed) !== Object.prototype ||
-                  Object.keys(parsed).sort().join(',') !== 'anonymitySetSize,credentialIndex' ||
-                  !Number.isInteger(parsed.credentialIndex) ||
-                  parsed.credentialIndex < 0 ||
-                  parsed.credentialIndex >= OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
-                  parsed.anonymitySetSize !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE
-                ) {
-                  throw new Error('Private authentication slot metadata is invalid');
-                }
-                myIndex = parsed.credentialIndex;
-              } catch {
-                console.warn('[Auth] Failed to load private auth slot metadata');
+            if (privateAuthSlotRaw !== null) {
+              if (typeof privateAuthSlotRaw !== 'string') {
+                throw new Error('Private authentication slot metadata is invalid');
               }
+              const parsed = JSON.parse(privateAuthSlotRaw);
+              if (
+                !parsed ||
+                Array.isArray(parsed) ||
+                Object.getPrototypeOf(parsed) !== Object.prototype ||
+                Object.keys(parsed).sort().join(',') !== 'anonymitySetSize,credentialIndex' ||
+                !Number.isInteger(parsed.credentialIndex) ||
+                parsed.credentialIndex < 0 ||
+                parsed.credentialIndex >= OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
+                parsed.anonymitySetSize !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE
+              ) {
+                throw new Error('Private authentication slot metadata is invalid');
+              }
+              myIndex = parsed.credentialIndex;
             }
             if (myIndex === null) {
               throw new Error('Private auth slot unavailable. Account recovery is required.');
             }
 
-            setters.setAuthStatus("Generating OT keys...");
+            setters.setAuthStatus("Generating private query...");
             await awaitCurrent(yieldToEventLoop());
 
-            const anonymitySetSize = OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE;
-            const loginStart = await awaitCurrent(opaqueClient.startOTLogin(compositeSecret, anonymitySetSize, myIndex));
-            loginPublicKeys = loginStart.pubKeys;
+            const loginStart = await awaitCurrent(opaqueClient.startLogin(compositeSecret));
             loginBlindedElement = loginStart.blindedElement;
-            let encodedPubKeys = loginPublicKeys.map((publicKey) =>
-              PostQuantumUtils.uint8ArrayToBase64(publicKey)
-            );
-            const requestCommitment = privateAuthRequestCommitment(loginBlindedElement, loginPublicKeys);
-            for (const publicKey of loginPublicKeys) publicKey.fill(0);
-            loginPublicKeys = [];
+            const generatedPirQuery = await awaitCurrent(pir.generateQuery(
+              PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+              PRIVATE_AUTH_PIR_RECORD_BYTES,
+              myIndex
+            ));
+            if (
+              !generatedPirQuery ||
+              !Number.isSafeInteger(generatedPirQuery.sessionId) ||
+              generatedPirQuery.sessionId <= 0
+            ) {
+              throw new Error('Private authentication query could not be created');
+            }
+            loginPirSessionId = generatedPirQuery.sessionId;
+            let loginPirQueryBytes: Uint8Array | null = null;
+            let loginPirPublicParamsBytes: Uint8Array | null = null;
+            let requestCommitment: string;
+            try {
+              loginPirQueryBytes = decodeCanonicalBase64(
+                generatedPirQuery.query,
+                'private-auth PIR query',
+                { exactBytes: PRIVATE_AUTH_PIR_QUERY_BYTES }
+              );
+              loginPirPublicParamsBytes = decodeCanonicalBase64(
+                generatedPirQuery.pubParams,
+                'private-auth PIR public parameters',
+                { exactBytes: PRIVATE_AUTH_PIR_PUBLIC_PARAMS_BYTES }
+              );
+              requestCommitment = privateAuthRequestCommitment(
+                loginBlindedElement,
+                loginPirQueryBytes,
+                loginPirPublicParamsBytes
+              );
+            } finally {
+              loginPirQueryBytes?.fill(0);
+              loginPirPublicParamsBytes?.fill(0);
+            }
+            loginPirQuery = generatedPirQuery.query;
+            loginPirPublicParams = generatedPirQuery.pubParams;
 
             setters.setAuthStatus("Retrieving blind record...");
-            const onOtChunkProgress = (ev: Event) => {
+            const onPirChunkProgress = (ev: Event) => {
               if (!helpers.lifecycle.isCurrent(operation)) return;
               const detail = (ev as CustomEvent).detail;
               if (
-                detail?.payloadType === SignalType.AUTH_OT_RESPONSE &&
+                detail?.payloadType === SignalType.AUTH_PIR_RESPONSE &&
                 Number.isFinite(detail?.total) && detail.total > 0
               ) {
                 const pct = Math.max(0, Math.min(100, Math.round((detail.received / detail.total) * 100)));
                 setters.setAuthStatus(`Retrieving blind record... (${pct}%)`);
               }
             };
-            window.addEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+            window.addEventListener(EventType.SECURE_CHUNK_PROGRESS, onPirChunkProgress as EventListener);
 
             try {
               let preflightPowSolution: string | undefined;
               for (let round = 0; round < 3; round += 1) {
-                const otResponseWaiter = createSignalResponseWaiter<any>(
-                  SignalType.AUTH_OT_RESPONSE,
+                const pirResponseWaiter = createSignalResponseWaiter<any>(
+                  SignalType.AUTH_PIR_RESPONSE,
                   240000,
-                  'OT response timeout',
+                  'PIR response timeout',
                   operation.signal,
                   authRequestId
                 );
@@ -781,10 +810,11 @@ export const createHandleAccountSubmit = (
                   }
                   try {
                     roundAuthChannelBinding = await awaitCurrent(websocketClient.sendSecureControlMessage({
-                      type: SignalType.AUTH_OT_REQUEST,
+                      type: SignalType.AUTH_PIR_REQUEST,
                       authRequestId,
-                      clientPubKeys: preflightPowSolution ? encodedPubKeys : undefined,
                       blindedElement: PostQuantumUtils.uint8ArrayToBase64(loginBlindedElement),
+                      pubParams: preflightPowSolution ? loginPirPublicParams : undefined,
+                      query: preflightPowSolution ? loginPirQuery : undefined,
                       requestCommitment,
                       preflightPowSolution
                     }, {
@@ -800,11 +830,11 @@ export const createHandleAccountSubmit = (
                   }
                 }
                 if (!sent) {
-                  otResponseWaiter.cancel();
+                  pirResponseWaiter.cancel();
                   throw lastSendError instanceof Error ? lastSendError : new Error('WebSocket not connected');
                 }
 
-                const response = await awaitCurrent(otResponseWaiter.promise);
+                const response = await awaitCurrent(pirResponseWaiter.promise);
                 if (!response?.preflightRequired) {
                   if (!roundAuthChannelBinding) {
                     throw new Error('Private authentication channel binding was not transmitted');
@@ -816,7 +846,7 @@ export const createHandleAccountSubmit = (
                   });
                   loginAuthChannelBinding?.fill(0);
                   loginAuthChannelBinding = decodedBinding.authChannelBinding;
-                  otResponse = response;
+                  pirResponse = response;
                   break;
                 }
 
@@ -826,18 +856,17 @@ export const createHandleAccountSubmit = (
                   operation.signal
                 ));
               }
-              if (!otResponse) {
+              if (!pirResponse) {
                 throw new Error('Authentication preflight could not be completed');
               }
             } finally {
-              encodedPubKeys = [];
-              window.removeEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+              window.removeEventListener(EventType.SECURE_CHUNK_PROGRESS, onPirChunkProgress as EventListener);
             }
 
-            if (!Array.isArray(otResponse.otRecords) || otResponse.otRecords.length !== anonymitySetSize) {
+            if (typeof pirResponse.pirResponse !== 'string') {
               throw new Error('Invalid private-auth response');
             }
-            const decodedResponse = OPAQUEClientHelpers.decodeResponse<any>(otResponse, {
+            const decodedResponse = OPAQUEClientHelpers.decodeResponse<any>(pirResponse, {
               evaluatedElement: 32,
               serverNonce: 32
             });
@@ -850,14 +879,30 @@ export const createHandleAccountSubmit = (
             if (!loginAuthChannelBinding) {
               throw new Error('Private authentication channel binding is unavailable');
             }
-            loginFinalize = await awaitCurrent(opaqueClient.finishOTLogin(
+            const decodedPirRecord = await awaitCurrent(pir.decodeResponse(
+              pirResponse.pirResponse,
+              loginPirSessionId
+            ));
+            loginPirSessionId = 0;
+            loginPirRecord = decodeCanonicalBase64(
+              decodedPirRecord,
+              'private-auth PIR record',
+              { exactBytes: PRIVATE_AUTH_PIR_RECORD_BYTES }
+            );
+            const selectedRecord = OPAQUEClientHelpers.decodePrivateAuthPirRecord(loginPirRecord);
+            loginEnvelope = selectedRecord.envelope;
+            loginSalt = selectedRecord.salt;
+            loginFinalize = await awaitCurrent(opaqueClient.finishLogin(
               compositeSecret,
-              otResponse.otRecords,
-              evaluatedElement,
-              loginServerNonce,
+              {
+                evaluatedElement,
+                envelope: loginEnvelope,
+                serverNonce: loginServerNonce,
+                salt: loginSalt,
+              },
               loginAuthChannelBinding
             ));
-            otResponse.otRecords = [];
+            pirResponse.pirResponse = '';
 
             if (!loginFinalize.success || !loginFinalize.authMessage || !loginFinalize.exportKey) {
               throw new Error('Incorrect username, password, or passphrase.');
@@ -900,13 +945,13 @@ export const createHandleAccountSubmit = (
             }
 
             const powSolution = await awaitCurrent(solvePowChallenge(
-              otResponse.powChallenge,
+              pirResponse.powChallenge,
               operation.signal
             ));
             const finalizationWaiter = createAuthFinalizeWaiter(120000, operation.signal, authRequestId);
             try {
               await awaitCurrent(websocketClient.sendSecureControlMessage({
-                type: SignalType.AUTH_OT_FINALIZE,
+                type: SignalType.AUTH_PIR_FINALIZE,
                 authRequestId,
                 authProof: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.authMessage),
                 blindedTokens: pendingAccountTokens.map((candidate) =>
@@ -934,7 +979,14 @@ export const createHandleAccountSubmit = (
             setters.setIsSubmittingAuth(false);
           } finally {
             loginBlindedElement?.fill(0);
-            for (const publicKey of loginPublicKeys) publicKey.fill(0);
+            loginPirQuery = null;
+            loginPirPublicParams = null;
+            loginPirRecord?.fill(0);
+            loginEnvelope?.fill(0);
+            loginSalt?.fill(0);
+            if (loginPirSessionId > 0) {
+              await pir.discardQuery(loginPirSessionId).catch(() => undefined);
+            }
             evaluatedElement?.fill(0);
             loginServerNonce?.fill(0);
             loginAuthChannelBinding?.fill(0);
@@ -946,7 +998,7 @@ export const createHandleAccountSubmit = (
               token.blindedElement?.fill(0);
               token.unblindedToken?.fill(0);
             }
-            if (Array.isArray(otResponse?.otRecords)) otResponse.otRecords = [];
+            if (pirResponse && typeof pirResponse === 'object') pirResponse.pirResponse = '';
           }
         }
       } catch (_error) {

@@ -71,7 +71,6 @@ COPY public/ public/
 COPY scripts/generate-material-file-icons.cjs scripts/generate-material-file-icons.cjs
 COPY shared/ shared/
 COPY src/ src/
-COPY test-chat/ test-chat/
 COPY index.html postcss.config.js tailwind.config.js tailwind.config.ts ./
 COPY tsconfig.app.json tsconfig.json tsconfig.node.json vite.config.simple.ts ./
 RUN --mount=type=cache,id=qorc-client-pnpm-${TARGETARCH},target=/opt/pnpm/store,sharing=locked \

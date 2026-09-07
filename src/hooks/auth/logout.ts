@@ -16,7 +16,6 @@ import { profilePictureSystem } from "../../lib/avatar/profile-picture-system";
 import { resetAvatarStoreClient } from "../../lib/avatar/avatar-store-client";
 import { resetBlindRoutingClient } from "../../lib/transport/blind-routing-client";
 import type { AuthLifecycle } from "../../lib/auth/auth-lifecycle";
-import { clearResumePool } from "../../lib/signals/resume-tokens";
 import { p2pTransport } from "../../lib/transport/p2p-transport";
 import { deliveryReceiptOutbox } from "../../lib/signals/delivery-receipt-outbox";
 import { keyTransparencyClient } from "../../lib/key-transparency/client";
@@ -39,9 +38,9 @@ export interface LogoutSetters {
   setIsSubmittingAuth: (v: boolean) => void;
   setUsername: (v: string) => void;
   setTokenValidationInProgress: (v: boolean) => void;
-  setVaultReady?: (v: boolean) => void;
-  setShowPassphrasePrompt?: (v: boolean) => void;
-  setShowPasswordPrompt?: (v: boolean) => void;
+  setVaultReady: (v: boolean) => void;
+  setShowPassphrasePrompt: (v: boolean) => void;
+  setShowPasswordPrompt: (v: boolean) => void;
 }
 
 export const createLogout = (
@@ -50,12 +49,14 @@ export const createLogout = (
   clearAuthenticationState: () => Promise<void>,
   lifecycle: AuthLifecycle
 ) => {
-  return async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
+  return async (secureDBRef: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     const logoutUsername = refs.loginUsernameRef.current;
-    const logoutDatabase = secureDBRef?.current || null;
+    const logoutDatabase = secureDBRef.current;
     const logoutAccountOwner = logoutDatabase?.getAccountScope() || refs.keyManagerOwnerRef.current;
     const operation = lifecycle.begin('');
+    const logoutServerScope = tokenVault.lock();
     let localSecretCleanupFailed = false;
+    const logoutMarker = markExplicitLogout().then(() => true, () => false);
 
     // Invalidate account bound singleton state before first await
     unifiedSignalTransport.resetForAccountTransition();
@@ -72,16 +73,12 @@ export const createLogout = (
     keyTransparencyWarningStore.clear();
     syncEncryptedStorage.reset();
     logoutDatabase?.dispose();
-    if (secureDBRef) secureDBRef.current = null;
+    secureDBRef.current = null;
 
     const connectionClose = websocketClient.close({ killSession: true })
       .then(() => true, () => false);
     const p2pClose = p2pTransport.shutdown().then(() => true, () => false);
     try { websocketClient.resetConnectionPrivacyMode(); } catch { }
-    const tokenVaultClear = tokenVault.clearAll().then(() => true, () => false);
-    const resumePoolClear = logoutUsername
-      ? clearResumePool(logoutUsername).then(() => true, () => false)
-      : Promise.resolve(false);
 
     clearStringRef(refs.passwordRef);
     clearStringRef(refs.passphrasePlaintextRef);
@@ -91,26 +88,24 @@ export const createLogout = (
 
     // Drop in memory account master, private keys, database handle, signal state at the start of teardown
     if (/^[a-f0-9]{64}$/.test(logoutAccountOwner)) {
-      try { await account.lock(logoutAccountOwner); } catch { localSecretCleanupFailed = true; }
+      try {
+        if (!await account.lock(logoutAccountOwner, { purgeTokens: true, serverScope: logoutServerScope })) {
+          localSecretCleanupFailed = true;
+        }
+      } catch { localSecretCleanupFailed = true; }
     } else {
       if (logoutUsername) {
         localSecretCleanupFailed = true;
       }
     }
-    const [connectionClosed, p2pClosed, tokenVaultCleared, resumePoolCleared] = await Promise.all([
+    const [connectionClosed, p2pClosed, markerStored] = await Promise.all([
       connectionClose,
       p2pClose,
-      tokenVaultClear,
-      resumePoolClear,
+      logoutMarker,
     ]);
-    if (!connectionClosed || !p2pClosed || !tokenVaultCleared || !resumePoolCleared) {
+    if (!connectionClosed || !p2pClosed || !markerStored) {
       localSecretCleanupFailed = true;
     }
-    if (!lifecycle.isCurrent(operation)) return;
-
-    try {
-      await markExplicitLogout();
-    } catch { localSecretCleanupFailed = true; }
     if (!lifecycle.isCurrent(operation)) return;
 
     await clearAuthenticationState().catch(() => {
@@ -127,12 +122,6 @@ export const createLogout = (
     } catch { }
     if (!lifecycle.isCurrent(operation)) return;
 
-    try {
-      if (typeof window !== 'undefined' && (window as any).gc) {
-        (window as any).gc();
-      }
-    } catch { }
-
     if (!lifecycle.isCurrent(operation)) return;
     refs.loginUsernameRef.current = "";
 
@@ -144,14 +133,8 @@ export const createLogout = (
     setters.setIsRegistrationMode(false);
     setters.setIsSubmittingAuth(false);
     setters.setUsername("");
-    setters.setVaultReady?.(false);
-    setters.setShowPassphrasePrompt?.(false);
-    setters.setShowPasswordPrompt?.(false);
-  };
-};
-
-export const createGetLogout = (logout: (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage?: string) => Promise<void>) => {
-  return (Database: { secureDBRef: RefObject<SecureDB | null> }) => {
-    return async () => await logout(Database.secureDBRef, "Logged out");
+    setters.setVaultReady(false);
+    setters.setShowPassphrasePrompt(false);
+    setters.setShowPasswordPrompt(false);
   };
 };

@@ -64,11 +64,11 @@ function setBoundedFailure<K, V>(map: Map<K, V>, key: K, value: V): void {
 export function useP2PMessaging(
   username: string,
   hybridKeys: HybridKeys | null,
-  options?: {
-    fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
-    onServiceReady?: (service: SecureP2PService | null) => void;
-    handleEncryptedMessagePayload?: (msg: any) => Promise<boolean | void>;
-    knownPeers?: readonly string[];
+  options: {
+    fetchPeerCertificates: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
+    onServiceReady: (service: SecureP2PService | null) => void;
+    handleEncryptedMessagePayload: (msg: any) => Promise<boolean | void>;
+    knownPeers: readonly string[];
   },
 ) {
   const p2pServiceRef = useRef<SecureP2PService | null>(null);
@@ -90,15 +90,15 @@ export function useP2PMessaging(
   const accountGenerationRef = useRef(0);
   const inFlightP2PRetriesRef = useRef({ generation: 0, count: 0, bytes: 0 });
   const activeUsernameRef = useRef<string | null>(null);
-  const onServiceReadyRef = useRef(options?.onServiceReady);
+  const onServiceReadyRef = useRef(options.onServiceReady);
   useLayoutEffect(() => {
-    onServiceReadyRef.current = options?.onServiceReady;
-  }, [options?.onServiceReady]);
+    onServiceReadyRef.current = options.onServiceReady;
+  }, [options.onServiceReady]);
   const stableConnectionOptions = useMemo(() => ({
-    onServiceReady: (service: SecureP2PService | null) => onServiceReadyRef.current?.(service),
+    onServiceReady: (service: SecureP2PService | null) => onServiceReadyRef.current(service),
   }), []);
   const knownPeerKey = Array.from(new Set(
-    (options?.knownPeers || []).filter(peer => (
+    options.knownPeers.filter(peer => (
       peer !== username && peer === peer.trim().toLowerCase() && AUTH_USERNAME_REGEX.test(peer)
     ))
   )).sort().join('\0');
@@ -131,10 +131,10 @@ export function useP2PMessaging(
   const getPeerCertificateBase = useCallback(
     createGetPeerCertificate(certificateRefs, {
       ownerUsername: username,
-      fetchPeerCertificates: options?.fetchPeerCertificates,
+      fetchPeerCertificates: options.fetchPeerCertificates,
       isCurrentOwner: () => activeUsernameRef.current === username,
     }),
-    [username, options?.fetchPeerCertificates]
+    [username, options.fetchPeerCertificates]
   );
 
   const getPeerCertificate = useCallback(
@@ -144,7 +144,7 @@ export function useP2PMessaging(
       if (normalizedPeer !== peer || !AUTH_USERNAME_REGEX.test(normalizedPeer)) return null;
       peer = normalizedPeer;
       const generation = accountGenerationRef.current;
-      await keyTransparencyClient.restorePersistedAuthorizations(username).catch(() => 0);
+      await keyTransparencyClient.restorePersistedAuthorizations(username);
       if (generation !== accountGenerationRef.current || activeUsernameRef.current !== username) return null;
       const now = Date.now();
       const failure = peerCertFailureRef.current.get(peer);
@@ -187,13 +187,13 @@ export function useP2PMessaging(
   const refreshPeerCertificateInBackground = useCallback(
     async (peer: string): Promise<PeerCertificateBundle | null> => {
       const generation = accountGenerationRef.current;
-      const cert = await getPeerCertificate(peer, true).catch(() => null);
+      const cert = await getPeerCertificate(peer, true);
       if (
         !cert ||
         generation !== accountGenerationRef.current ||
         activeUsernameRef.current !== username
       ) return null;
-      await p2pTransport.registerPeerCertificate(peer, cert).catch(() => { });
+      await p2pTransport.registerPeerCertificate(peer, cert);
       if (
         generation !== accountGenerationRef.current ||
         activeUsernameRef.current !== username
@@ -209,12 +209,12 @@ export function useP2PMessaging(
       const normalizedPeer = typeof peer === 'string' ? peer.trim().toLowerCase() : '';
       if (normalizedPeer !== peer || !AUTH_USERNAME_REGEX.test(normalizedPeer)) return null;
       const generation = accountGenerationRef.current;
-      await keyTransparencyClient.restorePersistedAuthorizations(username).catch(() => 0);
+      await keyTransparencyClient.restorePersistedAuthorizations(username);
       if (
         generation !== accountGenerationRef.current ||
         activeUsernameRef.current !== username
       ) return null;
-      const cert = await getPeerCertificateBase(normalizedPeer, false, true).catch(() => null);
+      const cert = await getPeerCertificateBase(normalizedPeer, false, true);
       if (
         generation !== accountGenerationRef.current ||
         activeUsernameRef.current !== username
@@ -263,8 +263,8 @@ export function useP2PMessaging(
   }, [initializeP2P, username, hybridKeys?.native, p2pStatus.isInitialized]);
 
   const isPeerConnected = useCallback(
-    createIsPeerConnected(p2pStatus.connectedPeers),
-    [p2pStatus.connectedPeers]
+    createIsPeerConnected(),
+    []
   );
 
   const connectToPeerBase = useCallback(
@@ -378,7 +378,7 @@ export function useP2PMessaging(
 
         if (shouldForceRefreshAndRetry) {
           invalidateDiscoveryCache(peer);
-          const refreshedCert = await getPeerCertificate(peer, true).catch(() => null);
+          const refreshedCert = await getPeerCertificate(peer, true);
           if (generation !== accountGenerationRef.current) throw createP2PError('AUTH_REQUIRED');
           if (refreshedCert) {
             try {
@@ -449,8 +449,8 @@ export function useP2PMessaging(
   }, [connectToPeerBase, getPeerCertificate, isPeerConnected, checkInitialized]);
 
   useLayoutEffect(() => {
-    handleEncryptedMessagePayloadRef.current = options?.handleEncryptedMessagePayload || null;
-  }, [options?.handleEncryptedMessagePayload]);
+    handleEncryptedMessagePayloadRef.current = options.handleEncryptedMessagePayload;
+  }, [options.handleEncryptedMessagePayload]);
 
   const handleIncomingP2PMessage = useCallback(
     createHandleIncomingP2PMessage(incomingMessageRefs),
@@ -525,12 +525,12 @@ export function useP2PMessaging(
       while (isCurrent()) {
         const peer = knownPeers[cursor++];
         if (!peer) return;
-        const cert = await loadPersistedPeerCert(username, peer, true).catch(() => null);
+        const cert = await loadPersistedPeerCert(username, peer, true);
         if (!isCurrent() || !cert) continue;
         try {
           await p2pTransport.registerPeerCertificate(peer, cert);
           if (!isCurrent()) return;
-          const endpoint = await loadPersistedPeerEndpoint(username, peer).catch(() => null);
+          const endpoint = await loadPersistedPeerEndpoint(username, peer);
           if (!isCurrent() || !endpoint) continue;
           p2pTransport.updateAuthenticatedEndpoint(
             peer,
@@ -538,7 +538,10 @@ export function useP2PMessaging(
             endpoint.signerPublicKeyBase64,
             endpoint.announcedAt
           );
-        } catch { }
+        } catch (error) {
+          console.error('[P2P] Persisted peer state could not be restored', error);
+          return;
+        }
       }
     };
     void keyTransparencyClient.restorePersistedAuthorizations(username).then(async () => {
@@ -571,14 +574,14 @@ export function useP2PMessaging(
       }, delayMs);
     };
     const run = async () => {
-      await keyTransparencyClient.restorePersistedAuthorizations(username).catch(() => 0);
+      await keyTransparencyClient.restorePersistedAuthorizations(username);
       if (!isCurrent()) return;
       for (const peer of knownPeers) {
         if (!isCurrent()) return;
         const now = Date.now();
         const refreshDueAt = peerTrustRefreshDueRef.current.get(peer);
         if (refreshDueAt !== undefined && refreshDueAt > now) continue;
-        const cert = await loadPersistedPeerCert(username, peer, true).catch(() => null);
+        const cert = await loadPersistedPeerCert(username, peer, true);
         if (!isCurrent()) return;
         const authorizationVerifiedAt = getKeyTransparencyAuthorizedPeerVerifiedAt(username, peer);
         const authorizationRefreshAt = authorizationVerifiedAt === null

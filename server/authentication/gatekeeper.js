@@ -52,6 +52,14 @@ import {
     PRIVACY_PASS_BLINDED_TOKEN_BYTES,
     XCHACHA20_NONCE_BYTES
 } from '../utils/crypto-consts.js';
+import {
+    AccountAuthRefreshDecision,
+    clearAccountAuthRefreshState,
+    completeAccountAuthRefresh,
+    hasLiveAccountAuthRefreshAuthorization,
+    releaseFailedAccountAuthRefresh,
+    reserveAccountAuthRefresh
+} from './account-auth-refresh-state.js';
 
 const GATEKEEPER_CHALLENGE_TTL_MS = 2 * 60_000;
 const GATEKEEPER_PREFLIGHT_TTL_MS = 60_000;
@@ -84,8 +92,9 @@ async function deriveGatekeeperSecret(secret) {
 
 export class ServerGatekeeper {
     static #sharedRecord = null;
-    static #initializationPromise = null;
+    static #passwordOperationTail = Promise.resolve();
     static #lifecycleGeneration = 0;
+    static #serverEntryAuthorizationGeneration = 0;
 
     constructor() {
         this.opaqueServer = OPAQUEServer;
@@ -103,21 +112,34 @@ export class ServerGatekeeper {
         ws._gatekeeperPreflight = null;
         ws._entryPowSeed = null;
         ws._entryPowDifficulty = 0;
+        clearAccountAuthRefreshState(ws);
     }
 
     static async destroy() {
         this.#lifecycleGeneration += 1;
-        const initialization = this.#initializationPromise;
+        this.#serverEntryAuthorizationGeneration += 1;
+        const initialization = this.#passwordOperationTail;
         await initialization?.catch(() => { });
         const record = this.#sharedRecord;
+        this.#wipeRecord(record);
+        this.#sharedRecord = null;
+        this.#passwordOperationTail = Promise.resolve();
+    }
+
+    static getServerEntryAuthorizationGeneration() {
+        return this.#serverEntryAuthorizationGeneration;
+    }
+
+    static isServerEntryAuthorizationGenerationCurrent(generation) {
+        return Number.isSafeInteger(generation) &&
+            generation === this.#serverEntryAuthorizationGeneration;
+    }
+
+    static #wipeRecord(record) {
         wipeBytes(record?.envelope);
         wipeBytes(record?.authPublicKey);
         wipeBytes(record?.oprfSecretKey);
         wipeBytes(record?.salt);
-        this.#sharedRecord = null;
-        if (this.#initializationPromise === initialization) {
-            this.#initializationPromise = null;
-        }
     }
 
     /**
@@ -345,15 +367,9 @@ export class ServerGatekeeper {
                 });
             }
             try {
-                proofBytes = decodeCanonicalBase64(proofOfKnowledge, ML_DSA_87_SIGNATURE_BYTES, 6200);
                 if (!Array.isArray(blindedTokens) || blindedTokens.length !== 1000) {
                     throw new Error(INVALID_TOKEN_BATCH_MESSAGE);
                 }
-                blindedTokenBytes = decodeCanonicalBase64List(
-                    blindedTokens,
-                    PRIVACY_PASS_BLINDED_TOKEN_BYTES,
-                    64
-                );
                 issuanceEpoch = this.ppServer.validateIssuanceEpoch(tokenEpoch);
             } catch {
                 return await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, requestId, message: 'Invalid server entry request', code: INVALID_REQUEST });
@@ -363,23 +379,45 @@ export class ServerGatekeeper {
                 return await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, requestId, message: PROOF_OF_WORK_REQUIRED_MESSAGE, code: POW_REQUIRED });
             }
 
+            try {
+                proofBytes = decodeCanonicalBase64(
+                    proofOfKnowledge,
+                    ML_DSA_87_SIGNATURE_BYTES,
+                    6200
+                );
+                blindedTokenBytes = decodeCanonicalBase64List(
+                    blindedTokens,
+                    PRIVACY_PASS_BLINDED_TOKEN_BYTES,
+                    64
+                );
+            } catch {
+                return await sendSecureMessage(ws, {
+                    type: SignalType.AUTH_ERROR,
+                    requestId,
+                    message: 'Invalid server entry request',
+                    code: INVALID_REQUEST
+                });
+            }
+
             await applyAdaptiveAuthDelay(ws._connectionAbortSignal);
 
             releaseVerificationSlot = await acquireExpensiveAuthVerificationSlot(ws._connectionAbortSignal);
             let loginResult;
             try {
-                issuedTokenBatch = await this.ppServer.issueTokenBatch(
-                    blindedTokenBytes,
-                    SERVER_ENTRY_PURPOSE,
-                    issuanceEpoch,
-                    ws._connectionAbortSignal
-                );
                 loginResult = this.opaqueServer.finishLoginWithPublicKey(
                     proofBytes,
                     ServerGatekeeper.#sharedRecord.authPublicKey,
                     gatekeeperNonce,
                     gatekeeperAuthChannelBinding
                 );
+                if (loginResult.success) {
+                    issuedTokenBatch = await this.ppServer.issueTokenBatch(
+                        blindedTokenBytes,
+                        SERVER_ENTRY_PURPOSE,
+                        issuanceEpoch,
+                        ws._connectionAbortSignal
+                    );
+                }
             } finally {
                 releaseVerificationSlot?.();
                 releaseVerificationSlot = null;
@@ -427,6 +465,7 @@ export class ServerGatekeeper {
         let requestId;
         let blindedTokenBytes = [];
         let issuedTokenBatch = null;
+        let refreshCommitment = null;
         try {
             try {
                 requestId = requireUuidV4(data?.requestId, 'server-entry request identifier');
@@ -438,7 +477,7 @@ export class ServerGatekeeper {
                 });
             }
 
-            if (!ws?._accountAuthViaAnonymousToken) {
+            if (!hasLiveAccountAuthRefreshAuthorization(ws)) {
                 return await sendSecureMessage(ws, {
                     type: SignalType.AUTH_ERROR,
                     requestId,
@@ -459,15 +498,6 @@ export class ServerGatekeeper {
                     code: INVALID_REQUEST
                 });
             }
-            if (ws._accountAuthRefreshIssued) {
-                return await sendSecureMessage(ws, {
-                    type: SignalType.AUTH_ERROR,
-                    requestId,
-                    message: 'Account-auth credentials already refreshed',
-                    code: 'REFRESH_ALREADY_ISSUED'
-                });
-            }
-
             let issuanceEpoch;
             try {
                 if (!Array.isArray(data.blindedTokens) || data.blindedTokens.length !== 1) {
@@ -488,7 +518,35 @@ export class ServerGatekeeper {
                 });
             }
 
-            ws._accountAuthRefreshIssued = true;
+            refreshCommitment = Buffer.from(blake3(
+                UTF8_ENCODER.encode(
+                    `${PROTOCOL_KEYS.ACCOUNT_AUTH_REFRESH}${issuanceEpoch}\0${data.blindedTokens[0]}`
+                ),
+                { dkLen: HASH_OUTPUT_BYTES }
+            )).toString('base64');
+            const refreshReservation = reserveAccountAuthRefresh(ws, refreshCommitment);
+            if (refreshReservation.decision === AccountAuthRefreshDecision.CONFLICT) {
+                return await sendSecureMessage(ws, {
+                    type: SignalType.AUTH_ERROR,
+                    requestId,
+                    message: 'Account-auth credentials already refreshed',
+                    code: 'REFRESH_ALREADY_ISSUED'
+                });
+            }
+            if (refreshReservation.decision === AccountAuthRefreshDecision.IN_PROGRESS) {
+                return await sendSecureMessage(ws, {
+                    type: SignalType.AUTH_ERROR,
+                    requestId,
+                    message: 'Account-auth refresh is in progress',
+                    code: 'AUTH_IN_PROGRESS'
+                });
+            }
+            if (refreshReservation.decision === AccountAuthRefreshDecision.REPLAY) {
+                return await sendSecureMessage(ws, {
+                    ...refreshReservation.response,
+                    requestId
+                });
+            }
             issuedTokenBatch = await this.ppServer.issueAccountAuthTokenBatch(
                 blindedTokenBytes,
                 issuanceEpoch,
@@ -496,12 +554,19 @@ export class ServerGatekeeper {
             );
 
             const formattedTokenBatch = PrivacyPassHelpers.formatResponse(issuedTokenBatch);
-            return await sendSecureMessage(ws, {
+            const response = {
                 type: SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE,
-                requestId,
                 ...formattedTokenBatch
+            };
+            if (!completeAccountAuthRefresh(ws, refreshCommitment, response)) {
+                throw new Error('Account-auth refresh reservation was lost');
+            }
+            return await sendSecureMessage(ws, {
+                ...response,
+                requestId,
             });
         } catch (error) {
+            if (refreshCommitment) releaseFailedAccountAuthRefresh(ws, refreshCommitment);
             const busy = error?.code === AUTH_SERVER_BUSY;
             return await sendSecureMessage(ws, {
                 type: SignalType.AUTH_ERROR,
@@ -519,6 +584,7 @@ export class ServerGatekeeper {
      * Verify entry token
      */
     async verifyEntryToken(tokenData) {
+        const authorizationGeneration = ServerGatekeeper.#serverEntryAuthorizationGeneration;
         const parsed = PrivacyPassHelpers.parseRedemptionRequest(tokenData);
         try {
             const result = await this.ppServer.redeemToken(
@@ -528,7 +594,11 @@ export class ServerGatekeeper {
                 parsed.tokenSecret,
                 SERVER_ENTRY_PURPOSE
             );
-            return result.valid;
+            return {
+                valid: result.valid === true &&
+                    authorizationGeneration === ServerGatekeeper.#serverEntryAuthorizationGeneration,
+                authorizationGeneration
+            };
         } finally {
             parsed.token.fill(0);
             parsed.nullifier.fill(0);
@@ -540,13 +610,21 @@ export class ServerGatekeeper {
     /**
      * initialize gatekeeper shared record if plaintext available
      */
-    static async initializeExplicit(plaintextPassword) {
+    static async #replaceExplicit(plaintextPassword, initializeOnly) {
         const secret = typeof plaintextPassword === 'string' ? plaintextPassword.trim() : '';
-        if (!secret || this.#sharedRecord) return;
-        if (this.#initializationPromise) return this.#initializationPromise;
+        if (secret.length < 12 || secret.length > 512) {
+            throw new Error('SERVER_PASSWORD must contain between 12 and 512 characters');
+        }
 
         const generation = this.#lifecycleGeneration;
-        const initialization = (async () => {
+        const operation = this.#passwordOperationTail.catch(() => { }).then(async () => {
+            if (generation !== ServerGatekeeper.#lifecycleGeneration) {
+                const error = new Error('Gatekeeper password operation cancelled');
+                error.code = 'GATEKEEPER_PASSWORD_OPERATION_CANCELLED';
+                throw error;
+            }
+            if (initializeOnly && ServerGatekeeper.#sharedRecord) return false;
+
             let passwordBytes = null;
             let oprfInput = null;
             let oprfKeys = null;
@@ -561,11 +639,12 @@ export class ServerGatekeeper {
             let envelopeNonce = null;
             let encryptedEnvelope = null;
             let envelope = null;
+            let candidateRecord = null;
             try {
                 passwordBytes = await deriveGatekeeperSecret(secret);
                 if (generation !== ServerGatekeeper.#lifecycleGeneration) {
-                    const error = new Error('Gatekeeper initialization cancelled');
-                    error.code = 'GATEKEEPER_INITIALIZATION_CANCELLED';
+                    const error = new Error('Gatekeeper password operation cancelled');
+                    error.code = 'GATEKEEPER_PASSWORD_OPERATION_CANCELLED';
                     throw error;
                 }
                 oprfInput = hkdf(
@@ -599,13 +678,26 @@ export class ServerGatekeeper {
                 envelope.set(envelopeNonce, 0);
                 envelope.set(encryptedEnvelope, envelopeNonce.length);
 
-                ServerGatekeeper.#sharedRecord = {
+                candidateRecord = {
                     envelope: new Uint8Array(envelope),
                     authPublicKey: new Uint8Array(authPublicKey),
                     oprfSecretKey: new Uint8Array(oprfKeys.secretKey),
                     salt: new Uint8Array(registrationSalt)
                 };
+
+                const issuerChanged = PrivacyPassServer.configureServerEntryPasswordSecret(passwordBytes);
+                if (!issuerChanged && ServerGatekeeper.#sharedRecord) {
+                    return false;
+                }
+
+                const previousRecord = ServerGatekeeper.#sharedRecord;
+                ServerGatekeeper.#sharedRecord = candidateRecord;
+                candidateRecord = null;
+                ServerGatekeeper.#wipeRecord(previousRecord);
+                ServerGatekeeper.#serverEntryAuthorizationGeneration += 1;
+                return true;
             } finally {
+                ServerGatekeeper.#wipeRecord(candidateRecord);
                 wipeBytes(passwordBytes);
                 wipeBytes(oprfInput);
                 wipeBytes(oprfKeys?.secretKey);
@@ -623,15 +715,16 @@ export class ServerGatekeeper {
                 wipeBytes(encryptedEnvelope);
                 wipeBytes(envelope);
             }
-        })();
-        this.#initializationPromise = initialization;
+        });
+        this.#passwordOperationTail = operation.then(() => undefined, () => undefined);
+        return operation;
+    }
 
-        try {
-            await initialization;
-        } finally {
-            if (this.#initializationPromise === initialization) {
-                this.#initializationPromise = null;
-            }
-        }
+    static async initializeExplicit(plaintextPassword) {
+        return this.#replaceExplicit(plaintextPassword, true);
+    }
+
+    static async rotateExplicit(plaintextPassword) {
+        return this.#replaceExplicit(plaintextPassword, false);
     }
 }

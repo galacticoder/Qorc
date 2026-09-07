@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "../ChatInput.tsx";
-import type { FileSenderController } from "../ChatInput/useFileSender";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/types/signal-types.ts";
 import { MessageReply } from "./types";
@@ -33,7 +32,7 @@ import {
 } from "../../../lib/constants";
 import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-limits";
 import type { HybridKeys } from "../../../lib/types/auth-types";
-import type { HybridPublicKeys } from '../../../lib/types/message-sending-types';
+import type { SecureDB } from '../../../lib/database/secureDB';
 import { toast } from 'sonner';
 import { ConversationSkeleton } from '../../ui/ViewSkeletons';
 
@@ -46,26 +45,22 @@ interface ChatInterfaceProps {
   ) => Promise<void>;
   readonly messages: ReadonlyArray<Message>;
   readonly setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
-  readonly isEncrypted?: boolean;
   readonly currentUsername: string;
   readonly users: ReadonlyArray<User>;
-  readonly selectedConversation?: string;
+  readonly selectedConversation: string;
   readonly saveMessageToLocalDB: (msg: Message) => Promise<void>;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
-  readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
-  readonly getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
-  readonly findUser?: (handle: string) => Promise<any>;
-  readonly checkPeerSession?: (peerUsername: string) => Promise<void>;
-  readonly p2pConnected?: boolean;
-  readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
+  readonly getDisplayUsername: (username: string) => Promise<string>;
+  readonly getKeysOnDemand: () => Promise<HybridKeys | null>;
+  readonly findUser: (handle: string) => Promise<any>;
+  readonly checkPeerSession: (peerUsername: string) => Promise<void>;
+  readonly loadMoreMessages: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
   readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
   readonly markMessageAsRead: (messageId: string) => Promise<void>;
   readonly getSmartReceiptStatus: (message: Message) => Message['receipt'] | undefined;
-  readonly secureDB?: any;
-  readonly currentCall?: CallState | null;
+  readonly secureDB: SecureDB;
+  readonly currentCall: CallState | null;
   readonly startCall: (targetUser: string, callType?: 'audio' | 'video') => Promise<string>;
-  readonly fileSenderOverride?: FileSenderController;
-  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
 }
 
 const distanceFromChatBottom = (container: Element): number => (
@@ -94,17 +89,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
   messages,
   setMessages,
-  isEncrypted = true,
   currentUsername,
   users,
   selectedConversation,
   saveMessageToLocalDB,
   getDisplayUsername,
   getKeysOnDemand,
-  getPeerHybridKeys,
   findUser,
   checkPeerSession: checkPeerSession,
-  p2pConnected: _p2pConnected = false,
   loadMoreMessages,
   sendServerReadReceipt,
   markMessageAsRead,
@@ -112,7 +104,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   secureDB,
   currentCall,
   startCall,
-  fileSenderOverride,
   onToggleBlock,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -125,8 +116,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const getDisplayUsernameStable = useCallback((username: string) => {
-    const fn = displayResolverRef.current;
-    return fn ? fn(username) : Promise.resolve(username);
+    return displayResolverRef.current(username);
   }, []);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
@@ -152,7 +142,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       keyTransparencyWarningStore.clear();
       return;
     }
-    void keyTransparencyClient.activateWarningStore(currentUsername).catch(() => undefined);
+    void keyTransparencyClient.activateWarningStore(currentUsername).catch((error) => {
+      console.error('Failed to activate the key transparency warning store:', error);
+      toast.error('Unable to load security warnings');
+    });
   }, [currentUsername]);
 
   useEffect(() => {
@@ -190,8 +183,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   useLayoutEffect(() => {
     if (
-      !selectedConversation ||
-      !loadMoreMessages ||
       loadedMessagesCountRef.current.has(selectedConversation)
     ) {
       setOpeningConversation(null);
@@ -211,8 +202,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, [selectedConversation]);
 
   useEffect(() => {
-    if (!selectedConversation || !loadMoreMessages) return;
-
     const conversationToLoad = selectedConversation;
     backgroundLoadConversationRef.current = conversationToLoad;
     let cancelled = false;
@@ -237,7 +226,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           loadedMessagesCountRef.current.set(conversationToLoad, currentCount + batch.length);
         }
         if (batch.length < CONVERSATION_SEGMENT_SIZE) setHasMoreMessages(false);
-      } catch {
+      } catch (error) {
+        console.error('[ChatInterface] Background message load failed', error);
       } finally {
         if (isCurrentLoad()) {
           backgroundLoadConversationRef.current = null;
@@ -260,8 +250,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     if (
       isLoadingMore ||
       !hasMoreMessages ||
-      !selectedConversation ||
-      !loadMoreMessages ||
       backgroundLoadConversationRef.current === selectedConversation
     ) return;
 
@@ -283,7 +271,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         if (moreMessages.length > 0) {
           loadedMessagesCountRef.current.set(selectedConversation, currentCount + moreMessages.length);
         }
-      } catch {
+      } catch (error) {
+        console.error('[ChatInterface] Older message load failed', error);
       } finally {
         setIsLoadingMore(false);
       }
@@ -588,19 +577,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     onSendMessage(targetMessage.wireMessageId || targetMessage.id, emoji, action, null);
   }, [currentUsername, messageActionsDisabled, onSendMessage]);
 
-  // Handle message editing
-  const handleEditMessage = useCallback(async (newContent: string) => {
-    if (!messageActionsDisabled && editingMessage) {
-      await onSendMessage(
-        editingMessage.wireMessageId || editingMessage.id,
-        newContent,
-        SignalType.EDIT_MESSAGE,
-        null,
-      );
-      setEditingMessage(null);
-    }
-  }, [editingMessage, messageActionsDisabled, onSendMessage]);
-
   // Handle reply, edit, cancellation
   const handleCancelReply = useCallback(() => setReplyTo(null), []);
   const handleCancelEdit = useCallback(() => setEditingMessage(null), []);
@@ -697,7 +673,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         className="qorc-message-scroll"
         ref={scrollAreaRef}
       >
-        <div className="qorc-message-stack">
+        <div
+          className={`qorc-message-stack${messages.length === 0 && !isLoadingMore ? ' is-empty' : ''}`}
+        >
           {}
           {isLoadingMore ? (
             <div className="qorc-thread-loading" role="status" aria-label="Loading earlier messages">
@@ -706,7 +684,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           ) : null}
           {messages.length === 0 && !isLoadingMore ? (
             <div className="qorc-thread-empty">
-              No messages yet. Start the conversation!
+              <strong>No messages yet. Start the conversation!</strong>
             </div>
           ) : (
             messages.map((message, index) => {
@@ -727,7 +705,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     onReact={messageActionsDisabled ? undefined : handleReactToMessage}
                     onReplyClick={handleReplyClick}
                     currentUsername={currentUsername}
-                    getDisplayUsername={getDisplayUsernameStable}
                     secureDB={secureDB}
                   />
                 </div>
@@ -738,7 +715,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           {/* Typing Indicators */}
           <TypingIndicatorList
             selectedConversation={selectedConversation}
-            getDisplayUsername={getDisplayUsernameStable}
             onUpdate={handleTypingUpdate}
           />
         </div>
@@ -755,25 +731,21 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         ) : (
           <ChatInput
             onSendMessage={handleMessageSend}
-            isEncrypted={isEncrypted}
             currentUsername={currentUsername}
             users={users}
             replyTo={replyTo}
             onCancelReply={handleCancelReply}
             editingMessage={editingMessage}
             onCancelEdit={handleCancelEdit}
-            onEditMessage={handleEditMessage}
             onTyping={handleLocalTyping}
             selectedConversation={selectedConversation}
             getDisplayUsername={getDisplayUsernameStable}
             disabled={isUserBlocked || isBlockedByUser}
             disabledPlaceholder={isUserBlocked ? 'You blocked this user' : undefined}
             getKeysOnDemand={getKeysOnDemand}
-            getPeerHybridKeys={getPeerHybridKeys}
             findUser={findUser}
             secureDB={secureDB}
             checkPeerSession={checkPeerSession}
-            fileSenderOverride={fileSenderOverride}
           />
         )}
       </div>

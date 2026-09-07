@@ -21,7 +21,6 @@ interface UserAvatarProps {
     isCurrentUser?: boolean;
     size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
     className?: string;
-    showFallback?: boolean;
 }
 
 const SIZE_MAP = {
@@ -36,16 +35,15 @@ export const UserAvatar = memo(function UserAvatar({
     username,
     isCurrentUser = false,
     size = 'md',
-    className = '',
-    showFallback = true
+    className = ''
 }: UserAvatarProps) {
-    const fallbackAvatarUrl = React.useMemo(() => generateDefaultAvatar(username), [username]);
+    const defaultAvatarUrl = React.useMemo(() => generateDefaultAvatar(username), [username]);
     const initialAvatarUrl = React.useMemo(() => {
         const stored = isCurrentUser
             ? profilePictureSystem.getOwnAvatar()
             : profilePictureSystem.getPeerAvatar(username);
-        return stored && getAvatarImageStatus(stored) !== 'failed' ? stored : fallbackAvatarUrl;
-    }, [username, isCurrentUser, fallbackAvatarUrl]);
+        return stored && getAvatarImageStatus(stored) !== 'failed' ? stored : defaultAvatarUrl;
+    }, [username, isCurrentUser, defaultAvatarUrl]);
     const [avatarUrl, setAvatarUrl] = useState<string | null>(() => initialAvatarUrl);
     const [isLoaded, setIsLoaded] = useState(() => getAvatarImageStatus(initialAvatarUrl) === 'ready');
     const currentUrlRef = React.useRef<string | null>(avatarUrl);
@@ -53,21 +51,21 @@ export const UserAvatar = memo(function UserAvatar({
 
     const applyAvatarUrl = useCallback((nextUrl: string | null) => {
         const resolved = nextUrl && getAvatarImageStatus(nextUrl) === 'failed'
-            ? fallbackAvatarUrl
+            ? defaultAvatarUrl
             : nextUrl;
         if (resolved !== currentUrlRef.current) {
             currentUrlRef.current = resolved;
             setAvatarUrl(resolved);
             setIsLoaded(getAvatarImageStatus(resolved) === 'ready');
         }
-    }, [fallbackAvatarUrl]);
+    }, [defaultAvatarUrl]);
 
     const loadAvatar = useCallback(() => {
         const stored = isCurrentUser
             ? profilePictureSystem.getOwnAvatar()
             : profilePictureSystem.getPeerAvatar(username);
-        applyAvatarUrl(stored || fallbackAvatarUrl);
-    }, [username, isCurrentUser, fallbackAvatarUrl, applyAvatarUrl]);
+        applyAvatarUrl(stored || defaultAvatarUrl);
+    }, [username, isCurrentUser, defaultAvatarUrl, applyAvatarUrl]);
 
     useEffect(() => {
         loadAvatar();
@@ -98,7 +96,7 @@ export const UserAvatar = memo(function UserAvatar({
                 if (!type) return;
 
                 if (type === 'all') {
-                    applyAvatarUrl(profilePictureSystem.getPeerAvatar(username) || fallbackAvatarUrl);
+                    applyAvatarUrl(profilePictureSystem.getPeerAvatar(username) || defaultAvatarUrl);
                 } else if (type === 'single' || type === 'peer') {
                     const updatedUser = sanitizeEventText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
                     if (!updatedUser) return;
@@ -106,7 +104,7 @@ export const UserAvatar = memo(function UserAvatar({
 
                     if (updatedUser === username) {
                         if (notFound) {
-                            applyAvatarUrl(fallbackAvatarUrl);
+                            applyAvatarUrl(defaultAvatarUrl);
                         } else {
                             loadAvatar();
                         }
@@ -123,7 +121,7 @@ export const UserAvatar = memo(function UserAvatar({
             window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleUpdate as EventListener);
             window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleUpdate as EventListener);
         };
-    }, [loadAvatar, username, isCurrentUser, fallbackAvatarUrl, applyAvatarUrl]);
+    }, [loadAvatar, username, isCurrentUser, defaultAvatarUrl, applyAvatarUrl]);
 
     const pixelSize = SIZE_MAP[size];
     const skeletonColor = 'var(--color-secondary)';
@@ -153,7 +151,7 @@ export const UserAvatar = memo(function UserAvatar({
                     }}
                     onError={() => {
                         markAvatarImageFailed(avatarUrl);
-                        const replacement = avatarUrl === fallbackAvatarUrl ? null : fallbackAvatarUrl;
+                        const replacement = avatarUrl === defaultAvatarUrl ? null : defaultAvatarUrl;
                         currentUrlRef.current = replacement;
                         setAvatarUrl(replacement);
                         setIsLoaded(replacement ? getAvatarImageStatus(replacement) === 'ready' : true);
@@ -163,8 +161,7 @@ export const UserAvatar = memo(function UserAvatar({
                 />
             )}
 
-            {/* Show skeleton if no URL or not yet loaded */}
-            {showFallback && (!avatarUrl || !isLoaded) && (
+            {(!avatarUrl || !isLoaded) && (
                 <div
                     className="absolute inset-0 w-full h-full animate-pulse"
                     style={{ backgroundColor: skeletonColor }}

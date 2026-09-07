@@ -1,6 +1,6 @@
 services:
   redis:
-    profiles: ["server", "loadbalancer", "redis-standalone"]
+    profiles: ["server", "loadbalancer"]
     build:
       context: "${QORC_DOCKER_BUILD_CONTEXT:-..}"
       dockerfile: docker/Dockerfile.redis
@@ -51,15 +51,12 @@ services:
       dockerfile: docker/Dockerfile.server
     hostname: server
     ports:
-      - "${PORT:-3000}:3000"
+      - "${SERVER_BIND_HOST:-127.0.0.1}:${PORT}:3000"
     environment:
       - BIND_ADDRESS=0.0.0.0
-      - PGHOST=postgres
-      - PGPORT=5432
-      - PGDATABASE=${DB_NAME}
-      - PGUSER=postgres
-      - PGPASSWORD=${DATABASE_PASSWORD}
-      - DATABASE_URL=
+      - PORT=3000
+      - SERVER_HOST=server
+      - DATABASE_URL=postgresql://postgres:${DATABASE_PASSWORD}@postgres:5432/${DB_NAME}
       - PGSSLROOTCERT=/app/postgres-certs/root.crt
       - DB_TLS_SERVERNAME=postgres
       - REDIS_URL=rediss://redis:6379
@@ -91,13 +88,14 @@ services:
       dockerfile: docker/Dockerfile.loadbalancer
     hostname: loadbalancer
     ports:
-      - "${HAPROXY_HTTPS_PORT:-8443}:8443"
-      - "${HAPROXY_STATS_PORT:-8404}:8404"
+      - "${HAPROXY_HTTPS_PORT}:8443"
+      - "127.0.0.1:${HAPROXY_STATS_PORT}:8404"
     env_file:
       - ../.env
     environment:
       - HAPROXY_HTTPS_PORT=8443
       - HAPROXY_STATS_PORT=8404
+      - HAPROXY_STATS_BIND_ADDRESS=0.0.0.0
       - TOR_HS_INTRO_POINTS=${TOR_HS_INTRO_POINTS:-3}
       - REDIS_URL=rediss://redis:6379
       - REDIS_CA_CERT_PATH=/app/redis-certs/redis-ca.crt

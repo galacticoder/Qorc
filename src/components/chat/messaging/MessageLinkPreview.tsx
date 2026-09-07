@@ -16,7 +16,7 @@ import { SEGMENT_UNLOAD_IDLE_MS } from '../../../lib/constants';
 interface MessageLinkPreviewsProps {
     messageId: string;
     contentVersion?: string;
-    secureDB?: SecureDB | null;
+    secureDB: SecureDB;
     onContextMenu?: (event: React.MouseEvent) => void;
 }
 
@@ -42,9 +42,9 @@ const messagePreviewCache = new Map<string, ExpiringMessagePreviews>();
 const messageCacheKey = (
     messageId: string,
     contentVersion: string | undefined,
-    secureDB?: SecureDB | null,
+    secureDB: SecureDB,
 ): string => {
-    const scope = secureDB?.getAccountScope() || '';
+    const scope = secureDB.getAccountScope();
     const version = contentVersion || '';
     return `${scope.length}:${scope}${messageId.length}:${messageId}${version.length}:${version}`;
 };
@@ -122,9 +122,9 @@ const writeMessagePreviewCache = (cacheKey: string, previews: NativeLinkPreview[
 
 const fetchCachedPreview = (
     target: NativeMessageLinkTarget,
-    secureDB?: SecureDB | null,
+    secureDB: SecureDB,
 ): Promise<NativeLinkPreview> => {
-    const requestKey = secureDB ? `${secureDB.getAccountScope()}:${target.url}` : target.url;
+    const requestKey = `${secureDB.getAccountScope()}:${target.url}`;
     const existing = previewRequests.get(requestKey);
     if (existing) return existing;
     if (previewRequests.size >= MAX_CACHED_PREVIEWS) {
@@ -132,38 +132,18 @@ const fetchCachedPreview = (
         if (oldest) previewRequests.delete(oldest);
     }
     const request = (async () => {
-        if (secureDB) {
-            try {
-                const cached = await loadLinkPreviewFromCache(secureDB, target.url);
-                if (cached) return cached;
-            } catch {
-                console.warn('[LINK-PREVIEW] metadata cache read failed');
-            }
-        }
+        const cached = await loadLinkPreviewFromCache(secureDB, target.url);
+        if (cached) return cached;
         const preview = await nativeMessageContent.fetchLinkPreview(target.url);
-        if (secureDB && preview.metadataFetched) {
-            void saveLinkPreviewToCache(secureDB, preview).catch(() => {
-                console.warn('[LINK-PREVIEW] metadata cache write failed');
-            });
-        }
+        await saveLinkPreviewToCache(secureDB, preview);
         return preview;
     })();
     previewRequests.set(requestKey, request);
-    void request.then((preview) => {
-        if (!preview.metadataFetched) previewRequests.delete(requestKey);
-    }, () => {
+    void request.catch(() => {
         previewRequests.delete(requestKey);
     });
     return request;
 };
-
-const basicPreview = (target: NativeMessageLinkTarget): NativeLinkPreview => ({
-    ...target,
-    metadataFetched: false,
-    title: null,
-    description: null,
-    imageDataUrl: null,
-});
 
 export function MessageLinkPreviews({
     messageId,
@@ -198,9 +178,8 @@ export function MessageLinkPreviews({
                 preview.url === targets[index].url
             ));
             if (!sameTargets) {
-                const basic = targets.map(basicPreview);
-                writeMessagePreviewCache(cacheKey, basic);
-                setPreviews(basic);
+                writeMessagePreviewCache(cacheKey, []);
+                setPreviews([]);
             } else if (previous) {
                 setPreviews(previous);
             }
@@ -210,13 +189,16 @@ export function MessageLinkPreviews({
                         const enriched = await fetchCachedPreview(target, secureDB);
                         if (cancelled) return;
                         setPreviews((current) => {
-                            const next = current.map((preview) => (
-                                preview.url === target.url ? enriched : preview
-                            ));
+                            const byUrl = new Map(current.map((preview) => [preview.url, preview]));
+                            byUrl.set(target.url, enriched);
+                            const next = targets.flatMap((candidate) => {
+                                const preview = byUrl.get(candidate.url);
+                                return preview ? [preview] : [];
+                            });
                             writeMessagePreviewCache(cacheKey, next);
                             return next;
                         });
-                        if (enriched.metadataFetched) return;
+                        return;
                     } catch {
                         console.warn('[LINK-PREVIEW] metadata invoke failed');
                     }
@@ -226,7 +208,7 @@ export function MessageLinkPreviews({
                 }
             };
             const targetsToEnrich = targets.filter((target) => !previous?.some((preview) => (
-                preview.url === target.url && preview.metadataFetched
+                preview.url === target.url
             )));
             await Promise.all(targetsToEnrich.map(enrich));
         };

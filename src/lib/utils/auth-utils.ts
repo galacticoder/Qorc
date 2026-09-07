@@ -123,11 +123,12 @@ export const PinnedServer = {
     serverPinLoadPromise = withServerPinMutation(async () => {
       if (serverPinLoaded) return cachedServerPin ? { ...cachedServerPin } : null;
       const raw = await storage.get(STORAGE_KEYS.SERVER_PQ_PIN);
-      if (!raw) {
+      if (raw === null) {
         cachedServerPin = null;
         serverPinLoaded = true;
         return null;
       }
+      if (raw.length === 0) throw new Error('Pinned server identity record is invalid');
       if (raw.length > 10_000) throw new Error('Pinned server identity record is oversized');
       cachedServerPin = normalizeServerKeys(JSON.parse(raw));
       serverPinLoaded = true;
@@ -142,7 +143,7 @@ export const PinnedServer = {
   get(): PinnedServerKeys | null {
     return cachedServerPin ? { ...cachedServerPin } : null;
   },
-  async establish(val: any, isCurrent: () => boolean = () => true): Promise<void> {
+  async establish(val: any, isCurrent: () => boolean): Promise<void> {
     const normalized = normalizeServerKeys(val);
     const serialized = JSON.stringify(normalized);
     await withServerPinMutation(async () => {
@@ -150,13 +151,14 @@ export const PinnedServer = {
       if (previousRaw !== null && typeof previousRaw !== 'string') {
         throw new Error('Pinned server identity record is invalid');
       }
+      if (previousRaw === '') throw new Error('Pinned server identity record is invalid');
       if (typeof previousRaw === 'string' && previousRaw.length > 10_000) {
         throw new Error('Pinned server identity record is oversized');
       }
       const previousPin = previousRaw
         ? normalizeServerKeys(JSON.parse(previousRaw))
         : null;
-      if (!isCurrent()) throw new Error('Server trust request is no longer current');
+      if (!isCurrent()) throw new Error('Server identity pin operation is no longer current');
 
       if (previousPin) {
         if (!serverKeysEqual(previousPin, normalized)) {
@@ -184,7 +186,7 @@ export const PinnedServer = {
         }
         cachedServerPin = previousPin;
         serverPinLoaded = true;
-        throw new Error('Server trust request is no longer current');
+        throw new Error('Server identity pin operation is no longer current');
       }
 
       cachedServerPin = normalized;

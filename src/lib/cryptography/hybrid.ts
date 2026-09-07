@@ -158,12 +158,11 @@ function buildRoutingHeader(input: RoutingHeaderBuildInput): RoutingHeader {
   if (!Number.isSafeInteger(input.size) || input.size < 0 || input.size > HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES) {
     throw new Error('Routing header size must be a non-negative finite number');
   }
-  const timestamp = input.timestamp ?? Date.now();
   const header = {
     to: input.to,
     from: input.from,
     type: input.type,
-    timestamp,
+    timestamp: input.timestamp,
     size: input.size
   };
   validateRoutingHeader(header);

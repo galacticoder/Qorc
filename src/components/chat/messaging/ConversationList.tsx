@@ -40,16 +40,15 @@ interface ConversationListProps {
   readonly conversations: ReadonlyArray<Conversation>;
   readonly selectedConversation?: string;
   readonly onSelectConversation: (username: string) => void;
-  readonly onRemoveConversation?: (username: string) => void;
-  readonly onAddConversation?: (username: string, signal?: AbortSignal) => Promise<void>;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly onRemoveConversation: (username: string) => void;
+  readonly onAddConversation: (username: string, signal?: AbortSignal) => Promise<void>;
   readonly showNewChatInput?: boolean;
-  readonly onNewChatOpenChange?: (open: boolean) => void;
-  readonly onTogglePin?: (username: string) => void;
-  readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
-  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly onNewChatOpenChange: (open: boolean) => void;
+  readonly onTogglePin: (username: string) => void;
+  readonly onStartCall: (username: string, type: 'audio' | 'video') => void;
+  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
   readonly conversationDialogMode?: ConversationDialogMode;
-  readonly onBlockConversation?: (username: string) => void | Promise<void>;
+  readonly onBlockConversation: (username: string) => void | Promise<void>;
 }
 
 // Call status type
@@ -59,11 +58,10 @@ interface ConversationItemProps {
   readonly conversation: Conversation;
   readonly isSelected: boolean;
   readonly onSelect: (username: string) => void;
-  readonly onRemove?: (username: string) => void;
+  readonly onRemove: (username: string) => void;
   readonly callStatus?: CallStatus;
   readonly isTyping: boolean;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
-  readonly onTogglePin?: (username: string) => void;
+  readonly onTogglePin: (username: string) => void;
 }
 
 const ConversationItem = memo<ConversationItemProps>(({
@@ -85,16 +83,12 @@ const ConversationItem = memo<ConversationItemProps>(({
   // Handle conversation removal
   const handleRemove = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (onRemove) {
-      onRemove(conversation.username);
-    }
+    onRemove(conversation.username);
   }, [onRemove, conversation.username]);
 
   const handleTogglePin = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (onTogglePin) {
-      onTogglePin(conversation.username);
-    }
+    onTogglePin(conversation.username);
   }, [onTogglePin, conversation.username]);
 
   return (
@@ -132,42 +126,38 @@ const ConversationItem = memo<ConversationItemProps>(({
           >
             {displayName}
           </span>
-          {(onTogglePin || onRemove) && (
-            <div
-              className={cn(
-                "qorc-conversation-action-pill",
-                conversation.isPinned && "is-pinned"
-              )}
+          <div
+            className={cn(
+              "qorc-conversation-action-pill",
+              conversation.isPinned && "is-pinned"
+            )}
+          >
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleTogglePin}
+              className="qorc-conversation-tiny-btn"
+              aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
+              aria-pressed={conversation.isPinned}
             >
-              {onTogglePin && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleTogglePin}
-                  className="qorc-conversation-tiny-btn"
-                  aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
-                  aria-pressed={conversation.isPinned}
-                >
-                  <Pin
-                    className="h-3 w-3"
-                    fill={conversation.isPinned ? "currentColor" : "none"}
-                  />
-                </Button>
-              )}
+              <Pin
+                className="h-3 w-3"
+                fill={conversation.isPinned ? "currentColor" : "none"}
+              />
+            </Button>
 
-              {onRemove && !conversation.isPinned && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleRemove}
-                  className="qorc-conversation-tiny-btn danger"
-                  aria-label={`Remove conversation with ${displayName}`}
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              )}
-            </div>
-          )}
+            {!conversation.isPinned && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleRemove}
+                className="qorc-conversation-tiny-btn danger"
+                aria-label={`Remove conversation with ${displayName}`}
+              >
+                <Trash2 className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
           {conversation.lastMessageTime && (
             <span
               className={cn(
@@ -251,9 +241,9 @@ interface ConversationManageRowProps {
   readonly blocked: boolean;
   readonly mode: ConversationDialogMode;
   readonly onChat: (username: string) => void;
-  readonly onCall?: (username: string, type: 'audio' | 'video') => void;
-  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
-  readonly onBlock?: (username: string) => void;
+  readonly onCall: (username: string, type: 'audio' | 'video') => void;
+  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly onBlock: (username: string) => void;
   readonly blocking?: boolean;
 }
 
@@ -270,7 +260,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
   const displayName = useDisplayUsername({ username });
   const handlePrimaryAction = useCallback(() => {
     if (mode === 'block') {
-      onBlock?.(username);
+      onBlock(username);
       return;
     }
     onChat(username);
@@ -303,10 +293,10 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
         <button
           type="button"
           className="qorc-cm-block-btn"
-          disabled={blocking || !onBlock}
+          disabled={blocking}
           onClick={(event) => {
             event.stopPropagation();
-            onBlock?.(username);
+            onBlock(username);
           }}
         >
           {blocking ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
@@ -320,8 +310,8 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
             className="qorc-call-pill-btn"
             title="Audio call"
             aria-label={`Call ${displayName}`}
-            disabled={blocked || !onCall}
-            onClick={() => onCall?.(username, 'audio')}
+            disabled={blocked}
+            onClick={() => onCall(username, 'audio')}
           >
             <CallIcon className="w-4 h-4" aria-hidden="true" />
           </Button>
@@ -331,8 +321,8 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
             className="qorc-call-pill-btn"
             title="Video call"
             aria-label={`Video call ${displayName}`}
-            disabled={blocked || !onCall}
-            onClick={() => onCall?.(username, 'video')}
+            disabled={blocked}
+            onClick={() => onCall(username, 'video')}
           >
             <Video className="w-4 h-4" aria-hidden="true" />
           </Button>
@@ -356,7 +346,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   onSelectConversation,
   onRemoveConversation,
   onAddConversation,
-  getDisplayUsername,
   showNewChatInput = false,
   onNewChatOpenChange,
   onTogglePin,
@@ -409,7 +398,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     () => conversations.some((c) => c.username.toLowerCase() === trimmedQuery),
     [conversations, trimmedQuery]
   );
-  const canAddTyped = conversationDialogMode === 'manage' && !!newChatUsername.trim() && !hasExactMatch && !!onAddConversation;
+  const canAddTyped = conversationDialogMode === 'manage' && !!newChatUsername.trim() && !hasExactMatch;
 
   // Handle remove conversation click
   const handleRemoveClick = useCallback((username: string) => {
@@ -419,7 +408,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   // Handle confirm removal
   const handleConfirmRemove = useCallback(() => {
-    if (conversationToDelete && onRemoveConversation) {
+    if (conversationToDelete) {
       onRemoveConversation(conversationToDelete);
     }
     setShowConfirmDialog(false);
@@ -450,7 +439,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   // Handle add new chat
   const handleAddChat = useCallback(async () => {
     const username = newChatUsername.trim();
-    if (!username || !onAddConversation || activeDiscoveryRef.current) return;
+    if (!username || activeDiscoveryRef.current) return;
 
     const controller = new AbortController();
     activeDiscoveryRef.current = controller;
@@ -459,7 +448,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       await onAddConversation(username, controller.signal);
       if (controller.signal.aborted) return;
       setNewChatUsername("");
-      onNewChatOpenChange?.(false);
+      onNewChatOpenChange(false);
     } catch (error) {
       if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return;
       toast.error(error instanceof Error ? error.message : "Failed to add conversation");
@@ -597,7 +586,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       setBlockingPeer(null);
       setNewChatUsername("");
     }
-    onNewChatOpenChange?.(open);
+    onNewChatOpenChange(open);
   }, [cancelActiveDiscovery, onNewChatOpenChange]);
 
   const handleChatFromModal = useCallback((username: string) => {
@@ -606,7 +595,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, [onSelectConversation, handleNewChatOpenChange]);
 
   const handleBlockFromModal = useCallback(async (username: string) => {
-    if (!onBlockConversation || blockingPeer) return;
+    if (blockingPeer) return;
     setBlockingPeer(username);
     try {
       await onBlockConversation(username);
@@ -785,7 +774,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                     onTogglePin={onTogglePin}
                     callStatus={conversation.username === activePeer ? activeStatus : null}
                     isTyping={typingUserSet.has(conversation.username) && Boolean(conversation.lastMessageTime)}
-                    getDisplayUsername={getDisplayUsername}
                   />
                 );
               })}

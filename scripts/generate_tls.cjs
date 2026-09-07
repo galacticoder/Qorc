@@ -4,6 +4,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -16,7 +17,24 @@ const DB_TLS_LINES = [
   'DB_TLS_SERVERNAME=postgres'
 ];
 
-const CERT_CN = (process.env.TLS_CERT_CN || 'localhost').trim();
+function normalizeTlsCertCommonName(rawValue) {
+  const value = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+  if (!value || value.length > 253 || /[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+    throw new Error('TLS_CERT_CN must be a valid DNS hostname or IPv4 address');
+  }
+  if (net.isIP(value) === 4) return value;
+  const labels = value.split('.');
+  if (labels.some((label) => (
+    label.length < 1 ||
+    label.length > 63 ||
+    !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ))) {
+    throw new Error('TLS_CERT_CN must be a valid DNS hostname or IPv4 address');
+  }
+  return value;
+}
+
+const CERT_CN = normalizeTlsCertCommonName(process.env.TLS_CERT_CN || 'localhost');
 
 function findInPath(bin) {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
@@ -46,7 +64,8 @@ async function mergeEnv(targetPath, newLines, ownership = null) {
   });
 
   const merged = [...map.values()].join('\n') + '\n';
-  await fs.promises.writeFile(targetPath, merged, 'utf8');
+  await fs.promises.writeFile(targetPath, merged, { encoding: 'utf8', mode: 0o600 });
+  await fs.promises.chmod(targetPath, 0o600);
 
   if (ownership) {
     const { uid, gid } = ownership;
@@ -56,9 +75,13 @@ async function mergeEnv(targetPath, newLines, ownership = null) {
 
 function buildSanList() {
   const sans = new Set(['DNS:localhost', 'IP:127.0.0.1', 'IP:::1']);
-  if (CERT_CN && CERT_CN !== 'localhost') sans.add(`DNS:${CERT_CN}`);
-  const hostname = os.hostname();
-  if (hostname) sans.add(`DNS:${hostname}`);
+  if (CERT_CN !== 'localhost') {
+    sans.add(`${net.isIP(CERT_CN) ? 'IP' : 'DNS'}:${CERT_CN}`);
+  }
+  try {
+    const hostname = normalizeTlsCertCommonName(os.hostname());
+    if (!net.isIP(hostname)) sans.add(`DNS:${hostname}`);
+  } catch { }
   return [...sans].join(',');
 }
 
@@ -75,19 +98,29 @@ async function writeEnv(relCert, relKey) {
     console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
   } catch (err) {
     if (err.code === 'EACCES' && process.platform !== 'win32' && findInPath('sudo')) {
-      const chownSpec = (process.getuid && process.getgid)
-        ? `${process.getuid()}:${process.getgid()}`
-        : `${process.env.USER || '$(id -u)'}:${process.env.GROUP || '$(id -g)'}`;
-      const tmp = `${ENV_PATH}.tmp.${Date.now()}`;
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      const gid = typeof process.getgid === 'function' ? process.getgid() : null;
+      if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
+        throw new Error('Unable to determine safe .env ownership');
+      }
+      const tmpDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'qorc-env-'));
+      const tmp = path.join(tmpDirectory, '.env');
       try {
+        const existing = await fsp.readFile(ENV_PATH, 'utf8').catch(() => '');
+        await fsp.writeFile(tmp, existing, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
         await mergeEnv(tmp, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1']);
-        const cmd = `cp '${tmp}' '${ENV_PATH}' && chown ${chownSpec} '${ENV_PATH}' && chmod 644 '${ENV_PATH}'`;
-        await execFileAsync('sudo', ['bash', '-lc', cmd]);
-        try { await fsp.unlink(tmp); } catch { }
+        await execFileAsync('sudo', [
+          'install',
+          '-o', String(uid),
+          '-g', String(gid),
+          '-m', '600',
+          '--', tmp, ENV_PATH
+        ]);
         console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
         return;
       } catch (e2) {
-        try { await fsp.unlink(tmp); } catch { }
+      } finally {
+        try { await fsp.rm(tmpDirectory, { recursive: true, force: true }); } catch { }
       }
     }
     console.log('[WARN] Could not write .env. Manually add to .env:');
@@ -97,6 +130,7 @@ async function writeEnv(relCert, relKey) {
   }
 }
 
+if (require.main === module) {
 (async () => {
   try {
     if (!findInPath('openssl')) {
@@ -155,3 +189,6 @@ async function writeEnv(relCert, relKey) {
     process.exit(1);
   }
 })();
+}
+
+module.exports = { normalizeTlsCertCommonName };

@@ -3,8 +3,8 @@ import type { AvatarData } from '../types/avatar-types';
 import { createInitialState } from './state';
 import { AvatarSystemState } from '../types/avatar-types';
 import { setSecureDB, initialize } from './init';
-import { clearPeerCache, cachePeerAvatar } from './cache';
-import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault } from './own-avatar';
+import { cachePeerAvatar } from './cache';
+import { setOwnAvatar, getOwnAvatar } from './own-avatar';
 import { getPeerAvatar, getPeerAvatarHash } from './peer-avatar';
 
 class ProfilePictureSystem {
@@ -41,14 +41,14 @@ class ProfilePictureSystem {
 
     // Initialize
     async initialize(): Promise<void> {
-        if (this.state.initialized || !this.state.secureDB) return;
+        if (this.state.initialized) return;
+        if (!this.state.secureDB) throw new Error('Profile picture storage is not initialized');
         if (this.initializationPromise) return this.initializationPromise;
 
         const generation = this.generation;
         const secureDB = this.state.secureDB;
         const operation = initialize(
             this.state,
-            () => { },
             () => this.generation === generation && this.state.secureDB === secureDB
         );
         this.initializationPromise = operation;
@@ -66,17 +66,6 @@ class ProfilePictureSystem {
         return setOwnAvatar(this.state, imageDataUrl, isDefault, this.captureAccountOperation());
     }
 
-    // Remove own avatar
-    async removeOwnAvatar(usernameOverride?: string): Promise<void> {
-        const isCurrent = this.captureAccountOperation();
-        return removeOwnAvatar(
-            this.state,
-            usernameOverride,
-            (url, def) => this.setOwnAvatar(url, def),
-            isCurrent
-        );
-    }
-
     // Get own avatar
     getOwnAvatar(): string | null {
         return getOwnAvatar(this.state);
@@ -88,16 +77,6 @@ class ProfilePictureSystem {
         return { ...this.state.ownAvatar };
     }
 
-    // Get own avatar hash
-    getOwnAvatarHash(): string | null {
-        return getOwnAvatarHash(this.state);
-    }
-
-    // Check if own avatar is default
-    isOwnAvatarDefault(): boolean {
-        return isOwnAvatarDefault(this.state);
-    }
-
     // Get peer avatar
     getPeerAvatar(username: string): string | null {
         return getPeerAvatar(this.state, username);
@@ -106,11 +85,6 @@ class ProfilePictureSystem {
     // Get peer avatar hash
     getPeerAvatarHash(username: string): string | null {
         return getPeerAvatarHash(this.state, username);
-    }
-
-    // Clear peer cache
-    clearPeerCache(username?: string): void {
-        clearPeerCache(this.state, username, this.captureAccountOperation());
     }
 
     // Cache peer avatar

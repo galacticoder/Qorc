@@ -18,6 +18,7 @@ import { envInt } from '../utils/env.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
 import { setNoStoreHeaders } from '../utils/http.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
+import { createInflightBodyAdmission } from '../utils/http-admission.js';
 import {
   hasExactPlainObjectKeys as exactPlainObject,
   isSafeJsonTree
@@ -28,6 +29,10 @@ import {
   ML_KEM_1024_CIPHERTEXT_BYTES as ML_KEM_CIPHERTEXT_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES as ML_KEM_PUBLIC_KEY_BYTES
 } from '../../shared/crypto-sizes.js';
+import {
+  KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
+  KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS
+} from '../../shared/key-transparency-protocol.js';
 import { DISCOVERY_BUCKET_QUERY_COUNT } from '../../shared/discovery-constants.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
@@ -60,7 +65,7 @@ const REQUEST_CLASS_BYTES = new Map([
 ]);
 
 const RESPONSE_SMALL_BYTES = 64 * 1024;
-const RESPONSE_KEY_TRANSPARENCY_BYTES = 512 * 1024;
+const RESPONSE_TAG_INDEX_BYTES = 512 * 1024;
 const RESPONSE_PIR_BYTES = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES = 8912896;
@@ -98,10 +103,10 @@ const OPERATION_POLICY = Object.freeze({
   [AVATAR_POOL_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
   'discovery/bucket': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 4, responseBytes: RESPONSE_DISCOVERY_BYTES }),
   [DISCOVERY_MANIFEST_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES }),
+  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS, responseBytes: KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES }),
   [KEY_TRANSPARENCY_APPEND_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
   'oprf/evaluate': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  'spool/tag-index': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES }),
+  'spool/tag-index': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_TAG_INDEX_BYTES }),
   'spool/pir': Object.freeze({ requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 5, responseBytes: RESPONSE_PIR_BYTES })
 });
 
@@ -112,8 +117,15 @@ const MAX_INFLIGHT = envInt(
   16
 );
 const MAX_REQUESTS_PER_SECOND = envInt('PQ_ANONYMOUS_HTTP_MAX_RPS', 100, 1, 2_000);
+const MAX_BODY_INFLIGHT = envInt('PQ_ANONYMOUS_HTTP_BODY_MAX_INFLIGHT', 32, 1, 256);
 const MAX_FAILURE_INFLIGHT = envInt('PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT', 16, 1, 64);
 const MAX_FAILURES_PER_SECOND = envInt('PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS', 200, 1, 4_000);
+const MAX_REJECTION_LOGS_PER_SECOND = envInt(
+  'PQ_ANONYMOUS_HTTP_REJECT_LOG_MAX_RPS',
+  5,
+  1,
+  20
+);
 const RESPONSE_WRITE_TIMEOUT_MS = envInt(
   'PQ_ANONYMOUS_HTTP_WRITE_TIMEOUT_MS',
   180_000,
@@ -176,11 +188,24 @@ async function sendBinaryResponse(res, body) {
 }
 
 const allowOpaqueFailure = createTokenBucketRateLimiter(MAX_FAILURES_PER_SECOND);
+const allowRejectionLog = createTokenBucketRateLimiter(MAX_REJECTION_LOGS_PER_SECOND);
 let opaqueFailureInflight = 0;
+
+function logAnonymousRejection(reason) {
+  if (!allowRejectionLog()) return;
+  console.warn('[PQ-ANONYMOUS-HTTP] rejected anonymous request', { reason });
+}
+
+export function createPqAnonymousBodyAdmission(maxInflight = MAX_BODY_INFLIGHT) {
+  return createInflightBodyAdmission({
+    maxInflight,
+    onReject: () => logAnonymousRejection('body-inflight-cap'),
+  });
+}
 
 // Rejects a request
 async function reject(res, reason) {
-  console.warn('[PQ-ANONYMOUS-HTTP] rejected anonymous request', { reason });
+  logAnonymousRejection(reason);
   return sendOpaqueFailure(res);
 }
 
@@ -210,10 +235,7 @@ export async function handlePqAnonymousHttpParseError(error, _req, res, _next) {
     const parseType = typeof error?.type === 'string' && REQUEST_BODY_PARSE_TYPES.has(error.type)
       ? error.type
       : 'unknown';
-    console.warn('[PQ-ANONYMOUS-HTTP] rejected anonymous request', {
-      reason: 'request-body-parse',
-      parseType
-    });
+    logAnonymousRejection(`request-body-parse:${parseType}`);
     await sendOpaqueFailure(res);
   } catch {
     try { res.destroy?.(); } catch { }
@@ -539,7 +561,9 @@ export function createPqAnonymousHttpHandler({
         requestAad
       );
       parsedRequest = parsePaddedRequest(plaintext);
-      const policy = parsedRequest ? OPERATION_POLICY[parsedRequest.operation] : null;
+      const policy = parsedRequest && Object.hasOwn(OPERATION_POLICY, parsedRequest.operation)
+        ? OPERATION_POLICY[parsedRequest.operation]
+        : null;
       if (
         !parsedRequest ||
         !policy ||
@@ -548,7 +572,7 @@ export function createPqAnonymousHttpHandler({
       ) {
         await reject(
           res,
-          parsedRequest ? `operation-policy-mismatch:${parsedRequest.operation}` : 'request-undecryptable-or-malformed'
+          parsedRequest ? 'operation-policy-mismatch' : 'request-undecryptable-or-malformed'
         );
         return;
       }
@@ -570,11 +594,8 @@ export function createPqAnonymousHttpHandler({
         serverHybridKeyPair
       });
       await sendBinaryResponse(res, responseBody);
-    } catch (error) {
-      console.warn('[PQ-ANONYMOUS-HTTP] rejected anonymous request', {
-        reason: 'unhandled',
-        error: error?.message || String(error),
-      });
+    } catch {
+      logAnonymousRejection('unhandled');
       if (!res.headersSent && !res.writableEnded) await sendOpaqueFailure(res);
     } finally {
       if (admitted) inflight = Math.max(0, inflight - 1);

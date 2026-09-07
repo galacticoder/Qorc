@@ -1,5 +1,4 @@
 import { sanitizeTextInput } from '../sanitizers';
-import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { EventType } from '../types/event-types';
 import type { ExtendedFileState, FilePreviewKind } from '../types/file-types';
 import { validateWebpContainer } from './image-container-validation';
@@ -15,6 +14,7 @@ import {
   IMAGE_EXTENSIONS,
   MAX_FILE_SIZE,
   MAX_VOICE_NOTE_BYTES,
+  MAX_VOICE_NOTE_DURATION_SECONDS,
 } from '../constants';
 import { asciiMatchesAt, bytesMatchAt, readUint32BE } from './byte-utils';
 import { tryDecodeCanonicalBase64 } from '../cryptography/base64';
@@ -23,6 +23,34 @@ const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_DIMENSION = 8192;
 const MAX_IMAGE_PREVIEW_PIXELS = 16 * 1024 * 1024;
 const MEDIA_HEADER_BYTES = 64;
+
+const VOICE_NOTE_MIME_BY_EXTENSION = Object.freeze({
+  webm: 'audio/webm',
+  ogg: 'audio/ogg',
+  m4a: 'audio/mp4',
+  mp3: 'audio/mpeg',
+} as const);
+
+export const parseCurrentVoiceNoteFilename = (
+  filename: unknown,
+): { durationSeconds: number; mimeType: string } | null => {
+  if (typeof filename !== 'string') return null;
+  const match = /^voice-note-(\d+)s-(\d{13})\.(webm|ogg|m4a|mp3)$/.exec(filename);
+  if (!match) return null;
+  const durationSeconds = Number(match[1]);
+  const timestamp = Number(match[2]);
+  if (
+    !Number.isSafeInteger(durationSeconds) ||
+    durationSeconds < 1 ||
+    durationSeconds > MAX_VOICE_NOTE_DURATION_SECONDS ||
+    !Number.isSafeInteger(timestamp) ||
+    timestamp <= 0
+  ) return null;
+  return {
+    durationSeconds,
+    mimeType: VOICE_NOTE_MIME_BY_EXTENSION[match[3] as keyof typeof VOICE_NOTE_MIME_BY_EXTENSION],
+  };
+};
 
 // Sanitize event detail for file transfer events
 const sanitizeFileEventDetail = (detail: Record<string, unknown>): Record<string, unknown> => {
@@ -67,14 +95,6 @@ export const decodeBase64Chunk = (data: string): Uint8Array | null => {
     return null;
   }
   return tryDecodeCanonicalBase64(data, 'base64 chunk');
-};
-
-// Validate envelope structure
-export const validateEnvelope = (envelope: unknown): envelope is Record<string, unknown> => {
-  if (!isPlainObject(envelope) || hasPrototypePollutionKeys(envelope)) {
-    return false;
-  }
-  return true;
 };
 
 // Check concurrent transfer limit
@@ -248,7 +268,7 @@ export const createDownloadLink = (href: string, filename: string): void => {
 export const detectMimeType = (filename: string): string => {
   const lowerName = filename.toLowerCase();
   if (lowerName.endsWith('.webm')) {
-    return lowerName.includes('voice-note') ? 'audio/webm' : 'video/webm';
+    return parseCurrentVoiceNoteFilename(filename)?.mimeType ?? 'video/webm';
   }
   if (lowerName.endsWith('.mp3')) return 'audio/mpeg';
   if (lowerName.endsWith('.wav')) return 'audio/wav';

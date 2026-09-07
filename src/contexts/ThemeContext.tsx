@@ -22,11 +22,10 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 function readStoredTheme(): Theme {
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEYS.THEME);
-    if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
-  } catch { }
-  return 'dark';
+  const stored = window.localStorage.getItem(STORAGE_KEYS.THEME);
+  if (stored === null) return 'dark';
+  if (stored === 'light' || stored === 'dark' || stored === 'system') return stored;
+  throw new Error('Stored theme is invalid');
 }
 
 function resolveTheme(theme: Theme): ResolvedTheme {
@@ -40,9 +39,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setTheme = useCallback((nextTheme: Theme) => {
     setThemeState(nextTheme);
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.THEME, nextTheme);
-    } catch { }
+    window.localStorage.setItem(STORAGE_KEYS.THEME, nextTheme);
   }, []);
 
   useEffect(() => {

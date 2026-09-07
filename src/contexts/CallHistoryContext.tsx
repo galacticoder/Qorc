@@ -69,11 +69,7 @@ function parseCallHistory(raw: string | null): CallLogEntry[] {
 }
 
 function readStoredLogs(): CallLogEntry[] {
-    try {
-        return parseCallHistory(syncEncryptedStorage.getItem(STORAGE_KEYS.CALL_HISTORY));
-    } catch {
-        return [];
-    }
+    return parseCallHistory(syncEncryptedStorage.getItem(STORAGE_KEYS.CALL_HISTORY));
 }
 
 export const useCallHistory = () => {
@@ -143,7 +139,8 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
                 await syncEncryptedStorage.waitForInitialization();
                 if (!mounted) return;
                 syncFromStorage();
-            } catch {
+            } catch (error) {
+                console.error('[CallHistory] Failed to initialize call history', error);
             } finally {
                 if (mounted) {
                     setIsLoading(false);
@@ -164,13 +161,10 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }, []);
 
     const saveLogs = useCallback((newLogs: CallLogEntry[]) => {
-        try {
-            syncEncryptedStorage.setItem(
-                STORAGE_KEYS.CALL_HISTORY,
-                JSON.stringify(newLogs.slice(0, MAX_CALL_HISTORY_ENTRIES))
-            );
-        } catch {
-        }
+        syncEncryptedStorage.setItem(
+            STORAGE_KEYS.CALL_HISTORY,
+            JSON.stringify(newLogs.slice(0, MAX_CALL_HISTORY_ENTRIES))
+        );
     }, []);
 
     const addCallLog = useCallback((entry: Omit<CallLogEntry, 'id'>) => {

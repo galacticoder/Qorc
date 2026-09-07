@@ -34,7 +34,7 @@ class EncryptedStorageManager {
 
   // Initialize storage manager with SecureDB instance
   async initialize(secureDB: SecureDB): Promise<void> {
-    if (!secureDB?.isInitialized()) {
+    if (!secureDB.isInitialized()) {
       throw new Error('Cannot bind uninitialized encrypted storage');
     }
     this.generation += 1;
@@ -182,7 +182,6 @@ export const encryptedStorage = new EncryptedStorageManager();
 
 class SyncEncryptedStorageAdapter {
   private memoryCache = new Map<string, any>();
-  private pendingGets = new Map<string, Promise<any>>();
   private mutationVersions = new Map<string, number>();
   private selfInitialized = false;
   private selfInitializationPromise: Promise<void>;
@@ -221,7 +220,6 @@ class SyncEncryptedStorageAdapter {
     });
     
     this.memoryCache.clear();
-    this.pendingGets.clear();
     this.mutationVersions.clear();
 
     const syncAccessKeys = [
@@ -255,34 +253,6 @@ class SyncEncryptedStorageAdapter {
     if (this.memoryCache.has(key)) {
       const value = this.memoryCache.get(key);
       return typeof value === 'string' ? value : JSON.stringify(value);
-    }
-
-    if (this.selfInitialized && encryptedStorage.isInitialized()) {
-      if (!this.pendingGets.has(key)) {
-        const generation = this.generation;
-        const mutationVersion = this.mutationVersions.get(key) || 0;
-        let promise: Promise<any>;
-        promise = encryptedStorage.getItem(key)
-          .then(value => {
-            if (
-              generation !== this.generation ||
-              !this.selfInitialized ||
-              (this.mutationVersions.get(key) || 0) !== mutationVersion
-            ) return null;
-            if (value !== null) this.memoryCache.set(key, value);
-            return value;
-          })
-          .catch(error => {
-            if (generation === this.generation) {
-              console.error('[SyncEncryptedStorage] Failed to load key:', error);
-            }
-            return null;
-          })
-          .finally(() => {
-            if (this.pendingGets.get(key) === promise) this.pendingGets.delete(key);
-          });
-        this.pendingGets.set(key, promise);
-      }
     }
 
     return null;
@@ -335,7 +305,6 @@ class SyncEncryptedStorageAdapter {
     this.generation += 1;
     encryptedStorage.reset();
     this.memoryCache.clear();
-    this.pendingGets.clear();
     this.mutationVersions.clear();
     this.selfInitialized = false;
     this.resolveSelfInitialization();

@@ -98,7 +98,8 @@ export class TokenVault {
     /**
      * Lock vault
      */
-    lock(): void {
+    lock(): string | null {
+        const serverScope = this.serverScope;
         this.generation += 1;
 
         // Clear token secrets from memory
@@ -107,6 +108,7 @@ export class TokenVault {
         this.tokens = [];
         this.isUnlocked = false;
         this.serverScope = null;
+        return serverScope;
     }
 
     /**
@@ -168,12 +170,18 @@ export class TokenVault {
         const existingIds = new Set(nextTokens.map((token) => token.id));
         try {
             for (const token of newTokens) {
-                if (!existingIds.has(token.id) && isPrivacyPassTokenEpochUsable(token.tokenSecret)) {
-                    const owned = cloneToken(token);
-                    nextTokens.push(owned);
-                    added.push(owned);
-                    existingIds.add(token.id);
+                if (
+                    !token ||
+                    typeof token.id !== 'string' ||
+                    existingIds.has(token.id) ||
+                    !isPrivacyPassTokenEpochUsable(token.tokenSecret)
+                ) {
+                    throw new Error('Invalid new token');
                 }
+                const owned = cloneToken(token);
+                nextTokens.push(owned);
+                added.push(owned);
+                existingIds.add(token.id);
             }
             if (nextTokens.length > VAULT_CONFIG.MAX_TOKENS) {
                 throw new Error('Token vault capacity exceeded');
@@ -207,7 +215,21 @@ export class TokenVault {
      */
     async prepareAuthorizedRefresh(batchSize: number = 1): Promise<{ blindedTokens: string[]; tokenEpoch: number }> {
         if (batchSize !== 1) throw new Error('Invalid account-auth replacement batch size');
-        await this.discardPendingTokens();
+        const existing = await this.getPendingTokens(2);
+        if (existing.length > 0) {
+            if (existing.length !== 1 || existing[0].blindedElement?.length !== 32) {
+                for (const token of existing) wipeToken(token);
+                throw new Error('Invalid pending account-auth replacement');
+            }
+            try {
+                return {
+                    blindedTokens: [Base64.arrayBufferToBase64(existing[0].blindedElement)],
+                    tokenEpoch: getPrivacyPassBatchEpoch(existing)
+                };
+            } finally {
+                wipeToken(existing[0]);
+            }
+        }
         const ppClient = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
         const generated = await ppClient.generateTokenBatch(batchSize);
         try {
@@ -354,9 +376,8 @@ export class TokenVault {
 
     private async reserveResumeTokensInternal(count: number, generation: number): Promise<AnonymousToken[]> {
         if (!Number.isSafeInteger(count) || count <= 0) {
-            return [];
+            throw new Error('Invalid resume-token reservation count');
         }
-        if (!this.isUnlocked || !this.serverScope) return [];
         await this.validateCurrentOwner(generation);
         const originalTokens = this.tokens;
         const reserved: AnonymousToken[] = [];
@@ -395,10 +416,8 @@ export class TokenVault {
         }
 
         let loadedTokens: AnonymousToken[] = [];
-        let storageReadCompleted = false;
         try {
             const stored = await account.tokenVaultLoad(serverScope, 'working');
-            storageReadCompleted = true;
             this.assertGeneration(generation);
             if (stored === null) {
                 return [];
@@ -430,14 +449,6 @@ export class TokenVault {
             for (const token of loadedTokens) wipeToken(token);
             loadedTokens = [];
             if (this.generation !== generation) throw error;
-            
-            if (storageReadCompleted) {
-                if (!await account.tokenVaultRemove(serverScope, 'working')) {
-                    throw new Error('Invalid token vault could not be removed');
-                }
-                this.assertGeneration(generation);
-                return [];
-            }
             throw new Error(`Token vault could not be opened: ${error instanceof Error ? error.message : String(error)}`);
         }
     }

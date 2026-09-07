@@ -16,6 +16,27 @@ import {
   UUID_V4_RE as AUTH_REQUEST_ID_RE
 } from '../utils/patterns.js';
 
+const REQUEST_ID_AUTH_SIGNAL_TYPES = new Set([
+  SignalType.TOKEN_VALIDATION,
+  SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
+]);
+
+export function rateLimitCorrelationIds(messageType, message) {
+  const authRequestId = isAccountAuthSignalType(messageType) &&
+    typeof message?.authRequestId === 'string' &&
+    AUTH_REQUEST_ID_RE.test(message.authRequestId)
+    ? message.authRequestId
+    : undefined;
+  const requestId = (
+    isServerEntrySignalType(messageType) || REQUEST_ID_AUTH_SIGNAL_TYPES.has(messageType)
+  ) &&
+    typeof message?.requestId === 'string' &&
+    AUTH_REQUEST_ID_RE.test(message.requestId)
+    ? message.requestId
+    : undefined;
+  return { authRequestId, requestId };
+}
+
 export class RateLimitMiddleware {
   constructor(limiter, { lazy = false } = {}) {
     this._limiter = limiter || null;
@@ -72,32 +93,53 @@ export class RateLimitMiddleware {
     if (!ws || typeof ws.send !== 'function' || typeof messageType !== 'string') return false;
     const isAuth = isRateLimitedAuthSignalType(messageType);
     const isPublish = messageType === SignalType.PUBLISH_DISCOVERY;
-    if (!isAuth && !isPublish) return true;
+    const isBootstrap = messageType === SignalType.REQUEST_SERVER_PUBLIC_KEY;
+    const isHeartbeat = messageType === SignalType.PQ_HEARTBEAT_PING;
+    const isApplicationControl = messageType === SignalType.ACTIVATE_DELIVERY ||
+      messageType === SignalType.OPRF_DISCOVERY_PUBLIC_KEY;
+    if (!isAuth && !isPublish && !isBootstrap && !isHeartbeat && !isApplicationControl) return true;
 
     const now = Date.now();
     let window = this._socketWindows.get(ws);
     if (!window || now - window.startedAt >= 60_000) {
-      window = { startedAt: now, auth: 0, publish: 0 };
+      window = {
+        startedAt: now,
+        auth: 0,
+        publish: 0,
+        bootstrap: 0,
+        heartbeat: 0,
+        applicationControl: 0
+      };
       this._socketWindows.set(ws, window);
     }
 
-    const key = isAuth ? 'auth' : 'publish';
+    const key = isAuth
+      ? 'auth'
+      : isPublish
+        ? 'publish'
+        : isBootstrap
+          ? 'bootstrap'
+          : isHeartbeat
+            ? 'heartbeat'
+            : 'applicationControl';
     const limit = isAuth
       ? Math.max(1, RATE_LIMIT_CONFIG.AUTHENTICATION.MAX_ATTEMPTS_PER_CONNECTION)
-      : Math.max(1, RATE_LIMIT_CONFIG.DISCOVERY_PUBLISH.MAX_ATTEMPTS_PER_CONNECTION);
+      : isPublish
+        ? Math.max(1, RATE_LIMIT_CONFIG.DISCOVERY_PUBLISH.MAX_ATTEMPTS_PER_CONNECTION)
+        : isBootstrap
+          ? Math.max(1, RATE_LIMIT_CONFIG.CONTROL.MAX_BOOTSTRAP_REQUESTS_PER_CONNECTION)
+          : isHeartbeat
+            ? Math.max(1, RATE_LIMIT_CONFIG.CONTROL.MAX_HEARTBEATS_PER_MINUTE)
+            : Math.max(1, RATE_LIMIT_CONFIG.CONTROL.MAX_APPLICATION_REQUESTS_PER_MINUTE);
     window[key] += 1;
     if (window[key] <= limit) return true;
 
-    const authRequestId = isAccountAuthSignalType(messageType) &&
-      typeof message?.authRequestId === 'string' &&
-      AUTH_REQUEST_ID_RE.test(message.authRequestId)
-      ? message.authRequestId
-      : undefined;
-    const requestId = isServerEntrySignalType(messageType) &&
-      typeof message?.requestId === 'string' &&
-      AUTH_REQUEST_ID_RE.test(message.requestId)
-      ? message.requestId
-      : undefined;
+    if (isBootstrap || isHeartbeat || isApplicationControl) {
+      ws.close(1008, 'Control request rate exceeded');
+      return false;
+    }
+
+    const { authRequestId, requestId } = rateLimitCorrelationIds(messageType, message);
       
     const publishRequestId = isPublish &&
       typeof message?.requestId === 'string' &&

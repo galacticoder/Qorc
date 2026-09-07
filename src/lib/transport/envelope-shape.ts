@@ -8,19 +8,23 @@ import {
 } from '../constants';
 import { hasExactObjectKeys } from '../sanitizers';
 import type { HybridEnvelope } from '../types/crypto-types';
+import { SignalType } from '../types/signal-types';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 
-export function isHybridEnvelopeWireShape(value: unknown): value is HybridEnvelope {
+export function isHybridEnvelopeWireShape(
+  value: unknown,
+  expectedRoutingType: 'libsignal-message' | SignalType.FILE_MESSAGE_CHUNK,
+): value is HybridEnvelope {
   if (!hasExactObjectKeys(value, ['version', 'routing', 'routingSignature', 'algorithms', 'kemCiphertext', 'outer'])) return false;
   if (value.version !== PROTOCOL_KEYS.HYBRID_ENVELOPE_VERSION) return false;
   if (!hasExactObjectKeys(value.routing, ['to', 'from', 'type', 'timestamp', 'size'])) return false;
   if (
     !canonicalBase64Shape(value.routing.to, { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }) ||
     !canonicalBase64Shape(value.routing.from, { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }) ||
-    value.routing.type !== 'libsignal-message' ||
+    value.routing.type !== expectedRoutingType ||
     !Number.isSafeInteger(value.routing.timestamp) ||
     !Number.isSafeInteger(value.routing.size) ||
     value.routing.size < 0 ||

@@ -17,8 +17,9 @@ import {
   isKeyTransparencyPeerRevoked,
 } from "../../../lib/key-transparency/verified-material";
 import type { HybridKeys as NativeAccountKeys } from "../../../lib/types/auth-types";
-import type { HybridPublicKeys, UserWithKeys } from '../../../lib/types/message-sending-types';
+import type { UserWithKeys } from '../../../lib/types/message-sending-types';
 import { PROTOCOL_KEYS } from '../../../lib/config/protocol-keys';
+import type { SecureDB } from '../../../lib/database/secureDB';
 
 interface TransferState {
   readonly fileId: string;
@@ -86,13 +87,12 @@ const fileRecoveryRetentionMs = (totalChunks: number): number => Math.max(
 
 export function useFileSender(
   currentUsername: string,
-  targetUsername: string | undefined,
+  targetUsername: string,
   users: readonly UserWithKeys[],
-  getKeysOnDemand?: () => Promise<LocalKeys | null>,
-  getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>,
-  findUser?: (handle: string) => Promise<any>,
-  secureDB?: any,
-  checkPeerSession?: (peerUsername: string) => Promise<void>
+  getKeysOnDemand: () => Promise<LocalKeys | null>,
+  findUser: (handle: string) => Promise<any>,
+  secureDB: SecureDB,
+  checkPeerSession: (peerUsername: string) => Promise<void>
 ) {
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
@@ -300,7 +300,7 @@ export function useFileSender(
     const owner = currentUsername;
     const isCurrent = () => !!targetUsername && isTransferAuthorized(owner, generation, targetUsername);
     try {
-      if (!targetUsername || !getKeysOnDemand || !isCurrent()) return false;
+      if (!targetUsername || !isCurrent()) return false;
 
       const sessionApi = getSessionApi();
       const needsRefresh = forceReestablish || peersNeedingSessionRefresh.current.has(targetUsername);
@@ -338,7 +338,7 @@ export function useFileSender(
         }
       }
 
-      if (!hasUsableSession && checkPeerSession) {
+      if (!hasUsableSession) {
         await checkPeerSession(targetUsername);
         if (!isCurrent()) return false;
       }
@@ -403,7 +403,7 @@ export function useFileSender(
     } catch {
       return false;
     }
-  }, [getKeysOnDemand, targetUsername, currentUsername, isTransferAuthorized, rememberSessionEstablished, checkPeerSession]);
+  }, [targetUsername, currentUsername, isTransferAuthorized, rememberSessionEstablished, checkPeerSession]);
 
   // Send file chunks
   const sendChunks = useCallback(async (
@@ -416,6 +416,12 @@ export function useFileSender(
 
     const totalChunks = state.totalChunks;
     const chunkSize = state.chunkSize;
+    const startedAt = performance.now();
+    let lastReportedAt = startedAt;
+    let p2pChunks = 0;
+    let serverChunks = 0;
+    let chunkPreparationMs = 0;
+    let transportMs = 0;
     const MAX_RESTARTS = 2;
     let retryCause: 'session-reset' | 'transport' | null = null;
 
@@ -474,6 +480,7 @@ export function useFileSender(
           }
 
           const nextIndex = state.lastSentIndex + 1;
+          const preparationStartedAt = performance.now();
           const start = nextIndex * chunkSize;
           const end = Math.min(start + chunkSize, file.size);
           const blobSlice = file.slice(start, end);
@@ -503,6 +510,7 @@ export function useFileSender(
             );
             if (state.canceled || !isTransferAuthorized(state.ownerUsername, state.ownerGeneration, state.recipientUsername)) return false;
 
+            chunkPreparationMs += performance.now() - preparationStartedAt;
             for (const uk of userKeys) {
               const chunkMetadata = {
                 type: SignalType.FILE_MESSAGE_CHUNK,
@@ -536,12 +544,16 @@ export function useFileSender(
               };
 
               if (state.canceled || !isTransferAuthorized(state.ownerUsername, state.ownerGeneration, state.recipientUsername)) return false;
+              const transportStartedAt = performance.now();
               const chunkSendResult = await unifiedSignalTransport.send(uk.username, fullChunkMessage, SignalType.FILE_MESSAGE_CHUNK);
+              transportMs += performance.now() - transportStartedAt;
               if (state.canceled || !isTransferAuthorized(state.ownerUsername, state.ownerGeneration, state.recipientUsername)) return false;
               if (!chunkSendResult?.success) {
                 transportFailed = true;
                 break;
               }
+              if (chunkSendResult.transport === 'p2p') p2pChunks += 1;
+              else serverChunks += 1;
             }
           } finally {
             iv.fill(0);
@@ -561,6 +573,21 @@ export function useFileSender(
           );
           const pct = confirmedBytes / state.fileSize;
           setProgress(pct);
+          const reportedAt = performance.now();
+          if (nextIndex === 0 || nextIndex === totalChunks - 1 || reportedAt - lastReportedAt >= 10_000) {
+            const elapsedMs = reportedAt - startedAt;
+            console.info('[FILE-SEND-PERF]', {
+              submittedBytes: confirmedBytes,
+              fileBytes: state.fileSize,
+              elapsedMs: Math.round(elapsedMs),
+              averageKiBPerSecond: Math.round(confirmedBytes * 1000 / Math.max(1, elapsedMs) / 1024),
+              p2pChunks,
+              serverChunks,
+              chunkPreparationMs: Math.round(chunkPreparationMs),
+              transportMs: Math.round(transportMs),
+            });
+            lastReportedAt = reportedAt;
+          }
 
           if ((nextIndex & (YIELD_INTERVAL - 1)) === 0) {
             await new Promise(res => setTimeout(res, 0));
@@ -894,6 +921,7 @@ export function useFileSender(
       if (!Number.isSafeInteger(rawFile.size) || rawFile.size <= 0 || rawFile.size > MAX_FILE_SIZE) {
         throw new Error('File size is outside the supported encrypted-transfer limit');
       }
+      unifiedSignalTransport.preparePeer(targetUsername);
       const file = await stripImageMetadata(rawFile);
       if (!isCurrent()) throw new Error('File transfer canceled or account changed');
       
@@ -979,47 +1007,22 @@ export function useFileSender(
         })
       );
 
-      // If recipient's keys not found, try to fetch them
-      if (filteredUsers.length === 0 && getPeerHybridKeys && targetUsername) {
-        try {
-          const fetchedKeys = await getPeerHybridKeys(targetUsername);
-          if (!isCurrent()) throw new Error('Account changed during recipient lookup');
-          if (validateHybridKeys(fetchedKeys)) {
+      if (filteredUsers.length === 0 && shouldAttemptDiscovery(targetUsername)) {
+        const material = await findUser(targetUsername);
+        if (!isCurrent()) throw new Error('Account changed during recipient discovery');
+        if (material) {
+          const trusted = await resolveTrustedPeerHybridPublicKeys(currentUsername, targetUsername, material);
+          const hk = trusted?.valid ? trusted.hybridKeys : null;
+          if (validateHybridKeys(hk)) {
             filteredUsers = [{
               username: targetUsername,
               hybridPublicKeys: {
-                x25519PublicBase64: fetchedKeys.x25519PublicBase64,
-                kyberPublicBase64: fetchedKeys.kyberPublicBase64,
-                dilithiumPublicBase64: fetchedKeys.dilithiumPublicBase64
+                x25519PublicBase64: hk.x25519PublicBase64,
+                kyberPublicBase64: hk.kyberPublicBase64,
+                dilithiumPublicBase64: hk.dilithiumPublicBase64
               }
             }] as any;
           }
-        } catch {
-          console.error('[FILE-SENDER] Failed to fetch recipient keys');
-        }
-      }
-
-      // Discovery fallback
-      if (filteredUsers.length === 0 && findUser && targetUsername && shouldAttemptDiscovery(targetUsername)) {
-        try {
-          const material = await findUser(targetUsername);
-          if (!isCurrent()) throw new Error('Account changed during recipient discovery');
-          if (material) {
-            const trusted = await resolveTrustedPeerHybridPublicKeys(currentUsername, targetUsername, material);
-            const hk = trusted?.valid ? trusted.hybridKeys : null;
-            if (validateHybridKeys(hk)) {
-              filteredUsers = [{
-                username: targetUsername,
-                hybridPublicKeys: {
-                  x25519PublicBase64: hk.x25519PublicBase64,
-                  kyberPublicBase64: hk.kyberPublicBase64,
-                  dilithiumPublicBase64: hk.dilithiumPublicBase64
-                }
-              }] as any;
-            }
-          }
-        } catch {
-          console.error('[FILE-SENDER] Discovery key resolution failed');
         }
       }
 
@@ -1028,10 +1031,6 @@ export function useFileSender(
         throw new Error('Cannot send file: post-quantum hybrid encryption keys are required but not available');
       }
 
-      if (!getKeysOnDemand) {
-        console.error('[FILE-SENDER] getKeysOnDemand not provided');
-        throw new Error('Encryption keys unavailable');
-      }
       const localKeys = await getKeysOnDemand();
       if (!isCurrent()) throw new Error('Account changed during local key lookup');
       if (localKeys?.native !== true || !localKeys.dilithium?.publicKeyBase64) {
@@ -1061,9 +1060,10 @@ export function useFileSender(
                 to: user.hybridPublicKeys!.dilithiumPublicBase64,
                 from: localKeys.dilithium.publicKeyBase64,
                 type: SignalType.FILE_MESSAGE_CHUNK,
-                senderDilithiumPublicKey: localKeys.dilithium.publicKeyBase64
-                ,signRoutingHeader: (canonicalHeader) =>
-                  account.sign(PROTOCOL_KEYS.DEVICE_ENVELOPE_SIGNING, canonicalHeader)
+                timestamp: Date.now(),
+                senderDilithiumPublicKey: localKeys.dilithium.publicKeyBase64,
+                signRoutingHeader: (canonicalHeader) =>
+                  account.sign(PROTOCOL_KEYS.DEVICE_ENVELOPE_SIGNING, canonicalHeader),
               }
             );
             return { username: user.username, envelope };
@@ -1086,18 +1086,14 @@ export function useFileSender(
         mimeType: file.type || 'application/octet-stream',
         type: SignalType.FILE,
         isCurrentUser: true,
-        isDeliberateUserAction: true as const,
         receipt: {
           delivered: false,
           read: false
         }
       };
 
-      if (!secureDB || typeof secureDB.storeFileMessage !== 'function') {
-        throw new Error('Secure file storage is unavailable');
-      }
       const saveResult = await secureDB.storeFileMessage(
-        { ...localMessage, timestamp: localMessage.timestamp },
+        { ...localMessage, isDeliberateUserAction: true as const },
         file,
         targetUsername,
       );
@@ -1176,7 +1172,6 @@ export function useFileSender(
     currentUsername,
     users,
     getKeysOnDemand,
-    getPeerHybridKeys,
     findUser,
     secureDB,
     retainTransfer,
@@ -1196,19 +1191,19 @@ export function useFileSender(
         { fileId: st.fileId },
         SignalType.FILE_TRANSFER_CANCEL,
       ).catch(() => { });
-      if (secureDB && typeof secureDB.cancelOutgoingFileMessage === 'function') {
-        void secureDB.cancelOutgoingFileMessage(st.recipientUsername, st.fileId)
-          .then((canceled: unknown) => {
-            if (!canceled) return;
-            window.dispatchEvent(new CustomEvent(EventType.LOCAL_FILE_SEND_CANCELED, {
-              detail: {
-                account: st.ownerUsername,
-                fileId: st.fileId,
-              },
-            }));
-          })
-          .catch(() => { });
-      }
+      void secureDB.cancelOutgoingFileMessage(st.recipientUsername, st.fileId)
+        .then((canceled: unknown) => {
+          if (!canceled) return;
+          window.dispatchEvent(new CustomEvent(EventType.LOCAL_FILE_SEND_CANCELED, {
+            detail: {
+              account: st.ownerUsername,
+              fileId: st.fileId,
+            },
+          }));
+        })
+        .catch((error) => {
+          console.error('[FILE-SENDER] Failed to cancel the persisted file transfer', error);
+        });
     }
     const activeRetransmit = activeRetransmitContextRef.current;
     if (activeRetransmit && (!st || activeRetransmit.fileId === st.fileId)) {

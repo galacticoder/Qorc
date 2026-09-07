@@ -84,34 +84,36 @@ export interface CertifiedPeerBundleBuildInput {
     dilithiumPublicBase64: string;
     x25519PublicBase64: string;
   };
-  fullBundle?: unknown;
+  fullBundle: unknown;
   peerCertificate: PeerCertificateBundle;
-  peerCertificateFingerprint?: string;
   accountRootPublicKey: string;
   signAccountRoot: (canonicalPayload: Uint8Array) => Promise<string>;
   signDevice: (canonicalPayload: Uint8Array) => Promise<string>;
 }
 
 export interface CertifiedPeerBundleValidationContext {
-  targetHandle?: string;
-  publicKeys?: {
-    kyberPublicBase64?: string;
-    dilithiumPublicBase64?: string;
-    x25519PublicBase64?: string;
+  targetHandle: string;
+  publicKeys: {
+    kyberPublicBase64: string;
+    dilithiumPublicBase64: string;
+    x25519PublicBase64: string;
   };
-  fullBundle?: unknown;
-  peerCertificate?: PeerCertificateBundle;
-  peerCertificateFingerprint?: string;
+  fullBundle: unknown;
+  peerCertificate: PeerCertificateBundle;
   now?: number;
   allowExpired?: boolean;
 }
 
-export interface CertifiedPeerBundleValidationResult {
-  valid: boolean;
-  reason?: string;
-  bundle?: CertifiedPeerBundleV3;
-  identityRootFingerprint?: string;
-  bundleFingerprint?: string;
-  peerCertificateFingerprint?: string;
-}
+export type CertifiedPeerBundleValidationResult =
+  | {
+    valid: true;
+    bundle: CertifiedPeerBundleV3;
+    identityRootFingerprint: string;
+    bundleFingerprint: string;
+    peerCertificateFingerprint: string;
+  }
+  | {
+    valid: false;
+    reason: string;
+  };
 import { PROTOCOL_KEYS } from '../config/protocol-keys';

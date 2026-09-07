@@ -13,8 +13,7 @@ import {
     SecureConnection,
     SecureStream
 } from './secure-transport';
-import { STORAGE_KEYS } from '../database/storage-keys';
-import { encryptedStorage } from '../database/encrypted-storage';
+import { readAppSettingsAsync, updateAppSettingsAsync } from '../ui/app-settings';
 import { unifiedSignalTransport } from './unified-signal-transport';
 import {
     CALL_TIMEOUT,
@@ -33,8 +32,6 @@ import {
     nativeMicrophone,
     nativeScreen,
     signal as signalApi,
-    system,
-    isTauri,
     requireNativeMediaAccess,
 } from '../tauri-bindings';
 import {
@@ -50,7 +47,6 @@ import {
     CallSignal,
     LocalCallEndReason,
 } from '../types/calling-types';
-import { type ScreenSource } from '../types/screen-sharing-types';
 
 const CAMERA_CAPTURE_WIDTH = 1280;
 const CAMERA_CAPTURE_HEIGHT = 720;
@@ -125,17 +121,11 @@ const MAX_CALL_OFFERS_PER_PEER = 4;
 const MAX_CALL_OFFERS_GLOBAL = 16;
 const MAX_CALL_OFFER_RATE_PEERS = 128;
 const MAX_PENDING_INCOMING_CALLS = 6;
-const MAX_SCREEN_SOURCES = 128;
-const MAX_SCREEN_SOURCE_NAME_LENGTH = 256;
 const SCREEN_CAPTURE_REQUEST_TIMEOUT_MS = 30_000;
 const SCREEN_SHARE_READY_TIMEOUT_MS = 10_000;
 const SCREEN_FIRST_FRAME_TIMEOUT_MS = 10_000;
 const SCREEN_SHARE_ANNOUNCEMENT_TIMEOUT_MS = 10_000;
 const MAX_VISUAL_RENDER_QUEUE_FRAMES = 3;
-const SCREEN_SOURCE_ID_REGEX = {
-    screen: /^screen:[0-9]{1,3}$/,
-    window: /^window:(?:0x[0-9a-f]{1,16}|[0-9]{1,20})$/i
-} as const;
 const visualFrameSendDeadlineMs = (rttMs: number | null): number => (
     rttMs === null || !Number.isFinite(rttMs)
         ? VISUAL_FRAME_SEND_DEADLINE_MAX_MS
@@ -258,15 +248,9 @@ export function decodeCallAudioBatch(data: Uint8Array, arrivedAt: number): Buffe
     }
 }
 
-function isValidScreenSourceId(value: unknown, type: 'screen' | 'window'): value is string {
-    return typeof value === 'string' &&
-        value.length <= 96 &&
-        SCREEN_SOURCE_ID_REGEX[type].test(value);
-}
-
 // Calling Service
 export class SecureCallingService {
-    private localStream: MediaStream | null = null;
+    private localMediaActive = false;
     private localVideoCanvas: HTMLCanvasElement | null = null;
     private localScreenCanvas: HTMLCanvasElement | null = null;
     private remoteVideoCanvas: HTMLCanvasElement | null = null;
@@ -300,9 +284,6 @@ export class SecureCallingService {
     private expectedRemoteScreenStreamId: string | null = null;
     private pendingScreenShareReady: PendingScreenShareReady | null = null;
     private seenRemoteScreenStreamIds = new Set<string>();
-    private sharedReceiveAudioContext: AudioContext | null = null;
-    private receiveAudioWorkletLoaded = false;
-    private callReceiveAudioNode: AudioWorkletNode | null = null;
     private audioCodecSessionId: string | null = null;
     private audioPlaybackSessionId: string | null = null;
 
@@ -339,7 +320,7 @@ export class SecureCallingService {
     private onRemoteScreenCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
     private onLocalVideoCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
     private onLocalScreenCanvasCallback: ((canvas: HTMLCanvasElement | null) => void) | null = null;
-    private onLocalStreamCallback: ((stream: MediaStream) => void) | null = null;
+    private onLocalMediaChangeCallback: ((active: boolean) => void) | null = null;
     private onScreenSharingChangeCallback: ((sharing: boolean) => void) | null = null;
 
     // Timers
@@ -521,11 +502,11 @@ export class SecureCallingService {
         }
     }
 
-    private notifyLocalStream(stream: MediaStream): void {
+    private notifyLocalMediaChange(active: boolean): void {
         try {
-            this.onLocalStreamCallback?.(stream);
+            this.onLocalMediaChangeCallback?.(active);
         } catch (error) {
-            console.error('[SecureCall] Local stream observer failed:', error);
+            console.error('[SecureCall] Local media observer failed:', error);
         }
     }
 
@@ -652,13 +633,6 @@ export class SecureCallingService {
         this.handleCallConnectionState(connection, expectedCallId, connection.state);
     }
 
-    private closeAudioContext(context: AudioContext | null): void {
-        if (!context) return;
-        try {
-            void context.close().catch(() => { });
-        } catch { }
-    }
-
     // Initialize calling service
     async initialize(): Promise<void> {
         if (this.securityQuarantined || keyTransparencyClient.isSecurityIncidentActive()) {
@@ -686,40 +660,22 @@ export class SecureCallingService {
     }
 
     private async performInitialization(): Promise<void> {
-        // Load preferred camera
-        try {
-            const storedCamera = await encryptedStorage.getItem(STORAGE_KEYS.PREFERRED_CAMERA);
-            if (isValidMediaDeviceId(storedCamera)) {
-                this.preferredCameraDeviceId = storedCamera;
-            }
-        } catch { }
-        try {
-            const storedSettings = await encryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-            const parsed = storedSettings ? JSON.parse(storedSettings) : null;
-            if (
-                isPlainObject(parsed) &&
-                isValidMediaDeviceId(parsed.preferredCallMicId)
-            ) {
-                this.preferredMicrophoneDeviceId = parsed.preferredCallMicId;
-            }
-            if (isPlainObject(parsed) && isValidMediaDeviceId(parsed.preferredSpeakerId)) {
-                this.preferredSpeakerDeviceId = parsed.preferredSpeakerId;
-            }
-        } catch { }
+        const storedSettings = await readAppSettingsAsync();
+        this.preferredCameraDeviceId = storedSettings.preferredCameraId || null;
+        this.preferredMicrophoneDeviceId = storedSettings.preferredCallMicId || null;
+        this.preferredSpeakerDeviceId = storedSettings.preferredSpeakerId || null;
 
         if (this.destroyed) {
             throw new Error('Calling service was destroyed during initialization');
         }
 
-        if (typeof window !== 'undefined') {
-            window.addEventListener('beforeunload', this.beforeUnloadHandler);
-            window.addEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
-            window.addEventListener(EventType.USER_BLOCKED, this.userBlockedHandler);
-            window.addEventListener(
-                EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
-                this.keyTransparencySecurityIncidentHandler
-            );
-        }
+        window.addEventListener('beforeunload', this.beforeUnloadHandler);
+        window.addEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
+        window.addEventListener(EventType.USER_BLOCKED, this.userBlockedHandler);
+        window.addEventListener(
+            EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
+            this.keyTransparencySecurityIncidentHandler
+        );
         this.initialized = true;
     }
 
@@ -986,7 +942,7 @@ export class SecureCallingService {
     // Toggle mute state
     async toggleMute(): Promise<boolean> {
         const sessionId = this.microphoneSessionId;
-        if (!this.localStream || !sessionId) return false;
+        if (!this.localMediaActive || !sessionId) return false;
         const enabled = !this.microphoneEnabled;
         await nativeMicrophone.setEnabled(sessionId, enabled);
         if (this.microphoneSessionId !== sessionId) return !this.microphoneEnabled;
@@ -997,7 +953,7 @@ export class SecureCallingService {
     // Toggle video state
     async toggleVideo(): Promise<boolean> {
         const sessionId = this.cameraSessionId;
-        if (!this.localStream || this.currentCall?.type !== 'video' || !this.videoStream || !sessionId) return false;
+        if (!this.localMediaActive || this.currentCall?.type !== 'video' || !this.videoStream || !sessionId) return false;
         const enabled = !this.videoEnabled;
         await nativeCamera.setEnabled(sessionId, enabled);
         if (this.cameraSessionId !== sessionId || this.currentCall?.id !== sessionId) return false;
@@ -1007,7 +963,7 @@ export class SecureCallingService {
 
     // Switch camera device
     async switchCamera(deviceId?: string): Promise<void> {
-        if (!this.localStream) throw new Error('No active local media stream');
+        if (!this.localMediaActive) throw new Error('No active local media capture');
         if (deviceId !== undefined && !isValidMediaDeviceId(deviceId)) {
             throw new Error('Invalid camera device identifier');
         }
@@ -1058,16 +1014,14 @@ export class SecureCallingService {
             }
             this.preferredCameraDeviceId = deviceId;
             const account = this.localUsername;
-            try {
-                await Promise.resolve().then(() => {
-                    if (
-                        this.destroyed ||
-                        this.localUsername !== account ||
-                        this.preferredCameraDeviceId !== deviceId
-                    ) return;
-                    return encryptedStorage.setItem(STORAGE_KEYS.PREFERRED_CAMERA, deviceId);
-                });
-            } catch { }
+            if (
+                this.destroyed ||
+                this.localUsername !== account ||
+                this.preferredCameraDeviceId !== deviceId
+            ) {
+                throw new Error('Call changed before camera preference was persisted');
+            }
+            await updateAppSettingsAsync({ preferredCameraId: deviceId });
         } catch (error) {
             if (
                 switchGeneration !== this.cameraSwitchGeneration &&
@@ -1096,7 +1050,7 @@ export class SecureCallingService {
 
     // Switch microphone device
     async switchMicrophone(deviceId: string): Promise<void> {
-        if (!this.localStream) throw new Error('No active local media stream');
+        if (!this.localMediaActive) throw new Error('No active local media capture');
         if (!isValidMediaDeviceId(deviceId)) throw new Error('Invalid microphone device identifier');
         const activeCallId = this.currentCall?.id;
         if (!activeCallId || this.microphoneSessionId !== activeCallId) {
@@ -1164,17 +1118,7 @@ export class SecureCallingService {
             }
             this.audioPlaybackSessionId = activeCallId;
             this.preferredSpeakerDeviceId = deviceId;
-            try {
-                const storedSettings = await encryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-                const parsed = storedSettings ? JSON.parse(storedSettings) : null;
-                const settings = isPlainObject(parsed) && !hasPrototypePollutionKeys(parsed)
-                    ? parsed
-                    : {};
-                await encryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, JSON.stringify({
-                    ...settings,
-                    preferredSpeakerId: deviceId,
-                }));
-            } catch { }
+            await updateAppSettingsAsync({ preferredSpeakerId: deviceId });
         } catch (error) {
             try {
                 await nativeAudioPlayback.start(activeCallId, previousDeviceId);
@@ -1209,7 +1153,7 @@ export class SecureCallingService {
         let acquiredStream: MediaStream | null = null;
         let acquiredNativeSessionId: string | null = null;
         let transportStream: SecureStream | null = null;
-        const useNativeCapture = isTauri() && /\bLinux\b/i.test(navigator.userAgent);
+        const useNativeCapture = /\bLinux\b/i.test(navigator.userAgent);
         const shareIsCurrent = () =>
             generation === this.screenShareGeneration &&
             this.currentCall?.id === callId &&
@@ -1224,7 +1168,7 @@ export class SecureCallingService {
                 phase: 'screen.capture-request-before',
                 callId,
                 generation,
-                capturePath: useNativeCapture ? 'native-portal' : 'browser'
+                capturePath: useNativeCapture ? 'native-portal' : 'webview'
             });
             if (useNativeCapture) {
                 acquiredNativeSessionId = callId;
@@ -1252,7 +1196,7 @@ export class SecureCallingService {
                     callId,
                     generation,
                     elapsedMs: Math.round(performance.now() - startedAt),
-                    capturePath: 'browser',
+                    capturePath: 'webview',
                     trackCount: screenStream.getVideoTracks().length,
                     trackState: screenTrack?.readyState ?? null,
                     settings: screenTrack?.getSettings() ?? null
@@ -1462,12 +1406,12 @@ export class SecureCallingService {
                 });
             }
         }
-        if (this.localStream) {
-            console.info('[CALL-DIAG]', { phase: 'media.previous-stream-stop-before', callType });
-            this.stopMediaStream(this.localStream);
-            this.localStream = null;
+        if (this.localMediaActive) {
+            this.localMediaActive = false;
+            this.notifyLocalMediaChange(false);
+        }
+        if (previousCameraSessionId || previousMicrophoneSessionId) {
             this.lastCaptureReleaseAt = Date.now();
-            console.info('[CALL-DIAG]', { phase: 'media.previous-stream-stop-after', callType });
         }
 
         const sinceRelease = Date.now() - this.lastCaptureReleaseAt;
@@ -1490,32 +1434,16 @@ export class SecureCallingService {
             callType,
             elapsedMs: Math.round(performance.now() - startedAt),
         });
-        try {
-            const storedSettings = await encryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-            const parsed = storedSettings ? JSON.parse(storedSettings) : null;
-            if (isPlainObject(parsed) && 'preferredCallMicId' in parsed) {
-                this.preferredMicrophoneDeviceId = isValidMediaDeviceId(parsed.preferredCallMicId)
-                    ? parsed.preferredCallMicId
-                    : null;
-            }
-            if (isPlainObject(parsed) && 'preferredSpeakerId' in parsed) {
-                this.preferredSpeakerDeviceId = isValidMediaDeviceId(parsed.preferredSpeakerId)
-                    ? parsed.preferredSpeakerId
-                    : null;
-            }
-        } catch { }
+        const storedSettings = await readAppSettingsAsync();
+        this.preferredMicrophoneDeviceId = storedSettings.preferredCallMicId || null;
+        this.preferredSpeakerDeviceId = storedSettings.preferredSpeakerId || null;
+        this.preferredCameraDeviceId = storedSettings.preferredCameraId || null;
         console.info('[CALL-DIAG]', {
             phase: 'media.native-microphone-before',
             callType,
             preferredDevice: this.preferredMicrophoneDeviceId !== null,
         });
-        try {
-            await nativeMicrophone.start(expectedCallId, this.preferredMicrophoneDeviceId);
-        } catch (error) {
-            if (!this.preferredMicrophoneDeviceId) throw error;
-            this.preferredMicrophoneDeviceId = null;
-            await nativeMicrophone.start(expectedCallId, null);
-        }
+        await nativeMicrophone.start(expectedCallId, this.preferredMicrophoneDeviceId);
         this.microphoneSessionId = expectedCallId;
         this.microphoneEnabled = true;
         console.info('[CALL-DIAG]', {
@@ -1540,25 +1468,13 @@ export class SecureCallingService {
                     height: CAMERA_CAPTURE_HEIGHT,
                     frameRate: TARGET_FPS,
                 });
-                try {
-                    await nativeCamera.start(
-                        expectedCallId,
-                        this.preferredCameraDeviceId,
-                        CAMERA_CAPTURE_WIDTH,
-                        CAMERA_CAPTURE_HEIGHT,
-                        TARGET_FPS,
-                    );
-                } catch (error) {
-                    if (!this.preferredCameraDeviceId || !callIsCurrent()) throw error;
-                    this.preferredCameraDeviceId = null;
-                    await nativeCamera.start(
-                        expectedCallId,
-                        null,
-                        CAMERA_CAPTURE_WIDTH,
-                        CAMERA_CAPTURE_HEIGHT,
-                        TARGET_FPS,
-                    );
-                }
+                await nativeCamera.start(
+                    expectedCallId,
+                    this.preferredCameraDeviceId,
+                    CAMERA_CAPTURE_WIDTH,
+                    CAMERA_CAPTURE_HEIGHT,
+                    TARGET_FPS,
+                );
                 console.info('[CALL-DIAG]', {
                     phase: 'media.native-camera-after',
                     callType,
@@ -1576,13 +1492,12 @@ export class SecureCallingService {
             throw error;
         }
 
-        const acquiredStream = new MediaStream();
-        this.localStream = acquiredStream;
+        this.localMediaActive = true;
         this.videoEnabled = callType === 'video';
-        console.info('[CALL-DIAG]', { phase: 'media.notify-local-stream-before', callType });
-        this.notifyLocalStream(this.localStream);
+        console.info('[CALL-DIAG]', { phase: 'media.notify-local-capture-before', callType });
+        this.notifyLocalMediaChange(true);
         console.info('[CALL-DIAG]', {
-            phase: 'media.notify-local-stream-after',
+            phase: 'media.notify-local-capture-after',
             callType,
             elapsedMs: Math.round(performance.now() - startedAt),
         });
@@ -1612,7 +1527,7 @@ export class SecureCallingService {
                 CALL_PASSIVE_CONNECTION_WAIT_MS,
             );
             console.info('[CALL-DIAG]', {
-                phase: connection ? 'connection.passive-wait-connected' : 'connection.passive-wait-fallback',
+                phase: connection ? 'connection.passive-wait-connected' : 'connection.passive-wait-expired',
                 callId: expectedCallId.slice(0, 12),
                 elapsedMs: Math.round(performance.now() - passiveStartedAt),
             });
@@ -1651,15 +1566,11 @@ export class SecureCallingService {
                     if (!callIsCurrent()) throw new Error('Call was cancelled while opening video');
                 }
 
-                try {
-                    telemetryStream = await connection.createStream({
-                        type: 'call-telemetry',
-                        id: `call-telemetry:${expectedCallId}`,
-                        lossy: true
-                    });
-                } catch {
-                    telemetryStream = null;
-                }
+                telemetryStream = await connection.createStream({
+                    type: 'call-telemetry',
+                    id: `call-telemetry:${expectedCallId}`,
+                    lossy: true
+                });
                 if (!callIsCurrent()) throw new Error('Call was cancelled while opening telemetry');
                 if (connection.state !== 'connected') {
                     throw new Error('Call connection closed during setup');
@@ -1763,7 +1674,7 @@ export class SecureCallingService {
         if (
             this.currentCall?.id !== expectedCallId ||
             this.currentCall.status !== 'connecting' ||
-            !this.localStream ||
+            !this.localMediaActive ||
             this.microphoneSessionId !== expectedCallId ||
             !this.callConnection
         ) {
@@ -1771,7 +1682,6 @@ export class SecureCallingService {
         }
 
         const generation = this.mediaGeneration;
-        if (!isTauri()) throw new Error('Native Opus codec unavailable');
         if (this.audioCodecSessionId !== expectedCallId) {
             const previousSession = this.audioCodecSessionId;
             this.audioCodecSessionId = null;
@@ -1787,25 +1697,8 @@ export class SecureCallingService {
             if (previousSession) {
                 try { await nativeAudioPlayback.stop(previousSession); } catch { }
             }
-            try {
-                await nativeAudioPlayback.start(expectedCallId, this.preferredSpeakerDeviceId);
-                this.audioPlaybackSessionId = expectedCallId;
-            } catch (error) {
-                if (this.preferredSpeakerDeviceId) {
-                    try {
-                        await nativeAudioPlayback.start(expectedCallId, null);
-                        this.preferredSpeakerDeviceId = null;
-                        this.audioPlaybackSessionId = expectedCallId;
-                    } catch { }
-                }
-                if (this.audioPlaybackSessionId !== expectedCallId) {
-                    console.warn('[CALL-DIAG]', {
-                        phase: 'audio.native-playback-unavailable',
-                        errorName: error instanceof Error ? error.name : 'UnknownError',
-                        errorMessage: error instanceof Error ? error.message : String(error),
-                    });
-                }
-            }
+            await nativeAudioPlayback.start(expectedCallId, this.preferredSpeakerDeviceId);
+            this.audioPlaybackSessionId = expectedCallId;
         }
         const starters: Promise<void>[] = [];
 
@@ -1826,39 +1719,6 @@ export class SecureCallingService {
             throw new Error('Call ended while media was starting');
         }
         this.startReceivingMedia();
-    }
-
-    // Shared playback AudioContext
-    private async getSharedReceiveAudioContext(): Promise<AudioContext> {
-        if (this.sharedReceiveAudioContext && this.sharedReceiveAudioContext.state !== 'closed') {
-            if (this.sharedReceiveAudioContext.state === 'suspended') {
-                try { await this.sharedReceiveAudioContext.resume(); } catch { }
-            }
-            return this.sharedReceiveAudioContext;
-        }
-        const ctx = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
-        this.sharedReceiveAudioContext = ctx;
-        this.receiveAudioWorkletLoaded = false;
-        return ctx;
-    }
-
-    private async loadAudioWorklet(context: AudioContext): Promise<void> {
-        await context.audioWorklet.addModule('audio-worklet-processor.js');
-    }
-
-    private destroyAudioWorkletNode(node: AudioWorkletNode | null): void {
-        if (!node) return;
-        try { node.port.postMessage({ type: 'destroy' }); } catch { }
-        try { node.port.onmessage = null; } catch { }
-        try { node.disconnect(); } catch { }
-    }
-
-    // Tear down this call audio graph nodes
-    private teardownCallAudioNodes(): void {
-        if (this.callReceiveAudioNode) {
-            this.destroyAudioWorkletNode(this.callReceiveAudioNode);
-            this.callReceiveAudioNode = null;
-        }
     }
 
     private teardownCallMediaElements(): void {
@@ -1937,8 +1797,15 @@ export class SecureCallingService {
 
             void request.then(
                 stream => {
-                    if (settled || generation !== this.screenShareGeneration) {
+                    if (settled) {
                         this.stopMediaStream(stream, true);
+                        return;
+                    }
+                    if (generation !== this.screenShareGeneration) {
+                        settled = true;
+                        clearTimeout(timeoutId);
+                        this.stopMediaStream(stream, true);
+                        reject(new Error('Call ended while screen capture was starting'));
                         return;
                     }
                     settled = true;
@@ -2239,11 +2106,10 @@ export class SecureCallingService {
 
     // Stream video frames
     private async startVideoStreaming(): Promise<void> {
-        if (!this.videoStream || !this.localStream) return;
+        if (!this.videoStream || !this.localMediaActive) return;
 
         const generation = this.mediaGeneration;
         const captureGeneration = this.cameraSwitchGeneration;
-        const sourceStream = this.localStream;
         const transportStream = this.videoStream;
         const cameraSessionId = this.cameraSessionId;
         if (!cameraSessionId || this.currentCall?.id !== cameraSessionId) {
@@ -2252,7 +2118,7 @@ export class SecureCallingService {
         if (
             generation !== this.mediaGeneration ||
             captureGeneration !== this.cameraSwitchGeneration ||
-            this.localStream !== sourceStream ||
+            !this.localMediaActive ||
             this.videoStream !== transportStream
         ) return;
 
@@ -2266,7 +2132,7 @@ export class SecureCallingService {
         const isActive = () =>
             generation === this.mediaGeneration &&
             captureGeneration === this.cameraSwitchGeneration &&
-            this.localStream === sourceStream &&
+            this.localMediaActive &&
             this.cameraSessionId === cameraSessionId &&
             this.currentCall?.id === cameraSessionId &&
             this.videoStream === transportStream &&
@@ -2364,32 +2230,14 @@ export class SecureCallingService {
             attempt: recoveryAttempt,
         });
         try {
-            try {
-                await nativeCamera.start(
-                    expectedCallId,
-                    this.preferredCameraDeviceId,
-                    CAMERA_CAPTURE_WIDTH,
-                    CAMERA_CAPTURE_HEIGHT,
-                    TARGET_FPS,
-                );
-                nativeCaptureStarted = true;
-            } catch (error) {
-                if (!this.preferredCameraDeviceId) throw error;
-                if (!this.isCameraRecoveryCurrent(
-                    expectedCallId,
-                    failedEncoder,
-                    recoveryGeneration,
-                )) return;
-                this.preferredCameraDeviceId = null;
-                await nativeCamera.start(
-                    expectedCallId,
-                    null,
-                    CAMERA_CAPTURE_WIDTH,
-                    CAMERA_CAPTURE_HEIGHT,
-                    TARGET_FPS,
-                );
-                nativeCaptureStarted = true;
-            }
+            await nativeCamera.start(
+                expectedCallId,
+                this.preferredCameraDeviceId,
+                CAMERA_CAPTURE_WIDTH,
+                CAMERA_CAPTURE_HEIGHT,
+                TARGET_FPS,
+            );
+            nativeCaptureStarted = true;
             if (!this.isCameraRecoveryCurrent(
                 expectedCallId,
                 failedEncoder,
@@ -2701,28 +2549,15 @@ export class SecureCallingService {
         const generation = this.mediaGeneration;
         const stream = this.audioStream;
         const codecSessionId = this.audioCodecSessionId;
-        const useNativePlayback = this.audioPlaybackSessionId === codecSessionId;
-        let audioContext: AudioContext | null = null;
-        if (!useNativePlayback) {
-            audioContext = await this.getSharedReceiveAudioContext();
-            if (!this.receiveAudioWorkletLoaded) {
-                await this.loadAudioWorklet(audioContext);
-                this.receiveAudioWorkletLoaded = true;
-            }
+        if (this.audioPlaybackSessionId !== codecSessionId) {
+            throw new Error('Native audio playback is unavailable');
         }
 
         if (generation !== this.mediaGeneration || this.audioStream !== stream) return;
 
-        let workletNode: AudioWorkletNode | null = null;
         let playoutTimer: ReturnType<typeof setInterval> | null = null;
         const jitterBuffer = new Map<number, BufferedAudioPacket>();
         try {
-            if (audioContext) {
-                workletNode = new AudioWorkletNode(audioContext, 'audio-receiver-processor');
-                this.callReceiveAudioNode = workletNode;
-                workletNode.connect(audioContext.destination);
-            }
-
             let expectedSequence: number | null = null;
             let started = false;
             let playoutBusy = false;
@@ -2738,23 +2573,8 @@ export class SecureCallingService {
                 jitterBuffer.delete(sequence);
                 SecureMemory.zeroBuffer(packet.packet);
             };
-            const postDecoded = (bytes: Uint8Array): void => {
-                if (bytes.byteLength !== OPUS_PCM_BYTES) {
-                    SecureMemory.zeroBuffer(bytes);
-                    throw new Error('Invalid decoded Opus PCM length');
-                }
-                const audioData = new Float32Array(OPUS_FRAME_SAMPLES);
-                new Uint8Array(audioData.buffer).set(bytes);
-                SecureMemory.zeroBuffer(bytes);
-                if (!workletNode) throw new Error('Call audio output is unavailable');
-                workletNode.port.postMessage(audioData, [audioData.buffer]);
-            };
-            const decodeFrame = async (packet: Uint8Array, fec: boolean): Promise<Uint8Array | null> => {
-                if (useNativePlayback) {
-                    await audioCodec.decodeToPlayback(codecSessionId, packet, fec);
-                    return null;
-                }
-                return audioCodec.decode(codecSessionId, packet, fec);
+            const decodeFrame = async (packet: Uint8Array, fec: boolean): Promise<void> => {
+                await audioCodec.decodeToPlayback(codecSessionId, packet, fec);
             };
             const playout = async (): Promise<void> => {
                 if (
@@ -2778,14 +2598,13 @@ export class SecureCallingService {
                 if (expectedSequence === null) return;
                 playoutBusy = true;
                 const decodeStartedAt = performance.now();
-                let decoded: Uint8Array | null = null;
                 let advanceExpectedSequence = true;
                 try {
                     const exact = jitterBuffer.get(expectedSequence);
                     if (exact) {
                         jitterBuffer.delete(expectedSequence);
                         try {
-                            decoded = await decodeFrame(exact.packet, false);
+                            await decodeFrame(exact.packet, false);
                         } finally {
                             SecureMemory.zeroBuffer(exact.packet);
                         }
@@ -2795,14 +2614,14 @@ export class SecureCallingService {
                         const next = jitterBuffer.get(nextSequence);
                         if (next) {
                             try {
-                                decoded = await decodeFrame(next.packet, true);
+                                await decodeFrame(next.packet, true);
                             } catch {
-                                decoded = await decodeFrame(new Uint8Array(0), false);
+                                await decodeFrame(new Uint8Array(0), false);
                             }
                         } else if (consecutiveLosses < MAX_AUDIO_QUEUE_PACKETS) {
-                            decoded = await decodeFrame(new Uint8Array(0), false);
+                            await decodeFrame(new Uint8Array(0), false);
                         } else {
-                            decoded = await decodeFrame(new Uint8Array(0), false);
+                            await decodeFrame(new Uint8Array(0), false);
                             advanceExpectedSequence = false;
                         }
                         consecutiveLosses += 1;
@@ -2812,10 +2631,8 @@ export class SecureCallingService {
                         this.audioStream !== stream ||
                         this.audioCodecSessionId !== codecSessionId
                     ) {
-                        if (decoded) SecureMemory.zeroBuffer(decoded);
                         return;
                     }
-                    if (decoded) postDecoded(decoded);
                     this.callTelemetry?.noteDecode('audio', performance.now() - decodeStartedAt);
                     if (advanceExpectedSequence) {
                         expectedSequence = (expectedSequence + 1) >>> 0;
@@ -2839,7 +2656,6 @@ export class SecureCallingService {
                         this.callTelemetry?.noteRenderDrop('audio');
                     }
                 } catch {
-                    if (decoded) SecureMemory.zeroBuffer(decoded);
                     this.callTelemetry?.noteReceiveError('audio');
                 } finally {
                     playoutBusy = false;
@@ -2913,10 +2729,6 @@ export class SecureCallingService {
             if (playoutTimer) clearInterval(playoutTimer);
             for (const packet of jitterBuffer.values()) SecureMemory.zeroBuffer(packet.packet);
             jitterBuffer.clear();
-            if (workletNode && this.callReceiveAudioNode === workletNode) {
-                this.destroyAudioWorkletNode(workletNode);
-                this.callReceiveAudioNode = null;
-            }
         }
     }
 
@@ -3647,19 +3459,12 @@ export class SecureCallingService {
         this.nextAudioCaptureSequence = 0;
         if (microphoneSessionId) void nativeMicrophone.stop(microphoneSessionId).catch(() => { });
 
-        // Stop local media
-        if (this.localStream) {
-            const localStream = this.localStream;
-            this.localStream = null;
-            this.stopMediaStream(localStream);
-            this.lastCaptureReleaseAt = Date.now();
+        if (this.localMediaActive) {
+            this.localMediaActive = false;
+            this.notifyLocalMediaChange(false);
         }
-
-        this.teardownCallAudioNodes();
-        for (const context of [this.sharedReceiveAudioContext]) {
-            if (context?.state === 'running') {
-                try { void context.suspend().catch(() => { }); } catch { }
-            }
+        if (cameraSessionId || microphoneSessionId) {
+            this.lastCaptureReleaseAt = Date.now();
         }
 
         this.cleanupScreenShareLocal();
@@ -3724,9 +3529,8 @@ export class SecureCallingService {
         this.onLocalScreenCanvasCallback = callback;
     }
 
-    // Set local stream callback
-    onLocalStream(callback: (stream: MediaStream) => void): void {
-        this.onLocalStreamCallback = callback;
+    onLocalMediaChange(callback: (active: boolean) => void): void {
+        this.onLocalMediaChangeCallback = callback;
     }
 
     onScreenSharingChange(callback: (sharing: boolean) => void): void {
@@ -3738,65 +3542,23 @@ export class SecureCallingService {
         return this.isScreenSharing;
     }
 
-    // Get available screen sources
-    async getAvailableScreenSources(): Promise<ScreenSource[]> {
-        try {
-            const candidates: unknown = await system.getScreenSources();
-            if (!Array.isArray(candidates) || candidates.length > MAX_SCREEN_SOURCES) return [];
-
-            const sources: ScreenSource[] = [];
-            const seen = new Set<string>();
-            for (const candidate of candidates) {
-                if (
-                    !isPlainObject(candidate) ||
-                    hasPrototypePollutionKeys(candidate) ||
-                    Object.keys(candidate).sort().join(',') !== 'id,name,source_type' ||
-                    (candidate.source_type !== 'screen' && candidate.source_type !== 'window') ||
-                    !isValidScreenSourceId(candidate.id, candidate.source_type) ||
-                    typeof candidate.name !== 'string' ||
-                    candidate.name.length === 0 ||
-                    candidate.name.length > MAX_SCREEN_SOURCE_NAME_LENGTH ||
-                    /[\x00-\x1f\x7f]/.test(candidate.name) ||
-                    seen.has(candidate.id)
-                ) {
-                    continue;
-                }
-                seen.add(candidate.id);
-                sources.push({
-                    id: candidate.id,
-                    name: candidate.name,
-                    type: candidate.source_type
-                });
-            }
-            sources.sort((left, right) => Number(left.type === 'window') - Number(right.type === 'window'));
-            return sources;
-        } catch {
-            return [];
-        }
-    }
-
     // Destroy the calling service
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
         this.lifecycleGeneration += 1;
 
-        if (typeof window !== 'undefined') {
-            window.removeEventListener('beforeunload', this.beforeUnloadHandler);
-            window.removeEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
-            window.removeEventListener(EventType.USER_BLOCKED, this.userBlockedHandler);
-            window.removeEventListener(
-                EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
-                this.keyTransparencySecurityIncidentHandler
-            );
-        }
+        window.removeEventListener('beforeunload', this.beforeUnloadHandler);
+        window.removeEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
+        window.removeEventListener(EventType.USER_BLOCKED, this.userBlockedHandler);
+        window.removeEventListener(
+            EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
+            this.keyTransparencySecurityIncidentHandler
+        );
         this.initialized = false;
         this.clearPendingIncomingCalls('shutdown');
         this.cleanup();
 
-        this.closeAudioContext(this.sharedReceiveAudioContext);
-        this.sharedReceiveAudioContext = null;
-        this.receiveAudioWorkletLoaded = false;
         this.incomingOfferRates.clear();
         this.incomingOfferGlobal = { windowStart: 0, count: 0 };
         this.onIncomingCallCallback = null;
@@ -3805,7 +3567,7 @@ export class SecureCallingService {
         this.onRemoteScreenCanvasCallback = null;
         this.onLocalVideoCanvasCallback = null;
         this.onLocalScreenCanvasCallback = null;
-        this.onLocalStreamCallback = null;
+        this.onLocalMediaChangeCallback = null;
         this.onScreenSharingChangeCallback = null;
     }
 }

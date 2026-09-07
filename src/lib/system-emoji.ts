@@ -1,5 +1,6 @@
 import { STORAGE_KEYS, STORAGE_STORES } from './database/storage-keys';
 import type { SecureDB } from './database/secureDB';
+import { hasPrototypePollutionKeys, isPlainObject } from './sanitizers';
 
 export interface EmojiRecord {
   readonly emoji: string;
@@ -180,12 +181,9 @@ function newUsageState(loaded: boolean): UsageState {
   };
 }
 
-const inMemoryUsageState = newUsageState(true);
 const usageByDatabase = new WeakMap<SecureDB, UsageState>();
 
-function getUsageState(secureDB?: SecureDB): UsageState {
-  if (!secureDB) return inMemoryUsageState;
-
+function getUsageState(secureDB: SecureDB): UsageState {
   let state = usageByDatabase.get(secureDB);
   if (!state) {
     state = newUsageState(false);
@@ -194,45 +192,50 @@ function getUsageState(secureDB?: SecureDB): UsageState {
   return state;
 }
 
-function parseUsageEntry(value: unknown): UsageEntry | null {
-  if (!Array.isArray(value) || value.length !== 2) return null;
-
-  const count = Number(value[0]);
-  const lastUsed = Number(value[1]);
-  if (!Number.isFinite(count) || count <= 0 || !Number.isFinite(lastUsed) || lastUsed < 0) {
-    return null;
+function parseUsageEntry(value: unknown): UsageEntry {
+  if (!Array.isArray(value) || value.length !== 2) {
+    throw new Error('Stored emoji usage entry is invalid');
   }
+
+  const count = value[0];
+  const lastUsed = value[1];
+  if (
+    !Number.isSafeInteger(count) ||
+    count <= 0 ||
+    count > MAX_USAGE_COUNT ||
+    !Number.isSafeInteger(lastUsed) ||
+    lastUsed < 0 ||
+    lastUsed > Date.now()
+  ) throw new Error('Stored emoji usage entry is invalid');
   return {
-    count: Math.min(Math.floor(count), MAX_USAGE_COUNT),
-    lastUsed: Math.min(Math.floor(lastUsed), Date.now()),
+    count,
+    lastUsed,
   };
 }
 
 function parsePersistedUsage(value: unknown): Map<string, UsageEntry> {
   const parsed = new Map<string, UsageEntry>();
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return parsed;
+  if (value === null || value === undefined) return parsed;
+  if (!isPlainObject(value) || hasPrototypePollutionKeys(value)) {
+    throw new Error('Stored emoji usage state is invalid');
+  }
 
   for (const [emoji, rawEntry] of Object.entries(value)) {
-    if (!emojiByValue.has(emoji)) continue;
+    if (!emojiByValue.has(emoji)) throw new Error('Stored emoji usage state is invalid');
     const entry = parseUsageEntry(rawEntry);
-    if (entry) parsed.set(emoji, entry);
+    parsed.set(emoji, entry);
   }
 
   return parsed;
 }
 
-async function validateUsageLoaded(state: UsageState, secureDB?: SecureDB): Promise<void> {
-  if (state.loaded || !secureDB) return;
+async function validateUsageLoaded(state: UsageState, secureDB: SecureDB): Promise<void> {
+  if (state.loaded) return;
   if (!state.loadPromise) {
     state.loadPromise = (async () => {
-      try {
-        const stored = await secureDB.retrieve(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS);
-        state.stats = parsePersistedUsage(stored);
-      } catch {
-        state.stats = new Map();
-      } finally {
-        state.loaded = true;
-      }
+      const stored = await secureDB.retrieve(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS);
+      state.stats = parsePersistedUsage(stored);
+      state.loaded = true;
     })();
   }
   await state.loadPromise;
@@ -273,12 +276,7 @@ function persistUsage(state: UsageState, secureDB: SecureDB): Promise<void> {
           [entry.count, entry.lastUsed] as const,
         ]),
       );
-      try {
-        await secureDB.store(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS, payload);
-      } catch {
-        state.persistDirty = true;
-        break;
-      }
+      await secureDB.store(STORAGE_STORES.EMOJI_DATA, STORAGE_KEYS.USAGE_STATS, payload);
     }
   })().finally(() => {
     state.persistRunning = false;
@@ -331,7 +329,7 @@ function searchScore(
   return score + Math.min(50, usageScore(state.stats.get(record.emoji), now));
 }
 
-export async function getEmojiCatalog(secureDB?: SecureDB): Promise<EmojiCatalogView> {
+export async function getEmojiCatalog(secureDB: SecureDB): Promise<EmojiCatalogView> {
   await validateEmojiCatalogLoaded();
   const state = getUsageState(secureDB);
   await validateUsageLoaded(state, secureDB);
@@ -344,7 +342,7 @@ export async function getEmojiCatalog(secureDB?: SecureDB): Promise<EmojiCatalog
 
 export function searchEmojiCatalog(
   query: string,
-  secureDB?: SecureDB,
+  secureDB: SecureDB,
   limit = DEFAULT_SEARCH_LIMIT,
 ): readonly EmojiRecord[] {
   const trimmed = query.trim().slice(0, 80);
@@ -372,7 +370,7 @@ export function searchEmojiCatalog(
     .map((item) => item.record);
 }
 
-export async function recordEmojiUsage(emoji: string, secureDB?: SecureDB): Promise<void> {
+export async function recordEmojiUsage(emoji: string, secureDB: SecureDB): Promise<void> {
   await validateEmojiCatalogLoaded();
   if (!emojiByValue.has(emoji)) return;
 
@@ -386,5 +384,5 @@ export async function recordEmojiUsage(emoji: string, secureDB?: SecureDB): Prom
   });
   pruneUsage(state);
 
-  if (secureDB) await persistUsage(state, secureDB);
+  await persistUsage(state, secureDB);
 }

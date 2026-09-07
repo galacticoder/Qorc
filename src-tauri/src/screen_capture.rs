@@ -448,39 +448,21 @@ fn run_gstreamer_capture(
     notifier: StartNotifier,
 ) -> Result<(), String> {
     let capture_started_at = Instant::now();
-    let bundled_only = require_bundled_gstreamer();
     let launcher = resolve_gstreamer_launcher()
         .ok_or_else(|| "bundled GStreamer screen capture runtime is unavailable".to_string())?;
-    let plugin_path = resolve_gstreamer_plugins(&launcher)
+    let plugin_path = resolve_gstreamer_plugins()
         .ok_or_else(|| "GStreamer screen capture plugins are unavailable".to_string())?;
-    let library_path = resolve_gstreamer_library_path(&plugin_path);
-    let spa_path = resolve_gstreamer_spa_path(&plugin_path);
-    let scanner = resolve_gstreamer_scanner(&launcher);
-    if bundled_only && library_path.is_none() {
-        return Err("bundled GStreamer screen capture libraries are unavailable".to_string());
-    }
-    if bundled_only && spa_path.is_none() {
-        return Err("bundled PipeWire SPA runtime is unavailable".to_string());
-    }
-    if let Some(spa_path) = spa_path.as_ref() {
-        let missing = missing_spa_plugins(spa_path);
-        if !missing.is_empty() {
-            return Err(format!(
-                "PipeWire SPA runtime is incomplete at {} (missing: {})",
-                spa_path.display(),
-                missing.join(", ")
-            ));
-        }
-    }
-    if bundled_only && scanner.is_none() {
-        return Err("bundled GStreamer plugin scanner is unavailable".to_string());
-    }
+    let library_path = resolve_gstreamer_library_path()
+        .ok_or_else(|| "bundled GStreamer screen capture libraries are unavailable".to_string())?;
+    let spa_path = resolve_gstreamer_spa_path()
+        .ok_or_else(|| "bundled PipeWire SPA runtime is unavailable".to_string())?;
+    let scanner = resolve_gstreamer_scanner()
+        .ok_or_else(|| "bundled GStreamer plugin scanner is unavailable".to_string())?;
     tracing::info!(
         target: "qorc_call_diag",
         launcher = %launcher.display(),
         plugin_path = %plugin_path.display(),
         target_fps = CAPTURE_FRAME_RATE,
-        bundled_only,
         "[CALL-DIAG] native-screen-gstreamer-start-before"
     );
     let max_rate = format!("max-rate={CAPTURE_FRAME_RATE}");
@@ -528,30 +510,14 @@ fn run_gstreamer_capture(
             "fd=1",
             "sync=false",
         ]);
-    if let Some(registry_path) = resolve_gstreamer_registry_path() {
-        command
-            .env("GST_REGISTRY", &registry_path)
-            .env("GST_REGISTRY_1_0", registry_path);
-    } else {
-        command
-            .env_remove("GST_REGISTRY")
-            .env_remove("GST_REGISTRY_1_0");
-    }
-    if let Some(library_path) = library_path {
-        command.env("LD_LIBRARY_PATH", library_path);
-    } else {
-        command.env_remove("LD_LIBRARY_PATH");
-    }
-    if let Some(spa_path) = spa_path {
-        command.env("SPA_PLUGIN_DIR", spa_path);
-    } else {
-        command.env_remove("SPA_PLUGIN_DIR");
-    }
-    if let Some(scanner) = scanner {
-        command.env("GST_PLUGIN_SCANNER_1_0", scanner);
-    } else {
-        command.env_remove("GST_PLUGIN_SCANNER_1_0");
-    }
+    let registry_path = resolve_gstreamer_registry_path()
+        .ok_or_else(|| "GStreamer registry path is unavailable".to_string())?;
+    command
+        .env("GST_REGISTRY", &registry_path)
+        .env("GST_REGISTRY_1_0", registry_path)
+        .env("LD_LIBRARY_PATH", library_path)
+        .env("SPA_PLUGIN_DIR", spa_path)
+        .env("GST_PLUGIN_SCANNER_1_0", scanner);
     if std::env::var_os("PIPEWIRE_DEBUG").is_none() {
         command.env("PIPEWIRE_DEBUG", "1");
     }
@@ -793,153 +759,30 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_launcher() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_LAUNCH") {
-        let configured = PathBuf::from(configured);
-        if configured.is_file() {
-            return Some(configured);
-        }
-    }
-    let mut candidates = Vec::new();
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(binary_dir) = executable.parent()
-    {
-        candidates.push(binary_dir.join("qorc-gst-launch-1.0"));
-        if let Some(usr_dir) = binary_dir.parent() {
-            candidates.push(
-                usr_dir
-                    .join("lib")
-                    .join("qorc")
-                    .join("webkitgtk")
-                    .join("bin")
-                    .join("qorc-gst-launch-1.0"),
-            );
-        }
-    }
-    if !require_bundled_gstreamer() {
-        candidates.push(PathBuf::from("/usr/bin/gst-launch-1.0"));
-        candidates.push(PathBuf::from("/bin/gst-launch-1.0"));
-    }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    let configured = PathBuf::from(std::env::var_os("QORC_GSTREAMER_LAUNCH")?);
+    configured.is_file().then_some(configured)
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_gstreamer_plugins(launcher: &std::path::Path) -> Option<PathBuf> {
-    let mut candidates = std::env::var_os("QORC_GSTREAMER_CAPTURE_PLUGINS")
-        .map(PathBuf::from)
-        .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(bin_dir) = launcher.parent()
-        && let Some(runtime_dir) = bin_dir.parent()
-    {
-        candidates.push(runtime_dir.join("capture-plugins"));
-        if !require_bundled_gstreamer() {
-            candidates.push(runtime_dir.join("gstreamer-1.0"));
-            if runtime_dir.file_name().and_then(|name| name.to_str()) == Some("runtime")
-                && let Some(staging_dir) = runtime_dir.parent()
-            {
-                candidates.push(staging_dir.to_path_buf());
-            }
-        }
-    }
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(binary_dir) = executable.parent()
-        && let Some(usr_dir) = binary_dir.parent()
-    {
-        candidates.push(
-            usr_dir
-                .join("lib")
-                .join("qorc")
-                .join("webkitgtk")
-                .join("capture-plugins"),
-        );
-        candidates.push(
-            usr_dir
-                .join("lib")
-                .join("qorc")
-                .join("screen-capture")
-                .join("gstreamer-1.0"),
-        );
-        if !require_bundled_gstreamer() {
-            candidates.push(usr_dir.join("lib").join("gstreamer-1.0"));
-        }
-    }
-    if !require_bundled_gstreamer() {
-        candidates.extend([
-            PathBuf::from("/usr/lib/x86_64-linux-gnu/gstreamer-1.0"),
-            PathBuf::from("/usr/lib/aarch64-linux-gnu/gstreamer-1.0"),
-            PathBuf::from("/usr/lib64/gstreamer-1.0"),
-            PathBuf::from("/usr/lib/gstreamer-1.0"),
-        ]);
-    }
-    candidates.into_iter().find(|candidate| {
-        candidate.is_dir()
-            && CAPTURE_PLUGINS
-                .iter()
-                .all(|plugin| candidate.join(plugin).is_file())
-    })
+fn resolve_gstreamer_plugins() -> Option<PathBuf> {
+    let configured = PathBuf::from(std::env::var_os("QORC_GSTREAMER_CAPTURE_PLUGINS")?);
+    (configured.is_dir()
+        && CAPTURE_PLUGINS
+            .iter()
+            .all(|plugin| configured.join(plugin).is_file()))
+    .then_some(configured)
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_gstreamer_library_path(plugin_path: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_RUNTIME_LIB") {
-        let configured = PathBuf::from(configured);
-        if configured.is_dir() {
-            return Some(configured);
-        }
-    }
-    let runtime_library = plugin_path.join("runtime").join("lib");
-    if runtime_library.is_dir() {
-        return Some(runtime_library);
-    }
-    if let Some(runtime_library) = plugin_path.parent().map(|path| path.join("lib"))
-        && runtime_library.is_dir()
-    {
-        return Some(runtime_library);
-    }
-    if require_bundled_gstreamer() {
-        None
-    } else {
-        plugin_path
-            .parent()
-            .filter(|path| path.is_dir())
-            .map(PathBuf::from)
-    }
+fn resolve_gstreamer_library_path() -> Option<PathBuf> {
+    let configured = PathBuf::from(std::env::var_os("QORC_GSTREAMER_RUNTIME_LIB")?);
+    configured.is_dir().then_some(configured)
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_gstreamer_spa_path(plugin_path: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_SPA_PLUGINS") {
-        let configured = PathBuf::from(configured);
-        return configured.is_dir().then_some(configured);
-    }
-    let mut candidates = vec![
-        plugin_path.join("runtime").join("spa-0.2"),
-        plugin_path
-            .parent()
-            .map(|path| path.join("spa-0.2"))
-            .unwrap_or_default(),
-    ];
-    if !require_bundled_gstreamer() {
-        candidates.extend([
-            PathBuf::from("/usr/lib/x86_64-linux-gnu/spa-0.2"),
-            PathBuf::from("/usr/lib/aarch64-linux-gnu/spa-0.2"),
-            PathBuf::from("/usr/lib64/spa-0.2"),
-            PathBuf::from("/usr/lib/spa-0.2"),
-        ]);
-    }
-    let mut first_existing = None;
-    for candidate in candidates {
-        if !candidate.is_dir() {
-            continue;
-        }
-        if spa_runtime_is_complete(&candidate) {
-            return Some(candidate);
-        }
-        if first_existing.is_none() {
-            first_existing = Some(candidate);
-        }
-    }
-    first_existing
+fn resolve_gstreamer_spa_path() -> Option<PathBuf> {
+    let configured = PathBuf::from(std::env::var_os("QORC_GSTREAMER_SPA_PLUGINS")?);
+    spa_runtime_is_complete(&configured).then_some(configured)
 }
 
 #[cfg(target_os = "linux")]
@@ -957,35 +800,13 @@ pub(crate) fn spa_runtime_is_complete(spa_root: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_gstreamer_scanner(launcher: &std::path::Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_PLUGIN_SCANNER") {
-        let configured = PathBuf::from(configured);
-        if configured.is_file() {
-            return Some(configured);
-        }
-    }
-    launcher
-        .parent()
-        .map(|path| path.join("qorc-gst-plugin-scanner"))
-        .filter(|candidate| candidate.is_file())
-}
-
-#[cfg(target_os = "linux")]
-fn require_bundled_gstreamer() -> bool {
-    std::env::var_os("QORC_GSTREAMER_REQUIRE_BUNDLED")
-        .is_some_and(|value| value == std::ffi::OsStr::new("1"))
+fn resolve_gstreamer_scanner() -> Option<PathBuf> {
+    let configured = PathBuf::from(std::env::var_os("QORC_GSTREAMER_PLUGIN_SCANNER")?);
+    configured.is_file().then_some(configured)
 }
 
 #[cfg(target_os = "linux")]
 fn resolve_gstreamer_registry_path() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("QORC_GSTREAMER_REGISTRY") {
-        let configured = PathBuf::from(configured);
-        if let Some(parent) = configured.parent()
-            && std::fs::create_dir_all(parent).is_ok()
-        {
-            return Some(configured);
-        }
-    }
     let runtime_dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
     if !runtime_dir.is_absolute() || !runtime_dir.is_dir() {
         return None;

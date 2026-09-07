@@ -15,8 +15,48 @@ import {
 
 import { requireAdmin } from '../../scripts/admin-auth.js';
 import { SERVER_KEYS_UNAVAILABLE_MESSAGE } from '../config/error-codes.js';
+import { CLUSTER_SERVER_ID_RE } from '../cluster/signed-message.js';
 
 const router = express.Router();
+const REASON_MAX_CHARS = 256;
+const CLUSTER_ADMIN_JSON_LIMIT = 2048;
+const parseClusterAdminJson = express.json({ limit: CLUSTER_ADMIN_JSON_LIMIT, strict: true });
+
+function validServerId(value) {
+  return typeof value === 'string' && CLUSTER_SERVER_ID_RE.test(value);
+}
+
+function parseReason(body) {
+  if (
+    typeof body !== 'object' ||
+    Array.isArray(body) ||
+    Object.getPrototypeOf(body) !== Object.prototype ||
+    Object.keys(body).length !== 1 ||
+    !Object.hasOwn(body, 'reason')
+  ) return null;
+  if (typeof body.reason !== 'string') return null;
+  const reason = body.reason.trim();
+  if (!reason || reason.length > REASON_MAX_CHARS || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(reason)) return null;
+  return reason;
+}
+
+function clusterOperationFailed(res, error, responseMessage) {
+  const message = String(error?.message || '');
+  const status = message.includes('not found') ? 404 :
+    message.includes('not initialized') ? 503 :
+      message.includes('Only primary') || message.includes('Cannot remove self') ? 403 : 500;
+  return res.status(status).json({ success: false, error: responseMessage });
+}
+
+router.use((req, res, next) => {
+  if (req.method === 'GET' && req.path === '/health') return next();
+  return requireAdmin(req, res, next);
+});
+
+router.use((req, res, next) => {
+  if (req.method === 'GET' && req.path === '/health') return next();
+  return parseClusterAdminJson(req, res, next);
+});
 
 // Get all server public keys for clients
 router.get('/server-keys', async (req, res) => {
@@ -51,15 +91,11 @@ router.get('/health', async (req, res) => {
     if (isHealthy) {
       res.status(200).json({
         status: 'healthy',
-        serverId: manager.serverId,
         timestamp: Date.now(),
       });
     } else {
       res.status(503).json({
         status: 'unhealthy',
-        reason: !manager ? 'not initialized' :
-          !manager.isApproved ? 'not approved' :
-            'shutting down',
         timestamp: Date.now(),
       });
     }
@@ -67,14 +103,13 @@ router.get('/health', async (req, res) => {
     console.error('[CLUSTER-API] Health check failed', error);
     res.status(503).json({
       status: 'unhealthy',
-      error: error.message,
       timestamp: Date.now(),
     });
   }
 });
 
 // Get cluster status (admin)
-router.get('/status', requireAdmin, async (req, res) => {
+router.get('/status', async (req, res) => {
   try {
     const status = await getClusterStatus();
     res.json({
@@ -92,7 +127,7 @@ router.get('/status', requireAdmin, async (req, res) => {
 });
 
 // Get pending servers awaiting approval (admin)
-router.get('/pending', requireAdmin, async (req, res) => {
+router.get('/pending', async (req, res) => {
   try {
     const pending = await getPendingServers();
     res.json({
@@ -110,14 +145,14 @@ router.get('/pending', requireAdmin, async (req, res) => {
 });
 
 // Approve a pending server (admin)
-router.post('/approve/:serverId', requireAdmin, async (req, res) => {
+router.post('/approve/:serverId', async (req, res) => {
   try {
     const { serverId } = req.params;
 
-    if (!serverId) {
+    if (!validServerId(serverId)) {
       return res.status(400).json({
         success: false,
-        error: 'serverId is required',
+        error: 'Invalid serverId format',
       });
     }
 
@@ -133,27 +168,24 @@ router.post('/approve/:serverId', requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('[CLUSTER-API] Failed to approve server', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    return clusterOperationFailed(res, error, 'Server approval failed');
   }
 });
 
 // Reject a pending server (admin)
-router.post('/reject/:serverId', requireAdmin, async (req, res) => {
+router.post('/reject/:serverId', async (req, res) => {
   try {
     const { serverId } = req.params;
-    const { reason } = req.body;
+    const reason = parseReason(req.body);
 
-    if (!serverId) {
+    if (!validServerId(serverId) || reason === null) {
       return res.status(400).json({
         success: false,
-        error: 'serverId is required',
+        error: 'Invalid rejection request',
       });
     }
 
-    await rejectServer(serverId, reason || 'Rejected by admin');
+    await rejectServer(serverId, reason);
 
     console.log('[CLUSTER-API] Server rejected', { serverId, reason });
 
@@ -161,35 +193,25 @@ router.post('/reject/:serverId', requireAdmin, async (req, res) => {
       success: true,
       message: `Server ${serverId} rejected`,
       serverId,
-      reason: reason || 'Rejected by admin',
+      reason,
       timestamp: Date.now(),
     });
   } catch (error) {
     console.error('[CLUSTER-API] Failed to reject server', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    return clusterOperationFailed(res, error, 'Server rejection failed');
   }
 });
 
 // Force remove a server from cluster (admin)
-router.delete('/remove/:serverId', requireAdmin, async (req, res) => {
+router.delete('/remove/:serverId', async (req, res) => {
   try {
     const { serverId } = req.params;
-    const { reason } = req.body;
+    const reason = parseReason(req.body);
 
-    if (!serverId) {
+    if (!validServerId(serverId) || reason === null) {
       return res.status(400).json({
         success: false,
-        error: 'serverId is required',
-      });
-    }
-
-    if (typeof serverId !== 'string' || serverId.length < 3) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid serverId format',
+        error: 'Invalid removal request',
       });
     }
 
@@ -198,7 +220,7 @@ router.delete('/remove/:serverId', requireAdmin, async (req, res) => {
     console.log('[CLUSTER-API] Server force removed via API', {
       serverId,
       adminId: req.admin?.id,
-      reason: reason || 'Force removal via admin API',
+      reason,
       removedServer: result.removedServer,
     });
 
@@ -217,15 +239,7 @@ router.delete('/remove/:serverId', requireAdmin, async (req, res) => {
       adminId: req.admin?.id,
     });
 
-    const status = error.message.includes('not found') ? 404 :
-      error.message.includes('not initialized') ? 503 :
-        error.message.includes('Only primary') ? 403 : 500;
-
-    res.status(status).json({
-      success: false,
-      error: error.message,
-      serverId: req.params.serverId,
-    });
+    return clusterOperationFailed(res, error, 'Server removal failed');
   }
 });
 

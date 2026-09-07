@@ -47,12 +47,14 @@ const requiredSpaPaths = [
 ];
 const gStreamerPlugins = [
   'libgstapp.so',
+  'libgstaudiofx.so',
   'libgstaudioconvert.so',
   'libgstaudiorate.so',
   'libgstaudioresample.so',
   'libgstautoconvert.so',
   'libgstautodetect.so',
   'libgstcoreelements.so',
+  'libgstdebugutilsbad.so',
   'libgstencoding.so',
   'libgstisomp4.so',
   'libgstjpeg.so',
@@ -64,6 +66,7 @@ const gStreamerPlugins = [
   'libgstpbtypes.so',
   'libgstplayback.so',
   'libgstpipewire.so',
+  'libgstsubenc.so',
   'libgsttranscode.so',
   'libgsttypefindfunctions.so',
   'libgstvideoconvertscale.so',

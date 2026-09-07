@@ -32,6 +32,10 @@ import {
 } from './bucket-layout.js';
 import { currentDiscoveryEpochId } from './epoch.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import {
+  signDiscoveryPublicationEntry,
+  verifyDiscoveryPublicationEntry
+} from './publication-auth.js';
 
 const DISCOVERY_PUBLICATION_POOL_KEY = PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS;
 const DISCOVERY_PUBLICATION_PROCESSING_KEY = PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS;
@@ -148,10 +152,31 @@ function normalizePublicationEntry(value, { queued = false, now = Date.now() } =
   };
 }
 
+function serializePublicationEntry(entry) {
+  return JSON.stringify({
+    entry,
+    signature: signDiscoveryPublicationEntry(entry),
+    version: 1
+  });
+}
+
 function parsePublicationEntry(raw, options) {
   if (typeof raw !== 'string') return null;
   try {
-    return normalizePublicationEntry(JSON.parse(raw), options);
+    const authenticated = JSON.parse(raw);
+    if (
+      !authenticated ||
+      typeof authenticated !== 'object' ||
+      Array.isArray(authenticated) ||
+      Object.getPrototypeOf(authenticated) !== Object.prototype ||
+      Object.keys(authenticated).sort().join(',') !== 'entry,signature,version' ||
+      authenticated.version !== 1
+    ) return null;
+    const normalized = normalizePublicationEntry(authenticated.entry, options);
+    if (!normalized || !verifyDiscoveryPublicationEntry(normalized, authenticated.signature)) {
+      return null;
+    }
+    return normalized;
   } catch {
     return null;
   }
@@ -256,7 +281,15 @@ async function removePublication(client, pool, raw, expectedSourceScore) {
   )) === 1;
 }
 
-export async function enqueueDiscoveryPublication({ publication, encryptedBlob, leaseMs }) {
+export async function enqueueDiscoveryPublication({
+  publication,
+  encryptedBlob,
+  leaseMs,
+  authorizationCheck
+}) {
+  if (typeof authorizationCheck !== 'function' || authorizationCheck() !== true) {
+    return { queued: false, error: 'discovery_authorization_revoked' };
+  }
   const normalized = normalizePublication(publication);
   if (!normalized || !isCanonicalDiscoveryBlob(encryptedBlob)) {
     return { queued: false, error: 'invalid_discovery_publication' };
@@ -284,16 +317,22 @@ export async function enqueueDiscoveryPublication({ publication, encryptedBlob, 
   }
 
   try {
-    const enqueued = await withRedisClient((client) => client.eval(
-      ENQUEUE_PUBLICATION_SCRIPT,
-      2,
-      DISCOVERY_PUBLICATION_POOL_KEY,
-      DISCOVERY_PUBLICATION_PROCESSING_KEY,
-      MAX_PUBLICATION_POOL_ENTRIES,
-      entry.releaseAt,
-      JSON.stringify(entry),
-      PUBLICATION_POOL_TTL_SECONDS
-    ));
+    const enqueued = await withRedisClient((client) => {
+      if (authorizationCheck() !== true) return null;
+      return client.eval(
+        ENQUEUE_PUBLICATION_SCRIPT,
+        2,
+        DISCOVERY_PUBLICATION_POOL_KEY,
+        DISCOVERY_PUBLICATION_PROCESSING_KEY,
+        MAX_PUBLICATION_POOL_ENTRIES,
+        entry.releaseAt,
+        serializePublicationEntry(entry),
+        PUBLICATION_POOL_TTL_SECONDS
+      );
+    });
+    if (enqueued === null) {
+      return { queued: false, error: 'discovery_authorization_revoked' };
+    }
     if (Number(enqueued) !== 1) {
       return { queued: false, error: 'discovery_publication_pool_full' };
     }

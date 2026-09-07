@@ -10,10 +10,9 @@ export function parseProtocolCollectionStore<T>(
     corrupt: (message: string) => never;
     parseError: string;
     structureError: string;
-    emptyStringIsEmpty?: boolean;
   },
 ): T[] {
-  if (raw === null || (options.emptyStringIsEmpty && raw === '')) return [];
+  if (raw === null) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -21,16 +20,17 @@ export function parseProtocolCollectionStore<T>(
     return options.corrupt(options.parseError);
   }
   const value = parsed as Record<string, unknown>;
+  const collection = value[options.collectionKey];
   if (
     !exactPlainObject(value, ['protocol', options.collectionKey]) ||
     value.protocol !== options.protocol ||
-    !Array.isArray(value[options.collectionKey]) ||
-    value[options.collectionKey].length > options.maxEntries
+    !Array.isArray(collection) ||
+    collection.length > options.maxEntries
   ) return options.corrupt(options.structureError);
-  return value[options.collectionKey].map(options.parseEntry);
+  return collection.map(options.parseEntry);
 }
 
-export function hasUniqueCollectionFields<T extends Record<string, unknown>>(
+export function hasUniqueCollectionFields<T>(
   values: T[],
   fields: Array<keyof T>,
 ): boolean {

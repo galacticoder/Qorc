@@ -82,7 +82,6 @@ function parseChunk(raw: string | null): StoredKeyTransparencyRecord[] {
     corrupt: corruptRecordStore,
     parseError: 'Stored key-transparency record chunk is corrupt',
     structureError: 'Stored key-transparency record chunk is corrupt',
-    emptyStringIsEmpty: true,
   });
 }
 
@@ -93,7 +92,7 @@ export async function loadKeyTransparencyCheckpoint(
   const accountScope = deriveLocalAccountScope(context, normalizeOwner(ownerUsername));
   const raw = await storage.get(storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_CHECKPOINT));
   await assertCurrentServerContext(context);
-  if (!raw) return null;
+  if (raw === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -239,15 +238,18 @@ export async function loadKeyTransparencyTransition(
   ownerUsername: string,
   recordHash: string,
 ): Promise<unknown | null> {
-  if (!isKeyTransparencyHash(recordHash)) return null;
+  if (!isKeyTransparencyHash(recordHash)) throw new Error('Invalid key-transparency record hash');
   const accountScope = deriveLocalAccountScope(context, normalizeOwner(ownerUsername));
   const raw = await storage.get(storageKey(accountScope, `transition:${recordHash}`));
   await assertCurrentServerContext(context);
-  if (!raw || raw.length > MAX_TRANSITION_CHARS) return null;
+  if (raw === null) return null;
+  if (raw.length > MAX_TRANSITION_CHARS) {
+    corruptRecordStore('Stored key-transparency transition is corrupt');
+  }
   try {
     return JSON.parse(raw);
   } catch {
-    return null;
+    corruptRecordStore('Stored key-transparency transition is corrupt');
   }
 }
 
@@ -277,10 +279,13 @@ export async function loadOwnKeyTransparencyTransition(
   const accountScope = deriveLocalAccountScope(context, normalizeOwner(ownerUsername));
   const raw = await storage.get(storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_OWN_TRANSITION));
   await assertCurrentServerContext(context);
-  if (!raw || raw.length > MAX_TRANSITION_CHARS) return null;
+  if (raw === null) return null;
+  if (raw.length > MAX_TRANSITION_CHARS) {
+    corruptRecordStore('Stored key-transparency transition is corrupt');
+  }
   try {
     return JSON.parse(raw);
   } catch {
-    return null;
+    corruptRecordStore('Stored key-transparency transition is corrupt');
   }
 }

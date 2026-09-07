@@ -202,13 +202,13 @@ export function verifyPowSolution(seedB64, difficulty, solutionB64) {
   }
 }
 
-const OT_KEY_PREFIX = REDIS_KEYS.AUTH_OT_REQUEST_PREFIX;
+const PIR_KEY_PREFIX = REDIS_KEYS.AUTH_PIR_REQUEST_PREFIX;
 const AUTH_PREFLIGHT_BASE_BITS = envInt('AUTH_PREFLIGHT_POW_BITS', 20, 18, POW_MAX_BITS);
 const AUTH_FINALIZE_BASE_BITS = envInt('AUTH_FINALIZE_POW_BITS', 22, 22, POW_MAX_BITS);
 const AUTH_PREFLIGHT_STEP_REQUESTS = envInt('AUTH_PREFLIGHT_STEP_REQUESTS', 32, 1, 1_000_000);
 const MAX_EXPENSIVE_AUTH_CONCURRENCY = 1;
-const MAX_EXPENSIVE_AUTH_QUEUE = envInt('AUTH_OT_MAX_QUEUE', 8, 0, 8);
-const EXPENSIVE_AUTH_QUEUE_TIMEOUT_MS = envInt('AUTH_OT_QUEUE_TIMEOUT_MS', 90_000, 1_000, 120_000);
+const MAX_EXPENSIVE_AUTH_QUEUE = envInt('AUTH_PIR_MAX_QUEUE', 8, 0, 8);
+const EXPENSIVE_AUTH_QUEUE_TIMEOUT_MS = envInt('AUTH_PIR_QUEUE_TIMEOUT_MS', 90_000, 1_000, 120_000);
 
 const expensiveAuthAdmissionGate = createAbortableAdmissionGate({
   maxConcurrent: MAX_EXPENSIVE_AUTH_CONCURRENCY,
@@ -227,9 +227,9 @@ function acquireExpensiveAuthSlot(signal) {
   return expensiveAuthAdmissionGate.acquire(signal);
 }
 
-// Baseline work always required before OT
+// Baseline work always required before private PIR retrieval
 export async function getAuthPreflightDifficulty() {
-  const recent = await getRecentCount(OT_KEY_PREFIX);
+  const recent = await getRecentCount(PIR_KEY_PREFIX);
   const extra = Math.floor(Math.log2(1 + Math.max(0, recent) / AUTH_PREFLIGHT_STEP_REQUESTS));
   return Math.min(POW_MAX_BITS, AUTH_PREFLIGHT_BASE_BITS + extra);
 }
@@ -240,10 +240,10 @@ export async function getAuthVerificationDifficulty() {
 }
 
 export async function recordAuthPreflightCompletion() {
-  return recordEvent(OT_KEY_PREFIX);
+  return recordEvent(PIR_KEY_PREFIX);
 }
 
-// Record work backed OT request and acquire bounded execution slot
+// Record the work-backed PIR request and acquire a bounded execution slot
 export async function throttleExpensiveAuthRequest(signal) {
   await recordAuthPreflightCompletion();
   return acquireExpensiveAuthSlot(signal);

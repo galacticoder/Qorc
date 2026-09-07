@@ -6,6 +6,7 @@ import type { ExtendedFileState } from "../../lib/types/file-types";
 import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
 import { bytesToHex } from '../../lib/utils/byte-utils';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
+import type { SecureDB } from '../../lib/database/secureDB';
 
 // Validate all chunks are present
 export const validateAllChunks = (fileEntry: ExtendedFileState): boolean => {
@@ -76,9 +77,9 @@ export const completeFileTransfer = async (
   fileEntry: ExtendedFileState,
   from: string,
   toUser: string | undefined,
-  secureDB: any | null,
+  secureDB: SecureDB,
   onNewMessage: (message: Message) => void,
-  isCurrent: () => boolean = () => true
+  isCurrent: () => boolean
 ): Promise<{ assembled: boolean; durablySaved: boolean }> => {
   if (!isCurrent()) return { assembled: false, durablySaved: false };
   if (!validateAllChunks(fileEntry)) {
@@ -100,12 +101,10 @@ export const completeFileTransfer = async (
   let durablySaved = false;
   let duplicate = false;
   try {
-    const saveResult = secureDB
-      ? await secureDB.storeFileMessage(
-        { ...message, timestamp: message.timestamp.getTime() },
-        fileBlob
-      )
-      : { success: false };
+    const saveResult = await secureDB.storeFileMessage(
+      { ...message, timestamp: message.timestamp.getTime() },
+      fileBlob
+    );
     durablySaved = !!saveResult?.success;
     duplicate = !!saveResult?.duplicate;
     if (!saveResult?.success && saveResult?.quotaExceeded) {

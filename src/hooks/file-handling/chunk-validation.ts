@@ -11,8 +11,11 @@ import {
   MAX_FILE_SIZE_BYTES,
   MAX_CHUNK_SIZE_BYTES,
 } from "../../lib/constants";
+import { SignalType } from '../../lib/types/signal-types';
 import { enforceConcurrentLimit, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { FileChunkPayload, ExtendedFileState } from "../../lib/types/file-types";
+import type { HybridEnvelope } from '../../lib/types/crypto-types';
+import { isHybridEnvelopeWireShape } from '../../lib/transport/envelope-shape';
 
 export interface ChunkValidationResult {
   from: string;
@@ -22,9 +25,9 @@ export interface ChunkValidationResult {
   chunkIndex: number;
   totalChunks: number;
   chunkData: string;
-  envelope?: any;
-  messageId?: string;
-  transportMessageId?: string;
+  envelope: HybridEnvelope;
+  messageId: string;
+  transportMessageId: string;
   fileSize: number;
   chunkSize: number;
   chunkMac: string;
@@ -86,8 +89,7 @@ export const validatePayload = (payload: any): payload is FileChunkPayload => {
     isCanonicalAuthUsername(payload.to) &&
     typeof payload.timestamp === 'number' && Number.isSafeInteger(payload.timestamp) &&
     payload.timestamp > 0 &&
-    isPlainObject(payload.envelope) &&
-    !hasPrototypePollutionKeys(payload.envelope);
+    isHybridEnvelopeWireShape(payload.envelope, SignalType.FILE_MESSAGE_CHUNK);
 };
 
 // Extract and sanitize chunk data from payload

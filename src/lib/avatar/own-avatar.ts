@@ -1,11 +1,9 @@
-import websocketClient from '../websocket/websocket';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { EventType } from '../types/event-types';
 import { MAX_AVATAR_DIMENSION } from '../constants';
 import type { AvatarData } from '../types/avatar-types';
 import type { AvatarSystemState } from '../types/avatar-types';
 import {
-    generateDefaultAvatar,
     validateImageData,
     compressImage,
     hashAvatarData
@@ -72,36 +70,7 @@ export async function setOwnAvatar(
     }
 }
 
-// Remove own avatar
-export async function removeOwnAvatar(
-    state: AvatarSystemState,
-    usernameOverride?: string,
-    setAvatarFn?: (url: string, isDefault: boolean) => Promise<any>,
-    isCurrent: () => boolean = () => false
-): Promise<void> {
-    if (!state.secureDB || !isCurrent()) return;
-
-    try {
-        const username = usernameOverride || websocketClient?.getUsername() || 'unknown';
-        const defaultAvatarUrl = generateDefaultAvatar(username);
-
-        if (setAvatarFn && isCurrent()) {
-            await setAvatarFn(defaultAvatarUrl, true);
-        }
-    } catch { }
-}
-
 // Get own avatar
 export function getOwnAvatar(state: AvatarSystemState): string | null {
     return state.ownAvatar?.data || null;
-}
-
-// Get own avatar hash
-export function getOwnAvatarHash(state: AvatarSystemState): string | null {
-    return state.ownAvatar?.hash || null;
-}
-
-// Check if own avatar is default
-export function isOwnAvatarDefault(state: AvatarSystemState): boolean {
-    return !!state.ownAvatar?.isDefault;
 }

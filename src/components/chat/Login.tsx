@@ -23,7 +23,7 @@ interface LoginProps {
   ) => Promise<void>;
   readonly showPasswordPrompt: boolean;
   readonly handleServerPasswordSubmit: (password: string) => Promise<void>;
-  readonly setIsRegistrationMode?: (val: boolean) => void;
+  readonly setIsRegistrationMode: (val: boolean) => void;
 }
 
 const TERMS_URL = "https://www.qorc.com/terms";
@@ -75,16 +75,12 @@ export const Login = React.memo<LoginProps>(({
       setIsSubmitting(true);
       setIsRateLimited(true);
       if (rateLimitTimeout) clearTimeout(rateLimitTimeout);
-      const detail = event instanceof CustomEvent ? event.detail : null;
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail;
       const now = Date.now();
       const declaredUntil = Number(detail?.rateLimitUntil);
-      const remainingSeconds = Number(detail?.remainingSeconds);
-      const fallbackDelay = Number.isFinite(remainingSeconds) && remainingSeconds > 0
-        ? Math.min(Math.ceil(remainingSeconds) * 1000, 24 * 60 * 60 * 1000)
-        : 60_000;
-      const delay = Number.isSafeInteger(declaredUntil) && declaredUntil > now
-        ? Math.min(declaredUntil - now, 24 * 60 * 60 * 1000)
-        : fallbackDelay;
+      if (!Number.isSafeInteger(declaredUntil) || declaredUntil <= now) return;
+      const delay = Math.min(declaredUntil - now, 24 * 60 * 60 * 1000);
       rateLimitTimeout = setTimeout(clearRateLimit, delay + 50);
     };
     const handleAuthError = () => {
@@ -135,7 +131,7 @@ export const Login = React.memo<LoginProps>(({
   const handleModeToggle = useCallback((): void => {
     setMode((prev) => {
       const newMode = prev === 'login' ? 'register' : 'login';
-      setIsRegistrationMode?.(newMode === 'register');
+      setIsRegistrationMode(newMode === 'register');
       return newMode;
     });
   }, [setIsRegistrationMode]);

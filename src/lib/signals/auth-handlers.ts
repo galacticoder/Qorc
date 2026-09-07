@@ -28,8 +28,39 @@ import { hasResumeToken, replenishResumePool } from './resume-tokens';
 import { hasExactKeys } from '../sanitizers';
 import { REQUEST_ID_RE } from '../../../shared/patterns.js';
 import { STORAGE_PREFIXES } from '../database/storage-keys';
+import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
 type AuthCompletionKind = 'failure' | 'login' | 'registration';
+type AuthOperationRefs = Pick<AuthRefs, 'authLifecycle'>;
+type ServerEntryPromptRefs = Pick<
+  AuthRefs,
+  | 'setShowPasswordPrompt'
+  | 'setIsSubmittingAuth'
+  | 'setTokenValidationInProgress'
+  | 'setAuthStatus'
+  | 'setLoginError'
+>;
+type TokenValidationAuthRefs = Pick<
+  AuthRefs,
+  | 'authLifecycle'
+  | 'getKeysOnDemand'
+  | 'hybridKeysRef'
+  | 'keyManagerOwnerRef'
+  | 'loginUsernameRef'
+  | 'passphrasePlaintextRef'
+  | 'passwordRef'
+  | 'setAccountAuthenticated'
+  | 'setAuthStatus'
+  | 'setIsLoggedIn'
+  | 'setIsSubmittingAuth'
+  | 'setLoginError'
+  | 'setRecoveryActive'
+  | 'setShowPassphrasePrompt'
+  | 'setShowPasswordPrompt'
+  | 'setTokenValidationInProgress'
+  | 'setUsername'
+  | 'setVaultReady'
+>;
 
 function hasValidIssuanceShape(value: unknown): value is Record<string, unknown> {
   return Boolean(
@@ -127,29 +158,29 @@ function validateAuthCompletion(data: unknown): AuthCompletionKind {
   return 'login';
 }
 
-function captureAuthOperation(auth: AuthRefs): AuthOperationSnapshot | null {
-  return auth.authLifecycle?.capture() ?? null;
+function captureAuthOperation(auth: AuthOperationRefs): AuthOperationSnapshot {
+  return auth.authLifecycle.capture();
 }
 
-function isAuthOperationCurrent(auth: AuthRefs, operation: AuthOperationSnapshot | null): boolean {
-  return !operation || !auth.authLifecycle || auth.authLifecycle.isCurrent(operation);
+function isAuthOperationCurrent(auth: AuthOperationRefs, operation: AuthOperationSnapshot): boolean {
+  return auth.authLifecycle.isCurrent(operation);
 }
 
-function assertAuthOperationCurrent(auth: AuthRefs, operation: AuthOperationSnapshot | null): void {
+function assertAuthOperationCurrent(auth: AuthOperationRefs, operation: AuthOperationSnapshot): void {
   if (!isAuthOperationCurrent(auth, operation)) throw new StaleAuthOperationError();
 }
 
 function promptForServerEntry(
-  auth: AuthRefs,
+  auth: ServerEntryPromptRefs,
   message = 'This server requires an entry token. Please provide the server password.',
   authRequestId?: string
 ): void {
-  websocketClient.setServerEntryPromptPending?.(true);
-  auth.setShowPasswordPrompt?.(true);
-  auth.setIsSubmittingAuth?.(false);
-  auth.setTokenValidationInProgress?.(false);
-  auth.setAuthStatus?.('');
-  auth.setLoginError?.('');
+  websocketClient.setServerEntryPromptPending(true);
+  auth.setShowPasswordPrompt(true);
+  auth.setIsSubmittingAuth(false);
+  auth.setTokenValidationInProgress(false);
+  auth.setAuthStatus('');
+  auth.setLoginError('');
   window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
     detail: {
       type: 'SERVER_ENTRY_REQUIRED',
@@ -170,9 +201,9 @@ const switchToUnlinkedModeOnce = async (
     await websocketClient.switchToUnlinkedMode(signal);
     assertCurrent();
     return !!(
-      websocketClient.isUnlinkedMode?.()
-      && websocketClient.isConnectedToServer?.()
-      && websocketClient.isUnlinkedSessionReady?.()
+      websocketClient.isUnlinkedMode()
+      && websocketClient.isConnectedToServer()
+      && websocketClient.isUnlinkedSessionReady()
     );
   } catch (err) {
     assertCurrent();
@@ -192,13 +223,13 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
     setAuthStatus, loginUsernameRef, setIsLoggedIn,
     setAccountAuthenticated, setIsSubmittingAuth,
     setLoginError,
-    setUsername, setRecoveryActive,
+    setRecoveryActive,
     handleAuthSuccess
   } = auth;
 
-  const currentUsername = loginUsernameRef?.current || '';
-  if (auth.authLifecycle && (!operation?.requestId || data?.authRequestId !== operation.requestId)) return;
-  if (operation?.account && operation.account !== currentUsername) return;
+  const currentUsername = loginUsernameRef.current;
+  if (!operation.requestId || data?.authRequestId !== operation.requestId) return;
+  if (operation.account && operation.account !== currentUsername) return;
   const awaitCurrent = async <T>(promise: Promise<T>): Promise<T> => {
     const result = await promise;
     try {
@@ -213,11 +244,11 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
 
   if (completionKind === 'failure') {
     const message = 'Incorrect username, password, or passphrase.';
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setLoginError?.(message);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setIsSubmittingAuth(false);
+    setAuthStatus('');
+    setLoginError(message);
     window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
       detail: { type: 'AUTH_FAILED', code: 'AUTH_FAILED', authRequestId: data?.authRequestId, message }
     }));
@@ -225,11 +256,11 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
   }
 
   if (!currentUsername) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setLoginError?.('Local authentication identity is unavailable. Please sign in again.');
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setIsSubmittingAuth(false);
+    setAuthStatus('');
+    setLoginError('Local authentication identity is unavailable. Please sign in again.');
     try { await websocketClient.close(); } catch { }
     return;
   }
@@ -259,11 +290,11 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
 
   if (!resumeCredentialReady) {
     const message = 'Anonymous session credentials could not be persisted. Please sign in again.';
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setLoginError?.(message);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setIsSubmittingAuth(false);
+    setAuthStatus('');
+    setLoginError(message);
     try { await websocketClient.close(); } catch { }
     window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
       detail: {
@@ -280,11 +311,11 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
     await awaitCurrent(keyTransparencyClient.assertSecurityReady());
   } catch {
     const message = 'Key-transparency security incident detected. Messaging remains quarantined.';
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setLoginError?.(message);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setIsSubmittingAuth(false);
+    setAuthStatus('');
+    setLoginError(message);
     try { await websocketClient.close(); } catch { }
     window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
       detail: {
@@ -302,36 +333,34 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
   }
 
   if (data?.serverEntryRequired) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setRecoveryActive?.(false);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setRecoveryActive(false);
     promptForServerEntry(auth, undefined, data.authRequestId);
     return;
   }
 
-  websocketClient.markServerAuthGranted?.();
+  websocketClient.markServerAuthGranted();
 
-  try {
-    const blindClient = getBlindRoutingClient(currentUsername);
-    blindClient.setSendFunction(async (message: any) => {
-      await websocketClient.sendSecureControlMessage(message);
-    });
-  } catch { }
+  const blindClient = getBlindRoutingClient(currentUsername);
+  blindClient.setSendFunction(async (message: any) => {
+    await websocketClient.sendSecureControlMessage(message);
+  });
 
-  if (websocketClient.isServerEntryPromptPending?.()) {
+  if (websocketClient.isServerEntryPromptPending()) {
     return;
   }
 
   if (!await awaitCurrent(switchToUnlinkedModeOnce(
     () => assertAuthOperationCurrent(auth, operation),
-    operation?.signal
+    operation.signal
   ))) {
     const message = 'Anonymous delivery connection could not be established. Please sign in again.';
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setLoginError?.(message);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setIsSubmittingAuth(false);
+    setAuthStatus('');
+    setLoginError(message);
     try { await websocketClient.close(); } catch { }
     window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
       detail: {
@@ -344,25 +373,16 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
     return;
   }
 
-  if (handleAuthSuccess) {
-    await awaitCurrent(Promise.resolve(handleAuthSuccess(currentUsername)));
-  } else {
-    setAccountAuthenticated?.(true);
-    setIsLoggedIn?.(true);
-    setIsSubmittingAuth?.(false);
-    setAuthStatus?.('');
-    setRecoveryActive?.(false);
-    if (currentUsername) setUsername?.(currentUsername);
-  }
+  await awaitCurrent(handleAuthSuccess(currentUsername));
 
-  auth.setShowPassphrasePrompt?.(false);
-  auth.setShowPasswordPrompt?.(false);
-  auth.setRecoveryActive?.(false);
-  auth.setVaultReady?.(true);
-  auth.setTokenValidationInProgress?.(false);
+  auth.setShowPassphrasePrompt(false);
+  auth.setShowPasswordPrompt(false);
+  auth.setRecoveryActive(false);
+  auth.setVaultReady(true);
+  auth.setTokenValidationInProgress(false);
 
   assertAuthOperationCurrent(auth, operation);
-  websocketClient.markApplicationAuthReady?.();
+  websocketClient.markApplicationAuthReady();
   window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS, {
     detail: {
       authenticated: true,
@@ -379,7 +399,7 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
 export async function handlePrivacyPassIssuance(
   data: any,
   auth: AuthRefs,
-  inheritedOperation?: AuthOperationSnapshot | null
+  inheritedOperation?: AuthOperationSnapshot
 ): Promise<void> {
   const operation = inheritedOperation === undefined ? captureAuthOperation(auth) : inheritedOperation;
   let signedBlindedTokens: Uint8Array[] = [];
@@ -389,7 +409,7 @@ export async function handlePrivacyPassIssuance(
   let completedTokens: any[] = [];
   try {
     assertAuthOperationCurrent(auth, operation);
-    const ppClient = new PrivacyPassClient();
+    const ppClient = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
     const decoded = PrivacyPassHelpers.decodeResponse(data);
     signedBlindedTokens = decoded.signedBlindedTokens;
     proof = decoded.proof;
@@ -437,7 +457,7 @@ export async function handlePrivacyPassIssuance(
  * Handle Token Validation Response
  */
 
-export async function handleTokenValidationResponse(data: any, auth: AuthRefs): Promise<void> {
+export async function handleTokenValidationResponse(data: any, auth: TokenValidationAuthRefs): Promise<void> {
   if (
     !data ||
     typeof data !== 'object' ||
@@ -481,12 +501,10 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
   };
 
   if (!data?.valid) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setTokenValidationInProgress?.(false);
-    if (data?.error || data?.message) {
-      setLoginError?.(`Session expired or invalid: ${data.message || data.error}`);
-    }
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setTokenValidationInProgress(false);
+    setLoginError(`Session expired or invalid: ${data.error}`);
     try {
       await websocketClient.close();
       websocketClient.resetConnectionPrivacyMode();
@@ -495,16 +513,16 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
   }
 
   if (data?.serverEntryRequired) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
     promptForServerEntry(auth);
     try {
       await websocketClient.validateLinkedAuthenticationMode();
     } catch {
       if (isAuthOperationCurrent(auth, operation)) {
-        websocketClient.setServerEntryPromptPending?.(false);
-        auth.setShowPasswordPrompt?.(false);
-        setLoginError?.('Could not establish a private server-authentication connection.');
+        websocketClient.setServerEntryPromptPending(false);
+        auth.setShowPasswordPrompt(false);
+        setLoginError('Could not establish a private server-authentication connection.');
       }
       return;
     }
@@ -512,107 +530,82 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
   }
 
   if (
-    !websocketClient.isUnlinkedMode?.()
-    || !websocketClient.isConnectedToServer?.()
-    || !websocketClient.isUnlinkedSessionReady?.()
+    !websocketClient.isUnlinkedMode()
+    || !websocketClient.isConnectedToServer()
+    || !websocketClient.isUnlinkedSessionReady()
   ) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setTokenValidationInProgress?.(false);
-    setLoginError?.('Anonymous delivery was not established. Please sign in again.');
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setTokenValidationInProgress(false);
+    setLoginError('Anonymous delivery was not established. Please sign in again.');
     try { await websocketClient.close(); } catch { }
     return;
   }
 
-  websocketClient.markServerAuthGranted?.();
+  websocketClient.markServerAuthGranted();
 
-  // Get username from storage or current ref
   const storedAccount = await awaitCurrent(loadLastAuthenticatedAccount());
-  let username = storedAccount.username;
+  const username = storedAccount.username;
   const storedDisplayName = storedAccount.displayName;
-  
-  if (!username && loginUsernameRef?.current) {
-    username = loginUsernameRef.current;
-  }
-  
+
   if (typeof username !== 'string' || !username) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setTokenValidationInProgress?.(false);
-    setLoginError?.('Local authentication identity is unavailable. Please sign in again.');
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setTokenValidationInProgress(false);
+    setLoginError('Local authentication identity is unavailable. Please sign in again.');
     try { await websocketClient.close(); } catch { }
     return;
   }
-  if (operation?.account && operation.account !== username) return;
-  if (loginUsernameRef) loginUsernameRef.current = username;
-  setUsername?.(typeof storedDisplayName === 'string' && storedDisplayName ? storedDisplayName : username);
+  if (operation.account && operation.account !== username) return;
+  loginUsernameRef.current = username;
+  setUsername(typeof storedDisplayName === 'string' && storedDisplayName ? storedDisplayName : username);
 
   try {
     await awaitCurrent(keyTransparencyClient.assertSecurityReady());
   } catch {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
-    setTokenValidationInProgress?.(false);
-    setLoginError?.('Key-transparency security incident detected. Messaging remains quarantined.');
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
+    setTokenValidationInProgress(false);
+    setLoginError('Key-transparency security incident detected. Messaging remains quarantined.');
     try { await websocketClient.close(); } catch { }
     return;
   }
 
-  let vaultUnlocked = false;
-  if (username) {
-    try {
-      const accountScope = await awaitCurrent(getCurrentLocalAccountScope(username));
-      vaultUnlocked = await awaitCurrent(account.isUnlocked(accountScope));
-      if (auth.keyManagerOwnerRef) auth.keyManagerOwnerRef.current = accountScope;
-      auth.setVaultReady?.(vaultUnlocked);
-    } catch (err) {
-      assertAuthOperationCurrent(auth, operation);
-      console.warn('[Auth] Failed to auto-unlock vault:', err);
-    }
+  const accountScope = await awaitCurrent(getCurrentLocalAccountScope(username));
+  const vaultUnlocked = await awaitCurrent(account.isUnlocked(accountScope));
+  auth.keyManagerOwnerRef.current = accountScope;
+  auth.setVaultReady(vaultUnlocked);
+
+  if (vaultUnlocked) {
+    const keys = await getKeysOnDemand();
+    assertAuthOperationCurrent(auth, operation);
+    if (!keys) throw new Error('Local account keys are unavailable');
+    hybridKeysRef.current = keys;
+    window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
   }
 
-  if (getKeysOnDemand) {
-    try {
-      const keys = await getKeysOnDemand();
-      assertAuthOperationCurrent(auth, operation);
-      if (keys && hybridKeysRef) {
-        hybridKeysRef.current = keys;
-        try { window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED)); } catch { }
-      }
-    } catch {
-      assertAuthOperationCurrent(auth, operation);
-    }
-  }
-
-  // Initialize blind routing
-  if (username) {
-    try {
-      const blindClient = getBlindRoutingClient(username);
-      blindClient.setSendFunction(async (message: any) => {
-        await websocketClient.sendSecureControlMessage(message);
-      });
-    } catch (err) {
-      console.warn('[Auth] Failed to initialize blind routing:', err);
-    }
-  }
+  const blindClient = getBlindRoutingClient(username);
+  blindClient.setSendFunction(async (message: any) => {
+    await websocketClient.sendSecureControlMessage(message);
+  });
 
   assertAuthOperationCurrent(auth, operation);
-  setLoginError?.('');
-  setAccountAuthenticated?.(true);
-  setIsLoggedIn?.(true);
-  setTokenValidationInProgress?.(false);
+  setLoginError('');
+  setAccountAuthenticated(true);
+  setIsLoggedIn(true);
+  setTokenValidationInProgress(false);
   
   if (vaultUnlocked) {
-    if (auth.passwordRef) clearStringRef(auth.passwordRef);
-    if (auth.passphrasePlaintextRef) clearStringRef(auth.passphrasePlaintextRef);
-    auth.setShowPassphrasePrompt?.(false);
-    auth.setRecoveryActive?.(false);
+    clearStringRef(auth.passwordRef);
+    clearStringRef(auth.passphrasePlaintextRef);
+    auth.setShowPassphrasePrompt(false);
+    auth.setRecoveryActive(false);
   } else {
-    auth.setShowPassphrasePrompt?.(true);
-    auth.setRecoveryActive?.(true);
+    auth.setShowPassphrasePrompt(true);
+    auth.setRecoveryActive(true);
   }
 
-  websocketClient.markApplicationAuthReady?.();
+  websocketClient.markApplicationAuthReady();
   if (vaultUnlocked) {
     void websocketClient.replaceConsumedAccountAuthorizationToken().catch((error) => {
       console.warn('[Auth] Failed to replace consumed account credential:', error);
@@ -628,13 +621,11 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   const operation = captureAuthOperation(auth);
   if (
     typeof data?.authRequestId === 'string' &&
-    auth.authLifecycle &&
-    data.authRequestId !== operation?.requestId
+    data.authRequestId !== operation.requestId
   ) return;
   if (
     typeof data?.requestId === 'string' &&
-    auth.authLifecycle &&
-    data.requestId !== operation?.requestId
+    data.requestId !== operation.requestId
   ) return;
   const { setLoginError, setAuthStatus, setIsSubmittingAuth, setAccountAuthenticated, setIsLoggedIn } = auth;
   const locked = Boolean(data?.locked);
@@ -643,13 +634,13 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   let errorMessage = message ?? 'Authentication failed';
   if (locked && cooldownSeconds) {
     errorMessage = `Too many attempts. Try again in ${cooldownSeconds}s.`;
-    websocketClient.setGlobalRateLimit?.(cooldownSeconds);
+    websocketClient.setGlobalRateLimit(cooldownSeconds);
   }
 
-  setLoginError?.(errorMessage);
-  setAuthStatus?.('');
-  setIsSubmittingAuth?.(false);
-  auth.setTokenValidationInProgress?.(false);
+  setLoginError(errorMessage);
+  setAuthStatus('');
+  setIsSubmittingAuth(false);
+  auth.setTokenValidationInProgress(false);
   window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
     detail: {
       type: data?.code === 'SERVER_ENTRY_REQUIRED' ? 'SERVER_ENTRY_REQUIRED' : data?.type,
@@ -662,7 +653,7 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   }));
 
   if (locked) {
-    setAccountAuthenticated?.(false);
-    setIsLoggedIn?.(false);
+    setAccountAuthenticated(false);
+    setIsLoggedIn(false);
   }
 }

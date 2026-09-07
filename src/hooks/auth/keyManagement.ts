@@ -68,50 +68,47 @@ export const createGetKeysOnDemand = (
       return null;
     }
 
-    try {
-      const accountScope = await getCurrentLocalAccountScope(currentUsername);
-      const assertOwner = () => {
-        lifecycle.assertCurrent(operation);
-        if (
-          refs.loginUsernameRef.current !== currentUsername ||
-          refs.keyManagerOwnerRef.current !== accountScope
-        ) {
-          throw new StaleAuthOperationError();
-        }
-      };
+    const accountScope = await getCurrentLocalAccountScope(currentUsername);
+    const assertOwner = () => {
+      lifecycle.assertCurrent(operation);
+      if (
+        refs.loginUsernameRef.current !== currentUsername ||
+        refs.keyManagerOwnerRef.current !== accountScope
+      ) {
+        throw new StaleAuthOperationError();
+      }
+    };
+    assertOwner();
+
+    if (refs.hybridKeysRef.current) {
+      return refs.hybridKeysRef.current;
+    }
+
+    if (refs.getKeysPromiseRef.current) {
+      const existing = refs.getKeysPromiseRef.current;
+      const cached = await existing;
       assertOwner();
+      if (refs.getKeysPromiseRef.current === existing) return cached;
+      throw new StaleAuthOperationError();
+    }
 
-      if (refs.hybridKeysRef.current) {
-        return refs.hybridKeysRef.current;
+    const fetching = (async () => {
+      assertOwner();
+      if (!await account.isUnlocked(accountScope)) return null;
+      assertOwner();
+      const keys = toPublicHybridKeys(await account.publicKeys());
+      assertOwner();
+      refs.hybridKeysRef.current = keys;
+      return keys;
+    })();
+
+    refs.getKeysPromiseRef.current = fetching;
+    try {
+      return await fetching;
+    } finally {
+      if (refs.getKeysPromiseRef.current === fetching) {
+        refs.getKeysPromiseRef.current = null;
       }
-
-      if (refs.getKeysPromiseRef.current) {
-        const existing = refs.getKeysPromiseRef.current;
-        const cached = await existing.catch(() => null);
-        assertOwner();
-        if (cached && refs.getKeysPromiseRef.current === existing) return cached;
-      }
-
-      const fetching = (async () => {
-        assertOwner();
-        if (!await account.isUnlocked(accountScope)) return null;
-        assertOwner();
-        const keys = toPublicHybridKeys(await account.publicKeys());
-        assertOwner();
-        refs.hybridKeysRef.current = keys;
-        return keys;
-      })();
-
-      refs.getKeysPromiseRef.current = fetching;
-      try {
-        return await fetching;
-      } finally {
-        if (refs.getKeysPromiseRef.current === fetching) {
-          refs.getKeysPromiseRef.current = null;
-        }
-      }
-    } catch {
-      return null;
     }
   };
 };

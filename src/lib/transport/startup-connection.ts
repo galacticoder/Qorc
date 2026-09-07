@@ -24,14 +24,6 @@ export interface TorPreferences {
 
 const CONNECT_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 2500;
-const SERVER_CONNECTION_TIMEOUT_MS = 10_000;
-const SERVER_CONNECTION_WATCHDOG_GRACE_MS = 1_000;
-
-const serverConnectionTimeoutError = (): Error => {
-  const error = new Error('Server connection timed out after 10 seconds');
-  error.name = 'TimeoutError';
-  return error;
-};
 
 export function normalizeToWss(value: string): string {
   let v = (value || '').trim();
@@ -72,32 +64,28 @@ export function humanizeConnectionError(err: unknown): string {
 }
 
 const readBooleanPreference = async (key: string): Promise<boolean> => {
-  try {
-    const value = await storage.get(key);
-    return value === 'true' || value === '1';
-  } catch {
-    return false;
-  }
+  const value = await storage.get(key);
+  if (value === null) return false;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`Stored boolean preference '${key}' is invalid`);
 };
 
 const readStringPreference = async (key: string): Promise<string> => {
-  try {
-    return (await storage.get(key)) ?? '';
-  } catch {
-    return '';
-  }
+  return (await storage.get(key)) ?? '';
 };
 
 const writeBooleanPreference = async (key: string, value: boolean): Promise<void> => {
-  try {
-    await storage.set(key, value ? 'true' : 'false');
-  } catch { }
+  const serialized = value ? 'true' : 'false';
+  if (!await storage.set(key, serialized) || await storage.get(key) !== serialized) {
+    throw new Error(`Boolean preference '${key}' could not be verified`);
+  }
 };
 
 const writeStringPreference = async (key: string, value: string): Promise<void> => {
-  try {
-    await storage.set(key, value);
-  } catch { }
+  if (!await storage.set(key, value) || await storage.get(key) !== value) {
+    throw new Error(`String preference '${key}' could not be verified`);
+  }
 };
 
 export async function loadTorPreferences(): Promise<TorPreferences> {
@@ -106,11 +94,10 @@ export async function loadTorPreferences(): Promise<TorPreferences> {
     readStringPreference(STORAGE_KEYS.TOR_BRIDGE_TRANSPORT),
     readStringPreference(STORAGE_KEYS.TOR_BRIDGE_LINES),
   ]);
-  return {
-    enableBridges,
-    transport: transport === 'snowflake' ? 'snowflake' : 'obfs4',
-    bridgeLines,
-  };
+  if (transport !== '' && transport !== 'obfs4' && transport !== 'snowflake') {
+    throw new Error('Stored Tor bridge transport is invalid');
+  }
+  return { enableBridges, transport: transport || 'obfs4', bridgeLines };
 }
 
 export async function saveTorPreferences(preferences: TorPreferences): Promise<void> {
@@ -138,6 +125,30 @@ class StartupConnection {
   private torInFlight: Promise<boolean> | null = null;
   private generation = 0;
   private watchdog: ReturnType<typeof setInterval> | null = null;
+  private diagnosticSequence = 0;
+  private diagnosticStartedAt = Date.now();
+
+  private diagnostic(
+    phase: string,
+    details: Record<string, unknown> = {},
+    level: 'info' | 'warn' | 'error' = 'info'
+  ): void {
+    const entry = {
+      sequence: ++this.diagnosticSequence,
+      phase: `startup.${phase}`,
+      elapsedMs: Date.now() - this.diagnosticStartedAt,
+      generation: this.generation,
+      uiPhase: this.state.phase,
+      ...details,
+    };
+    if (level === 'error') {
+      console.error('[WS-CONNECT-DIAG]', entry);
+    } else if (level === 'warn') {
+      console.warn('[WS-CONNECT-DIAG]', entry);
+    } else {
+      console.info('[WS-CONNECT-DIAG]', entry);
+    }
+  }
 
   getState(): StartupConnectionState {
     return this.state;
@@ -187,20 +198,15 @@ class StartupConnection {
   }
 
   private isTorRouteReady(): boolean {
-    return !torNetworkManager.isSupported() || (
-      torNetworkManager.isConnected() && torNetworkManager.isBootstrapped()
-    );
+    return torNetworkManager.isConnected() && torNetworkManager.isBootstrapped();
   }
 
   async loadConfiguredServerUrl(): Promise<string> {
-    try {
-      const stored = await websocket.getServerUrl();
-      const normalized = normalizeToWss(stored || '');
-      if (normalized) this.update({ serverUrl: normalized });
-      return normalized;
-    } catch {
-      return '';
-    }
+    const stored = await websocket.getServerUrl();
+    const normalized = normalizeToWss(stored || '');
+    if (stored && !normalized) throw new Error('Stored server URL is invalid');
+    if (normalized) this.update({ serverUrl: normalized });
+    return normalized;
   }
 
   async setServerUrl(url: string): Promise<string> {
@@ -209,8 +215,7 @@ class StartupConnection {
     this.generation += 1;
     this.inFlight = null;
     if (normalized !== this.state.serverUrl || websocketClient.isConnectedToServer()) {
-      try { await websocketClient.close(); } catch { }
-      try { await websocket.disconnect(); } catch { }
+      await websocketClient.close();
     }
     await websocket.setServerUrl(normalized);
     this.update({ serverUrl: normalized, phase: 'idle', error: '', step: '', failureTarget: null });
@@ -218,7 +223,6 @@ class StartupConnection {
   }
 
   async validateTor(): Promise<boolean> {
-    if (!torNetworkManager.isSupported()) return true;
     if (this.torInFlight) return this.torInFlight;
 
     const run = (async (): Promise<boolean> => {
@@ -233,14 +237,10 @@ class StartupConnection {
       if (current.isRunning && current.isBootstrapped) {
         torNetworkManager.updateConfig({
           enabled: true,
-          socksPort: current.socksPort || 9150,
-          controlPort: current.controlPort || 9151,
+          socksPort: current.socksPort,
+          controlPort: current.controlPort,
         });
-        const synced = (
-          await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize()
-        ) && this.isTorRouteReady();
-        await websocket.syncTorState().catch(() => false);
-        (window as any).__TOR_MODE__ = synced;
+        const synced = await torNetworkManager.syncWithDaemon() && this.isTorRouteReady();
         this.update({ torProgress: 100, step: 'Tor ready' });
         return synced;
       }
@@ -269,16 +269,14 @@ class StartupConnection {
       const refreshed = await getTorAutoSetup().refreshStatus();
       torNetworkManager.updateConfig({
         enabled: true,
-        socksPort: refreshed.socksPort || 9150,
-        controlPort: refreshed.controlPort || 9151,
+        socksPort: refreshed.socksPort,
+        controlPort: refreshed.controlPort,
       });
       const ready = started
         && refreshed.isRunning
         && refreshed.isBootstrapped
-        && (await torNetworkManager.syncWithDaemon() || await torNetworkManager.initialize())
+        && await torNetworkManager.syncWithDaemon()
         && this.isTorRouteReady();
-      await websocket.syncTorState().catch(() => false);
-      (window as any).__TOR_MODE__ = ready;
       this.update({
         torProgress: ready ? 100 : (refreshed.bootstrapProgress || 0),
         step: ready ? 'Tor ready' : (refreshed.error || 'Tor could not finish bootstrapping'),
@@ -293,26 +291,44 @@ class StartupConnection {
   }
 
   async checkConnected(): Promise<void> {
+    this.diagnostic('check-requested', {
+      websocketReady: websocketClient.isConnectedToServer(),
+      torRouteReady: this.isTorRouteReady(),
+      hasInFlightOperation: !!this.inFlight,
+    });
     if (websocketClient.isConnectedToServer() && this.isTorRouteReady()) {
       this.update({ phase: 'ready', error: '', step: '', failureTarget: null });
+      this.diagnostic('already-ready');
       return;
     }
-    if (this.inFlight) return this.inFlight;
+    if (this.inFlight) {
+      this.diagnostic('join-existing-operation');
+      return this.inFlight;
+    }
 
     this.startWatchdog();
     const generation = ++this.generation;
+    this.diagnosticStartedAt = Date.now();
+    this.diagnostic('operation-start');
     const run = (async (): Promise<void> => {
       const serverUrl = this.state.serverUrl || await this.loadConfiguredServerUrl();
       if (!serverUrl) {
         this.update({ phase: 'idle', step: '', error: '', failureTarget: null });
+        this.diagnostic('server-not-configured', {}, 'warn');
         throw new Error('No server selected');
       }
 
       let torReady = false;
       try {
+        this.diagnostic('tor-check-begin');
         torReady = await this.validateTor();
+        this.diagnostic('tor-check-complete', { torReady });
       } catch (error) {
         if (this.generation !== generation) return;
+        this.diagnostic('tor-check-failed', {
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }, 'error');
         const message = 'Tor could not connect. Check your network or bridge settings.';
         this.update({ phase: 'failed', error: message, step: '', failureTarget: 'tor' });
         throw error instanceof Error ? error : new Error(message);
@@ -332,6 +348,7 @@ class StartupConnection {
 
       if (websocketClient.isConnectedToServer()) {
         this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
+        this.diagnostic('became-ready-before-server-dial');
         return;
       }
 
@@ -339,45 +356,52 @@ class StartupConnection {
       for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
         if (this.generation !== generation) return;
         this.update({ phase: 'server', step: 'Connecting to server...', error: '', failureTarget: null });
+        const attemptStartedAt = Date.now();
+        this.diagnostic('server-attempt-begin', { attempt, attemptLimit: CONNECT_ATTEMPTS });
 
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        let timedOut = false;
         try {
-          const timeout = new Promise<never>((_resolve, reject) => {
-            timeoutId = setTimeout(() => {
-              timedOut = true;
-              reject(serverConnectionTimeoutError());
-            }, SERVER_CONNECTION_TIMEOUT_MS + SERVER_CONNECTION_WATCHDOG_GRACE_MS);
-          });
-          await Promise.race([
-            websocketClient.connect({ autoReconnectOnFailure: false }),
-            timeout,
-          ]);
+          await websocketClient.connect({ autoReconnectOnFailure: false });
           if (this.generation !== generation) return;
+          this.diagnostic('server-attempt-ready', {
+            attempt,
+            durationMs: Date.now() - attemptStartedAt,
+          });
           this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
           void anonymousHttp.prewarm().catch(() => { });
           return;
         } catch (error) {
           lastError = error;
-          if (timedOut) {
-            await websocketClient.close().catch(() => { });
-          }
           if (this.generation !== generation) return;
+          this.diagnostic('server-attempt-failed', {
+            attempt,
+            durationMs: Date.now() - attemptStartedAt,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          }, 'error');
           if (attempt < CONNECT_ATTEMPTS) {
             this.update({ step: 'Retrying connection...' });
+            this.diagnostic('server-retry-delay', {
+              attempt,
+              delayMs: RETRY_DELAY_MS,
+            }, 'warn');
             await delay(RETRY_DELAY_MS);
           }
-        } finally {
-          if (timeoutId) clearTimeout(timeoutId);
         }
       }
 
       if (this.generation !== generation) return;
       const message = humanizeConnectionError(lastError);
+      this.diagnostic('operation-failed', {
+        errorName: lastError instanceof Error ? lastError.name : 'UnknownError',
+        errorMessage: lastError instanceof Error ? lastError.message : String(lastError),
+      }, 'error');
       this.update({ phase: 'failed', error: message, step: '', failureTarget: 'server' });
       throw lastError instanceof Error ? lastError : new Error(message);
     })().finally(() => {
       if (this.inFlight === run) this.inFlight = null;
+      this.diagnostic('operation-finished', {
+        operationWasCurrent: this.generation === generation,
+      });
     });
 
     this.inFlight = run;
@@ -393,14 +417,12 @@ class StartupConnection {
   }
 
   async restartTor(): Promise<boolean> {
-    if (!torNetworkManager.isSupported()) return true;
     this.generation += 1;
     this.inFlight = null;
     this.torInFlight = null;
     this.update({ phase: 'tor', torProgress: 0, step: 'Restarting Tor', error: '', failureTarget: null });
     await getTorAutoSetup().stopTor().catch(() => false);
     await torNetworkManager.shutdown().catch(() => { });
-    (window as any).__TOR_MODE__ = false;
     try {
       const ready = await this.validateTor();
       if (!ready) {

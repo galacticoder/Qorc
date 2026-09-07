@@ -16,7 +16,8 @@ current rounded size of the authentication set.
 - OPAQUE-style password envelope and OPRF evaluation:
   `server/crypto/opaque-service.js` and
   `src/lib/cryptography/opaque-client.ts`.
-- ML-KEM-1024 oblivious record transfer for login.
+- YPIR single-server private information retrieval for one fixed-width login
+  record from a 2,048-row snapshot.
 - Privacy Pass VOPRF tokens with separate `account-auth` and `server-entry`
   issuer keys.
 - `pq-ws-8` WebSocket handshake with initiator and responder ML-KEM-1024
@@ -30,9 +31,9 @@ current rounded size of the authentication set.
   seed is random persistent account material wrapped by the native local vault,
   it is not derived in the renderer from the OPAQUE export key.
 
-OPAQUE, the Ristretto255 VOPRF operations, and Privacy Pass issuance are
-classical primitives. ML-KEM protects the fixed-set record transfer, the
-WebSocket and client-facing TLS handshakes are hybrid, and anonymous VOPRF HTTP
+OPAQUE, the Ristretto255 VOPRF operations, Privacy Pass issuance, and YPIR are
+classical constructions. The WebSocket and client-facing TLS handshakes are
+hybrid, and anonymous VOPRF HTTP
 requests are carried inside the hybrid-PQ anonymous tunnel. Those transport
 layers protect captured plaintext protocol traffic, but they do not remove the
 classical discrete-log assumptions inside OPAQUE/VOPRF/Privacy Pass or make the
@@ -42,11 +43,11 @@ complete authentication construction post-quantum.
 
 1. The client derives a composite secret from the normalized local username,
    password, and local encryption passphrase.
-2. `AUTH_OT_REGISTER_REQUEST` sends only a blinded OPRF element and a proof-of-work
+2. `AUTH_REGISTER_REQUEST` sends only a blinded OPRF element and a proof-of-work
    preflight response when required. It sends no username.
 3. The server returns an evaluated OPRF element and a connection-bound nonce.
 4. The client creates the OPAQUE envelope and authentication public key.
-   `AUTH_OT_REGISTER_FINALIZE` carries those values and a bounded random
+   `AUTH_REGISTER_FINALIZE` carries those values and a bounded random
    registration-attempt receipt, but no username or token batch.
 5. The server stages the opaque record in one slot of the fixed anonymity set and
    returns the slot index, or reports that the account was already committed.
@@ -56,7 +57,7 @@ complete authentication construction post-quantum.
    registration of an already-taken name from creating a conflicting local
    account vault.
 7. The client verifies local persistence of the slot index, then sends
-   `AUTH_OT_REGISTER_CONFIRM` with the blinded batch. The server atomically
+   `AUTH_REGISTER_CONFIRM` with the blinded batch. The server atomically
    commits the staged account before issuing those tokens. The slot index is not
    sent during later login.
 
@@ -66,38 +67,36 @@ capacity. There are no shards and no shard identifier on the wire.
 ## Login
 
 1. The client loads its slot index from local protected storage.
-2. It creates 2,048 ML-KEM public keys, retaining the secret key for its local
-   slot, and sends the public-key set, blinded OPRF element, and a transcript
-   commitment in `AUTH_OT_REQUEST`.
-3. The server returns exactly 2,048 fixed-size encrypted records plus a
-   connection-bound nonce and OPRF evaluation. It performs the same record work
-   for every slot.
-4. The client decrypts its slot and opens the OPAQUE envelope. After that local
+2. The native YPIR sidecar generates a query for one row in a fixed 2,048-row,
+   128 byte per row credential database. The client sends the encrypted query,
+   public expansion parameters, blinded OPRF element, and a transcript
+   commitment in `AUTH_PIR_REQUEST`.
+3. The server answers the query against an in memory snapshot containing the
+   OPAQUE envelope and salt in the occupied rows and random fixed width dummy
+   rows everywhere else. The response also carries a connection bound nonce and
+   OPRF evaluation. The server never receives the row index.
+4. The native sidecar decodes exactly one 128 byte row and the client opens the
+   OPAQUE envelope. After that local
    credential check succeeds, it unlocks the native account before opening the
    account-bound token vault and preparing the replacement token batch.
 5. The client sends a proof bound to the one-time server nonce in
-   `AUTH_OT_FINALIZE`. The server consumes the nonce and checks the proof against
+   `AUTH_PIR_FINALIZE`. The server consumes the nonce and checks the proof against
    every record with no early successful exit. The finalize request carries no
    credential ID, username, or slot index.
 6. A successful login blind-issues exactly 250 `account-auth` Privacy Pass
    tokens. The client atomically replaces its prior local batch instead of
    appending another batch.
 
-The implemented transfer protects the selected slot from an honest current
-client and from the server. It is not a malicious-client-secure 1-out-of-N OT:
-a modified client could retain more than one generated ML-KEM secret key and try
-to decrypt additional opaque records. Those records remain password protected,
-but a true malicious-receiver OT or PIR construction is required to remove this
-limitation.
+The PIR response decodes to one fixed width row even for a modified receiver. Query and public parameter encodings have exact protocol sizes,
+are committed into the authenticated preflight, and remain behind the global
+proof-ofwork and bounded expensive-auth admission queue.
 
-It is also not malicious-sender-secure or verifiable retrieval. A malicious
-server can corrupt or permute selected subsets of the 2,048 returned records
-across attempts and observe whether the connection later authenticates. That
-adaptive selective-failure channel can help it learn the client's stable slot.
-Fixed work and absent selectors protect against the honest implementation and
-passive observation, removing this active attack requires a reviewed
-malicious-sender-secure OT/PIR protocol or a client-verifiable committed
-credential database.
+The current retrieval is not malicious server verifiable. A malicious server
+can still answer from a corrupted or permuted credential database and observe
+whether a connection later authenticates. Removing that active selective-
+failure boundary requires a client-verifiable commitment to the credential
+database (or another reviewed malicious sender secure PIR design) it cannot be
+solved by transport encryption alone.
 
 ## Authentication Channel Binding
 
@@ -212,7 +211,7 @@ Code references:
 
 ## Server Entry
 
-An optional server-wide password is separate from account authentication. Its
+The server wide password is separate from account authentication. Its
 gatekeeper uses OPAQUE and blind-issues exactly 1,000 `server-entry` Privacy Pass
 tokens. The purpose-specific issuer key prevents an account token from being
 accepted as a server-entry token or vice versa.
@@ -224,11 +223,33 @@ network use. There is no server-entry replenishment signal: when the finite pool
 is exhausted or expires, the client must prove the shared server password again
 to replace it with a new 1,000-token pool.
 
+The server entry issuer root is derived from both `AUTH_ROOT_SEED` and the
+Argon2id server password secret. Changing `SERVER_PASSWORD` in the
+mounted `.env` atomically replaces the OPAQUE gate record and that issuer root,
+without rotating account auth issuers, account records, database keys, Tor/TLS
+material, or the client pinned server transport identity. No old issuer grace
+period is accepted: every outstanding server-entry token fails immediately.
+The server notifies already authorized encrypted sockets so the client removes
+and wipes the complete server-scoped token pool. Offline clients, and any client
+that misses the notice, perform the same purge after a dedicated
+`SERVER_ENTRY_TOKEN_INVALID` rejection instead of retrying the remaining
+invalid tokens.
+
+`DISCONNECT_CLIENTS_ON_SERVER_PASSWORD_CHANGE=yes` additionally strips all
+authorization state from local WebSockets and closes them immediately. With the
+default `no`, existing sockets continue until their normal disconnect, but new
+connections must authenticate under the new password generation. Every node
+serving one logical server identity must receive the same password update. a
+mixed password cluster intentionally rejects tokens minted by another
+generation.
+
 Code references:
 
 - `src/lib/cryptography/gatekeeper-client.ts`
 - `server/authentication/gatekeeper.js`
 - `server/authentication/privacy-pass-server.js`
+- `server/authentication/server-password-monitor.js`
+- `server/websocket/revoke-connections.js`
 
 ## Connection State
 

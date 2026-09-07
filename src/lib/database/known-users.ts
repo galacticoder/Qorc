@@ -121,51 +121,9 @@ function normalizeKnownUser(value: unknown, ownerUsername: string): StoredUser {
   };
 }
 
-function mergeMatchingUsers(existing: StoredUser, incoming: StoredUser): StoredUser {
-  if (
-    existing.peerCertificateFingerprint &&
-    incoming.peerCertificateFingerprint &&
-    existing.peerCertificateFingerprint !== incoming.peerCertificateFingerprint
-  ) {
-    throw new Error('Conflicting known-peer certificate fingerprints');
-  }
-  if (
-    existing.identityRootFingerprint &&
-    incoming.identityRootFingerprint &&
-    existing.identityRootFingerprint !== incoming.identityRootFingerprint
-  ) {
-    throw new Error('Conflicting known-peer identity roots');
-  }
-  if (
-    existing.hybridPublicKeys &&
-    incoming.hybridPublicKeys &&
-    (
-      existing.hybridPublicKeys.kyberPublicBase64 !== incoming.hybridPublicKeys.kyberPublicBase64 ||
-      existing.hybridPublicKeys.dilithiumPublicBase64 !== incoming.hybridPublicKeys.dilithiumPublicBase64 ||
-      existing.hybridPublicKeys.x25519PublicBase64 !== incoming.hybridPublicKeys.x25519PublicBase64
-    )
-  ) {
-    throw new Error('Conflicting known-peer hybrid public keys');
-  }
-
-  const peerCertificateVerifiedAt = existing.peerCertificateVerifiedAt !== undefined && incoming.peerCertificateVerifiedAt !== undefined
-    ? Math.max(existing.peerCertificateVerifiedAt, incoming.peerCertificateVerifiedAt)
-    : existing.peerCertificateVerifiedAt ?? incoming.peerCertificateVerifiedAt;
-  return {
-    id: existing.id,
-    username: existing.username,
-    peerCertificateFingerprint: existing.peerCertificateFingerprint ?? incoming.peerCertificateFingerprint,
-    peerCertificateVerifiedAt,
-    identityRootFingerprint: existing.identityRootFingerprint ?? incoming.identityRootFingerprint,
-    identityBundleFingerprint: incoming.identityBundleFingerprint ?? existing.identityBundleFingerprint,
-    hybridPublicKeys: existing.hybridPublicKeys ?? incoming.hybridPublicKeys,
-  };
-}
-
 export function normalizeKnownUsers(
   value: unknown,
   ownerUsername: string,
-  duplicatePolicy: 'reject' | 'merge' = 'reject',
 ): StoredUser[] {
   if (!isCanonicalAuthUsername(ownerUsername)) throw new Error('Invalid known-peer owner');
   if (!Array.isArray(value) || value.length > MAX_KNOWN_PEERS) {
@@ -180,10 +138,7 @@ export function normalizeKnownUsers(
       byUsername.set(user.username, user);
       continue;
     }
-    if (duplicatePolicy === 'reject') {
-      throw new Error('Known-peer list contains duplicate usernames');
-    }
-    byUsername.set(user.username, mergeMatchingUsers(existing, user));
+    throw new Error('Known-peer list contains duplicate usernames');
   }
   return Array.from(byUsername.values());
 }

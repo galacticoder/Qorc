@@ -17,7 +17,7 @@ import {
 // Setup session ready handler for retrying pending messages
 export const createSessionReadyHandler = (
   pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage[]>>,
-  secureDBRef: React.RefObject<SecureDB | null> | undefined,
+  secureDBRef: React.RefObject<SecureDB | null>,
   handleSendMessage: (
     user: UserWithKeys,
     content: string,
@@ -56,7 +56,7 @@ export const createSessionReadyHandler = (
       ) return;
       const id = peer;
 
-      if (drainingPeersRef?.current.has(id)) return;
+      if (drainingPeersRef.current.has(id)) return;
 
       let pending = pendingRetryMessagesRef.current.get(id);
       if (!pending || pending.length === 0) return;
@@ -71,7 +71,7 @@ export const createSessionReadyHandler = (
       }
 
       drainingId = id;
-      drainingPeersRef?.current.add(id);
+      drainingPeersRef.current.add(id);
 
       for (const entry of [...pending]) {
         if (!isCurrent()) return;
@@ -101,7 +101,7 @@ export const createSessionReadyHandler = (
 // Handle session reset for unacknowledged messages
 export const createSessionResetRetryHandler = (
   pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage[]>>,
-  secureDBRef: React.RefObject<any> | undefined,
+  secureDBRef: React.RefObject<SecureDB | null>,
   activeAccountRef: React.RefObject<string | null>,
   accountGenerationRef: React.RefObject<number>
 ) => {
@@ -132,7 +132,7 @@ export const createSessionResetRetryHandler = (
         peerUsername === account ||
         typeof failedMessageId !== 'string' ||
         sanitizeMessageId(failedMessageId) !== failedMessageId ||
-        !secureDBRef?.current
+        !secureDBRef.current
       ) return;
       if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
 

@@ -26,7 +26,9 @@ function serializeArgument(value: unknown): string {
                     name: current.name,
                     message: current.message,
                     stack: current.stack,
-                    cause: current.cause,
+                    cause: 'cause' in current
+                        ? (current as Error & { cause?: unknown }).cause
+                        : undefined,
                 };
             }
             if (current instanceof Uint8Array) return `[Uint8Array ${current.byteLength} bytes]`;
@@ -98,11 +100,7 @@ function enqueue(level: ForwardedConsoleLevel, args: readonly unknown[]): void {
 }
 
 export function installClientLogForwarding(): void {
-    if (
-        installed ||
-        typeof window === 'undefined' ||
-        !('__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window)
-    ) return;
+    if (installed) return;
     installed = true;
     const methods: Array<[keyof Pick<Console, 'log' | 'info' | 'warn' | 'error'>, ForwardedConsoleLevel]> = [
         ['log', 'LOG'],
@@ -114,7 +112,7 @@ export function installClientLogForwarding(): void {
         const original = console[method].bind(console);
         console[method] = (...args: unknown[]) => {
             original(...args);
-            if (args[0] === '[CALL-DIAG]') {
+            if (args[0] === '[CALL-DIAG]' || args[0] === '[WS-CONNECT-DIAG]') {
                 const entry = makeLine(level, args);
                 void invoke<boolean>('forward_client_logs', { entries: [entry] })
                     .catch(() => enqueue(level, args));

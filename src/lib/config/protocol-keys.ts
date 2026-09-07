@@ -3,10 +3,8 @@ import { OPAQUE_AUTH_SIGNATURE_CONTEXT } from '../../../shared/private-auth-prot
 import { SPOOL_TAG_PROTOCOL } from '../../../shared/spool-tag-protocol.js';
 
 export const PROTOCOL_KEYS = Object.freeze({
-  ACCOUNT_AUTH_KDF: 'qorc-Account-Auth-Argon2id-v2\0',
-  ACCOUNT_AUTH_PASSPHRASE_PREFIX: 's:',
-  ACCOUNT_AUTH_PASSWORD_PREFIX: 'p:',
-  ACCOUNT_AUTH_USERNAME_PREFIX: 'u:',
+  ACCOUNT_AUTH_KDF: 'qorc-Account-Auth-Argon2id-v3\0',
+  ACCOUNT_AUTH_SECRET: 'qorc-account-auth-secret-v3\0',
   ACCOUNT_ROOT_PAYLOAD: 'qorc-account-root-payload-v3',
   ACCOUNT_ROOT_CERTIFICATE_SIGNING: 'account-root-certificate-v1',
   AVATAR_BLOB_AAD: 'qorc-avatar-purb-v1',
@@ -30,6 +28,7 @@ export const PROTOCOL_KEYS = Object.freeze({
   DISCOVERY_BUCKET_KEY: 'qorc-discovery-bucket-key-v1',
   DISCOVERY_BUCKET_MANIFEST: 'qorc-discovery-bucket-manifest-v1',
   DISCOVERY_ENCRYPTION: 'discovery-encryption-key-v1',
+  DISCOVERY_MATERIAL_STORE: 'qorc-discovery-material-store-v1',
   DISCOVERY_OPRF_POW: 'qorc-discovery-oprf-pow-v1',
   DISCOVERY_PUBLISH_POW: 'qorc-discovery-publish-pow-v1',
   DISCOVERY_TOKEN: 'discovery-token-v1',
@@ -75,6 +74,7 @@ export const PROTOCOL_KEYS = Object.freeze({
   PEER_CERTIFICATE_ATTESTATION: 'qorc-peer-certificate-v4',
   PEER_CERTIFICATE_IDENTITY: 'qorc-peer-certificate-identity-v4',
   PEER_CERTIFICATE_PAYLOAD: 'qorc-peer-certificate-payload-v4',
+  PEER_CERTIFICATE_STORE: 'qorc-peer-certificate-store-v1',
   PQ_ANONYMOUS_HTTP_ADMISSION_POW: 'qorc-PQ-Anonymous-HTTP-Admission-PoW-v1\0',
   PQ_ANONYMOUS_HTTP_PROTOCOL: 'qorc-pq-anonymous-http-v1',
   PQ_ANONYMOUS_HTTP_REQUEST_AAD: 'qorc-PQ-Anonymous-HTTP-Request-v1\0',
@@ -87,7 +87,7 @@ export const PROTOCOL_KEYS = Object.freeze({
   PRIVACY_PASS_NULLIFIER: 'PrivacyPass-Nullifier-v1',
   PRIVACY_PASS_OPRF_INPUT: 'PrivacyPass-OPRF-Input-v3',
   PRIVACY_PASS_REDEMPTION_MAC: 'PrivacyPass-Redemption-MAC-v1',
-  PRIVATE_AUTH_REQUEST: 'qorc-private-auth-request-v2\0',
+  PRIVATE_AUTH_REQUEST: 'qorc-private-auth-request-v3\0',
   ROUTE_PROOF_KIND: 'route-proof-v2',
   SESSION_KEY_KDF_PREFIX: 'session-key-v2:',
   SECURE_DB_AEAD: 'securedb-aead-v3',

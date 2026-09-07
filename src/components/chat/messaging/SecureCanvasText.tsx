@@ -48,10 +48,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
 
     useEffect(() => {
         const node = containerRef.current;
-        if (!node || typeof IntersectionObserver === 'undefined') {
-            setIsVisible(true);
-            return;
-        }
+        if (!node) return;
         const observer = new IntersectionObserver(
             (entries) => setIsVisible(entries[0]?.isIntersecting === true),
             { threshold: 0.1, rootMargin: '100px' },

@@ -12,7 +12,7 @@ import {
   createClearAuthenticationState,
   type AuthRecoveryResult,
 } from "./recovery";
-import { createLogout, createGetLogout } from "./logout";
+import { createLogout } from "./logout";
 import { account } from "../../lib/tauri-bindings";
 import { toast } from "sonner";
 import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
@@ -60,7 +60,7 @@ export const useAuth = () => {
   showPasswordPromptRef.current = showPasswordPrompt;
 
   useEffect(() => {
-    websocketClient.setServerEntryPromptPending?.(showPasswordPrompt);
+    websocketClient.setServerEntryPromptPending(showPasswordPrompt);
   }, [showPasswordPrompt]);
 
   const passphrasePlaintextRef = useRef<string>("");
@@ -87,17 +87,21 @@ export const useAuth = () => {
     setTokenValidationInProgressState(value);
   }, []);
 
-  const rotateAuthLifecycle = useCallback((account = '', requestId = ''): AuthOperationSnapshot => {
+  const rotateAuthLifecycle = useCallback((accountName = '', requestId = ''): AuthOperationSnapshot => {
     invalidateResumePoolOperations();
     const previous = authLifecycleStateRef.current;
     previous.controller.abort();
 
-    const normalizedAccount = account.trim().toLowerCase();
+    const normalizedAccount = accountName.trim().toLowerCase();
     if (
       normalizedAccount &&
       loginUsernameRef.current &&
       loginUsernameRef.current !== normalizedAccount
     ) {
+      const previousOwner = keyManagerOwnerRef.current;
+      if (/^[a-f0-9]{64}$/.test(previousOwner)) {
+        void account.lock(previousOwner).catch(() => false);
+      }
       keyTransparencyClient.destroy();
       hybridKeysRef.current = null;
       keyManagerOwnerRef.current = '';
@@ -255,6 +259,9 @@ export const useAuth = () => {
         keyManagerOwnerRef,
         getKeysOnDemand,
         hybridKeysRef,
+        passwordRef,
+        passphrasePlaintextRef,
+        setRecoveryActive,
         authLifecycle,
       });
     },
@@ -322,8 +329,6 @@ export const useAuth = () => {
     clearAuthenticationState,
     authLifecycle
   );
-
-  const getLogout = createGetLogout(logout);
 
   useEffect(() => {
     const handleAuthUiBack = (event: CustomEvent) => {
@@ -453,6 +458,7 @@ export const useAuth = () => {
   const resumeSavedAccountAfterServerEntry = useCallback(async (
     operation: AuthOperationSnapshot
   ): Promise<void> => {
+    if (accountSubmitInFlightRef.current) return;
     if (await isExplicitlyLoggedOut()) {
       authLifecycle.assertCurrent(operation);
       setTokenValidationInProgress(false);
@@ -460,16 +466,19 @@ export const useAuth = () => {
       return;
     }
     authLifecycle.assertCurrent(operation);
+    if (accountSubmitInFlightRef.current) return;
     if (websocketClient.isUnlinkedMode()) {
       return;
     }
 
     const savedAccount = await loadLastAuthenticatedAccount();
     authLifecycle.assertCurrent(operation);
+    if (accountSubmitInFlightRef.current) return;
     const savedUsername = savedAccount.username;
     if (operation.account && savedUsername && operation.account !== savedUsername) return;
     const canResume = savedUsername ? await hasResumeToken(savedUsername) : false;
     authLifecycle.assertCurrent(operation);
+    if (accountSubmitInFlightRef.current) return;
 
     if (canResume) {
       setTokenValidationInProgress(true);
@@ -485,6 +494,7 @@ export const useAuth = () => {
         websocketClient.setUsername(savedUsername);
       }
 
+      if (accountSubmitInFlightRef.current) return;
       const authorization = await websocketClient.switchToUnlinkedMode(operation.signal);
       authLifecycle.assertCurrent(operation);
       await completeRecoveredAuthorization(authorization);
@@ -528,7 +538,7 @@ export const useAuth = () => {
     authStatus, setAuthStatus, loginError, accountAuthenticated, isRegistrationMode, setIsRegistrationMode,
     loginUsernameRef, originalUsernameRef, initializeKeys,
     handleAccountSubmit, handleAuthSuccess, setAccountAuthenticated, passwordRef, setLoginError,
-    setShowPassphrasePrompt, showPassphrasePrompt, logout, getLogout,
+    setShowPassphrasePrompt, showPassphrasePrompt, logout,
     hybridKeysRef, getKeysOnDemand, attemptAuthRecovery, attemptAuthRecoveryDetailed, storeAuthenticationState,
     clearAuthenticationState, recoveryActive, setRecoveryActive,
     passphrasePlaintextRef,
@@ -560,10 +570,10 @@ export const useAuth = () => {
             );
         authLifecycle.assertCurrent(operation);
         if (success) {
-          websocketClient.markServerAuthGranted?.();
+          websocketClient.markServerAuthGranted();
           
           showPasswordPromptRef.current = false;
-          websocketClient.setServerEntryPromptPending?.(false);
+          websocketClient.setServerEntryPromptPending(false);
           setShowPasswordPrompt(false);
           setAuthStatus("Entry granted");
           toast.success("Server access granted anonymously");

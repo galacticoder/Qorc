@@ -114,52 +114,44 @@ export class BlockingSystem {
       return this.cachedBlockList.map((entry) => ({ ...entry }));
     }
 
-    try {
-      const storedData = await binding.secureDB.retrieve(STORAGE_STORES.BLOCK_LIST, STORAGE_KEYS.BLOCK_LIST_GLOBAL);
-      this.assertCurrentBinding(binding);
-      if (storedData === null || storedData === undefined) {
-        this.cachedBlockList = [];
-        return [];
-      }
-
-      if (
-        !isPlainObject(storedData) ||
-        hasPrototypePollutionKeys(storedData) ||
-        Object.keys(storedData).sort().join(',') !== 'blockList,version' ||
-        storedData.version !== 4 ||
-        !Array.isArray(storedData.blockList) ||
-        storedData.blockList.length > MAX_BLOCK_LIST_SIZE
-      ) {
-        throw new Error('Stored block list is invalid');
-      }
-
-      const seen = new Set<string>();
-      const blockList = storedData.blockList.map((entry): BlockedUser => {
-        if (
-          !isPlainObject(entry) ||
-          hasPrototypePollutionKeys(entry) ||
-          Object.keys(entry).join(',') !== 'username' ||
-          typeof entry.username !== 'string'
-        ) {
-          throw new Error('Stored block list entry is invalid');
-        }
-        const username = this.normalizeUsername(entry.username);
-        if (username !== entry.username || seen.has(username)) {
-          throw new Error('Stored block list entry is not canonical');
-        }
-        seen.add(username);
-        return { username };
-      });
-
-      this.cachedBlockList = blockList;
-      return blockList.map((entry) => ({ ...entry }));
-    } catch (error) {
-      this.assertCurrentBinding(binding);
-      if (this.cachedBlockList !== null) {
-        return this.cachedBlockList;
-      }
-      throw error;
+    const storedData = await binding.secureDB.retrieve(STORAGE_STORES.BLOCK_LIST, STORAGE_KEYS.BLOCK_LIST_GLOBAL);
+    this.assertCurrentBinding(binding);
+    if (storedData === null || storedData === undefined) {
+      this.cachedBlockList = [];
+      return [];
     }
+
+    if (
+      !isPlainObject(storedData) ||
+      hasPrototypePollutionKeys(storedData) ||
+      Object.keys(storedData).sort().join(',') !== 'blockList,version' ||
+      storedData.version !== 4 ||
+      !Array.isArray(storedData.blockList) ||
+      storedData.blockList.length > MAX_BLOCK_LIST_SIZE
+    ) {
+      throw new Error('Stored block list is invalid');
+    }
+
+    const seen = new Set<string>();
+    const blockList = storedData.blockList.map((entry): BlockedUser => {
+      if (
+        !isPlainObject(entry) ||
+        hasPrototypePollutionKeys(entry) ||
+        Object.keys(entry).join(',') !== 'username' ||
+        typeof entry.username !== 'string'
+      ) {
+        throw new Error('Stored block list entry is invalid');
+      }
+      const username = this.normalizeUsername(entry.username);
+      if (username !== entry.username || seen.has(username)) {
+        throw new Error('Stored block list entry is not canonical');
+      }
+      seen.add(username);
+      return { username };
+    });
+
+    this.cachedBlockList = blockList;
+    return blockList.map((entry) => ({ ...entry }));
   }
 
   private async saveBlockList(
@@ -203,23 +195,7 @@ export class BlockingSystem {
 
       const nextBlockList = [...blockList, { username: target }];
 
-      try {
-        await this.saveBlockList(nextBlockList, binding);
-      } catch (error) {
-        if (this.isCurrentBinding(binding)) {
-          this.cachedBlockList = nextBlockList;
-          blockStatusCache.set(target, true);
-          window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
-            detail: { username: target }
-          }));
-        }
-        try {
-          await this.clearOutgoingRecovery(target, binding);
-        } catch {
-          throw new Error('Block is active for this session, but durable enforcement cleanup failed');
-        }
-        throw error;
-      }
+      await this.saveBlockList(nextBlockList, binding);
       blockStatusCache.set(target, true);
 
       window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
@@ -259,16 +235,8 @@ export class BlockingSystem {
     const pendingMutations = this.mutationChain;
     await pendingMutations.catch(() => undefined);
     this.assertCurrentBinding(binding);
-    try {
-      const blockList = await this.loadBlockList(binding);
-      return blockList.some(user => user.username === target);
-    } catch {
-      this.assertCurrentBinding(binding);
-      if (this.cachedBlockList) {
-        return this.cachedBlockList.some(user => user.username === target);
-      }
-      throw new Error('Block status unavailable');
-    }
+    const blockList = await this.loadBlockList(binding);
+    return blockList.some(user => user.username === target);
   }
 
   isBlockedSync(username: string): boolean {

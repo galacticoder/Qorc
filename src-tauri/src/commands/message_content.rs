@@ -201,18 +201,17 @@ pub async fn message_link_preview_fetch(
         tracing::warn!("[LINK-PREVIEW] metadata request rejected: invalid URL");
         return Err("Invalid link preview URL".to_string());
     };
-    let fallback = NativeLinkPreview::from(target.clone());
-    let Some(tor) = state.inner().tor_manager() else {
-        tracing::warn!("[LINK-PREVIEW] metadata skipped: Tor manager unavailable");
-        return Ok(fallback);
-    };
+    let tor = state
+        .inner()
+        .tor_manager()
+        .ok_or_else(|| "Tor manager unavailable".to_string())?;
     if !tor.is_ready().await {
-        tracing::warn!("[LINK-PREVIEW] metadata skipped: Tor transport unavailable");
-        return Ok(fallback);
+        return Err("Tor transport unavailable".to_string());
     }
-    let Ok(_permit) = LINK_PREVIEW_FETCH_LIMIT.acquire().await else {
-        return Ok(fallback);
-    };
+    let _permit = LINK_PREVIEW_FETCH_LIMIT
+        .acquire()
+        .await
+        .map_err(|_| "Link preview service unavailable".to_string())?;
     tracing::info!(
         active = MAX_PARALLEL_LINK_PREVIEW_FETCHES
             .saturating_sub(LINK_PREVIEW_FETCH_LIMIT.available_permits()),
@@ -224,22 +223,19 @@ pub async fn message_link_preview_fetch(
     )
     .await
     {
-        Ok(preview) => {
-            if preview.metadata_fetched {
-                tracing::info!(
-                    has_title = preview.title.is_some(),
-                    has_description = preview.description.is_some(),
-                    has_image = preview.image_data_url.is_some(),
-                    "[LINK-PREVIEW] metadata fetch complete"
-                );
-            } else {
-                tracing::warn!("[LINK-PREVIEW] metadata fetch failed");
-            }
+        Ok(Ok(preview)) => {
+            tracing::info!(
+                has_title = preview.title.is_some(),
+                has_description = preview.description.is_some(),
+                has_image = preview.image_data_url.is_some(),
+                "[LINK-PREVIEW] metadata fetch complete"
+            );
             Ok(preview)
         }
+        Ok(Err(())) => Err("Link preview metadata fetch failed".to_string()),
         Err(_) => {
             tracing::warn!("[LINK-PREVIEW] metadata fetch timed out");
-            Ok(fallback)
+            Err("Link preview metadata fetch timed out".to_string())
         }
     }
 }

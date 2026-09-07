@@ -734,8 +734,8 @@ pub async fn create(
     let serialized = Zeroizing::new(serde_json::to_string(&persisted).map_err(|_| {
         QorcError::EncryptionFailed("Native vault serialization failed".to_string())
     })?);
-    storage.set(&key, &serialized).await?;
-    let verified = storage.get(&key).await?.ok_or_else(|| {
+    storage.set_text(&key, &serialized).await?;
+    let verified = storage.get_text(&key).await?.ok_or_else(|| {
         QorcError::StorageInitFailed("Native vault persistence failed".to_string())
     })?;
     if verified != *serialized {
@@ -755,7 +755,7 @@ pub async fn unlock(
     passphrase: Zeroizing<String>,
 ) -> QorcResult<Arc<AccountSession>> {
     let key = storage_key(&account_owner)?;
-    let raw = Zeroizing::new(storage.get(&key).await?.ok_or_else(|| {
+    let raw = Zeroizing::new(storage.get_text(&key).await?.ok_or_else(|| {
         QorcError::DecryptionFailed("Native account vault is unavailable".to_string())
     })?);
     if raw.is_empty() || raw.len() > MAX_VAULT_JSON_CHARS {
@@ -817,7 +817,9 @@ pub async fn unlock(
                     aad: aad.as_slice(),
                 },
             )
-            .map_err(|_| QorcError::DecryptionFailed("Incorrect account credentials".to_string()))?,
+            .map_err(|_| {
+                QorcError::DecryptionFailed("Incorrect account credentials".to_string())
+            })?,
     );
     session_from_payload(
         account_owner,
@@ -832,8 +834,87 @@ pub async fn exists(storage: &SecureStorage, account_owner: &str) -> QorcResult<
 }
 
 #[cfg(test)]
+pub(crate) fn test_session(owner: &str, seed: u8) -> Arc<AccountSession> {
+    let public = public_keys_from_seeds(
+        &[seed; 64],
+        &[seed; 32],
+        &[seed; 32],
+        &[seed; 32],
+        &[seed; 32],
+    )
+    .unwrap();
+    let payload = encode_payload(
+        &[seed; 32],
+        &[seed; 64],
+        &[seed; 32],
+        &[seed; 32],
+        &[seed; 32],
+        &[seed; 32],
+    );
+    session_from_payload(owner.to_string(), "alice".to_string(), &payload, &public).unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn persisted_account_requires_both_credentials_with_the_production_kdf() {
+        let directory =
+            std::env::temp_dir().join(format!("qorc-vault-audit-{}", uuid::Uuid::new_v4()));
+        let storage = Arc::new(SecureStorage::new(directory.clone()).await.unwrap());
+        let owner = "e".repeat(64);
+        let password = "synthetic-account-password-for-audit";
+        let passphrase = "independent-synthetic-local-passphrase";
+        let created = create(
+            storage.clone(),
+            owner.clone(),
+            "alice".to_string(),
+            Zeroizing::new(password.to_string()),
+            Zeroizing::new(passphrase.to_string()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            create(
+                storage.clone(),
+                owner.clone(),
+                "alice".to_string(),
+                Zeroizing::new(password.to_string()),
+                Zeroizing::new(passphrase.to_string())
+            )
+            .await
+            .is_err()
+        );
+        for (candidate_password, candidate_passphrase) in [
+            ("wrong password", passphrase),
+            (password, "wrong passphrase"),
+        ] {
+            assert!(
+                unlock(
+                    storage.clone(),
+                    owner.clone(),
+                    "alice".to_string(),
+                    Zeroizing::new(candidate_password.to_string()),
+                    Zeroizing::new(candidate_passphrase.to_string())
+                )
+                .await
+                .is_err()
+            );
+        }
+        let reopened = unlock(
+            storage.clone(),
+            owner,
+            "alice".to_string(),
+            Zeroizing::new(password.to_string()),
+            Zeroizing::new(passphrase.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.public_keys(), reopened.public_keys());
+        assert_eq!(created.master_key(), reopened.master_key());
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
 
     #[test]
     fn account_owner_and_username_are_canonical() {
@@ -849,5 +930,81 @@ mod tests {
         let first = credential_input("alice", "a\0b", "c").unwrap();
         let second = credential_input("alice", "a", "b\0c").unwrap();
         assert_ne!(first.as_slice(), second.as_slice());
+    }
+
+    #[test]
+    fn native_token_vault_rejects_cross_account_server_purpose_and_key_substitution() {
+        let owner = "a".repeat(64);
+        let scope = "b".repeat(64);
+        let session = test_session(&owner, 7);
+        let other_owner = test_session(&"c".repeat(64), 7);
+        let other_key = test_session(&owner, 8);
+        let plaintext = br#"[{"credential":"test-only"}]"#;
+        let sealed = session
+            .seal_token_vault(&scope, "working", plaintext)
+            .unwrap();
+        assert_eq!(
+            &*session
+                .open_token_vault(&scope, "working", &sealed)
+                .unwrap(),
+            plaintext
+        );
+        assert!(
+            other_owner
+                .open_token_vault(&scope, "working", &sealed)
+                .is_err()
+        );
+        assert!(
+            other_key
+                .open_token_vault(&scope, "working", &sealed)
+                .is_err()
+        );
+        assert!(
+            session
+                .open_token_vault(&"d".repeat(64), "working", &sealed)
+                .is_err()
+        );
+        assert!(session.open_token_vault(&scope, "resume", &sealed).is_err());
+        assert_ne!(
+            session.token_vault_storage_key(&scope, "working").unwrap(),
+            session.token_vault_storage_key(&scope, "resume").unwrap()
+        );
+        let public = session.public_keys();
+        let payload = encode_payload(&[7; 32], &[8; 64], &[7; 32], &[7; 32], &[7; 32], &[7; 32]);
+        assert!(session_from_payload(owner, "alice".to_string(), &payload, &public).is_err());
+    }
+
+    #[test]
+    fn native_token_vault_authenticates_every_ciphertext_and_nonce_byte() {
+        let scope = "b".repeat(64);
+        let session = test_session(&"a".repeat(64), 9);
+        let sealed = session
+            .seal_token_vault(&scope, "resume", b"private resume credentials")
+            .unwrap();
+        for field in ["nonceBase64", "ciphertextBase64"] {
+            let mut parsed: serde_json::Value = serde_json::from_str(&sealed).unwrap();
+            let original = BASE64.decode(parsed[field].as_str().unwrap()).unwrap();
+            for index in 0..original.len() {
+                let mut corrupt = original.clone();
+                corrupt[index] ^= 1;
+                parsed[field] = serde_json::Value::String(BASE64.encode(corrupt));
+                assert!(
+                    session
+                        .open_token_vault(&scope, "resume", &parsed.to_string())
+                        .is_err()
+                );
+            }
+        }
+        for invalid in [
+            "null",
+            "[]",
+            "{}",
+            r#"{"version":1,"version":1}"#,
+            &"[".repeat(100),
+        ] {
+            assert!(session.open_token_vault(&scope, "resume", invalid).is_err());
+        }
+        assert!(session.x25519_shared_secret(&[0; 32]).is_err());
+        assert!(session.x25519_shared_secret(&[1; 32]).is_ok());
     }
 }

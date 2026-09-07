@@ -112,10 +112,10 @@ export class AvatarBlobDB {
          WHERE avatar_blobs."data" = EXCLUDED."data"`,
         [blobId, data, expiresAt]
       );
-      return (res?.rowCount ?? 0) > 0;
+      return res.rowCount > 0;
     } catch (error) {
       console.error('[DB][AVATAR] store failed', { error: error?.message || String(error) });
-      return false;
+      throw error;
     }
   }
 
@@ -149,7 +149,9 @@ export class AvatarBlobDB {
 
   // random sample of currently valid blobIds for clients to draw cover traffic decoys from
   static async samplePool(limit = 256, now = Date.now()) {
-    const capped = Math.min(Math.max(Math.trunc(Number(limit) || 256), 1), 1024);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1024) {
+      throw new Error('Invalid avatar pool limit');
+    }
     const pivotBytes = crypto.randomBytes(32);
     let pivot;
     try {
@@ -163,22 +165,22 @@ export class AvatarBlobDB {
         `SELECT "blobId" FROM avatar_blobs
          WHERE "expiresAt" > $1 AND "blobId" >= $2
          ORDER BY "blobId" ASC LIMIT $3`,
-        [now, pivot, capped]
+        [now, pivot, limit]
       );
       const ids = first.rows.map((row) => row.blobId);
-      if (ids.length < capped) {
+      if (ids.length < limit) {
         const wrapped = await pool.query(
           `SELECT "blobId" FROM avatar_blobs
            WHERE "expiresAt" > $1 AND "blobId" < $2
            ORDER BY "blobId" ASC LIMIT $3`,
-          [now, pivot, capped - ids.length]
+          [now, pivot, limit - ids.length]
         );
         ids.push(...wrapped.rows.map((row) => row.blobId));
       }
       return ids.filter(isValidAvatarBlobId);
     } catch (error) {
       console.error('[DB][AVATAR] samplePool failed', { error: error?.message || String(error) });
-      return [];
+      throw error;
     }
   }
 
@@ -186,17 +188,18 @@ export class AvatarBlobDB {
     try {
       const pool = await getPgPool();
       const res = await pool.query('DELETE FROM avatar_blobs WHERE "expiresAt" < $1', [now]);
-      return res?.rowCount ?? 0;
+      return res.rowCount;
     } catch (error) {
       console.error('[DB][AVATAR] pruneExpired failed', { error: error?.message || String(error) });
-      return 0;
+      throw error;
     }
   }
 
   // Bound total disk usage
   static async enforceCap(maxRows) {
-    const cap = Math.max(0, Math.trunc(Number(maxRows) || 0));
-    if (cap <= 0) return 0;
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > 100_000) {
+      throw new Error('Invalid avatar storage cap');
+    }
     let client;
     try {
       const pool = await getPgPool();
@@ -210,22 +213,22 @@ export class AvatarBlobDB {
           [now]
         );
         const { rows } = await client.query('SELECT "blobId" FROM avatar_blobs');
-        if (rows.length <= cap) return expired?.rowCount ?? 0;
+        if (rows.length <= maxRows) return expired.rowCount;
 
         const evictedIds = selectRandomRankEvictionIds(
           rows.map((row) => row?.blobId),
-          cap,
+          maxRows,
           isValidAvatarBlobId
         );
         const evicted = await client.query(
           'DELETE FROM avatar_blobs WHERE "blobId" = ANY($1)',
           [evictedIds]
         );
-        return (expired?.rowCount ?? 0) + (evicted?.rowCount ?? 0);
+        return expired.rowCount + evicted.rowCount;
       });
     } catch (error) {
       console.error('[DB][AVATAR] enforceCap failed', { error: error?.message || String(error) });
-      return 0;
+      throw error;
     } finally {
       client?.release();
     }

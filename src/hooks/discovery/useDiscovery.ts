@@ -46,7 +46,6 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { shouldAttemptDiscovery } from '@/lib/utils/discovery-utils';
 import {
     DISCOVERY_PUBLICATION_BUCKET_COUNT,
-    DISCOVERY_FIXED_BUCKET_COUNT,
     deriveDiscoveryBucketId,
     deriveDiscoveryBucketKey,
     fetchDiscoveryBlobsForTokens,
@@ -66,7 +65,6 @@ import { loadTrustedPersistedDiscoveryMaterial } from '@/lib/utils/signal-bundle
 import {
     ownDetectionPublicKeyHex,
     persistPeerDetectionKey,
-    rememberPeerDetectionKey,
 } from '../../lib/spool/detection-key';
 import { PROTOCOL_KEYS } from '@/lib/config/protocol-keys';
 import { OPRF_EVALUATE_AUDIENCE } from '@/lib/config/audiences';
@@ -141,7 +139,7 @@ async function readDiscoveryTokenCacheEntry(key: string): Promise<DiscoveryToken
     if (!entry || entry.retired) return null;
     entry.readers += 1;
     try {
-        const value = await entry.value.catch(() => null);
+        const value = await entry.value;
         if (!value) return null;
         return {
             token: value.token,
@@ -229,7 +227,7 @@ async function buildDiscoveryPublication(
         !/^[a-f0-9]{64}$/.test(serverScope)
     ) return null;
 
-    const manifestResponse = await requestDiscoveryManifest().catch(() => null);
+    const manifestResponse = await requestDiscoveryManifest();
         const manifest = manifestResponse?.success ? manifestResponse.manifest : null;
         if (!manifest) {
             return null;
@@ -663,8 +661,8 @@ export const useDiscovery = (
             return false;
         }
 
-        return websocketClient.isUnlinkedMode?.() === true &&
-            websocketClient.isUnlinkedSessionReady?.() === true;
+        return websocketClient.isUnlinkedMode() &&
+            websocketClient.isUnlinkedSessionReady();
     }, [effectiveHandle]);
 
     const noteDiscoveryTransportReadinessChanged = useCallback((_reason?: unknown) => {
@@ -828,14 +826,7 @@ export const useDiscovery = (
         abortSignal?: AbortSignal
     ): Promise<boolean> => {
         if (abortSignal?.aborted) return false;
-        try {
-            if (typeof (websocketClient as any)?.isPQSessionEstablished === 'function') {
-                if ((websocketClient as any).isPQSessionEstablished()) {
-
-                    return true;
-                }
-            }
-        } catch { }
+        if (websocketClient.isPQSessionEstablished()) return true;
 
 
         return new Promise<boolean>((resolve) => {
@@ -861,15 +852,7 @@ export const useDiscovery = (
 
             const timeoutId = window.setTimeout(() => {
                 cleanup();
-                try {
-                    if (typeof (websocketClient as any)?.isPQSessionEstablished === 'function') {
-                        const ready = (websocketClient as any).isPQSessionEstablished();
-
-                        return resolve(ready);
-                    }
-                } catch { }
-
-                resolve(false);
+                resolve(websocketClient.isPQSessionEstablished());
             }, timeoutMs);
 
             window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, handler as EventListener);
@@ -1043,6 +1026,7 @@ export const useDiscovery = (
         }
 
         const validated: OPRFDiscoveryMaterial = {
+            spoolDetectionKey: material.spoolDetectionKey,
             publicKeys: {
                 x25519PublicBase64: sanitizedPublicKeys.x25519PublicBase64,
                 kyberPublicBase64: sanitizedPublicKeys.kyberPublicBase64,
@@ -1076,11 +1060,10 @@ export const useDiscovery = (
             targetHandle,
             publicKeys: validated.publicKeys,
             fullBundle: material.fullBundle,
-            peerCertificate: cert,
-            peerCertificateFingerprint
+            peerCertificate: cert
         });
         if (!isCurrentOwner()) return null;
-        if (!certifiedIdentity.valid || !certifiedIdentity.identityRootFingerprint || !certifiedIdentity.bundleFingerprint) {
+        if (certifiedIdentity.valid === false) {
             return reject(`certified-bundle:${certifiedIdentity.reason || 'invalid'}`);
         }
 
@@ -1116,7 +1099,7 @@ export const useDiscovery = (
     }, []);
 
     const getAvatarForDiscovery = useCallback(async (): Promise<AvatarData | null> => {
-        const ownAvatar = profilePictureSystem.getOwnAvatarData?.() ?? null;
+        const ownAvatar = profilePictureSystem.getOwnAvatarData();
 
         if (
             ownAvatar &&
@@ -1155,10 +1138,7 @@ export const useDiscovery = (
             if (typeof encryptedBlob !== 'string' || encryptedBlob.length === 0) continue;
             for (const key of encryptionKeys) {
                 if (!key) continue;
-                let material: OPRFDiscoveryBlob | null = null;
-                try {
-                    material = oprfDiscoveryClient.decryptDiscoveryBlob(encryptedBlob, key, decryptStats);
-                } catch { }
+                const material = oprfDiscoveryClient.decryptDiscoveryBlob(encryptedBlob, key, decryptStats);
                 if (!material) continue;
                 decryptedCount += 1;
 
@@ -1169,22 +1149,11 @@ export const useDiscovery = (
                     continue;
                 }
 
-                if (accountOwner) {
-                    void persistPeerDetectionKey(
-                        accountOwner,
-                        targetHandle,
-                        material.spoolDetectionKey,
-                    ).catch(() => { });
-                } else {
-                    rememberPeerDetectionKey(targetHandle, material.spoolDetectionKey);
-                }
-
-                if (material.keyTransparencyTransition && accountOwner) {
-                    await keyTransparencyClient
-                        .ingestPublishedTransition(accountOwner, material.keyTransparencyTransition)
-                        .catch(() => { });
-                    if (!isCurrentOwner()) return null;
-                }
+                await keyTransparencyClient.ingestPublishedTransition(
+                    accountOwner,
+                    material.keyTransparencyTransition
+                );
+                if (!isCurrentOwner()) return null;
 
                 const accountRootPublicKey =
                     validated.certifiedPeerBundle?.accountRoot?.accountRootPublicKey;
@@ -1224,8 +1193,13 @@ export const useDiscovery = (
                         rootCommitment: transparencyContact.rootCommitment,
                         version: transparencyContact.version,
                     }
-                ).catch(() => { });
-                await keyTransparencyClient.persistAuthorizations(accountOwner!).catch(() => { });
+                );
+                await keyTransparencyClient.persistAuthorizations(accountOwner!);
+                await persistPeerDetectionKey(
+                    accountOwner!,
+                    targetHandle,
+                    validated.spoolDetectionKey,
+                );
 
                 const cacheUsername = validated.peerCertificate?.username || String(targetHandle);
                 void cachePeerAvatarFromRef(
@@ -1618,7 +1592,6 @@ export const useDiscovery = (
                     },
                     fullBundle: bundle,
                     peerCertificate,
-                    peerCertificateFingerprint,
                     accountRootPublicKey: accountRootKey,
                     signAccountRoot: (canonicalPayload) =>
                         account.sign(PROTOCOL_KEYS.ACCOUNT_ROOT_CERTIFICATE_SIGNING, canonicalPayload),
@@ -1636,11 +1609,10 @@ export const useDiscovery = (
                 if (!isCurrentOwner()) return false;
                 const publishOwner = String(accountHandle ?? '').trim().toLowerCase();
                 
-                const cachedKeyTransparencyTransition = publishOwner
-                    ? await keyTransparencyClient.getPublishedTransition(publishOwner).catch(() => null)
-                    : null;
+                const cachedKeyTransparencyTransition = await keyTransparencyClient
+                    .getPublishedTransition(publishOwner);
                 if (!isCurrentOwner()) return false;
-                const spoolDetectionKey = await ownDetectionPublicKeyHex(publishOwner).catch(() => null);
+                const spoolDetectionKey = await ownDetectionPublicKeyHex(publishOwner);
                 if (!isCurrentOwner()) return false;
                 const preflightPublishInputFingerprint = cachedKeyTransparencyTransition
                     ? hashDiscoveryMaterial({
@@ -1653,7 +1625,7 @@ export const useDiscovery = (
                         peerCertificateFingerprint,
                         avatarRef: avatarRef ?? null,
                         keyTransparencyTransition: cachedKeyTransparencyTransition,
-                        spoolDetectionKey: spoolDetectionKey ?? null,
+                        spoolDetectionKey,
                     })
                     : null;
 
@@ -1796,8 +1768,7 @@ export const useDiscovery = (
                 }
 
                 const keyTransparencyTransition = await keyTransparencyClient
-                    .getPublishedTransition(publishOwner)
-                    .catch(() => null);
+                    .getPublishedTransition(publishOwner);
                 if (!isCurrentOwner()) return false;
                 if (!keyTransparencyTransition) {
                     return fail('missing-key-transparency-transition');
@@ -1806,7 +1777,7 @@ export const useDiscovery = (
                 const material: OPRFDiscoveryBlob = {
                     fullBundle: bundle,
                     certifiedPeerBundle,
-                    ...(spoolDetectionKey ? { spoolDetectionKey } : {}),
+                    spoolDetectionKey,
                     ...(avatarRef ? { avatarRef } : {}),
                     keyTransparencyTransition:
                         keyTransparencyTransition as OPRFDiscoveryBlob['keyTransparencyTransition'],
@@ -1822,7 +1793,7 @@ export const useDiscovery = (
                     peerCertificateFingerprint,
                     avatarRef: avatarRef ?? null,
                     keyTransparencyTransition,
-                    spoolDetectionKey: spoolDetectionKey ?? null,
+                    spoolDetectionKey,
                 });
                 const contextFingerprint = `${publicKey || 'no-key'}:${publicationWindow}:${publishInputFingerprint}`;
 
@@ -2410,7 +2381,7 @@ export const useDiscovery = (
             return null;
         }
         if (!forceRefresh && effectiveHandle) {
-            await keyTransparencyClient.restorePersistedAuthorizations(effectiveHandle).catch(() => 0);
+            await keyTransparencyClient.restorePersistedAuthorizations(effectiveHandle);
             if (!isCurrentOwner()) return null;
             const persisted = await loadTrustedPersistedDiscoveryMaterial(
                 effectiveHandle,
@@ -2521,11 +2492,6 @@ export const useDiscovery = (
                     return null;
                 }
                 
-                const lookupBucketDbg = await deriveDiscoveryBucketId(
-                    await deriveDiscoveryBucketKey(currentResult.token),
-                    DISCOVERY_FIXED_BUCKET_COUNT
-                );
-
                 const encryptionKeys = [currentResult.encryptionKey];
 
                 const bucketTokens = [currentResult.token];

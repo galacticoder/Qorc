@@ -10,7 +10,7 @@ export const requestBundleOnce = async (
   peerUsername: string,
   keyRequestCacheRef: React.RefObject<Map<string, number>>,
   inFlightBundleRequestsRef: React.RefObject<Map<string, Promise<void>>>,
-  findUser: ((handle: string, options?: { forceRefresh?: boolean }) => Promise<any>) | undefined,
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
   options: {
     account: string;
     isCurrent: () => boolean;
@@ -29,15 +29,11 @@ export const requestBundleOnce = async (
 
   const inflight = inFlightBundleRequestsRef.current.get(peerUsername);
   if (inflight) {
-    try { await inflight; } catch { }
+    await inflight;
     return;
   }
 
   const promise = (async () => {
-    if (!findUser) {
-      return;
-    }
-
     if (!shouldAttemptDiscovery(peerUsername)) {
       return;
     }

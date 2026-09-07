@@ -10,26 +10,6 @@ const CALL_SIGNAL_BASE_KEYS = ['callId', 'from', 'timestamp', 'to', 'type'] as c
 const CALL_SCREEN_STREAM_ID_REGEX = /^call-screen:[a-f0-9]{16,64}$/;
 const MAX_MEDIA_DEVICE_ID_LENGTH = 1024;
 
-export const stopMediaStream = (stream: MediaStream | null) => {
-  if (!stream) return;
-
-  try {
-    const seen = new Set<string>();
-    const tracks = typeof stream.getTracks === 'function' ? stream.getTracks() : [];
-    tracks.forEach((track) => {
-      if (!track || seen.has(track.id)) {
-        return;
-      }
-      seen.add(track.id);
-      try {
-        if (track.readyState !== 'ended') {
-          track.stop();
-        }
-      } catch { }
-    });
-  } catch { }
-};
-
 export const releaseVisualCanvas = (canvas: HTMLCanvasElement | null): void => {
   if (!canvas) return;
   try { canvas.remove(); } catch { }
@@ -39,29 +19,28 @@ export const releaseVisualCanvas = (canvas: HTMLCanvasElement | null): void => {
 
 export const clearCallMediaState = (
   refs: {
-    localStreamRef: { current: MediaStream | null };
+    localMediaActiveRef: { current: boolean };
     localVideoCanvasRef: { current: HTMLCanvasElement | null };
     localScreenCanvasRef: { current: HTMLCanvasElement | null };
     remoteVideoCanvasRef: { current: HTMLCanvasElement | null };
     remoteScreenCanvasRef: { current: HTMLCanvasElement | null };
   },
   setters: {
-    setLocalStream: (stream: MediaStream | null) => void;
+    setLocalMediaActive: (active: boolean) => void;
     setLocalVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
     setLocalScreenCanvas: (canvas: HTMLCanvasElement | null) => void;
     setRemoteVideoCanvas: (canvas: HTMLCanvasElement | null) => void;
     setRemoteScreenCanvas: (canvas: HTMLCanvasElement | null) => void;
   },
 ): void => {
-  stopMediaStream(refs.localStreamRef.current);
   releaseVisualCanvas(refs.remoteVideoCanvasRef.current);
   releaseVisualCanvas(refs.remoteScreenCanvasRef.current);
-  refs.localStreamRef.current = null;
+  refs.localMediaActiveRef.current = false;
   refs.localVideoCanvasRef.current = null;
   refs.localScreenCanvasRef.current = null;
   refs.remoteVideoCanvasRef.current = null;
   refs.remoteScreenCanvasRef.current = null;
-  setters.setLocalStream(null);
+  setters.setLocalMediaActive(false);
   setters.setLocalVideoCanvas(null);
   setters.setLocalScreenCanvas(null);
   setters.setRemoteVideoCanvas(null);

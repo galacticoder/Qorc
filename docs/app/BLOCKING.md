@@ -58,8 +58,8 @@ The unified Signal transport is the final outbound policy boundary for text, edi
 - A blocked recipient is denied before discovery or encryption.
 - Every accepted send captures the account generation and recipient policy epoch.
 - Blocking a peer advances that epoch, so work already awaiting discovery, encryption, a concurrency permit, or a native write remains canceled even after a quick unblock.
-- Queued sends, P2P redelivery ciphertext, delivery-ack timers, server-fallback queues, durable ack journals, retry timers, and recovery cooldowns are removed for the peer.
-- Server fallback and P2P recovery re-check policy immediately before later writes.
+- Queued sends, P2P redelivery ciphertext, delivery-ack timers, sealed-server queues, durable ack journals, retry timers, and recovery cooldowns are removed for the peer.
+- Sealed-server delivery and P2P recovery re-check policy immediately before later writes.
 
 The message sender also checks the authoritative block list before creating durable send intent. Its registered cleanup removes the peer's in-memory and encrypted retry entries, releases retry pins, and clears exact unacknowledged operation records. Login-time retry restoration discards blocked-peer entries before any session prefetch or replay.
 

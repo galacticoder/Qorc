@@ -42,7 +42,10 @@ function prune(entries: ProbeEntries, now: number): void {
 
 function parseSnapshot(raw: string | null, now: number): ProbeEntries {
   const entries: ProbeEntries = new Map();
-  if (!raw || raw.length > MAX_SERIALIZED_CHARS) return entries;
+  if (raw === null) return entries;
+  if (raw.length === 0 || raw.length > MAX_SERIALIZED_CHARS) {
+    throw new Error('Consumed spool probe cache is corrupt');
+  }
   try {
     const parsed: unknown = JSON.parse(raw);
     if (
@@ -51,22 +54,22 @@ function parseSnapshot(raw: string | null, now: number): ProbeEntries {
       parsed.protocol !== PROTOCOL_KEYS.SPOOL_CONSUMED_PROBE_STORE ||
       !Array.isArray(parsed.entries) ||
       parsed.entries.length > MAX_CONSUMED_PROBES
-    ) return entries;
+    ) throw new Error('Consumed spool probe cache is corrupt');
     for (const value of parsed.entries) {
       if (
         !Array.isArray(value) ||
         value.length !== 2 ||
         !isSpoolProbeHex(value[0]) ||
         !Number.isSafeInteger(value[1]) ||
-        value[1] <= now ||
         value[1] > now + CONSUMED_PROBE_TTL_MS ||
         entries.has(value[0])
-      ) return new Map();
-      entries.set(value[0], value[1]);
+      ) throw new Error('Consumed spool probe cache is corrupt');
+      if (value[1] > now) entries.set(value[0], value[1]);
     }
     return entries;
-  } catch {
-    return new Map();
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Consumed spool probe cache is corrupt') throw error;
+    throw new Error('Consumed spool probe cache is corrupt');
   }
 }
 
@@ -117,7 +120,7 @@ async function loadState(key: string, state: AccountState): Promise<void> {
   if (state.loaded) return;
   if (!state.loading) {
     state.loading = (async () => {
-      const raw = await storage.get(key).catch(() => null);
+      const raw = await storage.get(key);
       state.entries = parseSnapshot(raw, Date.now());
       state.loaded = true;
     })().finally(() => {
@@ -136,21 +139,22 @@ async function rememberInState(
   const now = Date.now();
   prune(state.entries, now);
   for (const probe of probes) {
-    if (!isSpoolProbeHex(probe)) continue;
+    if (!isSpoolProbeHex(probe)) throw new Error('Invalid consumed spool probe');
     const currentExpiry = state.entries.get(probe);
     if (currentExpiry === undefined || currentExpiry <= now) {
       state.entries.set(probe, now + CONSUMED_PROBE_TTL_MS);
     }
   }
   prune(state.entries, now);
-  state.writeTail = state.writeTail.catch(() => {}).then(async () => {
+  const write = state.writeTail.catch(() => undefined).then(async () => {
     prune(state.entries, Date.now());
     const serialized = serializeSnapshot(state.entries);
     if (!await storage.set(key, serialized) || await storage.get(key) !== serialized) {
       throw new Error('Consumed spool probe cache could not be persisted');
     }
   });
-  await state.writeTail.catch(() => {});
+  state.writeTail = write;
+  await write;
 }
 
 export async function loadConsumedSpoolProbeCache(

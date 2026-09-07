@@ -3,10 +3,15 @@
 //! Platform-specific system integration
 
 use crate::error::{QorcError, QorcResult};
+use fs2::FileExt;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Seek, SeekFrom, Write},
+    path::Path,
+};
 
 pub mod notification;
 pub mod power;
-pub mod screen_capture;
 pub mod tray;
 
 const DEFAULT_INSTANCE_ID: &str = "1";
@@ -38,9 +43,36 @@ pub fn get_instance_id() -> QorcResult<String> {
     }
 }
 
+pub fn acquire_instance_lock(config_root: &Path, instance_id: &str) -> QorcResult<File> {
+    std::fs::create_dir_all(config_root)?;
+    let lock_path = config_root.join(format!("instance-{instance_id}.lock"));
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(lock_path)?;
+    FileExt::try_lock_exclusive(&file).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            QorcError::SystemError(format!(
+                "Client instance '{instance_id}' is already running"
+            ))
+        } else {
+            QorcError::Io(error)
+        }
+    })?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(file, "{}", std::process::id())?;
+    file.sync_data()?;
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::valid_instance_id;
+    use super::{acquire_instance_lock, valid_instance_id};
 
     #[test]
     fn accepts_only_bounded_path_safe_instance_ids() {
@@ -50,5 +82,18 @@ mod tests {
         assert_eq!(valid_instance_id("a/b"), None);
         assert_eq!(valid_instance_id("."), None);
         assert_eq!(valid_instance_id(&"a".repeat(65)), None);
+    }
+
+    #[test]
+    fn prevents_two_processes_from_owning_the_same_instance() {
+        let root = std::env::temp_dir().join(format!(
+            "qorc-instance-lock-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let first = acquire_instance_lock(&root, "1").expect("first instance lock");
+        assert!(acquire_instance_lock(&root, "1").is_err());
+        drop(first);
+        assert!(acquire_instance_lock(&root, "1").is_ok());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

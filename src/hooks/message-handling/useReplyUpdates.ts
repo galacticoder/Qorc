@@ -21,8 +21,8 @@ const trimOriginMap = (map: Map<string, Set<string>>): void => {
 export const useReplyUpdates = (
   messages: readonly Message[],
   onMessagesUpdate: React.Dispatch<React.SetStateAction<Message[]>>,
-  persistMessage?: (msg: Message) => Promise<void>,
-  currentUsername: string = ''
+  persistMessage: (msg: Message) => Promise<void>,
+  currentUsername: string
 ) => {
   const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
   const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
@@ -103,9 +103,10 @@ export const useReplyUpdates = (
         return { next: hasUpdates ? updatedMessages : currentMessages, result: persistedUpdates };
       });
       if (!isCurrent() || updates.length === 0) return;
-      if (!persistMessage) return;
-      await Promise.allSettled(updates.map((message) => persistMessage(message)));
-    })().catch(() => { });
+      await Promise.all(updates.map((message) => persistMessage(message)));
+    })().catch((error) => {
+      console.error('Failed to persist reply edits:', error);
+    });
   }, [onMessagesUpdate, persistMessage, currentUsername]);
 
   // Update reply fields when a message is deleted
@@ -135,7 +136,7 @@ export const useReplyUpdates = (
               secureContentId: undefined,
               contentVersion: operationId,
               isDeleted: true,
-              sender: msg.replyTo.sender || '[Unknown]'
+              sender: msg.replyTo.sender
             }
           } as Message;
           updates.push(updated);
@@ -147,8 +148,9 @@ export const useReplyUpdates = (
       return { next: hasUpdates ? updatedMessages : currentMessages, result: updates };
     }).then((updates) => {
       if (!isCurrent() || updates.length === 0) return;
-      if (!persistMessage) return;
-      void Promise.allSettled(updates.map((message) => persistMessage(message)));
+      void Promise.all(updates.map((message) => persistMessage(message))).catch((error) => {
+        console.error('Failed to persist reply deletions:', error);
+      });
     });
   }, [onMessagesUpdate, persistMessage, currentUsername]);
 

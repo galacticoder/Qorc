@@ -610,10 +610,7 @@ pub async fn signal_list_pending_decrypts(
                 &entry.application_type,
                 &entry.pending_id,
             )
-            .unwrap_or_else(|_| crate::message_content::RedactedApplicationPlaintext {
-                plaintext: "{}".to_string(),
-                content_ref: None,
-            });
+            .map_err(|error| error.safe_message())?;
             Ok(RendererPendingDecryptedMessage {
                 pending_id: entry.pending_id.clone(),
                 from_username: entry.from_username.clone(),

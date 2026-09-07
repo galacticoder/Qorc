@@ -202,8 +202,6 @@ export class ReceiptBatcher {
 
 export const receiptBatcher = new ReceiptBatcher();
 
-if (typeof window !== 'undefined') {
-  window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, () => {
-    receiptBatcher.setActiveAccount(null);
-  });
-}
+window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, () => {
+  receiptBatcher.setActiveAccount(null);
+});

@@ -5,10 +5,10 @@
 import { Base64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
 import { computeBlindUserId } from '../utils/auth-utils';
-import { ML_KEM_1024_CIPHERTEXT_BYTES } from '../../../shared/crypto-sizes.js';
 import {
     PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-    PRIVATE_AUTH_OT_RECORD_BYTES
+    PRIVATE_AUTH_PIR_RECORD_BYTES,
+    PRIVATE_AUTH_PIR_RECORD_MAGIC
 } from '../../../shared/private-auth-protocol.js';
 
 // OPAQUE configuration
@@ -16,29 +16,16 @@ const OPAQUE_CONFIG = {
     PRIVATE_AUTH_ANONYMITY_SET_SIZE,
 };
 
-const OT_CIPHERTEXT_BYTES = ML_KEM_1024_CIPHERTEXT_BYTES;
-const OT_MASKED_RECORD_BYTES = PRIVATE_AUTH_OT_RECORD_BYTES;
-
-function base64LengthForBytes(byteLength: number): number {
-    return 4 * Math.ceil(byteLength / 3);
-}
-
 /**
  * OPAQUE Client
  */
 export class OPAQUEClient {
     private blindingFactor: Uint8Array | null = null;
-    private otState: { myIndex: number; myPrivKey: Uint8Array; blindingFactor: Uint8Array } | null = null;
     private generation = 0;
 
     private wipeState(): void {
         this.blindingFactor?.fill(0);
         this.blindingFactor = null;
-        if (this.otState) {
-            this.otState.myPrivKey.fill(0);
-            this.otState.blindingFactor.fill(0);
-            this.otState = null;
-        }
     }
 
     /**
@@ -166,133 +153,6 @@ export class OPAQUEClient {
     }
 
     /**
-     * Start OT Registration
-     */
-    async startOTRegistration(password: Uint8Array): Promise<{
-        blindedElement: Uint8Array;
-        blindingFactor: Uint8Array;
-    }> {
-        return PostQuantumWorker.opaqueStartRegistration(password);
-    }
-
-    /**
-     * Finish OT Registration
-     */
-    async finishOTRegistration(
-        password: Uint8Array,
-        blindingFactor: Uint8Array,
-        serverResponse: {
-            evaluatedElement: Uint8Array;
-            serverNonce: Uint8Array;
-        }
-    ): Promise<{
-        envelope: Uint8Array;
-        exportKey: Uint8Array;
-        authPublicKey: Uint8Array;
-    }> {
-        try {
-            return await PostQuantumWorker.opaqueFinishRegistration(password, blindingFactor, serverResponse);
-        } finally {
-            blindingFactor.fill(0);
-        }
-    }
-
-    /**
-     * Start OT Login
-     */
-    async startOTLogin(password: Uint8Array, anonymitySetSize: number, myIndex: number): Promise<{
-        pubKeys: Uint8Array[];
-        blindedElement: Uint8Array;
-    }> {
-        this.wipeState();
-        const generation = ++this.generation;
-        const { pubKeys, blindedElement, blindingFactor, myPrivKey } =
-            await PostQuantumWorker.opaqueStartOTLogin(password, anonymitySetSize, myIndex);
-        if (generation !== this.generation) {
-            for (const publicKey of pubKeys) publicKey.fill(0);
-            blindedElement.fill(0);
-            blindingFactor.fill(0);
-            myPrivKey.fill(0);
-            throw new Error('Private authentication operation was cancelled');
-        }
-        this.otState = { myIndex, myPrivKey, blindingFactor };
-        return { pubKeys, blindedElement };
-    }
-
-    /**
-     * Finish OT Login
-     */
-    async finishOTLogin(
-        password: Uint8Array,
-        otRecords: any[],
-        evaluatedElement: Uint8Array,
-        serverNonce: Uint8Array,
-        authChannelBinding: Uint8Array
-    ): Promise<any> {
-        const otState = this.otState;
-        if (!otState) throw new Error('Private authentication not started');
-        this.otState = null;
-        const generation = this.generation;
-        const { myIndex, myPrivKey, blindingFactor } = otState;
-        let ct: Uint8Array | null = null;
-        let masked: Uint8Array | null = null;
-
-        try {
-            if (!Array.isArray(otRecords) || otRecords.length !== OPAQUE_CONFIG.PRIVATE_AUTH_ANONYMITY_SET_SIZE) {
-                throw new Error('Invalid private-auth response size');
-            }
-            const selected = otRecords[myIndex];
-            if (
-                !selected ||
-                typeof selected !== 'object' ||
-                Array.isArray(selected) ||
-                Object.getPrototypeOf(selected) !== Object.prototype ||
-                Object.keys(selected).sort().join(',') !== 'ct,masked'
-            ) {
-                throw new Error('Private-auth record missing');
-            }
-            if (
-                typeof selected.ct !== 'string' ||
-                selected.ct.length !== base64LengthForBytes(OT_CIPHERTEXT_BYTES) ||
-                typeof selected.masked !== 'string' ||
-                selected.masked.length !== base64LengthForBytes(OT_MASKED_RECORD_BYTES)
-            ) {
-                throw new Error('Private-auth record encoding is invalid');
-            }
-            ct = Base64.base64ToUint8Array(selected.ct);
-            masked = Base64.base64ToUint8Array(selected.masked);
-            if (
-                ct.length !== OT_CIPHERTEXT_BYTES ||
-                masked.length !== OT_MASKED_RECORD_BYTES ||
-                Base64.arrayBufferToBase64(ct) !== selected.ct ||
-                Base64.arrayBufferToBase64(masked) !== selected.masked
-            ) {
-                throw new Error('Private-auth record encoding is invalid');
-            }
-            const result = await PostQuantumWorker.opaqueFinishOTLogin(
-                password,
-                blindingFactor,
-                myPrivKey,
-                { ct, masked },
-                evaluatedElement,
-                serverNonce,
-                authChannelBinding
-            );
-            if (generation !== this.generation) {
-                result.exportKey?.fill(0);
-                result.authMessage?.fill(0);
-                throw new Error('Private authentication operation was cancelled');
-            }
-            return result;
-        } finally {
-            ct?.fill(0);
-            masked?.fill(0);
-            myPrivKey.fill(0);
-            blindingFactor.fill(0);
-        }
-    }
-
-    /**
      * Clear all sensitive state
      */
     clear(): void {
@@ -305,6 +165,26 @@ export class OPAQUEClient {
  * Helper functions for encoding/decoding
  */
 export const OPAQUEClientHelpers = {
+    decodePrivateAuthPirRecord(record: Uint8Array): {
+        envelope: Uint8Array;
+        salt: Uint8Array;
+    } {
+        const magic = new TextEncoder().encode(PRIVATE_AUTH_PIR_RECORD_MAGIC);
+        if (record.length !== PRIVATE_AUTH_PIR_RECORD_BYTES) {
+            throw new Error('Invalid private-auth record');
+        }
+        let validMagic = magic.length === 8;
+        for (let index = 0; index < magic.length; index += 1) {
+            validMagic = validMagic && record[index] === magic[index];
+        }
+        magic.fill(0);
+        if (!validMagic) throw new Error('Incorrect username, password, or passphrase.');
+        const envelopeStart = PRIVATE_AUTH_PIR_RECORD_MAGIC.length;
+        const envelope = record.slice(envelopeStart, envelopeStart + 72);
+        const salt = record.slice(envelopeStart + 72, envelopeStart + 72 + 32);
+        return { envelope, salt };
+    },
+
     // Compute a blinded user ID from a username
     computeBlindUserId(username: string): string {
         return computeBlindUserId(username);

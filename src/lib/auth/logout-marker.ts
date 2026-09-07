@@ -15,7 +15,9 @@ export async function markExplicitLogout(): Promise<void> {
 
 export async function clearExplicitLogout(): Promise<void> {
   try {
-    await storage.remove(STORAGE_KEYS.EXPLICIT_LOGOUT);
+    if (!await storage.remove(STORAGE_KEYS.EXPLICIT_LOGOUT)) {
+      throw new Error('Logout marker removal failed');
+    }
     if (await storage.get(STORAGE_KEYS.EXPLICIT_LOGOUT) !== null) {
       throw new Error('Logout marker verification failed');
     }
@@ -25,14 +27,10 @@ export async function clearExplicitLogout(): Promise<void> {
 }
 
 export async function isExplicitlyLoggedOut(): Promise<boolean> {
-  try {
-    const value = await storage.get(STORAGE_KEYS.EXPLICIT_LOGOUT);
-    if (typeof value === 'string' && value.length > 0) {
-      return true;
-    }
-  } catch {
-    return true;
+  const value = await storage.get(STORAGE_KEYS.EXPLICIT_LOGOUT);
+  if (value === null) return false;
+  if (!/^[1-9][0-9]{0,15}$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error('Explicit logout marker is invalid');
   }
-
-  return false;
+  return true;
 }

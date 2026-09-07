@@ -10,11 +10,11 @@ interface SidebarProps {
     variant?: 'sidebar' | 'top';
     activeTab: 'chats' | 'calls' | 'settings';
     onTabChange: (tab: 'chats' | 'calls' | 'settings') => void;
-    currentUser?: {
+    currentUser: {
         username: string;
         avatarUrl?: string;
     };
-    onLogout?: () => void;
+    onLogout: () => void;
 }
 
 export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUser, onLogout }: SidebarProps) {
@@ -74,7 +74,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                 logoutHoldActiveRef.current = false;
                 logoutCommittedRef.current = true;
                 setIsHoldingLogout(false);
-                onLogout?.();
+                onLogout();
             }
         };
 

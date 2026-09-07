@@ -1,32 +1,14 @@
-import fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
+import path from 'node:path';
 import { getClusterTelemetry } from '../cluster/cluster-integration.js';
+import { readSecureTlsFile } from '../utils/secure-file.js';
+import { safeServiceEndpointForDisplay } from '../utils/safe-url.js';
 
 const TLS_REFRESH_MS = 60_000;
 let tlsCache = { checkedAt: 0, state: 'checking', commonName: null, daysRemaining: null };
 
-function serviceEndpoint(raw, fallback) {
-  const value = typeof raw === 'string' && raw.length > 0 ? raw : fallback;
-  try {
-    const url = new URL(value);
-    const protocol = url.protocol.replace(/:$/, '');
-    const port = url.port ? `:${url.port}` : '';
-    const pathname = url.pathname && url.pathname !== '/' ? url.pathname : '';
-    return `${protocol}://${url.hostname}${port}${pathname}`;
-  } catch {
-    return null;
-  }
-}
-
 function databaseEndpoint() {
-  if (process.env.DATABASE_URL) {
-    const endpoint = serviceEndpoint(process.env.DATABASE_URL, '');
-    if (endpoint) return endpoint;
-  }
-  const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
-  const port = process.env.PGPORT || '5432';
-  const database = process.env.PGDATABASE || process.env.DB_NAME || 'qorc';
-  return `postgres://${host}:${port}/${database}`;
+  return safeServiceEndpointForDisplay(process.env.DATABASE_URL);
 }
 
 function tlsSnapshot() {
@@ -38,7 +20,7 @@ function tlsSnapshot() {
     return tlsCache;
   }
   try {
-    const certificate = new X509Certificate(fs.readFileSync(certificatePath));
+    const certificate = new X509Certificate(readSecureTlsFile(path.resolve(certificatePath)));
     const expiresAt = Date.parse(certificate.validTo);
     const commonName = /(?:^|[\n,])\s*CN\s*=\s*([^,\n]+)/.exec(certificate.subject)?.[1]?.trim() || null;
     const daysRemaining = Number.isFinite(expiresAt)
@@ -60,14 +42,14 @@ export function getServerRuntimeTelemetry() {
   const tls = tlsSnapshot();
   const cluster = getClusterTelemetry();
   return {
-    serverId: cluster.serverId || process.env.SERVER_ID || 'default',
+    serverId: cluster.serverId,
     pid: process.pid,
     clusterRegistration: cluster.registration,
     heartbeatAgeSeconds: cluster.heartbeatAgeSeconds,
     tlsState: tls.state,
     tlsCommonName: tls.commonName,
     tlsDaysRemaining: tls.daysRemaining,
-    redisEndpoint: serviceEndpoint(process.env.REDIS_URL, 'rediss://redis:6379'),
+    redisEndpoint: safeServiceEndpointForDisplay(process.env.REDIS_URL),
     databaseEndpoint: databaseEndpoint(),
   };
 }

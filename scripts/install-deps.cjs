@@ -98,128 +98,6 @@ async function redisHasTlsSupport(bin) {
   }
 }
 
-async function installRedisTlsLocal() {
-  const plat = process.platform;
-  if (plat !== 'linux') {
-    console.log('[INFO] TLS Redis auto-build is supported only on Linux.');
-    return false;
-  }
-
-  const repoRoot = path.resolve(__dirname, '..');
-  const binDir = path.join(repoRoot, 'server', 'bin');
-  const redisBin = path.join(binDir, 'redis-server-tls');
-
-  try {
-    if (fs.existsSync(redisBin) && await redisHasTlsSupport(redisBin)) {
-      return true;
-    }
-  } catch { }
-
-  const buildOk = await installComponent('build-tools');
-  if (!buildOk) {
-    console.log('[INFO] Failed to install build-tools required for TLS Redis (gcc/make)');
-    return false;
-  }
-
-  await installLinux('libssl-dev') || await installLinux('openssl-devel') || await installLinux('openssl-dev');
-
-  let downloader = findInPath('curl') ? 'curl' : null;
-  if (!downloader && findInPath('wget')) downloader = 'wget';
-  if (!downloader) {
-    await installComponent('curl');
-    if (findInPath('curl')) {
-      downloader = 'curl';
-    } else if (findInPath('wget')) {
-      downloader = 'wget';
-    }
-  }
-  if (!downloader) {
-    console.log('[INFO] Neither curl nor wget is available; cannot download Redis sources automatically.');
-    return false;
-  }
-
-  const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'redis-tls-'));
-  const tarPath = path.join(tmpRoot, 'redis.tar.gz');
-
-  // Pin recent Redis release
-  const redisUrl = process.env.REDIS_TLS_SOURCE_URL || 'https://download.redis.io/releases/redis-7.2.5.tar.gz';
-  console.log('[INFO] Downloading Redis source for TLS build from', redisUrl);
-
-  try {
-    if (downloader === 'curl') {
-      await execFileAsync('curl', ['-fsSL', redisUrl, '-o', tarPath], { stdio: 'inherit' });
-    } else {
-      await execFileAsync('wget', ['-O', tarPath, redisUrl], { stdio: 'inherit' });
-    }
-  } catch (e) {
-    console.log('[INFO] Failed to download Redis sources:', e.message);
-    return false;
-  }
-
-  try {
-    await execFileAsync('tar', ['-xzf', tarPath, '-C', tmpRoot], { stdio: 'inherit' });
-  } catch (e) {
-    console.log('[INFO] Failed to extract Redis sources (tar xzf):', e.message);
-    return false;
-  }
-
-  let extractedDir = null;
-  try {
-    const entries = fs.readdirSync(tmpRoot, { withFileTypes: true });
-    for (const ent of entries) {
-      if (ent.isDirectory() && ent.name.startsWith('redis-')) {
-        extractedDir = path.join(tmpRoot, ent.name);
-        break;
-      }
-    }
-  } catch { }
-  if (!extractedDir) {
-    console.log('[INFO] Could not locate extracted Redis source directory.');
-    return false;
-  }
-
-  console.log('[INFO] Building Redis...');
-  try {
-    await execFileAsync('make', ['BUILD_TLS=yes'], { cwd: extractedDir, stdio: 'inherit' });
-  } catch (e) {
-    console.log('[INFO] Redis TLS build failed:', e.message);
-    console.log('[INFO] confirm OpenSSL dev libraries are installed');
-    return false;
-  }
-
-  const builtServer = path.join(extractedDir, 'src', 'redis-server');
-  if (!fs.existsSync(builtServer)) {
-    console.log('[INFO] Built redis-server binary not found at', builtServer);
-    return false;
-  }
-
-  try {
-    await require('fs/promises').mkdir(binDir, { recursive: true, mode: 0o755 });
-    fs.copyFileSync(builtServer, redisBin);
-    fs.chmodSync(redisBin, 0o755);
-  } catch (e) {
-    console.log('[INFO] Failed to install TLS redis-server into project bin:', e.message);
-    return false;
-  }
-
-  try {
-    const envPath = path.join(repoRoot, '.env');
-    let envText = '';
-    try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
-    const lines = envText ? envText.split(/\r?\n/) : [];
-    const line = `TLS_REDIS_SERVER=${redisBin}`;
-    const idx = lines.findIndex(l => l.trim().startsWith('TLS_REDIS_SERVER='));
-    if (idx >= 0) lines[idx] = line; else lines.push(line);
-    const newEnv = lines.filter(Boolean).join('\n') + '\n';
-    fs.writeFileSync(envPath, newEnv, 'utf8');
-    console.log('[INFO] TLS Redis binary installed at', redisBin, 'and recorded as TLS_REDIS_SERVER in .env');
-  } catch (e) {
-    console.log('[INFO] TLS Redis installed at', redisBin, 'but failed to save TLS_REDIS_SERVER in .env:', e.message);
-  }
-
-  return true;
-}
-
 async function installDockerBuildx() {
   if (await tryExec('docker', ['buildx', 'version'], { stdio: 'ignore' })) return true;
   if (process.platform !== 'linux') return false;
@@ -265,9 +143,6 @@ async function installComponent(name) {
           if (hasTlsAfter) return true;
         }
       }
-
-      const tlsInstalled = await installRedisTlsLocal();
-      if (tlsInstalled) return true;
 
       console.log('[INFO] Install a TLS-enabled Redis manually (Redis >= 6 built with BUILD_TLS=yes) and make sure redis-server supports --tls-port.');
       return false;
@@ -446,8 +321,7 @@ async function installComponent(name) {
         if (pmHas('apk')) {
           return await trySudo(['apk', 'add', '--no-cache', 'docker']);
         }
-        // Generic fallback
-        return await installLinux('docker.io') || await installLinux('docker-ce') || await installLinux('docker');
+        return false;
       }
       console.log('[INFO] Install Docker from https://docs.docker.com/get-docker/');
       return false;

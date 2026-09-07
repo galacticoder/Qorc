@@ -130,10 +130,10 @@ interface EncoderCallbacks {
         frames: readonly VisualSendDescriptor[],
     ) => Promise<number>;
     onCaptureDrop: () => void;
-    onSourceFrame?: () => void;
-    onSourceDrop?: (count: number) => void;
-    onSourceError?: (reason: string) => void;
-    onCaptureTiming?: (stage: 'pull' | 'sourceAge' | 'decode' | 'prepare', milliseconds: number) => void;
+    onSourceFrame: () => void;
+    onSourceDrop: (count: number) => void;
+    onSourceError: (reason: string) => void;
+    onCaptureTiming: (stage: 'pull' | 'sourceAge' | 'decode' | 'prepare', milliseconds: number) => void;
     onEncode: (milliseconds: number) => void;
     onSendError: (reason: string) => void;
     onAdaptation: (state: VisualAdaptationState) => void;
@@ -439,7 +439,6 @@ export class RealtimeVisualEncoder {
     private readonly canvas = document.createElement('canvas');
     private readonly context: CanvasRenderingContext2D;
     private timer: ReturnType<typeof setTimeout> | null = null;
-    private videoFrameCallbackId: number | null = null;
     private video: HTMLVideoElement | null = null;
     private nativeSource: NativeVisualCaptureSource | null = null;
     private encoder: VideoEncoder | null = null;
@@ -554,10 +553,6 @@ export class RealtimeVisualEncoder {
         this.stateTimer = null;
         if (this.timer) clearTimeout(this.timer);
         this.timer = null;
-        if (this.video && this.videoFrameCallbackId !== null) {
-            try { this.video.cancelVideoFrameCallback(this.videoFrameCallbackId); } catch { }
-        }
-        this.videoFrameCallbackId = null;
         this.nativeSource?.stop();
         this.nativeSource = null;
         this.video = null;
@@ -591,7 +586,7 @@ export class RealtimeVisualEncoder {
     }
 
     private schedule(delay = 0): void {
-        if (this.stopped || this.timer || this.videoFrameCallbackId !== null) return;
+        if (this.stopped || this.timer) return;
         const video = this.video;
         if (video && this.kind === 'screen') {
             this.timer = setTimeout(() => {
@@ -607,14 +602,6 @@ export class RealtimeVisualEncoder {
                 this.timer = null;
                 this.schedule();
             }, delay);
-            return;
-        }
-        if (video && typeof video.requestVideoFrameCallback === 'function') {
-            this.videoFrameCallbackId = video.requestVideoFrameCallback((_now, metadata) => {
-                this.videoFrameCallbackId = null;
-                this.schedule();
-                this.offerCapture(metadata.mediaTime, performance.now());
-            });
             return;
         }
         if (video) {
@@ -668,9 +655,11 @@ export class RealtimeVisualEncoder {
                 this.noteCaptureDrop();
                 return;
             } else if (!sourceEnabled) {
+                this.sourceCapturedAt = Date.now();
                 sourceWidth = video.videoWidth;
                 sourceHeight = video.videoHeight;
             } else {
+                this.sourceCapturedAt = Date.now();
                 source = video;
                 sourceWidth = video.videoWidth;
                 sourceHeight = video.videoHeight;
@@ -679,7 +668,7 @@ export class RealtimeVisualEncoder {
                     return;
                 }
                 this.lastMediaTime = currentMediaTime;
-                this.callbacks.onSourceFrame?.();
+                this.callbacks.onSourceFrame();
                 this.adaptationSourceFrames += 1;
             }
             if (this.encoderPipelineFrames >= MAX_ENCODER_PIPELINE_FRAMES) {
@@ -722,7 +711,7 @@ export class RealtimeVisualEncoder {
             let lastNativeFrameAt = performance.now();
             while (!this.stopped && this.callbacks.isActive() && this.nativeSource === source) {
                 const { frame, pullMs, error } = await pendingRead;
-                this.callbacks.onCaptureTiming?.('pull', pullMs);
+                this.callbacks.onCaptureTiming('pull', pullMs);
                 if (this.stopped || !this.callbacks.isActive() || this.nativeSource !== source) {
                     if (frame) SecureMemory.zeroBuffer(frame.jpeg);
                     break;
@@ -767,8 +756,10 @@ export class RealtimeVisualEncoder {
                         continue;
                     }
                     const decodeStartedAt = performance.now();
-                    image = await createImageBitmap(new Blob([frame.jpeg], { type: 'image/jpeg' }));
-                    this.callbacks.onCaptureTiming?.('decode', performance.now() - decodeStartedAt);
+                    const jpegBuffer = new ArrayBuffer(frame.jpeg.byteLength);
+                    new Uint8Array(jpegBuffer).set(frame.jpeg);
+                    image = await createImageBitmap(new Blob([jpegBuffer], { type: 'image/jpeg' }));
+                    this.callbacks.onCaptureTiming('decode', performance.now() - decodeStartedAt);
                     if (this.stopped || !this.callbacks.isActive() || this.nativeSource !== source) break;
                     this.sourceCapturedAt = frame.capturedAt;
                     const sourceEnabled = this.callbacks.isSourceEnabled() && frame.enabled;
@@ -789,7 +780,7 @@ export class RealtimeVisualEncoder {
                             sourceEnabled,
                         );
                     }
-                    this.callbacks.onCaptureTiming?.('prepare', performance.now() - prepareStartedAt);
+                    this.callbacks.onCaptureTiming('prepare', performance.now() - prepareStartedAt);
                 } catch (error) {
                     if (!this.stopped) {
                         this.handleEncoderFailure(this.encoderGeneration, errorDetail(error));
@@ -802,7 +793,7 @@ export class RealtimeVisualEncoder {
         } catch (error) {
             if (!this.stopped && this.callbacks.isActive()) {
                 this.noteCaptureDrop();
-                this.callbacks.onSourceError?.(errorDetail(error));
+                this.callbacks.onSourceError(errorDetail(error));
             }
         } finally {
             try {
@@ -814,12 +805,12 @@ export class RealtimeVisualEncoder {
     }
 
     private observeNativeFrame(frame: NativeCameraFrame, now: number): void {
-        this.callbacks.onSourceFrame?.();
-        this.callbacks.onCaptureTiming?.('sourceAge', Math.max(0, Date.now() - frame.capturedAt));
+        this.callbacks.onSourceFrame();
+        this.callbacks.onCaptureTiming('sourceAge', Math.max(0, Date.now() - frame.capturedAt));
         this.adaptationSourceFrames += 1;
         if (this.nativeSequence > 0 && frame.sequence > this.nativeSequence + 1) {
             const skipped = frame.sequence - this.nativeSequence - 1;
-            this.callbacks.onSourceDrop?.(skipped);
+            this.callbacks.onSourceDrop(skipped);
             this.adaptationSourceDrops += skipped;
         }
         this.nativeSequence = frame.sequence;
@@ -976,7 +967,7 @@ export class RealtimeVisualEncoder {
             alpha: 'discard',
         });
         this.pendingEncode.set(timestamp, {
-            capturedAt: this.sourceCapturedAt || Date.now(),
+            capturedAt: this.sourceCapturedAt,
             width: dimensions.width,
             height: dimensions.height,
             startedAt: now,

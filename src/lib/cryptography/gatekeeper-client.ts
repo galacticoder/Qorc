@@ -282,6 +282,24 @@ export class GatekeeperClient {
         });
     }
 
+    async purgeStoredTokens(): Promise<void> {
+        return this.withMutation(async () => {
+            await this.checkReady();
+            const tokens = this.storedTokens;
+            this.storedTokens = [];
+            this.pendingEntrySecret?.fill(0);
+            this.pendingEntrySecret = null;
+            this.opaqueClient.clear();
+            try {
+                if (!await storage.remove(this.storageKey) || await storage.has(this.storageKey)) {
+                    throw new Error('Invalidated server-entry tokens could not be removed');
+                }
+            } finally {
+                for (const token of tokens) wipeAnonymousToken(token);
+            }
+        });
+    }
+
     /**
      * Permanently reserve one entry proof before an HTTP request
      */
@@ -326,10 +344,8 @@ export class GatekeeperClient {
     }
 
     private async loadTokens(): Promise<void> {
-        let storageReadCompleted = false;
         try {
             const data = await storage.get(this.storageKey);
-            storageReadCompleted = true;
             if (data !== null) {
                 this.storedTokens = await TokenSerializer.deserializeBatch(data);
             } else {
@@ -346,16 +362,7 @@ export class GatekeeperClient {
         } catch (e) {
             for (const token of this.storedTokens) wipeAnonymousToken(token);
             this.storedTokens = [];
-            
-            if (storageReadCompleted) {
-                if (!await storage.remove(this.storageKey) || await storage.has(this.storageKey)) {
-                    throw new Error('Invalid gatekeeper token store could not be removed');
-                }
-                return;
-            }
             throw new Error(`Gatekeeper token store could not be opened: ${e instanceof Error ? e.message : String(e)}`);
-        } finally {
-            this.initPromise = null;
         }
     }
 

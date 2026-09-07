@@ -443,7 +443,7 @@ const APP_SETTINGS_CSS = `
       object-fit: cover;
     }
 
-    .avatar-preview-fallback {
+    .avatar-preview-placeholder {
       font-size: 36px;
       line-height: 1;
       font-weight: 650;
@@ -1030,7 +1030,7 @@ const APP_SETTINGS_CSS = `
 let installed = false;
 
 export function installAppSettingsStyles(): void {
-  if (installed || typeof document === 'undefined') return;
+  if (installed) return;
   installed = true;
   const style = document.createElement('style');
   style.setAttribute('data-qorc-app-settings', '');

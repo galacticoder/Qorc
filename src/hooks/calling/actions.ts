@@ -3,8 +3,7 @@ import { flushSync, unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { clearCallMediaState, isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
-import { p2pTransport } from '../../lib/transport/p2p-transport';
-import { loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
+import { preparePeerTransport } from '../../lib/p2p/prepare-peer';
 import { toast } from 'sonner';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 
@@ -23,63 +22,35 @@ async function validatePeerMaterial(
     throw new Error('Calling service not initialized');
   }
 
-  if (!refs.getPeerCertificate) throw new Error('Peer certificate resolver unavailable');
-  callDiagnostic('action.peer-certificate-before');
-  const trustedCert = await refs.getPeerCertificate(peer);
-  callDiagnostic('action.peer-certificate-after', { found: trustedCert !== null });
+  await preparePeerTransport(
+    ownerUsername,
+    peer,
+    refs.getPeerCertificate,
+    () => refs.serviceRef.current === expectedService,
+  );
+  callDiagnostic('action.peer-session-before');
+  await refs.checkPeerSession(peer);
+  callDiagnostic('action.peer-session-after');
   if (refs.serviceRef.current !== expectedService) {
-    throw new Error('Calling account changed while resolving peer identity');
-  }
-  if (!trustedCert) throw new Error('Trusted peer certificate unavailable');
-  callDiagnostic('action.peer-register-before');
-  await p2pTransport.registerPeerCertificate(peer, trustedCert);
-  callDiagnostic('action.peer-register-after');
-  if (refs.serviceRef.current !== expectedService) {
-    throw new Error('Calling account changed while registering peer identity');
-  }
-  const hasAuthenticatedEndpoint = p2pTransport.hasAuthenticatedEndpoint(peer);
-  callDiagnostic('action.peer-endpoint-check', { found: hasAuthenticatedEndpoint });
-  if (!hasAuthenticatedEndpoint) {
-    callDiagnostic('action.peer-endpoint-load-before');
-    const persistedEndpoint = await loadPersistedPeerEndpoint(ownerUsername, peer);
-    callDiagnostic('action.peer-endpoint-load-after', { found: persistedEndpoint !== null });
-    if (refs.serviceRef.current !== expectedService) {
-      throw new Error('Calling account changed while restoring the peer endpoint');
-    }
-    if (persistedEndpoint) {
-      p2pTransport.updateAuthenticatedEndpoint(
-        peer,
-        persistedEndpoint.endpointUrl,
-        persistedEndpoint.signerPublicKeyBase64,
-        persistedEndpoint.announcedAt
-      );
-    }
-  }
-  if (refs.checkPeerSession) {
-    callDiagnostic('action.peer-session-before');
-    await refs.checkPeerSession(peer);
-    callDiagnostic('action.peer-session-after');
-    if (refs.serviceRef.current !== expectedService) {
-      throw new Error('Calling account changed while establishing the signaling session');
-    }
+    throw new Error('Calling account changed while establishing the signaling session');
   }
   callDiagnostic('action.peer-material-complete');
 }
 
 export interface ActionRefs {
   serviceRef: React.RefObject<SecureCallingService | null>;
-  localStreamRef: React.RefObject<MediaStream | null>;
+  localMediaActiveRef: React.RefObject<boolean>;
   localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   localScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
-  getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
-  checkPeerSession?: (username: string) => Promise<void>;
+  getPeerCertificate: (username: string) => Promise<PeerCertificateBundle | null>;
+  checkPeerSession: (username: string) => Promise<void>;
 }
 
 export interface ActionSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<any>>;
-  setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
+  setLocalMediaActive: React.Dispatch<React.SetStateAction<boolean>>;
   setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setLocalScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
@@ -155,7 +126,7 @@ export const createStartCall = (
 
       if (serviceIsCurrent && _error instanceof Error && _error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
-          description: "Access to camera/microphone was denied. Please check your browser permissions in the address bar and system privacy settings."
+          description: "Access to camera/microphone was denied. Please check the app and system privacy settings."
         });
       }
 
@@ -205,7 +176,7 @@ export const createAnswerCall = (refs: ActionRefs, currentUsername: string) => {
     } catch (_error: any) {
       if (refs.serviceRef.current === service && _error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
-          description: "Could not access camera/microphone. Please check your browser and system privacy settings."
+          description: "Could not access camera/microphone. Please check the app and system privacy settings."
         });
       }
 
@@ -327,7 +298,7 @@ export const createStartScreenShare = (refs: ActionRefs) => {
 
       if (_error.name === 'NotAllowedError') {
         toast.error("Permission Denied", {
-          description: "Access to screen recording was denied or canceled. Please check your browser and system privacy settings."
+          description: "Access to screen recording was denied or canceled. Please check the app and system privacy settings."
         });
       } else {
         toast.error("Screen Share Failed", {

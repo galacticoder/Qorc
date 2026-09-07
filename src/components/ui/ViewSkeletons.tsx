@@ -5,7 +5,7 @@ const MESSAGE_ROWS = [
   { side: 'incoming', width: 248, height: 42, grouped: false, kind: 'text' },
   { side: 'incoming', width: 174, height: 42, grouped: true, kind: 'text' },
   { side: 'outgoing', width: 286, height: 42, grouped: false, kind: 'reply' },
-  { side: 'incoming', width: 320, height: 64, grouped: false, kind: 'file' },
+  { side: 'incoming', width: 320, height: 64, grouped: false, kind: 'text' },
   { side: 'outgoing', width: 208, height: 42, grouped: false, kind: 'text' },
   { side: 'incoming', width: 338, height: 64, grouped: false, kind: 'text' },
 ] as const;
@@ -69,21 +69,10 @@ export const ConversationSkeleton = React.memo(function ConversationSkeleton({
                     </div>
                   )}
 
-                  {row.kind === 'file' ? (
-                    <div className="qorc-file-card qorc-conversation-skeleton-file">
-                      <span className="qorc-skeleton-block qorc-conversation-skeleton-file-icon" />
-                      <span className="qorc-conversation-skeleton-file-copy">
-                        <span className="qorc-skeleton-block" />
-                        <span className="qorc-skeleton-block" />
-                      </span>
-                      <span className="qorc-skeleton-block qorc-conversation-skeleton-file-action" />
-                    </div>
-                  ) : (
-                    <span
-                      className={`qorc-skeleton-block qorc-conversation-skeleton-bubble ${mine ? 'is-mine' : 'is-received'}`}
-                      style={{ width: row.width, height: row.height }}
-                    />
-                  )}
+                  <span
+                    className={`qorc-skeleton-block qorc-conversation-skeleton-bubble ${mine ? 'is-mine' : 'is-received'}`}
+                    style={{ width: row.width, height: row.height }}
+                  />
                 </div>
               </div>
             );

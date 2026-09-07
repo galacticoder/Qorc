@@ -4,9 +4,17 @@
 
 import { storage } from '../tauri-bindings';
 import { getCurrentLocalAccountScope } from '../security/local-account-scope';
-import { canonicalAuthUsername, isPlainRecord as plainObject } from '../sanitizers';
+import {
+  canonicalAuthUsername,
+  hasExactKeys,
+  hasPrototypePollutionKeys,
+  isPlainRecord as plainObject,
+} from '../sanitizers';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { SPOOL_DETECTION_KEY_BYTES } from '../../../shared/spool-tag-protocol.js';
+import { isKeyTransparencyHash } from '../../../shared/key-transparency-protocol.js';
 
 const MAX_PERSISTED_DISCOVERY_CHARS = 256 * 1024;
 
@@ -32,39 +40,45 @@ export interface PersistedDiscoveryRecord {
   transparency: PersistedDiscoveryTransparency | null;
 }
 
-const ROOT_COMMITMENT_RE = /^[a-f0-9]{64}$/;
+const DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_BYTES * 2}}$`);
 
-function validTransparency(value: unknown): PersistedDiscoveryTransparency | null {
-  if (!plainObject(value)) return null;
+function parseTransparency(value: unknown): PersistedDiscoveryTransparency | null {
+  if (value === null) return null;
   if (
-    typeof value.rootCommitment !== 'string' ||
-    !ROOT_COMMITMENT_RE.test(value.rootCommitment) ||
+    !plainObject(value) ||
+    hasPrototypePollutionKeys(value) ||
+    !hasExactKeys(value, ['rootCommitment', 'version']) ||
+    !isKeyTransparencyHash(value.rootCommitment) ||
     !Number.isSafeInteger(value.version) ||
-    (value.version as number) < 0
-  ) return null;
-  return { rootCommitment: value.rootCommitment, version: value.version as number };
+    (value.version as number) < 1
+  ) throw new Error('Invalid persisted discovery transparency state');
+  return { rootCommitment: value.rootCommitment as string, version: value.version as number };
 }
 
 export async function loadPersistedDiscoveryMaterial(
   owner: string,
   peer: string
 ): Promise<PersistedDiscoveryRecord | null> {
-  try {
-    const raw = await storage.get(await persistedKey(owner, peer));
-    if (!raw || raw.length > MAX_PERSISTED_DISCOVERY_CHARS) return null;
-    const parsed = JSON.parse(raw, (key, value) => (
-      key === '__proto__' || key === 'prototype' || key === 'constructor' ? undefined : value
-    ));
-    if (!plainObject(parsed) || !plainObject(parsed.material)) return null;
-    const material = parsed.material;
-    
-    if (!plainObject(material.publicKeys) || typeof material.publicKeys.kyberPublicBase64 !== 'string') {
-      return null;
-    }
-    return { material, transparency: validTransparency(parsed.transparency) };
-  } catch {
-    return null;
+  const raw = await storage.get(await persistedKey(owner, peer));
+  if (raw === null) return null;
+  if (raw.length === 0 || raw.length > MAX_PERSISTED_DISCOVERY_CHARS) {
+    throw new Error('Invalid persisted discovery material');
   }
+  const parsed = JSON.parse(raw);
+  if (
+    !plainObject(parsed) ||
+    hasPrototypePollutionKeys(parsed) ||
+    !hasExactKeys(parsed, ['material', 'protocol', 'transparency']) ||
+    parsed.protocol !== PROTOCOL_KEYS.DISCOVERY_MATERIAL_STORE ||
+    !plainObject(parsed.material) ||
+    hasPrototypePollutionKeys(parsed.material) ||
+    !plainObject(parsed.material.publicKeys) ||
+    hasPrototypePollutionKeys(parsed.material.publicKeys) ||
+    typeof parsed.material.publicKeys.kyberPublicBase64 !== 'string' ||
+    typeof parsed.material.spoolDetectionKey !== 'string' ||
+    !DETECTION_KEY_RE.test(parsed.material.spoolDetectionKey)
+  ) throw new Error('Invalid persisted discovery material');
+  return { material: parsed.material, transparency: parseTransparency(parsed.transparency) };
 }
 
 export async function savePersistedDiscoveryMaterial(
@@ -73,18 +87,21 @@ export async function savePersistedDiscoveryMaterial(
   material: unknown,
   transparency: PersistedDiscoveryTransparency | null
 ): Promise<void> {
-  if (!plainObject(material)) return;
-  try {
-    const serialized = JSON.stringify({
-      material,
-      ...(validTransparency(transparency) ? { transparency } : {}),
-    });
-    if (
-      typeof serialized !== 'string' ||
-      serialized.length > MAX_PERSISTED_DISCOVERY_CHARS
-    ) return;
-    await storage.set(await persistedKey(owner, peer), serialized);
-  } catch {
+  if (!plainObject(material) || hasPrototypePollutionKeys(material)) {
+    throw new Error('Invalid discovery material');
+  }
+  const validatedTransparency = parseTransparency(transparency);
+  const serialized = JSON.stringify({
+    protocol: PROTOCOL_KEYS.DISCOVERY_MATERIAL_STORE,
+    material,
+    transparency: validatedTransparency,
+  });
+  if (serialized.length > MAX_PERSISTED_DISCOVERY_CHARS) {
+    throw new Error('Persisted discovery material is too large');
+  }
+  const key = await persistedKey(owner, peer);
+  if (!await storage.set(key, serialized) || await storage.get(key) !== serialized) {
+    throw new Error('Persisted discovery material could not be verified');
   }
 }
 
@@ -101,8 +118,8 @@ export function discoveryMaterialStillVouchedFor(
 }
 
 export async function clearPersistedDiscoveryMaterial(owner: string, peer: string): Promise<void> {
-  try {
-    await storage.remove(await persistedKey(owner, peer));
-  } catch {
+  const key = await persistedKey(owner, peer);
+  if (!await storage.remove(key) || await storage.has(key)) {
+    throw new Error('Persisted discovery material could not be removed');
   }
 }

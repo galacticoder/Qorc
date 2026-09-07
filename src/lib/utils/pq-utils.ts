@@ -11,108 +11,8 @@ import { Base64 } from '../cryptography/base64';
 export class PostQuantumUtils {
   static timingSafeEqual = SecureMemory.constantTimeCompare;
 
-  static asUint8Array(value: Uint8Array | ArrayBuffer | Buffer | ArrayLike<number>): Uint8Array {
-    if (value instanceof Uint8Array) {
-      return value;
-    }
-    if (typeof Buffer !== 'undefined' && value instanceof Buffer) {
-      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    }
-    if (ArrayBuffer.isView(value)) {
-      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    }
-    if (value instanceof ArrayBuffer) {
-      return new Uint8Array(value);
-    }
-    if (Array.isArray(value)) {
-      return Uint8Array.from(value);
-    }
-    throw new Error('Uint8Array-compatible input required');
-  }
-
   static clearMemory(data: Uint8Array): void {
-    if (data) {
-      data.fill(0);
-    }
-  }
-
-  static deepClearSensitiveData(root: unknown, seen: Set<unknown> = new Set()): void {
-    if (root === null || root === undefined) {
-      return;
-    }
-
-    const rootType = typeof root;
-    if (rootType !== 'object') {
-      return;
-    }
-
-    if (seen.has(root)) {
-      return;
-    }
-    seen.add(root);
-
-    if (root instanceof Uint8Array) {
-      PostQuantumUtils.clearMemory(root);
-      return;
-    }
-
-    if (ArrayBuffer.isView(root)) {
-      const view = root as ArrayBufferView;
-      const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-      PostQuantumUtils.clearMemory(bytes);
-      return;
-    }
-
-    if (root instanceof ArrayBuffer) {
-      const bytes = new Uint8Array(root);
-      PostQuantumUtils.clearMemory(bytes);
-      return;
-    }
-
-    const maybeZeroize = (root as any).zeroize;
-    if (typeof maybeZeroize === 'function') {
-      try {
-        maybeZeroize.call(root);
-      } catch {
-      }
-    }
-
-    if (Array.isArray(root)) {
-      for (const item of root) {
-        PostQuantumUtils.deepClearSensitiveData(item, seen);
-      }
-      return;
-    }
-
-    if (root instanceof Map) {
-      for (const [k, v] of root.entries()) {
-        PostQuantumUtils.deepClearSensitiveData(k, seen);
-        PostQuantumUtils.deepClearSensitiveData(v, seen);
-      }
-      return;
-    }
-
-    if (root instanceof Set) {
-      for (const v of root.values()) {
-        PostQuantumUtils.deepClearSensitiveData(v, seen);
-      }
-      return;
-    }
-
-    const obj = root as Record<string | symbol, unknown>;
-    for (const key of Object.keys(obj)) {
-      try {
-        PostQuantumUtils.deepClearSensitiveData(obj[key], seen);
-      } catch {
-      }
-    }
-
-    for (const sym of Object.getOwnPropertySymbols(obj)) {
-      try {
-        PostQuantumUtils.deepClearSensitiveData(obj[sym], seen);
-      } catch {
-      }
-    }
+    data.fill(0);
   }
 
   static stringToBytes(str: string): Uint8Array {
@@ -123,8 +23,7 @@ export class PostQuantumUtils {
     return new TextDecoder().decode(bytes);
   }
 
-  static bytesToHex(bytes: Uint8Array | ArrayBuffer | Buffer): string {
-    bytes = PostQuantumUtils.asUint8Array(bytes);
+  static bytesToHex(bytes: Uint8Array): string {
     if (bytes.length > PQ_UTILS_MAX_DATA_SIZE) {
       throw new Error(`Data too large: ${bytes.length} bytes exceeds limit`);
     }
@@ -135,20 +34,19 @@ export class PostQuantumUtils {
     if (typeof hex !== 'string') {
       throw new Error('Hex input must be a string');
     }
-    const clean = hex.replace(/\s+/g, '');
-    if (!/^[0-9a-fA-F]*$/.test(clean)) {
+    if (!/^[0-9a-f]*$/.test(hex)) {
       throw new Error('Invalid hex characters');
     }
-    if (clean.length % 2 !== 0) {
+    if (hex.length % 2 !== 0) {
       throw new Error('Hex string must have even length');
     }
-    if (clean.length > PQ_UTILS_MAX_DATA_SIZE * 2) {
-      throw new Error(`Hex string too long: ${clean.length} chars exceeds limit`);
+    if (hex.length > PQ_UTILS_MAX_DATA_SIZE * 2) {
+      throw new Error(`Hex string too long: ${hex.length} chars exceeds limit`);
     }
 
-    const bytes = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < clean.length; i += 2) {
-      const byteStr = clean.slice(i, i + 2);
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      const byteStr = hex.slice(i, i + 2);
       const val = parseInt(byteStr, 16);
       if (Number.isNaN(val)) {
         throw new Error(`Invalid hex byte: ${byteStr}`);
@@ -166,8 +64,8 @@ export class PostQuantumUtils {
     }
   }
 
-  static uint8ArrayToBase64(bytes: Uint8Array | ArrayBuffer | Buffer): string {
-    return Base64.arrayBufferToBase64(PostQuantumUtils.asUint8Array(bytes));
+  static uint8ArrayToBase64(bytes: Uint8Array): string {
+    return Base64.arrayBufferToBase64(bytes);
   }
 
   static concatBytes(...arrays: Uint8Array[]): Uint8Array {

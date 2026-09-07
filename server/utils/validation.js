@@ -1,6 +1,7 @@
 import { UUID_V4_RE } from './patterns.js';
 
 const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const WIRE_MESSAGE_TYPE_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 export function hasExactPlainObjectKeys(value, expectedKeys) {
   return Boolean(
@@ -14,6 +15,10 @@ export function hasExactPlainObjectKeys(value, expectedKeys) {
 
 export function hasReservedJsonKey(key) {
   return RESERVED_JSON_KEYS.has(key);
+}
+
+export function isSafeWireMessageType(value) {
+  return typeof value === 'string' && WIRE_MESSAGE_TYPE_RE.test(value);
 }
 
 export function requireUuidV4(value, label) {

@@ -41,25 +41,9 @@ export async function persistCache(
     state.cacheSaveInFlight = operation;
     try {
         await operation;
-    } catch { }
-    finally {
+    } finally {
         if (state.cacheSaveInFlight === operation) state.cacheSaveInFlight = null;
     }
-}
-
-// Clear avatar cache
-export function clearPeerCache(
-    state: AvatarSystemState,
-    username: string | undefined,
-    isCurrent: () => boolean
-): void {
-    if (!isCurrent()) return;
-    if (username) {
-        state.avatarCache.delete(username);
-    } else {
-        state.avatarCache.clear();
-    }
-    void persistCache(state, isCurrent);
 }
 
 // Cache avatar for peer

@@ -3,6 +3,11 @@ import fs from 'fs/promises';
 import { constants, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+    processMatchesExecutable,
+    readProcessIdFileSnapshot,
+    removeUnchangedProcessIdFile,
+} from '../utils/process-identity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EDGE_RUNTIME_ROOT = '/opt/qorc-edge';
@@ -59,13 +64,7 @@ export class TorManager {
         delete env.OQS_PROVIDER_MODULE;
         delete env.LD_PRELOAD;
 
-        const bundledLibraryDirs = [
-            BUNDLED_LIBRARY_DIR,
-            this.torBundleDir,
-            path.join(this.torBundleDir, 'lib64'),
-            path.join(this.torBundleDir, 'lib')
-        ].filter((directory) => existsSync(directory));
-        env.LD_LIBRARY_PATH = [...new Set(bundledLibraryDirs)].join(path.delimiter);
+        env.LD_LIBRARY_PATH = BUNDLED_LIBRARY_DIR;
 
         return env;
     }
@@ -136,33 +135,14 @@ export class TorManager {
             await fs.access(bundledTor, constants.X_OK);
             return bundledTor;
         } catch (error) {
-            console.error('[TOR] Bundled Tor executable is unavailable:', error.message);
-            return null;
+            throw new Error(`Bundled Tor executable is unavailable: ${error.message}`);
         }
     }
 
     async isRunning() {
         try {
-            if (existsSync(this.pidPath)) {
-                const pid = parseInt(await fs.readFile(this.pidPath, 'utf8'), 10);
-                try {
-                    process.kill(pid, 0);
-                    if (process.platform === 'linux') {
-                        try {
-                            const [runningExecutable, bundledExecutable] = await Promise.all([
-                                fs.readlink(`/proc/${pid}/exe`),
-                                fs.realpath(this.getTorBinaryPath())
-                            ]);
-                            if (path.resolve(runningExecutable) !== path.resolve(bundledExecutable)) return false;
-                        } catch {
-                            return false;
-                        }
-                    }
-                    return true;
-                } catch {
-                    return false;
-                }
-            }
+            const snapshot = await readProcessIdFileSnapshot(this.pidPath);
+            return Boolean(snapshot?.pid && await processMatchesExecutable(snapshot.pid, this.getTorBinaryPath()));
         } catch { }
         return false;
     }
@@ -215,10 +195,6 @@ export class TorManager {
         this.isPublishedState = false;
 
         const torBin = await this.getTorBinary();
-        if (!torBin) {
-            console.error('[TOR] The bundled Tor runtime is missing or invalid.');
-            return false;
-        }
 
         try {
             const startupLogOffset = await this.getTorLogSize();
@@ -235,8 +211,7 @@ export class TorManager {
             console.log('[TOR] Waiting for bootstrap and confirmed descriptor publication...');
             for (let i = 0; ; i++) {
                 if (this.torProcess.exitCode !== null) {
-                    console.error(`[TOR] Tor exited during startup (${this.torProcess.exitCode}).`);
-                    return false;
+                    throw new Error(`Tor exited during startup (${this.torProcess.exitCode})`);
                 }
                 const addr = await this.getOnionAddress();
                 const bootstrapped = await this.hasBootstrappedSince(startupLogOffset);
@@ -255,17 +230,24 @@ export class TorManager {
             }
         } catch (err) {
             console.error('[TOR] Failed to start Tor:', err.message);
-            return false;
+            throw err;
         }
     }
 
     async stop() {
         try {
-            if (existsSync(this.pidPath)) {
-                const pid = parseInt(await fs.readFile(this.pidPath, 'utf8'), 10);
-                console.log(`[TOR] Stopping Tor (PID: ${pid})...`);
-                try { process.kill(pid, 'SIGTERM'); } catch { }
-                await fs.unlink(this.pidPath).catch(() => { });
+            const snapshot = await readProcessIdFileSnapshot(this.pidPath);
+            if (snapshot) {
+                const { pid } = snapshot;
+                if (pid && await processMatchesExecutable(pid, this.getTorBinaryPath())) {
+                    console.log(`[TOR] Stopping Tor (PID: ${pid})...`);
+                    try { process.kill(pid, 'SIGTERM'); } catch { }
+                } else {
+                    console.warn('[TOR] Refusing to signal a PID not owned by bundled Tor');
+                }
+                if (!await removeUnchangedProcessIdFile(this.pidPath, snapshot)) {
+                    throw new Error('Tor PID file changed while stopping');
+                }
             }
             this.isRunningState = false;
             this.isPublishedState = false;

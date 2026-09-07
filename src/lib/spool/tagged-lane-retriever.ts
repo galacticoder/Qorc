@@ -7,7 +7,7 @@ import { SPOOL_TAG_INDEX_POLL_INTERVAL_MS } from '../../../shared/spool-tag-prot
 import { captureCurrentServerContext } from '../security/local-account-scope';
 import { fetchSpoolTagIndex } from './tag-index-client';
 import { fetchSpoolEntries, sealedEnvelopeFromRecord } from './pir-fetch';
-import { detectionTagForProbe, ownDetectionPublicKeyHex } from './detection-key';
+import { detectionTagForProbe } from './detection-key';
 import { loadConsumedSpoolProbeCache } from './consumed-probe-cache';
 
 const testedProbes = new Set<string>();
@@ -35,11 +35,8 @@ export async function retrieveTaggedLaneOnce(
   for (const probe of consumedProbeCache.probes) testedProbes.add(probe);
 
   const index = await fetchSpoolTagIndex(options.serverUrl);
-  if (!index || index.tags.length === 0) {
-    console.log(
-      index ? '[SPOOL-PIR] tag index is empty' : '[SPOOL-PIR] tag index unavailable',
-      { entries: index?.tags.length ?? 0 }
-    );
+  if (index.tags.length === 0) {
+    console.log('[SPOOL-PIR] tag index is empty', { entries: 0 });
     return null;
   }
 
@@ -141,7 +138,6 @@ class TaggedLaneRetriever {
         this.running = false;
         if (generation === this.generation) {
           this.timer = setTimeout(tick, intervalMs);
-          (this.timer as any)?.unref?.();
         }
       }
     };

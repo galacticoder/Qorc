@@ -11,13 +11,42 @@ import { BLIND_ROUTE_REQUEST_ID_RE, validateBlindRouteRequest } from '../routing
 import { envInt } from '../utils/env.js';
 import { createWindowBudget } from '../utils/window-budget.js';
 
-function hasAccountAuthentication(ws, state = {}) {
-  return !!state?.hasAuthenticated || !!ws?._authenticated || !!ws?._hasAuthenticated;
+export function hasAccountAuthentication(ws) {
+  return ws?._authenticated === true;
 }
 
-function hasServerEntryAuthorization(ws, state = {}) {
+export function hasServerEntryAuthorization(ws) {
   if (!ServerConfig.isServerPasswordGateReady()) return true;
-  return !!state?.hasServerAuth || !!ws?._hasServerAuth || !!ws?._unlinkedSession;
+  return ws?._hasServerAuth === true;
+}
+
+export function isLiveDeliverySocket(ws) {
+  return Boolean(
+    ws &&
+    ws._connectionAbortSignal?.aborted !== true &&
+    ws._ingressQueueRejected !== true &&
+    (ws.readyState === undefined || ws.readyState === 1)
+  );
+}
+
+export function hasAnonymousDeliveryAuthorization(ws) {
+  return hasAnonymousSocketAuthorization(ws) &&
+    ws?._unlinkedSession === true;
+}
+
+export function hasAnonymousSocketAuthorization(ws) {
+  return isLiveDeliverySocket(ws) &&
+    ws?._accountAuthViaAnonymousToken === true &&
+    hasServerEntryAuthorization(ws) &&
+    hasAccountAuthentication(ws);
+}
+
+export function activateAnonymousDeliveryAuthorization(ws) {
+  if (!hasAnonymousSocketAuthorization(ws)) return false;
+  ws._unlinkedSession = true;
+  if (hasAnonymousDeliveryAuthorization(ws)) return true;
+  delete ws._unlinkedSession;
+  return false;
 }
 
 const BLIND_ROUTE_WINDOW_MS = envInt('BLIND_ROUTE_WINDOW_MS', 60_000, 1_000, 10 * 60_000);
@@ -55,7 +84,7 @@ export async function handleBlindRoute({ ws, parsed }) {
     return await ack({ success: false, error: requestValidation.error });
   }
 
-  if (ws._unlinkedSession !== true) {
+  if (!hasAnonymousDeliveryAuthorization(ws)) {
     console.warn('[BLIND-ROUTE] Rejected unauthenticated');
     return await ack({ success: false, error: 'authentication_required' });
   }
@@ -79,6 +108,7 @@ export async function handleBlindRoute({ ws, parsed }) {
   }
 
   const { routeToGlobalMix } = await import('../routing/blind-router.js');
+  if (!hasAnonymousDeliveryAuthorization(ws)) return false;
   const routeResult = await routeToGlobalMix(sealedEnvelope, {
     liveOnly: requestValidation.deliveryPolicy === LIVE_ONLY_DELIVERY_POLICY
   });
@@ -90,7 +120,7 @@ export async function handleBlindRoute({ ws, parsed }) {
 }
 
 // Activate authorized socket for global mix broadcast
-export async function handleActivateDelivery({ ws, parsed, state }) {
+export async function handleActivateDelivery({ ws, parsed }) {
   const requestId = typeof parsed?.requestId === 'string' &&
     BLIND_ROUTE_REQUEST_ID_RE.test(parsed.requestId)
     ? parsed.requestId
@@ -105,14 +135,13 @@ export async function handleActivateDelivery({ ws, parsed, state }) {
     return await response({ success: false, error: 'invalid_activation_request' });
   }
 
-  const isAuthorized = ws._accountAuthViaAnonymousToken === true &&
-    hasServerEntryAuthorization(ws, state) &&
-    hasAccountAuthentication(ws, state);
+  const isAuthorized = hasAnonymousSocketAuthorization(ws);
   if (!isAuthorized) {
     return await response({ success: false, error: 'authentication_required' });
   }
 
   const { registerLocalSocket, unregisterLocalSocket } = await import('../routing/blind-router.js');
+  if (!hasAnonymousSocketAuthorization(ws)) return false;
   const previousSocketId = ws._blindSocketId;
   let newlyRegistered = false;
   try {
@@ -121,7 +150,10 @@ export async function handleActivateDelivery({ ws, parsed, state }) {
   } catch {
     return await response({ success: false, error: 'delivery_registration_failed' });
   }
-  ws._unlinkedSession = true;
+  if (!activateAnonymousDeliveryAuthorization(ws)) {
+    if (newlyRegistered) unregisterLocalSocket(ws);
+    return false;
+  }
 
   try {
     const delivered = await response({ success: true });

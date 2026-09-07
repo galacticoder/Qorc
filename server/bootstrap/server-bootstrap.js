@@ -4,6 +4,9 @@ import path from 'path';
 import crypto from 'crypto';
 import { LOOPBACK_HOST } from '../config/infrastructure.js';
 import { envInt } from '../utils/env.js';
+import { readSecureTlsFile } from '../utils/secure-file.js';
+
+export { readSecureTlsFile } from '../utils/secure-file.js';
 
 // Basic validation of certificate content
 function validateCertificateContent(key, cert, { logger = console } = {}) {
@@ -82,9 +85,11 @@ export function loadServerCertificates({ certPath, keyPath, logger = console } =
 
   if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSync(validKeyPath)) {
     logger?.log?.('[BOOTSTRAP] Using provided TLS certificate and key');
+    let key;
+    let cert;
     try {
-      const key = fs.readFileSync(validKeyPath);
-      const cert = fs.readFileSync(validCertPath);
+      key = readSecureTlsFile(validKeyPath, { privateKey: true });
+      cert = readSecureTlsFile(validCertPath);
 
       if (!validateCertificateContent(key, cert, { logger })) {
         const error = new Error('Invalid certificate or key content');
@@ -92,12 +97,10 @@ export function loadServerCertificates({ certPath, keyPath, logger = console } =
         throw error;
       }
 
-      return {
-        key,
-        cert,
-        source: 'provided',
-      };
+      return { key, cert };
     } catch (error) {
+      key?.fill(0);
+      cert?.fill(0);
       logger?.error?.('[BOOTSTRAP] Failed to read/validate TLS certificates:', error.message);
       throw new Error('TLS certificate loading failed. Cannot continue.');
     }
@@ -157,6 +160,15 @@ export async function createServer({
   if (typeof createApp !== 'function') {
     throw new Error('createServer requires a createApp function');
   }
+  if (typeof createWebSocketServer !== 'function') {
+    throw new Error('createServer requires a createWebSocketServer function');
+  }
+  if (typeof onServerReady !== 'function') {
+    throw new Error('createServer requires an onServerReady function');
+  }
+  if (typeof prepareServerContext !== 'function') {
+    throw new Error('createServer requires a prepareServerContext function');
+  }
 
   const bindAddr = process.env.BIND_ADDRESS || LOOPBACK_HOST;
   const loopbacks = new Set([LOOPBACK_HOST, '::1', 'localhost']);
@@ -166,31 +178,18 @@ export async function createServer({
     );
   }
 
-  const configuredWorkers = String(process.env.CLUSTER_WORKERS || '1').trim();
-  if (configuredWorkers !== '' && configuredWorkers !== '1') {
-    throw new Error('CLUSTER_WORKERS greater than 1 is unsupported; scale with independent Redis-backed server nodes');
-  }
-
-  const startWorkerInstance = async ({ key, cert, source, context, workerId }) => {
-    const app = await createApp({ context, workerId, isClusterWorker: false });
+  const { key, cert } = loadServerCertificates({ certPath, keyPath, logger });
+  try {
+    const context = await prepareServerContext({ key, cert });
+    const app = await createApp({ context });
     const server = createHttpsServer({ app, key, cert });
-    const wss = typeof createWebSocketServer === 'function' ? await createWebSocketServer({ server, context, workerId }) : null;
-
-    if (typeof onServerReady === 'function') {
-      await onServerReady({ app, server, wss, context, workerId, tls: { key, cert, source } });
-    }
-
-    return { app, server, wss };
-  };
-
-  const { key, cert, source } = loadServerCertificates({ certPath, keyPath, logger });
-  logger?.log?.(`[BOOTSTRAP] TLS source: ${source}`);
-  const context = typeof prepareServerContext === 'function'
-    ? await prepareServerContext({ key, cert, mode: 'single' })
-    : {};
-  const result = await startWorkerInstance({ key, cert, source, context, workerId: 0 });
-
-  return { mode: 'single', ...result, context };
+    const wss = await createWebSocketServer({ server, context });
+    await onServerReady({ app, server, wss, context });
+    return { app, server, wss, context };
+  } finally {
+    key.fill(0);
+    cert.fill(0);
+  }
 }
 
 export function registerShutdownHandlers({

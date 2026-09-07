@@ -4,11 +4,10 @@ import { TypingIndicator } from './TypingIndicator';
 
 interface TypingIndicatorListProps {
     selectedConversation?: string;
-    getDisplayUsername?: (username: string) => Promise<string>;
-    onUpdate?: () => void;
+    onUpdate: () => void;
 }
 
-export const TypingIndicatorList = React.memo(({ selectedConversation, getDisplayUsername: _getDisplayUsername, onUpdate }: TypingIndicatorListProps) => {
+export const TypingIndicatorList = React.memo(({ selectedConversation, onUpdate }: TypingIndicatorListProps) => {
     const { typingUsers: allTypingUsers } = useTypingIndicatorContext();
 
     const typingUsers = useMemo(() => {
@@ -21,7 +20,7 @@ export const TypingIndicatorList = React.memo(({ selectedConversation, getDispla
     useEffect(() => {
         if (typingUsers.length !== prevCountRef.current) {
             prevCountRef.current = typingUsers.length;
-            onUpdate?.();
+            onUpdate();
         }
     }, [typingUsers.length, onUpdate]);
 

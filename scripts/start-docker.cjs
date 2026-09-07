@@ -14,7 +14,6 @@ const path = require('path');
 const readline = require('readline');
 const fs = require('fs');
 const net = require('net');
-const { Writable } = require('stream');
 const { randomBytes } = require('crypto');
 const {
     createDockerBuildContext,
@@ -58,55 +57,16 @@ const repoRoot = path.resolve(__dirname, '..');
 const envPath = path.join(repoRoot, '.env');
 const hostLogsPath = path.join(repoRoot, 'logs');
 const composeFilePath = path.join(repoRoot, 'docker/docker-compose.yml');
-const serverImagePirWorkerPath = '/app/bin/qorc-pir-worker';
-
-function composeImageName(service) {
-    const rawConfig = execFileSync('docker', [
-        'compose',
-        '--env-file', envPath,
-        '-f', composeFilePath,
-        '--profile', '*',
-        'config',
-        '--format', 'json'
-    ], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore']
-    });
-    const projectName = JSON.parse(rawConfig).name;
-    if (typeof projectName !== 'string' || !projectName) {
-        throw new Error('Docker Compose did not provide a project name');
-    }
-    return `${projectName}-${service}:latest`;
-}
-
-function serverImageHasCurrentPirWorker() {
-    try {
-        const imageName = composeImageName('server');
-        execFileSync('docker', [
-            'run', '--rm',
-            '--entrypoint', '/usr/bin/test',
-            imageName,
-            '-x', serverImagePirWorkerPath
-        ], {
-            cwd: repoRoot,
-            stdio: 'ignore'
-        });
-        return true;
-    } catch {
-        return false;
-    }
-}
 
 // Helper to check if a port is in use
 function isPortInUse(port) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         const server = net.createServer();
         server.once('error', (err) => {
             if (err.code === 'EADDRINUSE') {
                 resolve(true);
             } else {
-                resolve(false);
+                reject(err);
             }
         });
         server.once('listening', () => {
@@ -117,7 +77,6 @@ function isPortInUse(port) {
     });
 }
 
-// Helper to find the next available port
 function isComposeServiceUsingPort(service, containerPort, hostPort) {
     try {
         const output = execFileSync('docker', [
@@ -139,15 +98,14 @@ function isComposeServiceUsingPort(service, containerPort, hostPort) {
     }
 }
 
-async function findAvailablePort(startPort, composeService, containerPort) {
-    let port = parseInt(startPort, 10);
-    while (await isPortInUse(port)) {
-        if (composeService && isComposeServiceUsingPort(composeService, containerPort, port)) {
-            return port;
-        }
-        port++;
+async function requireAvailablePort(name, value, composeService, containerPort) {
+    const port = Number(value);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+        throw new Error(`${name} must be an integer from 1 through 65535`);
     }
-    return port;
+    if (await isPortInUse(port) && !isComposeServiceUsingPort(composeService, containerPort, port)) {
+        throw new Error(`${name} port ${port} is already in use`);
+    }
 }
 
 // Helper to read .env file
@@ -185,43 +143,11 @@ function updateEnvFile(updates) {
     )).join(', ')}`);
 }
 
-function promptForHiddenInput(prompt) {
-    if (!process.stdin.isTTY || !process.stdout.isTTY) {
-        throw new Error('SERVER_PASSWORD is missing. Add SERVER_PASSWORD=<12-512 character password> to .env, then run this command again.');
-    }
-
-    return new Promise((resolve) => {
-        let muted = false;
-        const hiddenOutput = new Writable({
-            write(chunk, encoding, callback) {
-                if (!muted) process.stdout.write(chunk, encoding);
-                callback();
-            }
-        });
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: hiddenOutput,
-            terminal: true
-        });
-
-        process.stdout.write(prompt);
-        muted = true;
-        rl.question('', (answer) => {
-            muted = false;
-            rl.close();
-            process.stdout.write('\n');
-            resolve(answer);
-        });
-    });
-}
-
-async function checkDockerEnvironment(env, needsServerPassword) {
+async function checkDockerEnvironment(env, needsServerPassword, needsLoadBalancerCredentials) {
     const updates = {};
-    let redisPasswordChanged = false;
     const defaults = {
         DB_PORT: '5432',
         DB_NAME: 'qorc',
-        DATABASE_USER: 'postgres',
         REDIS_URL: 'rediss://redis:6379',
         REDIS_EXTERNAL_PORT: '6379',
         REDIS_TLS_SERVERNAME: 'redis',
@@ -233,6 +159,8 @@ async function checkDockerEnvironment(env, needsServerPassword) {
         TLS_CERT_PATH: 'server/config/certs/localhost.crt',
         TLS_KEY_PATH: 'server/config/certs/localhost.key',
         PORT: '3000',
+        CLUSTER_PRIMARY: 'true',
+        CLUSTER_AUTO_APPROVE: 'false',
         HAPROXY_HTTPS_PORT: '8443',
         HAPROXY_STATS_PORT: '8404'
     };
@@ -241,23 +169,34 @@ async function checkDockerEnvironment(env, needsServerPassword) {
         if (!env[key]) updates[key] = value;
     }
     if (!env.DATABASE_PASSWORD) updates.DATABASE_PASSWORD = randomBytes(32).toString('base64url');
-    if (!env.REDIS_PASSWORD || env.REDIS_PASSWORD.length < 32 || !/^[A-Za-z0-9_-]+$/.test(env.REDIS_PASSWORD)) {
-        if (env.REDIS_PASSWORD) {
-            console.warn('[WARN] REDIS_PASSWORD is incompatible with the hardened Redis runtime, generating a 256-bit replacement.');
-        }
+    if (!env.REDIS_PASSWORD) {
         updates.REDIS_PASSWORD = randomBytes(32).toString('base64url');
-        redisPasswordChanged = true;
+    } else if (env.REDIS_PASSWORD.length < 32 || !/^[A-Za-z0-9_-]+$/.test(env.REDIS_PASSWORD)) {
+        throw new Error('REDIS_PASSWORD must contain at least 32 base64url characters');
     }
 
-    if (needsServerPassword && !env.SERVER_PASSWORD) {
-        let password = '';
-        while (password.length < 12 || password.length > 512) {
-            password = await promptForHiddenInput('Choose a server password (12-512 characters): ');
-            if (password.length < 12 || password.length > 512) {
-                console.error('[ERROR] The server password must be 12-512 characters.');
-            }
+    if (needsServerPassword) {
+        const serverPassword = typeof env.SERVER_PASSWORD === 'string'
+            ? env.SERVER_PASSWORD.trim()
+            : '';
+        if (!serverPassword) {
+            throw new Error('SERVER_PASSWORD is required in .env. Add a 12-512 character value and run this command again.');
         }
-        updates.SERVER_PASSWORD = password;
+        if (serverPassword.length < 12 || serverPassword.length > 512) {
+            throw new Error('SERVER_PASSWORD in .env must contain between 12 and 512 characters.');
+        }
+    }
+
+    if (needsLoadBalancerCredentials) {
+        const statsUsername = typeof env.HAPROXY_STATS_USERNAME === 'string'
+            ? env.HAPROXY_STATS_USERNAME.trim()
+            : '';
+        const statsPassword = typeof env.HAPROXY_STATS_PASSWORD === 'string'
+            ? env.HAPROXY_STATS_PASSWORD
+            : '';
+        if (!statsUsername || !statsPassword) {
+            throw new Error('HAPROXY_STATS_USERNAME and HAPROXY_STATS_PASSWORD are required in .env for the load balancer.');
+        }
     }
 
     if (Object.keys(updates).length > 0) {
@@ -265,7 +204,6 @@ async function checkDockerEnvironment(env, needsServerPassword) {
         Object.assign(env, updates);
     }
 
-    return { redisPasswordChanged };
 }
 
 function checkSupportedDockerRuntime() {
@@ -484,58 +422,21 @@ async function main() {
         checkSupportedDockerRuntime();
         fs.mkdirSync(hostLogsPath, { recursive: true });
 
-        console.log('[INFO] Checking for port conflicts...');
         const env = readEnv();
-        const environmentChanges = await checkDockerEnvironment(env, command === 'server' || command === 'all');
+        await checkDockerEnvironment(
+            env,
+            command === 'server' || command === 'all',
+            command === 'loadbalancer' || command === 'all'
+        );
         checkDockerIdentitySeeds(env);
-        const updates = {};
-
-        // 1. Postgres
-        const dbPort = parseInt(env.DB_PORT || '5432', 10);
-        const availableDbPort = await findAvailablePort(dbPort, 'postgres', 5432);
-        if (availableDbPort !== dbPort) {
-            console.log(`[WARN] Port ${dbPort} is in use. Switching Postgres to ${availableDbPort}.`);
-            updates.DB_PORT = availableDbPort;
+        await requireAvailablePort('REDIS_EXTERNAL_PORT', env.REDIS_EXTERNAL_PORT, 'redis', 6379);
+        if (command === 'server' || command === 'all') {
+            await requireAvailablePort('DB_PORT', env.DB_PORT, 'postgres', 5432);
+            await requireAvailablePort('PORT', env.PORT, 'server', 3000);
         }
-
-        // 2. Server
-        const serverPort = parseInt(env.PORT || '3000', 10);
-        const availableServerPort = await findAvailablePort(serverPort, 'server', 3000);
-        if (availableServerPort !== serverPort) {
-            console.log(`[WARN] Port ${serverPort} is in use. Switching Server to ${availableServerPort}.`);
-            updates.PORT = availableServerPort;
-        }
-
-        // 3. Redis
-        const redisPort = parseInt(env.REDIS_EXTERNAL_PORT || '6379', 10);
-        const availableRedisPort = await findAvailablePort(redisPort, 'redis', 6379);
-        if (availableRedisPort !== redisPort) {
-            console.log(`[WARN] Port ${redisPort} is in use. Switching Redis to ${availableRedisPort}.`);
-            updates.REDIS_EXTERNAL_PORT = availableRedisPort;
-        }
-
-        // 4. LoadBalancer
         if (command === 'loadbalancer' || command === 'all') {
-            const httpsPort = parseInt(env.HAPROXY_HTTPS_PORT || '8443', 10);
-            const availableHttpsPort = await findAvailablePort(httpsPort, 'loadbalancer', 8443);
-            if (availableHttpsPort !== httpsPort) {
-                console.log(`[WARN] Port ${httpsPort} is in use. Switching LoadBalancer HTTPS to ${availableHttpsPort}.`);
-                updates.HAPROXY_HTTPS_PORT = availableHttpsPort;
-            }
-
-            const statsPort = parseInt(env.HAPROXY_STATS_PORT || '8404', 10);
-            const availableStatsPort = await findAvailablePort(statsPort, 'loadbalancer', 8404);
-            if (availableStatsPort !== statsPort) {
-                console.log(`[WARN] Port ${statsPort} is in use. Switching LoadBalancer Stats to ${availableStatsPort}.`);
-                updates.HAPROXY_STATS_PORT = availableStatsPort;
-            }
-        }
-
-        if (Object.keys(updates).length > 0) {
-            updateEnvFile(updates);
-            for (const [key, value] of Object.entries(updates)) {
-                process.env[key] = value;
-            }
+            await requireAvailablePort('HAPROXY_HTTPS_PORT', env.HAPROXY_HTTPS_PORT, 'loadbalancer', 8443);
+            await requireAvailablePort('HAPROXY_STATS_PORT', env.HAPROXY_STATS_PORT, 'loadbalancer', 8404);
         }
 
         const shouldBuild = flags.includes('--build');
@@ -568,20 +469,11 @@ async function main() {
                 let sharedServices = 'redis';
                 if (command === 'server' || command === 'all') sharedServices = 'postgres redis';
 
-                const needsServer = command === 'server' || command === 'all';
-                const repairServerImage = needsServer
-                    && !shouldBuild
-                    && !serverImageHasCurrentPirWorker();
-                if (repairServerImage) {
-                    console.log(`[INFO] Existing server image is missing ${serverImagePirWorkerPath}, rebuilding it once.`);
+                if (shouldBuild) {
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildServices}`, { cwd: repoRoot, stdio: 'inherit' });
                 }
 
-                if (shouldBuild || repairServerImage) {
-                    const servicesToBuild = shouldBuild ? buildServices : 'server';
-                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${servicesToBuild}`, { cwd: repoRoot, stdio: 'inherit' });
-                }
-
-                const sharedRecreateFlag = shouldBuild || environmentChanges.redisPasswordChanged ? '' : '--no-recreate';
+                const sharedRecreateFlag = shouldBuild ? '' : '--no-recreate';
                 execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --wait --remove-orphans ${sharedRecreateFlag} ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
 
                 if (runDetached) {
@@ -636,8 +528,11 @@ async function main() {
         });
 
     } catch (error) {
-        console.error('[ERROR] Docker command failed');
-        if (error.message && error.message.includes('Cannot connect to the Docker daemon')) {
+        const message = error && typeof error.message === 'string'
+            ? error.message
+            : 'Docker command failed';
+        console.error(`[ERROR] ${message}`);
+        if (message.includes('Cannot connect to the Docker daemon')) {
             console.error('[ERROR] Docker Desktop is not running. Please start Docker Desktop and try again.');
         }
         process.exit(1);

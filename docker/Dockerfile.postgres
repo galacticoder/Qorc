@@ -15,7 +15,6 @@ ENV LANG en_US.utf8
 WORKDIR /app
 
 COPY scripts/ ./scripts/
-COPY .env .env
 
 RUN node scripts/install-deps.cjs postgres openssl
 RUN mkdir -p /var/lib/postgresql/certs && chown postgres:postgres /var/lib/postgresql/certs

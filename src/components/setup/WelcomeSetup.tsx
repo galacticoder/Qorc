@@ -9,7 +9,6 @@ import {
   saveTorPreferences,
   startupConnection,
 } from '../../lib/transport/startup-connection';
-import { torNetworkManager } from '../../lib/transport/tor-network';
 
 interface WelcomeSetupProps {
   readonly onConnected: (serverUrl: string) => void;
@@ -41,7 +40,6 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
   const [isRestartingTor, setIsRestartingTor] = useState(false);
   const [error, setError] = useState('');
   const mountedRef = useRef(true);
-  const torSupported = torNetworkManager.isSupported();
 
   useEffect(() => {
     mountedRef.current = true;
@@ -241,7 +239,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                 type="button"
                 className="welcome-secondary"
                 onClick={handleRestartTor}
-                disabled={busy || !torSupported}
+                disabled={busy}
               >
                 <RestartIcon spinning={isRestartingTor} />
                 <span>{isRestartingTor ? 'Restarting Tor' : 'Restart Tor'}</span>

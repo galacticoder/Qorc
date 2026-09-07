@@ -21,8 +21,6 @@ pub const SERVER_PQ_PIN: &str = "server_pq_pin_v4";
 pub const SPOOL_CONSUMED_PROBES_PREFIX: &str = "spoolconsumed:v1:";
 pub const SPOOL_DETECTION_PREFIX: &str = "spooldet:v1:";
 pub const SPOOL_PEER_DETECTION_PREFIX: &str = "spoolpeerdet:v1:";
-pub const TOR_AUTO_CONNECT: &str = "qorc_tor_auto_connect_v1";
-pub const TOR_AUTO_START: &str = "qorc_tor_auto_start_v1";
 pub const TOR_BRIDGES_ENABLED: &str = "qorc_tor_bridges_enabled_v1";
 pub const TOR_BRIDGE_LINES: &str = "qorc_tor_bridge_lines_v1";
 pub const TOR_BRIDGE_TRANSPORT: &str = "qorc_tor_bridge_transport_v1";
@@ -31,8 +29,6 @@ pub const RENDERER_EXACT_KEYS: &[&str] = &[
     SERVER_PQ_PIN,
     EXPLICIT_LOGOUT,
     BACKGROUND_SESSION_ACTIVE,
-    TOR_AUTO_START,
-    TOR_AUTO_CONNECT,
     TOR_BRIDGES_ENABLED,
     TOR_BRIDGE_TRANSPORT,
     TOR_BRIDGE_LINES,

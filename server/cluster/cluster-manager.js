@@ -3,8 +3,6 @@
  */
 
 import crypto from 'crypto';
-import fs from 'fs';
-import os from 'os';
 import { EventEmitter } from 'events';
 import { withRedisClient, createSubscriber } from '../session/redis-client.js';
 import {
@@ -18,8 +16,27 @@ import {
   CLUSTER_KEYS_ROTATED_EVENT,
   CLUSTER_PROMOTED_EVENT
 } from './protocol.js';
-import { DOCKER_ENV_PATH, LOOPBACK_HOST } from '../config/infrastructure.js';
-import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM, X25519_KEY_BYTES } from '../utils/crypto-consts.js';
+import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+} from '../../shared/crypto-sizes.js';
+import { hasExactPlainObjectKeys } from '../utils/validation.js';
+import {
+  CLUSTER_MESSAGE_REPLAY_TTL_MS,
+  CLUSTER_SERVER_ID_RE,
+  createSignedClusterMessage,
+  inspectSignedClusterMessage,
+  verifyInspectedClusterMessage,
+  wipeInspectedClusterMessage,
+} from './signed-message.js';
+import {
+  isValidAdvertisedHost,
+  isValidAdvertisedPort,
+  isValidClusterPublicKeys,
+  isValidClusterServerRecord,
+} from './server-record.js';
 
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
@@ -46,25 +63,58 @@ const CONFIG = {
   KEY_ROTATION_INTERVAL: 86400000,               // 24 hours
 };
 
-function safeJsonParse(raw, fallback = null) {
+function parseClusterRecord(raw) {
   try {
     const parsed = JSON.parse(typeof raw === 'string' ? raw : String(raw));
-    if (!parsed || typeof parsed !== 'object') return fallback;
+    if (!parsed || Object.getPrototypeOf(parsed) !== Object.prototype) return null;
     return parsed;
   } catch {
-    return fallback;
+    return null;
   }
+}
+
+function exactByteLength(value, length) {
+  return value instanceof Uint8Array && value.length === length;
+}
+
+function validPendingInfo(value, serverId) {
+  return Boolean(
+    hasExactPlainObjectKeys(value, [
+      'clusterPublicKey', 'host', 'port', 'publicKeys', 'requestedAt', 'serverId'
+    ]) &&
+    value.serverId === serverId &&
+    Number.isSafeInteger(value.requestedAt) &&
+    value.requestedAt >= Date.now() - CONFIG.APPROVAL_TIMEOUT &&
+    value.requestedAt <= Date.now() + 30_000 &&
+    canonicalBase64Shape(value.clusterPublicKey, { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }) &&
+    isValidClusterPublicKeys(value.publicKeys) &&
+    isValidAdvertisedHost(value.host) &&
+    isValidAdvertisedPort(value.port)
+  );
+}
+
+function validClusterKeyRecord(value, serverId) {
+  return Boolean(
+    hasExactPlainObjectKeys(value, ['clusterPublicKey', 'publicKeys', 'serverId']) &&
+    value.serverId === serverId &&
+    canonicalBase64Shape(value.clusterPublicKey, { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }) &&
+    isValidClusterPublicKeys(value.publicKeys)
+  );
 }
 
 export class ClusterManager extends EventEmitter {
   constructor({ serverId, serverKeys, isPrimary = false, autoApprove = false }) {
     super();
 
-    if (!serverId || typeof serverId !== 'string') {
+    if (typeof serverId !== 'string' || !CLUSTER_SERVER_ID_RE.test(serverId)) {
       throw new Error('serverId is required and must be a string');
     }
 
-    if (!serverKeys?.kyber?.publicKey || !serverKeys?.dilithium?.publicKey || !serverKeys?.x25519?.publicKey) {
+    if (
+      !exactByteLength(serverKeys?.kyber?.publicKey, ML_KEM_1024_PUBLIC_KEY_BYTES) ||
+      !exactByteLength(serverKeys?.dilithium?.publicKey, ML_DSA_87_PUBLIC_KEY_BYTES) ||
+      !exactByteLength(serverKeys?.x25519?.publicKey, X25519_KEY_BYTES)
+    ) {
       throw new Error('serverKeys must contain kyber, dilithium, and x25519 public keys');
     }
 
@@ -92,6 +142,8 @@ export class ClusterManager extends EventEmitter {
     this.heartbeatTask = null;
     this.healthCheckTask = null;
     this.keyRotationTask = null;
+    this.keyRotationBarrier = null;
+    this.clusterPublishTasks = new Set();
     this.shutdownPromise = null;
 
     // Redis subscriber for cluster messages
@@ -104,24 +156,12 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  // Parse PORT environment variable
-  parsePort(portValue) {
-    const DEFAULT_PORT = 8443;
-    if (!portValue) return DEFAULT_PORT;
-    if (typeof portValue === 'string') {
-      const lower = portValue.toLowerCase();
-      if (lower === 'dynamic' || lower === '0') return 0;
-    }
-    const parsed = parseInt(portValue, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_PORT;
-    return parsed;
-  }
-
   // Initialize cluster manager and join cluster
   async initialize() {
     try {
       await this.generateClusterKeys();
       await this.cleanupStaleServers();
+      await this.setupMessageSubscriber();
 
       if (this.isPrimary) {
         await this.initializePrimaryServer();
@@ -130,7 +170,6 @@ export class ClusterManager extends EventEmitter {
       }
       if (this.isApproved) this.lastHeartbeatAt = Date.now();
 
-      await this.setupMessageSubscriber();
       this.startHeartbeat();
       this.startHealthMonitoring();
       this.startKeyRotation();
@@ -167,33 +206,105 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
+  async publishClusterMessage(client, type, fields = {}) {
+    if (this.keyRotationBarrier) await this.keyRotationBarrier;
+    const payload = {
+      version: 1,
+      type,
+      messageId: crypto.randomUUID(),
+      issuedAt: Date.now(),
+      senderId: this.serverId,
+      ...fields,
+    };
+    const task = (async () => {
+      const signedMessage = createSignedClusterMessage(this.clusterSigningKey, payload);
+      await client.publish(CLUSTER_KEYS.MESSAGES, signedMessage);
+    })();
+    this.clusterPublishTasks.add(task);
+    try {
+      await task;
+    } finally {
+      this.clusterPublishTasks.delete(task);
+    }
+  }
+
+  async authenticateClusterMessage(raw) {
+    const inspected = inspectSignedClusterMessage(raw);
+    if (!inspected) return null;
+
+    let publicKey = null;
+    try {
+      const accepted = await withRedisClient(async (client) => {
+        const { payload } = inspected;
+        let keyData;
+        if (payload.type === CLUSTER_JOIN_REQUEST_EVENT) {
+          const pendingRaw = await client.hget(CLUSTER_KEYS.PENDING, payload.senderId);
+          const pending = parseClusterRecord(pendingRaw);
+          if (!validPendingInfo(pending, payload.senderId)) return false;
+          keyData = pending;
+        } else {
+          const registeredRaw = await client.hget(CLUSTER_KEYS.KEYS, payload.senderId);
+          const registered = parseClusterRecord(registeredRaw);
+          if (!validClusterKeyRecord(registered, payload.senderId)) return false;
+          keyData = registered;
+        }
+
+        if (!canonicalBase64Shape(keyData?.clusterPublicKey, { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES })) {
+          return false;
+        }
+        publicKey = Buffer.from(keyData.clusterPublicKey, 'base64');
+        if (!verifyInspectedClusterMessage(inspected, publicKey)) return false;
+
+        const claimed = await client.set(
+          `${REDIS_KEYS.CLUSTER_MESSAGE_REPLAY_PREFIX}${payload.messageId}`,
+          '1',
+          'PX',
+          CLUSTER_MESSAGE_REPLAY_TTL_MS,
+          'NX'
+        );
+        return claimed === 'OK';
+      });
+      return accepted ? inspected.payload : null;
+    } finally {
+      publicKey?.fill?.(0);
+      wipeInspectedClusterMessage(inspected);
+    }
+  }
+
+  async isPrimaryControlMessage(message) {
+    return await withRedisClient(async (client) => {
+      const master = await client.get(CLUSTER_KEYS.MASTER);
+      return master === message.senderId;
+    });
+  }
+
   // Get host to advertise to cluster
   #getAdvertisedHost() {
-    const isDocker = fs.existsSync(DOCKER_ENV_PATH);
-    const hostEnv = process.env.SERVER_HOST || process.env.HOST;
-
-    if (isDocker) {
-      if (!hostEnv || hostEnv === LOOPBACK_HOST || hostEnv === 'localhost') {
-        return os.hostname();
-      }
-    }
-
-    return hostEnv || LOOPBACK_HOST;
+    const host = process.env.SERVER_HOST;
+    if (!isValidAdvertisedHost(host)) throw new Error('SERVER_HOST contains an invalid cluster host');
+    return host;
   }
 
   // Get port to advertise to cluster
   #getAdvertisedPort() {
-    const isDocker = fs.existsSync(DOCKER_ENV_PATH);
-    if (isDocker) return 3000;
-    return this.parsePort(process.env.PORT) || 8443;
+    const port = Number(process.env.PORT);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error('PORT contains an invalid cluster port');
+    }
+    return port;
   }
 
   // Initialize as primary master server
   async initializePrimaryServer() {
+    let masterClaimed = false;
+    let registrationCommitted = false;
     try {
       await withRedisClient(async (client) => {
+        masterClaimed = await client.set(CLUSTER_KEYS.MASTER, this.serverId, 'NX') === 'OK';
+        if (!masterClaimed) {
+          throw new Error('A primary server is already registered');
+        }
         const pipeline = client.pipeline();
-        pipeline.set(CLUSTER_KEYS.MASTER, this.serverId);
 
         // Register server info
         const serverInfo = {
@@ -224,7 +335,9 @@ export class ClusterManager extends EventEmitter {
           uptime: 0,
         }));
 
-        await pipeline.exec();
+        const results = await pipeline.exec();
+        if (results.some(([error]) => error)) throw new Error('Primary cluster registration failed');
+        registrationCommitted = true;
       });
 
       console.log('[CLUSTER] Initialized as primary server', {
@@ -233,6 +346,18 @@ export class ClusterManager extends EventEmitter {
 
       this.emit('primary-initialized');
     } catch (error) {
+      if (masterClaimed && !registrationCommitted) {
+        try {
+          await withRedisClient(async (client) => {
+            await client.eval(
+              "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+              1,
+              CLUSTER_KEYS.MASTER,
+              this.serverId
+            );
+          });
+        } catch { }
+      }
       console.error('[CLUSTER] Failed to initialize primary server', error);
       throw error;
     }
@@ -242,11 +367,12 @@ export class ClusterManager extends EventEmitter {
   async requestClusterJoin() {
     try {
       await withRedisClient(async (client) => {
-        const existingServer = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
-        if (existingServer) {
-          this.isApproved = true;
-          console.log('[CLUSTER] Server already approved', { serverId: this.serverId });
-          return;
+        const [existingServer, existingPending] = await Promise.all([
+          client.hget(CLUSTER_KEYS.SERVERS, this.serverId),
+          client.hget(CLUSTER_KEYS.PENDING, this.serverId),
+        ]);
+        if (existingServer || existingPending) {
+          throw new Error('Cluster serverId is already registered or awaiting approval');
         }
 
         const pendingInfo = {
@@ -258,50 +384,9 @@ export class ClusterManager extends EventEmitter {
           port: this.#getAdvertisedPort(),
         };
 
-        // If auto-approve is enabled then directly register server
-        if (this.autoApprove) {
-          const serverInfo = {
-            serverId: this.serverId,
-            isPrimary: false,
-            joinedAt: Date.now(),
-            lastHeartbeat: Date.now(),
-            approvedBy: 'auto-approve',
-            status: 'active',
-            publicKeys: this.exportPublicKeys(),
-            host: pendingInfo.host,
-            port: pendingInfo.port,
-          };
-
-          const pipeline = client.pipeline();
-          pipeline.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(serverInfo));
-          pipeline.hset(CLUSTER_KEYS.KEYS, this.serverId, JSON.stringify({
-            serverId: this.serverId,
-            clusterPublicKey: pendingInfo.clusterPublicKey,
-            publicKeys: pendingInfo.publicKeys,
-          }));
-          pipeline.hset(CLUSTER_KEYS.HEALTH, this.serverId, JSON.stringify({
-            status: 'healthy',
-            lastCheck: Date.now(),
-            uptime: 0,
-          }));
-          await pipeline.exec();
-
-          this.isApproved = true;
-          console.log('[CLUSTER] Server auto-approved and joined cluster', {
-            serverId: this.serverId
-          });
-          this.emit(CLUSTER_APPROVED_EVENT);
-          return;
-        }
-
-        // Manual approval
+        // Only the primary may convert this pending request into membership.
         await client.hset(CLUSTER_KEYS.PENDING, this.serverId, JSON.stringify(pendingInfo));
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: CLUSTER_JOIN_REQUEST_EVENT,
-          serverId: this.serverId,
-          timestamp: Date.now(),
-          data: pendingInfo,
-        }));
+        await this.publishClusterMessage(client, CLUSTER_JOIN_REQUEST_EVENT);
 
         console.log('[CLUSTER] Sent cluster join request', {
           serverId: this.serverId
@@ -328,8 +413,16 @@ export class ClusterManager extends EventEmitter {
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
       const isApproved = await withRedisClient(async (client) => {
-        const serverInfo = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
-        return !!serverInfo;
+        const [serverInfo, keyData] = await Promise.all([
+          client.hget(CLUSTER_KEYS.SERVERS, this.serverId),
+          client.hget(CLUSTER_KEYS.KEYS, this.serverId),
+        ]);
+        const keys = parseClusterRecord(keyData);
+        return Boolean(
+          serverInfo &&
+          validClusterKeyRecord(keys, this.serverId) &&
+          keys.clusterPublicKey === Buffer.from(this.clusterPublicKey).toString('base64')
+        );
       });
 
       if (isApproved) {
@@ -354,6 +447,9 @@ export class ClusterManager extends EventEmitter {
     if (!this.isPrimary) {
       throw new Error('Only primary server can approve new servers');
     }
+    if (typeof targetServerId !== 'string' || !CLUSTER_SERVER_ID_RE.test(targetServerId)) {
+      throw new Error('Invalid cluster serverId');
+    }
 
     try {
       await withRedisClient(async (client) => {
@@ -362,54 +458,68 @@ export class ClusterManager extends EventEmitter {
           throw new Error(`Server ${targetServerId} not found in pending list`);
         }
 
-        const pendingInfo = safeJsonParse(pendingData, null);
-        if (!pendingInfo) {
+        const pendingInfo = parseClusterRecord(pendingData);
+        if (!validPendingInfo(pendingInfo, targetServerId)) {
           throw new Error(`Server ${targetServerId} has corrupted pending data`);
         }
 
-        const serverCount = await client.hlen(CLUSTER_KEYS.SERVERS);
-        if (serverCount >= CONFIG.MAX_SERVERS_IN_CLUSTER) {
-          throw new Error('Maximum cluster size reached');
-        }
-
-        const pipeline = client.pipeline();
-        pipeline.hdel(CLUSTER_KEYS.PENDING, targetServerId);
-
-        // Register server
+        const now = Date.now();
         const serverInfo = {
           serverId: targetServerId,
           isPrimary: false,
-          joinedAt: Date.now(),
-          lastHeartbeat: Date.now(),
+          joinedAt: now,
+          lastHeartbeat: now,
           approvedBy: this.serverId,
           status: 'active',
           publicKeys: pendingInfo.publicKeys,
-          host: pendingInfo.host || LOOPBACK_HOST,
-          port: pendingInfo.port || 8443,
+          host: pendingInfo.host,
+          port: pendingInfo.port,
         };
-        pipeline.hset(CLUSTER_KEYS.SERVERS, targetServerId, JSON.stringify(serverInfo));
-
-        // Register public keys
-        pipeline.hset(CLUSTER_KEYS.KEYS, targetServerId, JSON.stringify({
+        const keyInfo = {
           serverId: targetServerId,
           clusterPublicKey: pendingInfo.clusterPublicKey,
           publicKeys: pendingInfo.publicKeys,
-        }));
-
-        pipeline.hset(CLUSTER_KEYS.HEALTH, targetServerId, JSON.stringify({
+        };
+        const healthInfo = {
           status: 'healthy',
-          lastCheck: Date.now(),
+          lastCheck: now,
           uptime: 0,
-        }));
+        };
 
-        await pipeline.exec();
+        const committed = Number(await client.eval(
+          `
+            local pending = redis.call('HGET', KEYS[1], ARGV[1])
+            if not pending then return 0 end
+            if pending ~= ARGV[2] then return -1 end
+            if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return -2 end
+            if redis.call('HLEN', KEYS[2]) >= tonumber(ARGV[3]) then return -3 end
+            redis.call('HDEL', KEYS[1], ARGV[1])
+            redis.call('HSET', KEYS[2], ARGV[1], ARGV[4])
+            redis.call('HSET', KEYS[3], ARGV[1], ARGV[5])
+            redis.call('HSET', KEYS[4], ARGV[1], ARGV[6])
+            return 1
+          `,
+          4,
+          CLUSTER_KEYS.PENDING,
+          CLUSTER_KEYS.SERVERS,
+          CLUSTER_KEYS.KEYS,
+          CLUSTER_KEYS.HEALTH,
+          targetServerId,
+          pendingData,
+          CONFIG.MAX_SERVERS_IN_CLUSTER,
+          JSON.stringify(serverInfo),
+          JSON.stringify(keyInfo),
+          JSON.stringify(healthInfo)
+        ));
+        if (committed === 0) throw new Error(`Server ${targetServerId} not found in pending list`);
+        if (committed === -1) throw new Error(`Server ${targetServerId} pending request changed during approval`);
+        if (committed === -2) throw new Error(`Server ${targetServerId} is already registered`);
+        if (committed === -3) throw new Error('Maximum cluster size reached');
+        if (committed !== 1) throw new Error('Cluster approval transaction failed');
 
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: 'server-approved',
-          serverId: targetServerId,
-          approvedBy: this.serverId,
-          timestamp: Date.now(),
-        }));
+        await this.publishClusterMessage(client, 'server-approved', {
+          targetServerId,
+        });
       });
 
       console.log('[CLUSTER] Approved server', {
@@ -429,18 +539,18 @@ export class ClusterManager extends EventEmitter {
     if (!this.isPrimary) {
       throw new Error('Only primary server can reject servers');
     }
+    if (typeof targetServerId !== 'string' || !CLUSTER_SERVER_ID_RE.test(targetServerId)) {
+      throw new Error('Invalid cluster serverId');
+    }
 
     try {
       await withRedisClient(async (client) => {
         await client.hdel(CLUSTER_KEYS.PENDING, targetServerId);
 
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: 'server-rejected',
-          serverId: targetServerId,
-          rejectedBy: this.serverId,
+        await this.publishClusterMessage(client, 'server-rejected', {
+          targetServerId,
           reason,
-          timestamp: Date.now(),
-        }));
+        });
       });
 
       console.log('[CLUSTER] Rejected server', {
@@ -461,8 +571,8 @@ export class ClusterManager extends EventEmitter {
       const pending = await client.hgetall(CLUSTER_KEYS.PENDING);
       return Object.entries(pending)
         .map(([serverId, data]) => {
-          const parsed = safeJsonParse(data, null);
-          if (!parsed) return null;
+          const parsed = parseClusterRecord(data);
+          if (!validPendingInfo(parsed, serverId)) return null;
           return { serverId, ...parsed };
         })
         .filter(Boolean);
@@ -473,6 +583,9 @@ export class ClusterManager extends EventEmitter {
   async forceRemoveServer(targetServerId) {
     if (!this.isPrimary) {
       throw new Error('Only primary server can force remove servers');
+    }
+    if (typeof targetServerId !== 'string' || !CLUSTER_SERVER_ID_RE.test(targetServerId)) {
+      throw new Error('Invalid cluster serverId');
     }
 
     if (targetServerId === this.serverId) {
@@ -485,13 +598,18 @@ export class ClusterManager extends EventEmitter {
       await withRedisClient(async (client) => {
         const serverData = await client.hget(CLUSTER_KEYS.SERVERS, targetServerId);
         if (serverData) {
-          serverInfo = safeJsonParse(serverData, { serverId: targetServerId });
+          const parsed = parseClusterRecord(serverData);
+          serverInfo = isValidClusterServerRecord(parsed, targetServerId)
+            ? parsed
+            : { serverId: targetServerId };
         }
 
         const pendingData = await client.hget(CLUSTER_KEYS.PENDING, targetServerId);
         if (pendingData && !serverInfo) {
-          serverInfo = safeJsonParse(pendingData, { serverId: targetServerId });
-          serverInfo.status = 'pending';
+          const parsed = parseClusterRecord(pendingData);
+          serverInfo = validPendingInfo(parsed, targetServerId)
+            ? { ...parsed, status: 'pending' }
+            : { serverId: targetServerId, status: 'pending' };
         }
 
         if (!serverInfo) {
@@ -509,13 +627,10 @@ export class ClusterManager extends EventEmitter {
         await pipeline.exec();
 
         // Notify cluster of forced removal
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: 'server-force-removed',
-          serverId: targetServerId,
-          removedBy: this.serverId,
+        await this.publishClusterMessage(client, 'server-force-removed', {
+          targetServerId,
           reason: 'Admin force removal',
-          timestamp: Date.now(),
-        }));
+        });
       });
 
       this.clusterServers.delete(targetServerId);
@@ -564,23 +679,30 @@ export class ClusterManager extends EventEmitter {
       if (!Number.isSafeInteger(actualPort) || actualPort < 1 || actualPort > 65535) {
         throw new Error('Invalid bound server port');
       }
-      const advertisedPort = fs.existsSync(DOCKER_ENV_PATH) ? 3000 : actualPort;
       await withRedisClient(async (client) => {
         const serverData = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
         if (serverData) {
-          const info = safeJsonParse(serverData, null);
-          if (!info) {
+          const info = parseClusterRecord(serverData);
+          if (!isValidClusterServerRecord(info, this.serverId)) {
             console.warn('[CLUSTER] Server entry is corrupted, cannot update port', { serverId: this.serverId });
             return;
           }
           const oldPort = info.port;
-          info.port = advertisedPort;
+          info.port = actualPort;
           info.host = this.#getAdvertisedHost();
-          await client.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(info));
+          const committed = await client.eval(
+            "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then redis.call('HSET', KEYS[1], ARGV[1], ARGV[3]); return 1 else return 0 end",
+            1,
+            CLUSTER_KEYS.SERVERS,
+            this.serverId,
+            serverData,
+            JSON.stringify(info)
+          );
+          if (committed !== 1) throw new Error('Cluster registration changed while updating its port');
           console.log('[CLUSTER] Updated server port in Redis', {
             serverId: this.serverId,
             oldPort,
-            newPort: advertisedPort
+            newPort: actualPort
           });
         }
       });
@@ -591,30 +713,43 @@ export class ClusterManager extends EventEmitter {
 
   // Send heartbeat to cluster
   async sendHeartbeat() {
+    let membershipLost = false;
     try {
       await withRedisClient(async (client) => {
         const serverInfo = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
         if (!serverInfo) {
-          console.warn('[CLUSTER] Server not registered, re-registering');
-          if (this.isPrimary) {
-            await this.initializePrimaryServer();
-          }
+          console.warn('[CLUSTER] Server registration is missing', { serverId: this.serverId });
+          membershipLost = true;
           return;
         }
 
-        const info = safeJsonParse(serverInfo, null);
-        if (!info) {
-          console.warn('[CLUSTER] Server entry is corrupted, re-registering', { serverId: this.serverId });
-          if (this.isPrimary) {
-            await this.initializePrimaryServer();
-          }
+        const info = parseClusterRecord(serverInfo);
+        if (!isValidClusterServerRecord(info, this.serverId)) {
+          console.warn('[CLUSTER] Server registration is corrupted', { serverId: this.serverId });
+          membershipLost = true;
           return;
         }
         info.lastHeartbeat = Date.now();
-
-        await client.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(info));
+        const updated = JSON.stringify(info);
+        const committed = await client.eval(
+          "if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then redis.call('HSET', KEYS[1], ARGV[1], ARGV[3]); return 1 else return 0 end",
+          1,
+          CLUSTER_KEYS.SERVERS,
+          this.serverId,
+          serverInfo,
+          updated
+        );
+        if (committed !== 1) {
+          membershipLost = !this.isPrimary;
+          if (this.isPrimary) throw new Error('Primary cluster registration changed during heartbeat');
+          return;
+        }
         this.lastHeartbeatAt = info.lastHeartbeat;
       });
+      if (membershipLost) {
+        this.isApproved = false;
+        this.emit('self-membership-lost');
+      }
     } catch (error) {
       console.error('[CLUSTER] Failed to send heartbeat', error);
       throw error;
@@ -666,11 +801,20 @@ export class ClusterManager extends EventEmitter {
             for (let i = 0; i < entries.length; i += 2) {
               const serverId = entries[i];
               const data = entries[i + 1];
-              const serverInfo = safeJsonParse(data, null);
+              const serverInfo = parseClusterRecord(data);
 
-              if (!serverInfo) {
+              if (!isValidClusterServerRecord(serverInfo, serverId, now)) {
                 console.warn('[CLUSTER] Removing corrupted server entry during health check', { serverId });
                 pipe.hdel(CLUSTER_KEYS.SERVERS, serverId);
+                pipe.hdel(CLUSTER_KEYS.HEALTH, serverId);
+                pipe.hdel(CLUSTER_KEYS.KEYS, serverId);
+                pipe.hdel(CLUSTER_KEYS.TOKENS, serverId);
+                await client.eval(
+                  "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+                  1,
+                  CLUSTER_KEYS.MASTER,
+                  serverId
+                );
                 hasCommands = true;
                 continue;
               }
@@ -678,7 +822,7 @@ export class ClusterManager extends EventEmitter {
               const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
 
               if (serverId !== this.serverId && timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
-                await this.handleDeadServer(serverId, serverInfo);
+                await this.handleDeadServer(serverId, serverInfo, data);
               } else {
                 this.clusterServers.set(serverId, serverInfo);
 
@@ -726,8 +870,9 @@ export class ClusterManager extends EventEmitter {
               const serverId = entries[i];
               const data = entries[i + 1];
               try {
-                const serverInfo = JSON.parse(data);
-                const timeSinceHeartbeat = now - (serverInfo.lastHeartbeat || 0);
+                const serverInfo = parseClusterRecord(data);
+                if (!isValidClusterServerRecord(serverInfo, serverId, now)) throw new Error('Invalid cluster server record');
+                const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
 
                 if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT * 2) {
                   console.warn('[CLUSTER] Removing stale server entry', {
@@ -745,7 +890,12 @@ export class ClusterManager extends EventEmitter {
                     const currentMaster = await client.get(CLUSTER_KEYS.MASTER);
                     if (currentMaster === serverId) {
                       console.warn('[CLUSTER] Removing stale primary server master key', { serverId });
-                      pipeline.del(CLUSTER_KEYS.MASTER);
+                      await client.eval(
+                        "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+                        1,
+                        CLUSTER_KEYS.MASTER,
+                        serverId
+                      );
                     }
                   }
 
@@ -755,6 +905,15 @@ export class ClusterManager extends EventEmitter {
               } catch (_parseError) {
                 console.warn('[CLUSTER] Removing corrupted server entry', { serverId });
                 pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
+                pipeline.hdel(CLUSTER_KEYS.HEALTH, serverId);
+                pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
+                pipeline.hdel(CLUSTER_KEYS.TOKENS, serverId);
+                await client.eval(
+                  "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+                  1,
+                  CLUSTER_KEYS.MASTER,
+                  serverId
+                );
                 hasCommands = true;
                 cleanedCount++;
               }
@@ -779,27 +938,34 @@ export class ClusterManager extends EventEmitter {
   }
 
   // Handle a dead/unresponsive server
-  async handleDeadServer(serverId, serverInfo) {
+  async handleDeadServer(serverId, serverInfo, expectedServerRecord) {
     try {
       console.warn('[CLUSTER] Detected dead server', { serverId });
 
-      await withRedisClient(async (client) => {
-        const pipeline = client.pipeline();
-
-        pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
-        pipeline.hdel(CLUSTER_KEYS.HEALTH, serverId);
-        pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
-        pipeline.hdel(CLUSTER_KEYS.TOKENS, serverId);
-
-        await pipeline.exec();
-
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: 'server-dead',
+      const removed = await withRedisClient(async (client) => {
+        const staleBefore = Date.now() - CONFIG.SERVER_TIMEOUT;
+        const result = await client.eval(
+          "local current = redis.call('HGET', KEYS[1], ARGV[1]); if current ~= ARGV[2] then return 0 end; local ok, record = pcall(cjson.decode, current); if not ok or type(record) ~= 'table' or type(record.lastHeartbeat) ~= 'number' then return -1 end; if record.lastHeartbeat > tonumber(ARGV[3]) then return 0 end; redis.call('HDEL', KEYS[1], ARGV[1]); redis.call('HDEL', KEYS[2], ARGV[1]); redis.call('HDEL', KEYS[3], ARGV[1]); redis.call('HDEL', KEYS[4], ARGV[1]); return 1",
+          4,
+          CLUSTER_KEYS.SERVERS,
+          CLUSTER_KEYS.HEALTH,
+          CLUSTER_KEYS.KEYS,
+          CLUSTER_KEYS.TOKENS,
           serverId,
-          detectedBy: this.serverId,
-          timestamp: Date.now(),
-        }));
+          expectedServerRecord,
+          staleBefore
+        );
+        if (result === -1) {
+          throw new Error('Cluster server record became invalid during dead-server removal');
+        }
+        if (result !== 1) return false;
+
+        await this.publishClusterMessage(client, 'server-dead', {
+          targetServerId: serverId,
+        });
+        return true;
       });
+      if (!removed) return;
 
       this.clusterServers.delete(serverId);
       this.serverHealth.delete(serverId);
@@ -807,7 +973,7 @@ export class ClusterManager extends EventEmitter {
       this.emit('server-dead', { serverId, serverInfo });
 
       if (serverInfo.isPrimary) {
-        await this.handlePrimaryFailure();
+        await this.handlePrimaryFailure(serverId);
       }
     } catch (error) {
       console.error('[CLUSTER] Failed to handle dead server', error);
@@ -818,7 +984,7 @@ export class ClusterManager extends EventEmitter {
    * Handle primary server failure
    * Queue-based primary selection
    */
-  async handlePrimaryFailure() {
+  async handlePrimaryFailure(failedPrimaryId) {
     console.warn('[CLUSTER] Primary server failed, initiating queue-based election');
 
     try {
@@ -834,8 +1000,8 @@ export class ClusterManager extends EventEmitter {
 
         // Find the oldest server (earliest joinedAt timestamp) = next in queue
         for (const [serverId, data] of Object.entries(servers)) {
-          const info = safeJsonParse(data, null);
-          if (!info) continue;
+          const info = parseClusterRecord(data);
+          if (!isValidClusterServerRecord(info, serverId)) continue;
           if (info.joinedAt < oldestTime) {
             oldestTime = info.joinedAt;
             oldestServer = { serverId, info };
@@ -843,10 +1009,21 @@ export class ClusterManager extends EventEmitter {
         }
 
         if (oldestServer) {
-          // Promote to primary
+          // Promote to primary only if no other server won the election first.
           oldestServer.info.isPrimary = true;
-          await client.hset(CLUSTER_KEYS.SERVERS, oldestServer.serverId, JSON.stringify(oldestServer.info));
-          await client.set(CLUSTER_KEYS.MASTER, oldestServer.serverId);
+          const promoted = await client.eval(
+            "local current = redis.call('GET', KEYS[1]); if (not current) or current == ARGV[1] then redis.call('HSET', KEYS[2], ARGV[2], ARGV[3]); redis.call('SET', KEYS[1], ARGV[2]); return 1 else return 0 end",
+            2,
+            CLUSTER_KEYS.MASTER,
+            CLUSTER_KEYS.SERVERS,
+            failedPrimaryId,
+            oldestServer.serverId,
+            JSON.stringify(oldestServer.info)
+          );
+          if (promoted !== 1) {
+            console.log('[CLUSTER] Primary election already completed by another server');
+            return;
+          }
 
           console.log('[CLUSTER] Queue-based election completed', {
             newPrimary: oldestServer.serverId,
@@ -854,11 +1031,9 @@ export class ClusterManager extends EventEmitter {
             message: 'Next server in queue promoted to primary'
           });
 
-          await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-            type: 'primary-elected',
-            serverId: oldestServer.serverId,
-            timestamp: Date.now(),
-          }));
+          await this.publishClusterMessage(client, 'primary-elected', {
+            targetServerId: oldestServer.serverId,
+          });
 
           if (oldestServer.serverId === this.serverId) {
             this.isPrimary = true;
@@ -880,10 +1055,12 @@ export class ClusterManager extends EventEmitter {
 
       this.messageSubscriber.on('message', async (channel, message) => {
         try {
-          const msg = JSON.parse(message);
+          if (channel !== CLUSTER_KEYS.MESSAGES) return;
+          const msg = await this.authenticateClusterMessage(message);
+          if (!msg) return;
           await this.handleClusterMessage(msg);
         } catch (error) {
-          console.error('[CLUSTER] Failed to handle cluster message', error);
+          console.error('[CLUSTER] Failed to handle authenticated cluster message', error);
         }
       });
 
@@ -896,26 +1073,32 @@ export class ClusterManager extends EventEmitter {
 
   // Handle cluster messages
   async handleClusterMessage(msg) {
-    if (msg.serverId === this.serverId) return;
+    if (msg.senderId === this.serverId) return;
 
     switch (msg.type) {
       case CLUSTER_JOIN_REQUEST_EVENT:
         if (this.isPrimary) {
-          console.log('[CLUSTER] Received join request', { serverId: msg.serverId });
-          this.emit(CLUSTER_JOIN_REQUEST_EVENT, msg.data);
+          const pending = await withRedisClient(async (client) => {
+            return parseClusterRecord(await client.hget(CLUSTER_KEYS.PENDING, msg.senderId));
+          });
+          if (!pending || pending.serverId !== msg.senderId) return;
+          console.log('[CLUSTER] Received authenticated join request', { serverId: msg.senderId });
+          this.emit(CLUSTER_JOIN_REQUEST_EVENT, pending);
         }
         break;
 
       case 'server-approved':
-        if (msg.serverId === this.serverId) {
+        if (!await this.isPrimaryControlMessage(msg)) return;
+        if (msg.targetServerId === this.serverId) {
           this.isApproved = true;
           this.emit(CLUSTER_APPROVED_EVENT);
         }
-        this.emit('server-joined', { serverId: msg.serverId });
+        this.emit('server-joined', { serverId: msg.targetServerId });
         break;
 
       case 'server-rejected':
-        if (msg.serverId === this.serverId) {
+        if (!await this.isPrimaryControlMessage(msg)) return;
+        if (msg.targetServerId === this.serverId) {
           console.error('[CLUSTER] Server join rejected', { reason: msg.reason });
           this.emit('rejected', { reason: msg.reason });
           await this.shutdown();
@@ -923,16 +1106,47 @@ export class ClusterManager extends EventEmitter {
         }
         break;
 
+      case 'server-force-removed':
+        if (!await this.isPrimaryControlMessage(msg)) return;
+        if (msg.targetServerId === this.serverId) {
+          this.isApproved = false;
+          await this.shutdown();
+          this.emit('server-removed', { serverId: this.serverId, forced: true });
+          this.emit('self-force-removed');
+        } else {
+          this.clusterServers.delete(msg.targetServerId);
+          this.serverHealth.delete(msg.targetServerId);
+          this.emit('server-removed', { serverId: msg.targetServerId, forced: true });
+        }
+        break;
+
       case 'server-dead':
-        console.warn('[CLUSTER] Server marked as dead', { serverId: msg.serverId });
-        this.clusterServers.delete(msg.serverId);
-        this.serverHealth.delete(msg.serverId);
-        this.emit('server-removed', { serverId: msg.serverId });
+        {
+          const removalCommitted = await withRedisClient(async (client) => (
+            await client.hget(CLUSTER_KEYS.SERVERS, msg.targetServerId)
+          )) === null;
+          if (!removalCommitted) return;
+        }
+        console.warn('[CLUSTER] Server marked as dead', { serverId: msg.targetServerId });
+        this.clusterServers.delete(msg.targetServerId);
+        this.serverHealth.delete(msg.targetServerId);
+        this.emit('server-removed', { serverId: msg.targetServerId });
         break;
 
       case 'primary-elected':
-        console.log('[CLUSTER] New primary elected', { serverId: msg.serverId });
-        if (msg.serverId === this.serverId) {
+        {
+          const electionCommitted = await withRedisClient(async (client) => {
+            const [master, serverRaw] = await Promise.all([
+              client.get(CLUSTER_KEYS.MASTER),
+              client.hget(CLUSTER_KEYS.SERVERS, msg.targetServerId),
+            ]);
+            const server = parseClusterRecord(serverRaw);
+            return master === msg.targetServerId && server?.isPrimary === true;
+          });
+          if (!electionCommitted) return;
+        }
+        console.log('[CLUSTER] New primary elected', { serverId: msg.targetServerId });
+        if (msg.targetServerId === this.serverId) {
           this.isPrimary = true;
           this.emit(CLUSTER_PROMOTED_EVENT);
         }
@@ -962,29 +1176,57 @@ export class ClusterManager extends EventEmitter {
 
   // Rotate cluster authentication keys
   async rotateKeys() {
+    if (this.keyRotationBarrier) {
+      await this.keyRotationBarrier;
+      return;
+    }
+    let releaseRotation;
+    this.keyRotationBarrier = new Promise((resolve) => {
+      releaseRotation = resolve;
+    });
+    let nextKeyPair = null;
+    let nextToken = null;
     try {
       console.log('[CLUSTER] Starting key rotation', { serverId: this.serverId });
-
-      await this.generateClusterKeys();
+      await Promise.allSettled([...this.clusterPublishTasks]);
+      nextKeyPair = ml_dsa87.keygen();
+      nextToken = crypto.randomBytes(64).toString('base64url');
 
       await withRedisClient(async (client) => {
         const keysData = await client.hget(CLUSTER_KEYS.KEYS, this.serverId);
-        if (keysData) {
-          const keys = safeJsonParse(keysData, null);
-          if (!keys) return;
-          keys.clusterPublicKey = Buffer.from(this.clusterPublicKey).toString('base64');
-          await client.hset(CLUSTER_KEYS.KEYS, this.serverId, JSON.stringify(keys));
+        const keys = parseClusterRecord(keysData);
+        if (!validClusterKeyRecord(keys, this.serverId)) {
+          throw new Error('Registered cluster key record is missing or invalid');
         }
+        keys.clusterPublicKey = Buffer.from(nextKeyPair.publicKey).toString('base64');
 
-        const tokenHash = crypto.createHash(SHA_256_ALGORITHM).update(this.clusterToken).digest('hex');
-        await client.hset(CLUSTER_KEYS.TOKENS, this.serverId, tokenHash);
+        const tokenHash = crypto.createHash(SHA_256_ALGORITHM).update(nextToken).digest('hex');
+        const pipeline = client.pipeline();
+        pipeline.hset(CLUSTER_KEYS.KEYS, this.serverId, JSON.stringify(keys));
+        pipeline.hset(CLUSTER_KEYS.TOKENS, this.serverId, tokenHash);
+        const results = await pipeline.exec();
+        if (results.some(([error]) => error)) throw new Error('Cluster key rotation persistence failed');
       });
+
+      this.clusterSigningKey?.fill?.(0);
+      this.clusterPublicKey?.fill?.(0);
+      this.clusterSigningKey = nextKeyPair.secretKey;
+      this.clusterPublicKey = nextKeyPair.publicKey;
+      this.clusterToken = nextToken;
+      nextKeyPair = null;
+      nextToken = null;
 
       console.log('[CLUSTER] Key rotation completed', { serverId: this.serverId });
       this.emit(CLUSTER_KEYS_ROTATED_EVENT);
     } catch (error) {
       console.error('[CLUSTER] Failed to rotate keys', error);
       throw error;
+    } finally {
+      nextKeyPair?.secretKey?.fill?.(0);
+      nextKeyPair?.publicKey?.fill?.(0);
+      nextToken = null;
+      this.keyRotationBarrier = null;
+      releaseRotation();
     }
   }
 
@@ -1004,8 +1246,8 @@ export class ClusterManager extends EventEmitter {
       const keys = {};
 
       for (const [serverId, data] of Object.entries(keysData)) {
-        const parsed = safeJsonParse(data, null);
-        if (parsed) {
+        const parsed = parseClusterRecord(data);
+        if (validClusterKeyRecord(parsed, serverId)) {
           keys[serverId] = parsed;
         }
       }
@@ -1024,25 +1266,28 @@ export class ClusterManager extends EventEmitter {
         client.get(CLUSTER_KEYS.MASTER),
       ]);
 
+      const validServers = Object.entries(servers)
+        .map(([id, data]) => {
+          const info = parseClusterRecord(data);
+          if (!isValidClusterServerRecord(info, id)) return null;
+          const healthInfo = health[id] ? parseClusterRecord(health[id]) : null;
+          return { ...info, serverId: id, health: healthInfo };
+        })
+        .filter(Boolean);
+      const validPending = Object.entries(pending)
+        .map(([id, data]) => {
+          const info = parseClusterRecord(data);
+          if (!validPendingInfo(info, id)) return null;
+          return { ...info, serverId: id };
+        })
+        .filter(Boolean);
+
       return {
         master,
-        serverCount: Object.keys(servers).length,
-        pendingCount: Object.keys(pending).length,
-        servers: Object.entries(servers)
-          .map(([id, data]) => {
-            const info = safeJsonParse(data, null);
-            if (!info) return null;
-            const healthInfo = health[id] ? safeJsonParse(health[id], null) : null;
-            return { serverId: id, ...info, health: healthInfo };
-          })
-          .filter(Boolean),
-        pending: Object.entries(pending)
-          .map(([id, data]) => {
-            const info = safeJsonParse(data, null);
-            if (!info) return null;
-            return { serverId: id, ...info };
-          })
-          .filter(Boolean),
+        serverCount: validServers.length,
+        pendingCount: validPending.length,
+        servers: validServers,
+        pending: validPending,
       };
     });
   }
@@ -1058,6 +1303,12 @@ export class ClusterManager extends EventEmitter {
   async setSharedConfig(key, value) {
     if (!this.isPrimary) {
       throw new Error('Only primary server can set shared configuration');
+    }
+    if (typeof key !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(key)) {
+      throw new Error('Invalid shared cluster configuration key');
+    }
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 65_536) {
+      throw new Error('Invalid shared cluster configuration value');
     }
 
     return await withRedisClient(async (client) => {
@@ -1088,6 +1339,7 @@ export class ClusterManager extends EventEmitter {
       this.heartbeatTask,
       this.healthCheckTask,
       this.keyRotationTask,
+      ...this.clusterPublishTasks,
     ].filter(Boolean));
     this.heartbeatTask = null;
     this.healthCheckTask = null;
@@ -1103,17 +1355,19 @@ export class ClusterManager extends EventEmitter {
 
         if (this.isPrimary) {
           console.log('[CLUSTER] Removing master key', { serverId: this.serverId });
-          pipeline.del(CLUSTER_KEYS.MASTER);
         }
 
         await pipeline.exec();
 
-        await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
-          type: 'server-shutdown',
-          serverId: this.serverId,
-          isPrimary: this.isPrimary,
-          timestamp: Date.now(),
-        }));
+        if (this.isPrimary) {
+          await client.eval(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+            1,
+            CLUSTER_KEYS.MASTER,
+            this.serverId
+          );
+        }
+
       });
     } catch (error) {
       if (!error?.message?.includes('pool is draining') && !error?.message?.includes('cannot accept work')) {
@@ -1134,6 +1388,7 @@ export class ClusterManager extends EventEmitter {
     }
 
     this.clusterSigningKey?.fill?.(0);
+    this.clusterPublicKey?.fill?.(0);
     this.clusterSigningKey = null;
     this.clusterPublicKey = null;
     this.clusterToken = null;

@@ -6,7 +6,7 @@ import type { P2PStatus, HybridKeys, PeerCertificateBundle, P2PMessage, CertCach
 import {
   createP2PError
 } from "../../lib/utils/p2p-utils";
-import { loadPersistedPeerEndpoint } from "../../lib/p2p/persisted-peer-cert";
+import { preparePeerTransport } from "../../lib/p2p/prepare-peer";
 
 export interface ConnectionRefs {
   p2pServiceRef: RefObject<SecureP2PService | null>;
@@ -20,19 +20,19 @@ export interface ConnectionSetters {
 }
 
 export interface ConnectionOptions {
-  onServiceReady?: (service: SecureP2PService | null) => void;
+  onServiceReady: (service: SecureP2PService | null) => void;
 }
 
 // Tears down current peer service, clears caches, and resets status indicators
 export function createDestroyService(
   refs: ConnectionRefs,
   setters: ConnectionSetters,
-  options?: ConnectionOptions
+  options: ConnectionOptions
 ) {
   return async () => {
     const service = refs.p2pServiceRef.current;
     if (service) {
-      options?.onServiceReady?.(null);
+      options.onServiceReady(null);
       (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
     }
     refs.peerCertificateCacheRef.current.clear();
@@ -52,14 +52,14 @@ export function createInitializeP2P(
   username: string,
   hybridKeys: HybridKeys | null,
   destroyService: () => Promise<void>,
-  options?: ConnectionOptions
+  options: ConnectionOptions
 ) {
   return async () => {
     let candidateService: SecureP2PService | null = null;
     try {
       if (refs.p2pServiceRef.current) {
         const currentService = refs.p2pServiceRef.current;
-        if (currentService.isCompatible(username, hybridKeys)) {
+        if (currentService.matchesIdentity(username, hybridKeys)) {
           return;
         }
 
@@ -67,7 +67,7 @@ export function createInitializeP2P(
         if (refs.p2pServiceRef.current !== currentService) {
           return;
         }
-        options?.onServiceReady?.(null);
+        options.onServiceReady(null);
         (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
       }
       refs.peerCertificateCacheRef.current.clear();
@@ -124,7 +124,7 @@ export function createInitializeP2P(
         await service.shutdown().catch(() => { });
         return;
       }
-      options?.onServiceReady?.(service);
+      options.onServiceReady(service);
 
       setters.setP2PStatus((prev) => ({
         ...prev,
@@ -146,7 +146,7 @@ export function createConnectToPeer(
   refs: ConnectionRefs,
   hybridKeys: HybridKeys | null,
   getPeerCertificate: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>,
-  ownerUsername?: string
+  ownerUsername: string
 ) {
   return async (peerUsername: string) => {
     const service = refs.p2pServiceRef.current;
@@ -158,26 +158,13 @@ export function createConnectToPeer(
       throw createP2PError('LOCAL_KEYS_MISSING');
     }
 
-    const cert = await getPeerCertificate(peerUsername);
-    if (!cert) {
-      throw createP2PError('PEER_CERT_MISSING');
-    }
+    const cert = await preparePeerTransport(
+      ownerUsername,
+      peerUsername,
+      getPeerCertificate,
+      () => refs.p2pServiceRef.current === service,
+    );
     if (refs.p2pServiceRef.current !== service) throw createP2PError('AUTH_REQUIRED');
-
-    if (ownerUsername && !p2pTransport.hasAuthenticatedEndpoint(peerUsername)) {
-      const persisted = await loadPersistedPeerEndpoint(ownerUsername, peerUsername).catch(() => null);
-      if (refs.p2pServiceRef.current !== service) throw createP2PError('AUTH_REQUIRED');
-      if (persisted) {
-        await p2pTransport.registerPeerCertificate(peerUsername, cert);
-        if (refs.p2pServiceRef.current !== service) throw createP2PError('AUTH_REQUIRED');
-        p2pTransport.updateAuthenticatedEndpoint(
-          peerUsername,
-          persisted.endpointUrl,
-          persisted.signerPublicKeyBase64,
-          persisted.announcedAt
-        );
-      }
-    }
 
     await service.connectToPeer(peerUsername, {
       peerCertificate: cert,
@@ -185,14 +172,9 @@ export function createConnectToPeer(
   };
 }
 
-// Queries whether peer currently appears connected in state
-export function createIsPeerConnected(connectedPeers: string[]) {
+export function createIsPeerConnected() {
   return (peerUsername: string): boolean => {
     if (!peerUsername) return false;
-
-    if (connectedPeers.includes(peerUsername)) {
-      return true;
-    }
 
     try {
       if (p2pTransport.isConnected(peerUsername)) {

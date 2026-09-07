@@ -16,7 +16,6 @@ import {
   initializeEncryptedStorage,
 } from './initialization';
 import {
-  loadRecentMessages,
   loadConversationWarmPages,
   loadConversationMessages,
   mergeMessages,
@@ -71,11 +70,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       const candidate = typeof action === 'function' ? action(previous) : action;
       const owner = activeAccountRef.current;
       if (!owner && candidate.length === 0) return [];
-      try {
-        return normalizeKnownUsers(candidate, owner || '', 'merge');
-      } catch {
-        return previous;
-      }
+      if (!owner) throw new Error('Cannot update known peers without an active account');
+      return normalizeKnownUsers(candidate, owner);
     });
   }, []);
 
@@ -83,14 +79,14 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
   // Reset on logout
   useLayoutEffect(() => {
-    const account = Authentication?.isLoggedIn
-      ? (Authentication?.loginUsernameRef?.current || Authentication?.username || null)
+    const account = Authentication.isLoggedIn
+      ? (Authentication.loginUsernameRef.current || null)
       : null;
     const accountChanged = activeAccountRef.current !== account;
     if (accountChanged) dbGenerationRef.current += 1;
     activeAccountRef.current = account;
 
-    if (!Authentication?.isLoggedIn || accountChanged) {
+    if (!Authentication.isLoggedIn || accountChanged) {
       unifiedSignalTransport.resetForAccountTransition();
       deliveryReceiptOutbox.setPersistence(null, null);
       syncEncryptedStorage.reset();
@@ -123,22 +119,22 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       setUsers([]);
       setMessages([]);
     }
-  }, [Authentication?.isLoggedIn, Authentication?.username, setMessages]);
+  }, [Authentication.isLoggedIn, Authentication.username, setMessages]);
 
   // Initialize database
   useEffect(() => {
-    if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
+    if (!Authentication.isLoggedIn || dbInitialized || secureDBRef.current) return;
     if (!Authentication.vaultReady) return;
     if (!Authentication.loginUsernameRef.current) return;
 
     const generation = dbGenerationRef.current;
-    const authOperation = Authentication.authLifecycle?.capture?.();
+    const authOperation = Authentication.authLifecycle.capture();
     const username = Authentication.loginUsernameRef.current;
     const isCurrent = () => (
       dbGenerationRef.current === generation &&
       activeAccountRef.current === username &&
-      (!authOperation || Authentication.authLifecycle?.isCurrent?.(authOperation)) &&
-      Authentication?.isLoggedIn
+      Authentication.authLifecycle.isCurrent(authOperation) &&
+      Authentication.isLoggedIn
     );
 
     const initializeDB = async () => {
@@ -165,7 +161,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
           return;
         }
 
-        const accountKeys = await Authentication.getKeysOnDemand?.();
+        const accountKeys = await Authentication.getKeysOnDemand();
         if (!isCurrent()) {
           db.dispose();
           secureDBRef.current = null;
@@ -192,8 +188,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
         await storeAuthMetadata(
           db,
-          Authentication.pseudonym || username,
-          Authentication.originalUsernameRef?.current || null
+          Authentication.pseudonym,
+          Authentication.originalUsernameRef.current || null
         );
         if (!isCurrent()) {
           db.dispose();
@@ -235,7 +231,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         });
 
         setDbInitialized(true);
-        Authentication.setVaultReady?.(true);
+        Authentication.setVaultReady(true);
       } catch (err) {
         if (initializedDb) {
           initializedDb.dispose();
@@ -247,7 +243,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         secureDBRef.current = null;
         setDbInitialized(false);
         setDbInitError(message || 'Failed to initialize secure storage');
-        Authentication.setLoginError?.(`Failed to initialize secure storage: ${message || 'unknown error'}`);
+        Authentication.setLoginError(`Failed to initialize secure storage: ${message || 'unknown error'}`);
       } finally {
         if (dbGenerationRef.current === generation) {
           initializingDbRef.current = false;
@@ -260,7 +256,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       .then(initializeDB);
     initializationChainRef.current = queued;
     void queued;
-  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized, Authentication?.vaultReady, dbInitAttempt]);
+  }, [Authentication.isLoggedIn, Authentication.username, dbInitialized, Authentication.vaultReady, dbInitAttempt]);
 
   const retryInitializeDB = useCallback(() => {
     initializingDbRef.current = false;
@@ -274,11 +270,11 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
   // Load data after initialization
   useEffect(() => {
-    if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
+    if (!Authentication.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
 
     const generation = dbGenerationRef.current;
     const db = secureDBRef.current;
-    const currentUser = Authentication?.loginUsernameRef?.current;
+    const currentUser = Authentication.loginUsernameRef.current;
     if (!currentUser) return;
     let cancelled = false;
     const isCurrent = () => (
@@ -286,7 +282,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       dbGenerationRef.current === generation &&
       activeAccountRef.current === currentUser &&
       secureDBRef.current === db &&
-      Authentication?.isLoggedIn
+      Authentication.isLoggedIn
     );
 
     const loadData = async () => {
@@ -305,52 +301,40 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       usersLoadedGenerationRef.current = null;
       loadedAccountRef.current = currentUser;
 
-      const [warmPagesResult, usersResult] = await Promise.allSettled([
+      const [warmPages, storedUsers] = await Promise.all([
         loadConversationWarmPages(db, currentUser, CONVERSATION_WARM_MESSAGE_COUNT),
         loadUsers(db),
       ]);
       if (!isCurrent()) return;
 
-      if (warmPagesResult.status === 'fulfilled') {
-        const warmPages = warmPagesResult.value;
-        preloadedConversationMessagesRef.current = new Map(
-          warmPages.map((page) => [page.peerUsername, page.messages]),
-        );
-        const previewMessages = warmPages.flatMap((page) => (
-          page.messages.length > 0 ? [page.messages[page.messages.length - 1]] : []
-        ));
-        if (previewMessages.length > 0) {
-          setMessages(prev => isCurrent()
-            ? mergeMessages(prev, previewMessages, currentUser)
-            : prev);
-        }
-      } else {
-        console.error('[useSecureDB] Failed to preload conversation messages', warmPagesResult.reason);
-        try {
-          const previewMessages = await loadRecentMessages(db, currentUser);
-          if (isCurrent() && previewMessages.length > 0) {
-            setMessages((previous) => mergeMessages(previous, previewMessages, currentUser));
-          }
-        } catch (error) {
-          if (isCurrent()) console.error('[useSecureDB] Failed to load conversation previews', error);
-        }
+      preloadedConversationMessagesRef.current = new Map(
+        warmPages.map((page) => [page.peerUsername, page.messages]),
+      );
+      const previewMessages = warmPages.flatMap((page) => (
+        page.messages.length > 0 ? [page.messages[page.messages.length - 1]] : []
+      ));
+      if (previewMessages.length > 0) {
+        setMessages(prev => isCurrent()
+          ? mergeMessages(prev, previewMessages, currentUser)
+          : prev);
       }
 
-      if (usersResult.status === 'fulfilled') {
-        setUsers(usersResult.value);
-        usersLoadedGenerationRef.current = generation;
-      } else {
-        console.error('[useSecureDB] Failed to load users', usersResult.reason);
-      }
-
+      setUsers(storedUsers);
+      usersLoadedGenerationRef.current = generation;
       setInitialDataLoaded(true);
     };
 
-    void loadData();
+    void loadData().catch((error) => {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[useSecureDB] Failed to load secure data', error);
+      setInitialDataLoaded(false);
+      setDbInitError(message || 'Failed to load secure data');
+    });
     return () => {
       cancelled = true;
     };
-  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized, setMessages]);
+  }, [Authentication.isLoggedIn, Authentication.username, dbInitialized, setMessages]);
 
 
   // Flush pending messages
@@ -406,7 +390,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   // Save users on change
   useEffect(() => {
     if (
-      !Authentication?.isLoggedIn ||
+      !Authentication.isLoggedIn ||
       !dbInitialized ||
       !secureDBRef.current ||
       usersLoadedGenerationRef.current !== dbGenerationRef.current
@@ -417,7 +401,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     const snapshot = users.map((user) => ({ ...user }));
     const isCurrent = () => (
       !!account &&
-      Authentication?.isLoggedIn &&
+      Authentication.isLoggedIn &&
       activeAccountRef.current === account &&
       dbGenerationRef.current === generation &&
       secureDBRef.current === db
@@ -432,7 +416,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       });
     userSaveChainRef.current = operation;
     void operation.catch(err => console.error('[useSecureDB] saveUsers error:', err));
-  }, [users, Authentication?.isLoggedIn, dbInitialized]);
+  }, [users, Authentication.isLoggedIn, dbInitialized]);
 
   const settleSaveWaiters = useCallback((messageId: string, throughVersion: number, error?: Error) => {
     const waiters = pendingSaveWaitersRef.current.get(messageId) || [];
@@ -584,7 +568,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
   const loadMoreConversationMessages = useCallback(
     async (peerUsername: string, currentOffset: number, limit: number = 50) => {
-      if (!secureDBRef.current || !Authentication?.loginUsernameRef?.current) {
+      if (!secureDBRef.current || !Authentication.loginUsernameRef.current) {
         console.error('[useSecureDB] Cannot load more messages: DB or username not available');
         return [];
       }
@@ -624,7 +608,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         return [];
       }
     },
-    [Authentication?.loginUsernameRef?.current, setMessages]
+    [Authentication.loginUsernameRef.current, setMessages]
   );
 
   const hydratePreloadedConversationMessages = useCallback((peerUsername: string): number => {

@@ -42,14 +42,14 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only] [--target <architecture>] [--all-architectures]');
     console.log('  --run-only     Skip the rebuild and just launch the already built binary.');
     console.log('  --bundle-only  Build native installer bundles and exit without launching.');
-    console.log('  --target       Build x64 or arm64 bundles; a non-native Linux target uses Docker Buildx.');
+    console.log('  --target       Build x64 or arm64 bundles, a non-native Linux target uses Docker Buildx.');
     console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
     console.log('For x86-to-ARM64 builds, run `node scripts/install-deps.cjs --client-arm64`.');
-    console.log('QORC_ARM64_BUILDER must select a native ARM64 Buildx builder; emulation is unsupported.');
+    console.log('QORC_ARM64_BUILDER must select a native ARM64 Buildx builder .');
     console.log('Native bundles are written to src-tauri/target/release/bundle.');
     console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
-    console.log('Logs are mirrored to logs/instance-<QORC_INSTANCE_ID>-logs.txt');
+    console.log('Logs are saved to logs/instance-<QORC_INSTANCE_ID>-logs.txt');
     process.exit(0);
 }
 
@@ -102,30 +102,105 @@ if (requestedTarget && targetArchitecture !== process.arch && !(process.arch ===
     process.exit(1);
 }
 
-const instanceId = (process.env.QORC_INSTANCE_ID || '1').trim() || '1';
-if (instanceId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(instanceId)) {
+const requestedInstanceId = process.env.QORC_INSTANCE_ID?.trim() || null;
+if (requestedInstanceId && (requestedInstanceId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(requestedInstanceId))) {
     logErr('QORC_INSTANCE_ID must contain only letters, numbers, underscores, or hyphens.');
     process.exit(1);
 }
 const logsDir = path.join(repoRoot, 'logs');
-const logFilePath = path.join(logsDir, `instance-${instanceId}-logs.txt`);
 const buildLockPath = path.join(repoRoot, '.cache', 'client-build.lock');
+const instanceLeaseDir = path.join(repoRoot, '.cache', 'client-instances');
 const gStreamerPluginsPath = path.join(repoRoot, '.cache', `gstreamer-plugins-${process.arch}`);
-const requiredSpaPaths = [
-    'audioconvert/libspa-audioconvert.so',
-    'libspa.so',
-    'support/libspa-dbus.so',
-    'support/libspa-journal.so',
-    'support/libspa-support.so',
-    'videoconvert/libspa-videoconvert.so'
-];
 let buildLockToken = null;
 
-function spaRuntimeIsComplete(spaRoot) {
-    return fs.statSync(spaRoot, { throwIfNoEntry: false })?.isDirectory() &&
-        requiredSpaPaths.every(relativePath =>
-            fs.statSync(path.join(spaRoot, ...relativePath.split('/')), { throwIfNoEntry: false })?.isFile()
-        );
+function processIsAlive(pid) {
+    if (!Number.isSafeInteger(pid) || pid < 1) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (error) {
+        return error?.code === 'EPERM';
+    }
+}
+
+function readInstanceLease(lockPath) {
+    try {
+        return JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    } catch {
+        return null;
+    }
+}
+
+function leaseOwnerIsAlive(lockPath) {
+    const lease = readInstanceLease(lockPath);
+    if (lease && (processIsAlive(lease.launcherPid) || processIsAlive(lease.clientPid))) {
+        return true;
+    }
+    try {
+        return Date.now() - fs.statSync(lockPath).mtimeMs < 10_000;
+    } catch {
+        return false;
+    }
+}
+
+function tryAcquireInstanceLease(instanceId) {
+    fs.mkdirSync(instanceLeaseDir, { recursive: true });
+    const lockPath = path.join(instanceLeaseDir, `${instanceId}.lock`);
+    const token = crypto.randomBytes(16).toString('hex');
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const fd = fs.openSync(lockPath, 'wx', 0o600);
+            const lease = { instanceId, lockPath, fd, token, clientPid: null };
+            updateInstanceLease(lease);
+            return lease;
+        } catch (error) {
+            if (error?.code !== 'EEXIST') throw error;
+            if (leaseOwnerIsAlive(lockPath)) return null;
+            try {
+                fs.unlinkSync(lockPath);
+            } catch (unlinkError) {
+                if (unlinkError?.code !== 'ENOENT') return null;
+            }
+        }
+    }
+    return null;
+}
+
+function updateInstanceLease(lease) {
+    const contents = JSON.stringify({
+        token: lease.token,
+        launcherPid: process.pid,
+        clientPid: lease.clientPid,
+        startedAt: new Date().toISOString()
+    });
+    fs.ftruncateSync(lease.fd, 0);
+    fs.writeSync(lease.fd, contents, 0, 'utf8');
+    fs.fsyncSync(lease.fd);
+}
+
+function releaseInstanceLease(lease) {
+    if (!lease) return;
+    try { fs.closeSync(lease.fd); } catch { }
+    try {
+        if (readInstanceLease(lease.lockPath)?.token === lease.token) {
+            fs.unlinkSync(lease.lockPath);
+        }
+    } catch { }
+}
+
+function acquireInstanceLease() {
+    if (requestedInstanceId) {
+        const lease = tryAcquireInstanceLease(requestedInstanceId);
+        if (lease) return lease;
+        throw new Error(`Client instance '${requestedInstanceId}' is already running`);
+    }
+
+    for (let instanceNumber = 1; instanceNumber <= 32; instanceNumber++) {
+        const lease = tryAcquireInstanceLease(String(instanceNumber));
+        if (lease) return lease;
+    }
+    throw new Error('All automatic client instance slots (1-32) are already in use');
 }
 
 function processIsRunning(pid) {
@@ -216,12 +291,8 @@ function acquireBuildLock() {
 
 function clientRuntimeEnv(options = {}) {
     const env = { ...process.env };
+    if (options.instanceId) env.QORC_INSTANCE_ID = options.instanceId;
     if (process.platform === 'linux') {
-        const prependPath = (key, value) => {
-            if (!fs.statSync(value, { throwIfNoEntry: false })?.isDirectory()) return;
-            const existing = (env[key] || '').split(path.delimiter).filter(Boolean);
-            env[key] = [value, ...existing.filter(candidate => candidate !== value)].join(path.delimiter);
-        };
         for (const key of Object.keys(env)) {
             if (
                 key.startsWith('SNAP') ||
@@ -245,45 +316,12 @@ function clientRuntimeEnv(options = {}) {
         if (env.LD_LIBRARY_PATH?.includes('/snap/')) {
             delete env.LD_LIBRARY_PATH;
         }
-        if (options.mediaRuntime && fs.statSync(gStreamerPluginsPath, { throwIfNoEntry: false })?.isDirectory()) {
-            const runtimePath = path.join(gStreamerPluginsPath, 'runtime');
-            const runtimeLibPath = path.join(runtimePath, 'lib');
-            const gStreamerCapturePluginsPath = path.join(runtimePath, 'capture-plugins');
-            const gStreamerLauncher = path.join(runtimePath, 'bin', 'qorc-gst-launch-1.0');
-            const gStreamerPluginScanner = path.join(runtimePath, 'bin', 'qorc-gst-plugin-scanner');
-            const spaPluginPath = path.join(runtimePath, 'spa-0.2');
-            prependPath('GST_PLUGIN_PATH_1_0', gStreamerPluginsPath);
-            prependPath('LD_LIBRARY_PATH', runtimeLibPath);
-            env.QORC_GSTREAMER_REQUIRE_BUNDLED = '1';
-            if (fs.statSync(gStreamerCapturePluginsPath, { throwIfNoEntry: false })?.isDirectory()) {
-                env.QORC_GSTREAMER_CAPTURE_PLUGINS = gStreamerCapturePluginsPath;
-            } else {
-                delete env.QORC_GSTREAMER_CAPTURE_PLUGINS;
-            }
-            env.QORC_GSTREAMER_RUNTIME_LIB = runtimeLibPath;
-            delete env.SPA_PLUGIN_DIR;
-            delete env.QORC_GSTREAMER_SPA_PLUGINS;
-            if (spaRuntimeIsComplete(spaPluginPath)) {
-                env.SPA_PLUGIN_DIR = spaPluginPath;
-                env.QORC_GSTREAMER_SPA_PLUGINS = spaPluginPath;
-            }
-            if (fs.statSync(gStreamerLauncher, { throwIfNoEntry: false })?.isFile()) {
-                env.QORC_GSTREAMER_LAUNCH = gStreamerLauncher;
-            }
-            if (fs.statSync(gStreamerPluginScanner, { throwIfNoEntry: false })?.isFile()) {
-                env.GST_PLUGIN_SCANNER_1_0 = gStreamerPluginScanner;
-                env.QORC_GSTREAMER_PLUGIN_SCANNER = gStreamerPluginScanner;
-            }
-        }
         const localLib = path.join(os.homedir(), '.local', 'lib');
         if (fs.existsSync(localLib)) {
             env.LIBRARY_PATH = env.LIBRARY_PATH ? `${localLib}${path.delimiter}${env.LIBRARY_PATH}` : localLib;
         }
         env.WEBKIT_DMABUF_RENDERER_FORCE_SHM ??= '1';
         env.GST_PLUGIN_FEATURE_RANK ??= 'pulsesrc:512,pulsesink:512';
-        if (env.QORC_SOFTWARE_RENDERING) {
-            env.LIBGL_ALWAYS_SOFTWARE ??= '1';
-        }
     }
     return env;
 }
@@ -514,15 +552,25 @@ if (!fs.existsSync(nodeModulesPath)) {
 }
 
 function launchApp() {
+    let instanceLease;
+    try {
+        instanceLease = acquireInstanceLease();
+    } catch (error) {
+        logErr(error.message);
+        process.exit(1);
+    }
+    const instanceId = instanceLease.instanceId;
+    const logFilePath = path.join(logsDir, `instance-${instanceId}-logs.txt`);
     const binName = getTauriBinaryName();
     const binaryPath = path.join(tauriDir, 'target', 'release', binName);
     const productName = JSON.parse(fs.readFileSync(path.join(tauriDir, 'tauri.conf.json'), 'utf8')).productName;
     const appDirPath = path.join(tauriDir, 'target', 'release', 'bundle', 'appimage', `${productName}.AppDir`);
     const appRunPath = path.join(appDirPath, 'AppRun');
-    const runPath = process.platform === 'linux' && fs.existsSync(appRunPath) ? appRunPath : binaryPath;
+    const runPath = process.platform === 'linux' ? appRunPath : binaryPath;
     const runCwd = runPath === appRunPath ? appDirPath : repoRoot;
 
     if (!fs.existsSync(runPath)) {
+        releaseInstanceLease(instanceLease);
         logErr('Built Tauri binary not found. Expected at:', runPath);
         logErr('Run without --run-only once to build it.');
         process.exit(1);
@@ -537,8 +585,16 @@ function launchApp() {
         stdio: ['inherit', 'pipe', 'pipe'],
         cwd: runCwd,
         shell: false,
-        env: clientRuntimeEnv({ mediaRuntime: runPath !== appRunPath })
+        env: clientRuntimeEnv({ instanceId })
     });
+    instanceLease.clientPid = runProc.pid ?? null;
+    updateInstanceLease(instanceLease);
+
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+        process.once(signal, () => {
+            if (runProc.exitCode === null && !runProc.killed) runProc.kill(signal);
+        });
+    }
 
     runProc.stdout.pipe(process.stdout);
     runProc.stdout.pipe(logStream);
@@ -549,29 +605,27 @@ function launchApp() {
         const line = `[CLIENT] Failed to launch app: ${error.message}\n`;
         process.stderr.write(line);
         logStream.write(line);
+        releaseInstanceLease(instanceLease);
     });
 
     runProc.on('close', (exitCode, signal) => {
         const line = `# qorc client stopped ${new Date().toISOString()} code=${exitCode ?? 'null'} signal=${signal || 'none'}\n`;
+        releaseInstanceLease(instanceLease);
         logStream.end(line, () => process.exit(exitCode ?? 1));
     });
 }
 
 function getTauriBinaryName() {
-    try {
-        const metadata = JSON.parse(execSync('cargo metadata --format-version 1 --no-deps', {
-            cwd: tauriDir,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore']
-        }));
-        const rootPackage = metadata.packages?.find(pkg => pkg.manifest_path === path.join(tauriDir, 'Cargo.toml'));
-        const binTarget = rootPackage?.targets?.find(target => target.kind?.includes('bin'));
-        if (binTarget?.name) {
-            return process.platform === 'win32' ? `${binTarget.name}.exe` : binTarget.name;
-        }
-    } catch { }
-
-    return process.platform === 'win32' ? 'qorc.exe' : 'qorc';
+    const metadata = JSON.parse(execSync('cargo metadata --format-version 1 --no-deps', {
+        cwd: tauriDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore']
+    }));
+    const rootPackage = metadata.packages.find(pkg => pkg.manifest_path === path.join(tauriDir, 'Cargo.toml'));
+    if (!rootPackage) throw new Error('Tauri package metadata is unavailable');
+    const binTarget = rootPackage.targets.find(target => target.kind.includes('bin'));
+    if (!binTarget?.name) throw new Error('Tauri binary target is unavailable');
+    return process.platform === 'win32' ? `${binTarget.name}.exe` : binTarget.name;
 }
 
 function removeOldBundleArtifacts() {

@@ -95,6 +95,14 @@ export class WebSocketHandshake {
 
   constructor(private callbacks: HandshakeCallbacks) { }
 
+  private diagnostic(
+    phase: string,
+    details: Record<string, unknown> = {},
+    level: 'info' | 'warn' | 'error' = 'info'
+  ): void {
+    this.callbacks.onDiagnostic(phase, details, level);
+  }
+
   isInFlight(): boolean {
     return this.handshakeInFlight;
   }
@@ -134,8 +142,15 @@ export class WebSocketHandshake {
 
   // Main handshake entry point
   async performHandshake(force: boolean): Promise<void> {
+    const handshakeStartedAt = Date.now();
+    this.diagnostic('perform-requested', {
+      force,
+      hasServerKeyMaterial: !!this.serverKeyMaterial,
+      alreadyInFlight: this.handshakeInFlight,
+    });
     if (!force && this.handshakeInFlight) {
       if (this.handshakePromise) {
+        this.diagnostic('join-existing');
         await this.handshakePromise;
       }
       return;
@@ -146,19 +161,32 @@ export class WebSocketHandshake {
     if (!serverMaterial) {
       const startTime = Date.now();
       const timeout = this.callbacks.getTorAdaptedTimeout(SERVER_KEY_WAIT_BASE_TIMEOUT_MS);
-      let lastRequestTime = 0;
+      let lastRequestTime = startTime;
+      let requestCount = 0;
+      this.diagnostic('server-key-wait-begin', { timeoutMs: timeout });
 
       while (!this.serverKeyMaterial && (Date.now() - startTime) < timeout) {
         if (!await this.callbacks.isConnected()) {
+          this.diagnostic('server-key-wait-connection-lost', {
+            waitMs: Date.now() - startTime,
+            requestCount,
+          }, 'error');
           throw new Error('Connection lost while waiting for server keys');
         }
 
         const now = Date.now();
         if (now - lastRequestTime > SERVER_KEY_REQUEST_INTERVAL_MS) {
           try {
+            requestCount += 1;
+            this.diagnostic('server-key-request-send', { requestCount });
             await this.callbacks.transmit(JSON.stringify({ type: 'request-server-public-key' }));
             lastRequestTime = Date.now();
           } catch (err) {
+            this.diagnostic('server-key-request-failed', {
+              requestCount,
+              errorName: err instanceof Error ? err.name : 'UnknownError',
+              errorMessage: err instanceof Error ? err.message : String(err),
+            }, 'warn');
             console.error('[WebSocketHandshake] Failed to transmit request:', err);
           }
         }
@@ -167,15 +195,26 @@ export class WebSocketHandshake {
 
       serverMaterial = this.serverKeyMaterial;
       if (!serverMaterial) {
+        this.diagnostic('server-key-wait-timeout', {
+          waitMs: Date.now() - startTime,
+          requestCount,
+        }, 'error');
         console.error('[WebSocketHandshake] Handshake timeout waiting for server keys');
         throw new Error('Server key material unavailable (timeout)');
       }
+      this.diagnostic('server-key-ready', {
+        waitMs: Date.now() - startTime,
+        requestCount,
+      });
     }
 
     this.serverKeyMaterial = serverMaterial;
 
     if (this.handshakeInFlight) {
-      if (this.handshakePromise) await this.handshakePromise;
+      if (this.handshakePromise) {
+        this.diagnostic('join-existing-after-key-wait');
+        await this.handshakePromise;
+      }
       return;
     }
 
@@ -188,6 +227,18 @@ export class WebSocketHandshake {
 
     try {
       await handshakePromise;
+      this.diagnostic('perform-complete', {
+        force,
+        durationMs: Date.now() - handshakeStartedAt,
+      });
+    } catch (error) {
+      this.diagnostic('perform-failed', {
+        force,
+        durationMs: Date.now() - handshakeStartedAt,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }, 'error');
+      throw error;
     } finally {
       if (this.handshakePromise === handshakePromise) {
         this.handshakeInFlight = false;
@@ -198,6 +249,8 @@ export class WebSocketHandshake {
 
   // Execute the handshake
   private async executeHandshake(serverMaterial: ServerKeyMaterial, generation: number): Promise<void> {
+    const startedAt = Date.now();
+    this.diagnostic('execute-begin', { lifecycleGeneration: generation });
     if (generation !== this.lifecycleGeneration) {
       throw new Error('PQ handshake cancelled by connection reset');
     }
@@ -210,7 +263,7 @@ export class WebSocketHandshake {
     const sessionId = PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(16));
     const handshakeNonce = PostQuantumRandom.randomBytes(32);
     const handshakeNonceBase64 = PostQuantumUtils.uint8ArrayToBase64(handshakeNonce);
-    const timestamp = this.callbacks.getTrustedNow?.() ?? Date.now();
+    const timestamp = this.callbacks.getTrustedNow();
 
     let baseHandshakeSecret: Uint8Array | null = null;
     let handshakePayload: HandshakeRequestPayload | null = null;
@@ -228,6 +281,9 @@ export class WebSocketHandshake {
       clientKemKeyPair = await PostQuantumKEM.generateKeyPair();
       ephemeral = generateX25519KeyPair();
       classicalShared = computeX25519SharedSecret(ephemeral.secretKey, serverMaterial.x25519PublicKey);
+      this.diagnostic('request-crypto-ready', {
+        durationMs: Date.now() - startedAt,
+      });
       handshakePayload = {
         version: PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION,
         algorithms: {
@@ -316,10 +372,8 @@ export class WebSocketHandshake {
         if (this.cancelActiveAckWait === settleFailure) {
           this.cancelActiveAckWait = null;
         }
-        if (typeof window !== 'undefined') {
-          window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
-          window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
-        }
+        window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
+        window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
       };
 
       const settleFailure = (error: Error) => {
@@ -371,6 +425,9 @@ export class WebSocketHandshake {
           return;
         }
         ackVerificationInFlight = true;
+        this.diagnostic('ack-received', {
+          durationMs: Date.now() - startedAt,
+        });
         let signature: Uint8Array | null = null;
         let signatureMessage: Uint8Array | null = null;
         try {
@@ -469,6 +526,9 @@ export class WebSocketHandshake {
             recvKey = null;
             this.callbacks.onSessionEstablished(pendingSession);
             sessionInstalled = true;
+            this.diagnostic('ack-verified-session-installed', {
+              durationMs: Date.now() - startedAt,
+            });
           } finally {
             responseKemCiphertext?.fill(0);
             responderSharedSecret?.fill(0);
@@ -514,10 +574,21 @@ export class WebSocketHandshake {
             sessionId,
             requestDigest
           });
+          this.diagnostic('confirmation-sent', {
+            durationMs: Date.now() - startedAt,
+          });
           await confirmationPromise;
+          this.diagnostic('confirmation-received', {
+            durationMs: Date.now() - startedAt,
+          });
           rejectConfirmation = null;
           settleSuccess(ack.serverTime as number);
         } catch (error) {
+          this.diagnostic('ack-processing-failed', {
+            durationMs: Date.now() - startedAt,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          }, 'error');
           settleFailure(error instanceof Error ? error : new Error('Invalid handshake acknowledgement'));
         } finally {
           signature?.fill(0);
@@ -537,24 +608,36 @@ export class WebSocketHandshake {
       };
 
       this.callbacks.registerMessageHandler(SignalType.PQ_HANDSHAKE_ACK, handleAckMessage);
-      if (typeof window !== 'undefined') {
-        window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
-        window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
-      }
+      window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
+      window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
     });
 
     try {
       if (generation !== this.lifecycleGeneration) {
         throw new Error('PQ handshake cancelled by connection reset');
       }
+      this.diagnostic('request-send', {
+        durationMs: Date.now() - startedAt,
+      });
       await this.callbacks.transmitHandshake(handshakeMessage);
+      this.diagnostic('request-sent', {
+        durationMs: Date.now() - startedAt,
+      });
       await ackPromise;
       if (generation !== this.lifecycleGeneration) {
         throw new Error('PQ handshake cancelled by connection reset');
       }
       this.scheduleRekey();
+      this.diagnostic('execute-complete', {
+        durationMs: Date.now() - startedAt,
+      });
     } catch (error) {
       const handshakeError = error instanceof Error ? error : new Error('PQ handshake failed');
+      this.diagnostic('execute-failed', {
+        durationMs: Date.now() - startedAt,
+        errorName: handshakeError.name,
+        errorMessage: handshakeError.message,
+      }, 'error');
       cancelAckWait?.(handshakeError);
       await ackPromise.catch(() => { });
       if (generation === this.lifecycleGeneration) {

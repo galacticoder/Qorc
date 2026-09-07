@@ -15,9 +15,8 @@ import {
 import {
   appendKeyTransparencyRecord,
   initializeKeyTransparencyDatabase,
-  readKeyTransparencyDelta,
-  readKeyTransparencyEpochStart,
   readKeyTransparencyLogState,
+  readKeyTransparencySnapshot,
 } from '../database/key-transparency-db.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { SHA3_512_ALGORITHM } from '../utils/crypto-consts.js';
@@ -142,18 +141,14 @@ export async function syncKeyTransparency(fromEpoch, toEpoch) {
 
   const currentEpoch = keyTransparencyEpoch();
   const boundedTo = Math.min(toEpoch, currentEpoch);
-  const delta = await readKeyTransparencyDelta(fromEpoch, boundedTo);
-  const firstLogIndex = delta.firstLogIndex === null
-    ? await readKeyTransparencyEpochStart(fromEpoch)
-    : delta.firstLogIndex;
-  const state = await readKeyTransparencyLogState();
+  const { delta, state } = await readKeyTransparencySnapshot(fromEpoch, boundedTo);
 
   return {
     protocol: KEY_TRANSPARENCY_PROTOCOL,
     currentEpoch,
     fromEpoch: delta.fromEpoch,
     toEpoch: delta.toEpoch,
-    firstLogIndex,
+    firstLogIndex: delta.firstLogIndex,
     records: delta.records,
     head: signHead(state, currentEpoch),
   };

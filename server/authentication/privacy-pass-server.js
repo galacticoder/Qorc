@@ -28,6 +28,8 @@ const PP_LABELS = {
 };
 
 const ALLOWED_PURPOSES = new Set([ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE]);
+const SERVER_ENTRY_BINDING_LABEL = 'qorc-PrivacyPass-Server-Entry-Password-Binding-v1';
+const SERVER_ENTRY_ROOT_PURPOSE = 'privacy-pass-voprf:server-entry-bound-v1';
 
 function normalizePurpose(purpose) {
     const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
@@ -72,9 +74,16 @@ export class PrivacyPassServer {
     static #cleanupInterval = null;
     static #cleanupInFlight = null;
     static #lifecycleGeneration = 0;
+    static #serverEntryIssuerSeed = null;
+    static #serverEntryCredentialGeneration = 0;
 
     static validateIssuanceEpoch(epoch) {
         return normalizeIssuanceEpoch(epoch);
+    }
+
+    static isServerEntryCredentialGenerationCurrent(generation) {
+        return Number.isSafeInteger(generation) &&
+            generation === this.#serverEntryCredentialGeneration;
     }
 
     // Derive cluster wide issuer key
@@ -83,11 +92,19 @@ export class PrivacyPassServer {
         if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 0xffffffff) {
             throw new Error('Invalid Privacy Pass epoch');
         }
-        const cacheKey = `${norm}:${epoch}`;
+        const credentialGeneration = norm === SERVER_ENTRY_PURPOSE
+            ? this.#serverEntryCredentialGeneration
+            : 0;
+        const cacheKey = `${norm}:${credentialGeneration}:${epoch}`;
         const existing = this.#keysByPurpose.get(cacheKey);
         if (existing) return existing;
 
-        const seed = deriveAuthRootKey(`${PROTOCOL_KEYS.PRIVACY_PASS_VOPRF_ROOT}:${norm}`);
+        const seed = norm === SERVER_ENTRY_PURPOSE
+            ? this.#serverEntryIssuerSeed && new Uint8Array(this.#serverEntryIssuerSeed)
+            : deriveAuthRootKey(`${PROTOCOL_KEYS.PRIVACY_PASS_VOPRF_ROOT}:${norm}`);
+        if (!seed) {
+            throw new Error('Server-entry issuer is not configured');
+        }
         let keys;
         try {
             keys = oprf.voprf.deriveKeyPair(
@@ -115,8 +132,48 @@ export class PrivacyPassServer {
                 continue;
             }
             keys?.secretKey?.fill(0);
+            keys?.publicKey?.fill(0);
             this.#keysByPurpose.delete(cacheKey);
         }
+    }
+
+    static configureServerEntryPasswordSecret(passwordSecret) {
+        if (!(passwordSecret instanceof Uint8Array) || passwordSecret.length !== HASH_OUTPUT_BYTES) {
+            throw new Error('Invalid server-entry password secret');
+        }
+
+        const root = deriveAuthRootKey(SERVER_ENTRY_ROOT_PURPOSE);
+        let nextSeed = null;
+        try {
+            nextSeed = hkdf(
+                blake3,
+                passwordSecret,
+                root,
+                UTF8_ENCODER.encode(SERVER_ENTRY_BINDING_LABEL),
+                HASH_OUTPUT_BYTES
+            );
+        } finally {
+            root.fill(0);
+        }
+
+        if (
+            this.#serverEntryIssuerSeed &&
+            crypto.timingSafeEqual(this.#serverEntryIssuerSeed, nextSeed)
+        ) {
+            nextSeed.fill(0);
+            return false;
+        }
+
+        this.#serverEntryCredentialGeneration += 1;
+        for (const [cacheKey, keys] of this.#keysByPurpose) {
+            if (!cacheKey.startsWith(`${SERVER_ENTRY_PURPOSE}:`)) continue;
+            keys?.secretKey?.fill(0);
+            keys?.publicKey?.fill(0);
+            this.#keysByPurpose.delete(cacheKey);
+        }
+        this.#serverEntryIssuerSeed?.fill(0);
+        this.#serverEntryIssuerSeed = nextSeed;
+        return true;
     }
 
     static #validateKeyPair(keys) {
@@ -168,20 +225,27 @@ export class PrivacyPassServer {
     static async initialize(nullifierStore) {
         if (this.#initialized) return;
         if (this.#initializationPromise) return this.#initializationPromise;
+        if (
+            !nullifierStore ||
+            typeof nullifierStore.cleanup !== 'function' ||
+            typeof nullifierStore.markUsed !== 'function' ||
+            typeof nullifierStore.markUsedBatch !== 'function'
+        ) {
+            throw new Error('Privacy Pass requires a complete nullifier store');
+        }
 
         const generation = this.#lifecycleGeneration;
         const initialization = (async () => {
             this.#nullifierStore = nullifierStore;
-            if (!nullifierStore) {
-                console.warn('[PrivacyPass] Missing nullifier store; token redemption disabled');
-            }
 
-            await this.#getKeysForPurpose(SERVER_ENTRY_PURPOSE);
-            this.#assertLifecycleGeneration(generation);
+            if (this.#serverEntryIssuerSeed) {
+                await this.#getKeysForPurpose(SERVER_ENTRY_PURPOSE);
+                this.#assertLifecycleGeneration(generation);
+            }
             await this.#getKeysForPurpose(ACCOUNT_AUTH_PURPOSE);
             this.#assertLifecycleGeneration(generation);
 
-            if (this.#nullifierStore && !this.#cleanupInterval) {
+            if (!this.#cleanupInterval) {
                 await this.#runNullifierCleanup();
                 this.#assertLifecycleGeneration(generation);
                 this.#cleanupInterval = setInterval(() => {
@@ -251,6 +315,9 @@ export class PrivacyPassServer {
             this.#initializationPromise = null;
         }
         this.#cleanupInFlight = null;
+        this.#serverEntryIssuerSeed?.fill(0);
+        this.#serverEntryIssuerSeed = null;
+        this.#serverEntryCredentialGeneration += 1;
     }
 
     /**
@@ -261,6 +328,10 @@ export class PrivacyPassServer {
             throw new Error('PrivacyPass server not initialized');
         }
         const generation = this.#lifecycleGeneration;
+        const normalizedPurpose = normalizePurpose(purpose);
+        const credentialGeneration = normalizedPurpose === SERVER_ENTRY_PURPOSE
+            ? this.#serverEntryCredentialGeneration
+            : null;
 
         if (!Array.isArray(blindedTokens) || blindedTokens.length === 0) {
             throw new Error('Invalid blinded tokens');
@@ -276,8 +347,16 @@ export class PrivacyPassServer {
         }
 
         const issuerEpoch = normalizeIssuanceEpoch(tokenEpoch);
-        const keys = await this.#getKeysForPurpose(purpose, issuerEpoch);
+        const keys = await this.#getKeysForPurpose(normalizedPurpose, issuerEpoch);
         this.#assertIssuanceGeneration(generation);
+        if (
+            credentialGeneration !== null &&
+            credentialGeneration !== this.#serverEntryCredentialGeneration
+        ) {
+            const error = new Error('Server-entry token issuance cancelled by credential rotation');
+            error.code = 'SERVER_ENTRY_ISSUANCE_CANCELLED';
+            throw error;
+        }
         let blindedTokenSlab = new Uint8Array(blindedTokens.length * 32);
         let secretKey = new Uint8Array(keys.secretKey);
         let publicKey = new Uint8Array(keys.publicKey);
@@ -299,6 +378,14 @@ export class PrivacyPassServer {
             publicKey = null;
             ({ evaluatedTokens, proof } = await evaluation);
             this.#assertIssuanceGeneration(generation);
+            if (
+                credentialGeneration !== null &&
+                credentialGeneration !== this.#serverEntryCredentialGeneration
+            ) {
+                const error = new Error('Server-entry token issuance cancelled by credential rotation');
+                error.code = 'SERVER_ENTRY_ISSUANCE_CANCELLED';
+                throw error;
+            }
 
             const signedBlindedTokens = new Array(blindedTokens.length);
             for (let index = 0; index < signedBlindedTokens.length; index += 1) {
@@ -329,18 +416,44 @@ export class PrivacyPassServer {
         if (!this.#initialized) {
             throw new Error('PrivacyPass server not initialized');
         }
+        const lifecycleGeneration = this.#lifecycleGeneration;
+        const normalizedPurpose = normalizePurpose(expectedPurpose);
+        const credentialGeneration = normalizedPurpose === SERVER_ENTRY_PURPOSE
+            ? this.#serverEntryCredentialGeneration
+            : null;
 
-        if (!await this.#isRedemptionValid(token, nullifier, mac, tokenSecret, expectedPurpose)) {
+        if (
+            !await this.#isRedemptionValid(token, nullifier, mac, tokenSecret, normalizedPurpose) ||
+            !this.#initialized ||
+            lifecycleGeneration !== this.#lifecycleGeneration
+        ) {
+            return this.#uniformFailureResponse();
+        }
+        if (
+            credentialGeneration !== null &&
+            credentialGeneration !== this.#serverEntryCredentialGeneration
+        ) {
             return this.#uniformFailureResponse();
         }
 
         const tokenEpoch = readTokenEpoch(tokenSecret);
-        const consumed = await this.#nullifierStore?.markUsed(nullifier, tokenEpoch);
-        if (!consumed) {
+        const consumed = await this.#nullifierStore.markUsed(nullifier, tokenEpoch);
+        if (
+            !consumed ||
+            !this.#initialized ||
+            lifecycleGeneration !== this.#lifecycleGeneration ||
+            (credentialGeneration !== null &&
+                credentialGeneration !== this.#serverEntryCredentialGeneration)
+        ) {
             return this.#uniformFailureResponse();
         }
 
-        return { valid: true };
+        return {
+            valid: true,
+            ...(credentialGeneration === null
+                ? {}
+                : { serverEntryCredentialGeneration: credentialGeneration })
+        };
     }
 
     /**
@@ -350,9 +463,14 @@ export class PrivacyPassServer {
         if (!this.#initialized) {
             throw new Error('PrivacyPass server not initialized');
         }
+        const lifecycleGeneration = this.#lifecycleGeneration;
         if (!Array.isArray(redemptions) || redemptions.length < 1 || redemptions.length > 4) {
             return this.#uniformFailureResponse();
         }
+        const credentialGeneration = redemptions.some((redemption) => (
+            typeof redemption?.expectedPurpose === 'string' &&
+            redemption.expectedPurpose.trim().toLowerCase() === SERVER_ENTRY_PURPOSE
+        )) ? this.#serverEntryCredentialGeneration : null;
 
         const nullifiers = await Promise.all(redemptions.map(async (redemption) => {
             if (!redemption || typeof redemption !== 'object') return null;
@@ -376,9 +494,27 @@ export class PrivacyPassServer {
         if (nullifiers.some((entry) => entry === null)) {
             return this.#uniformFailureResponse();
         }
+        if (
+            !this.#initialized ||
+            lifecycleGeneration !== this.#lifecycleGeneration ||
+            credentialGeneration !== null &&
+            credentialGeneration !== this.#serverEntryCredentialGeneration
+        ) {
+            return this.#uniformFailureResponse();
+        }
 
-        const consumed = await this.#nullifierStore?.markUsedBatch(nullifiers);
-        return consumed ? { valid: true } : this.#uniformFailureResponse();
+        const consumed = await this.#nullifierStore.markUsedBatch(nullifiers);
+        return consumed &&
+            this.#initialized &&
+            lifecycleGeneration === this.#lifecycleGeneration && (
+            credentialGeneration === null ||
+            credentialGeneration === this.#serverEntryCredentialGeneration
+        ) ? {
+                valid: true,
+                ...(credentialGeneration === null
+                    ? {}
+                    : { serverEntryCredentialGeneration: credentialGeneration })
+            } : this.#uniformFailureResponse();
     }
 
     static async #isRedemptionValid(token, nullifier, mac, tokenSecret, expectedPurpose) {

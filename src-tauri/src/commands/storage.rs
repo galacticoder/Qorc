@@ -47,7 +47,7 @@ pub async fn secure_get(key: String, state: State<'_, AppState>) -> Result<Optio
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
 
-    storage.get(&key).await.map_err(|e| e.safe_message())
+    storage.get_text(&key).await.map_err(|e| e.safe_message())
 }
 
 /// Set value in secure storage
@@ -72,7 +72,7 @@ pub async fn secure_set(
 
     let _mutation_guard = SECURE_MUTATION_LOCK.lock().await;
     storage
-        .set(&key, &value)
+        .set_text(&key, &value)
         .await
         .map(|_| true)
         .map_err(|e| e.safe_message())
@@ -92,7 +92,7 @@ pub async fn secure_remove(key: String, state: State<'_, AppState>) -> Result<bo
 
     let _mutation_guard = SECURE_MUTATION_LOCK.lock().await;
     storage
-        .remove(&key)
+        .remove_item(&key)
         .await
         .map(|_| true)
         .map_err(|e| e.safe_message())

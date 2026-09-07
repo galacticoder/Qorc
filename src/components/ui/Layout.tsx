@@ -8,11 +8,11 @@ interface LayoutProps {
     children: React.ReactNode;
     activeTab: 'chats' | 'calls' | 'settings';
     onTabChange: (tab: 'chats' | 'calls' | 'settings') => void;
-    currentUser?: {
+    currentUser: {
         username: string;
         avatarUrl?: string;
     };
-    onLogout?: () => void;
+    onLogout: () => void;
 }
 
 export function Layout({

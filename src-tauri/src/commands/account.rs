@@ -10,6 +10,28 @@ use crate::state::AppState;
 
 const SIGN_INPUT_MAX_BYTES: usize = 1024 * 1024;
 
+async fn acquire_token_vault_session(
+    state: &AppState,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        std::sync::Arc<account_vault::AccountSession>,
+    ),
+    String,
+> {
+    let session = state
+        .account_session()
+        .ok_or_else(|| "Native account is locked".to_string())?;
+    let guard = state.database_lifecycle_lock.clone().lock_owned().await;
+    if !state
+        .account_session()
+        .is_some_and(|current| std::sync::Arc::ptr_eq(&current, &session))
+    {
+        return Err("Native account changed during token-vault operation".to_string());
+    }
+    Ok((guard, session))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountOpenResult {
@@ -28,10 +50,13 @@ async fn activate_session(
     app_handle: &AppHandle,
     state: &AppState,
     session: std::sync::Arc<account_vault::AccountSession>,
+    permit: &crate::account_lifecycle::AccountOpenPermit<'_>,
 ) -> Result<(), String> {
-    crate::database::activate_native_account_database(
+    let lifecycle_lock = state.database_lifecycle_lock.clone();
+    let _database_guard = lifecycle_lock.lock_owned().await;
+    permit.ensure_current()?;
+    let database = crate::database::prepare_native_account_database(
         app_handle.clone(),
-        state,
         session.account_owner(),
         session.master_key(),
     )
@@ -44,19 +69,31 @@ async fn activate_session(
     let public_key = BASE64
         .decode(&session.public_keys().kyber_public_base64)
         .map_err(|_| "Native account public key is invalid".to_string())?;
-    let database = state
-        .database()
-        .ok_or_else(|| "Database not initialized".to_string())?;
-    crate::commands::signal::initialize_native_account_signal(
-        signal_handler,
-        database,
-        session.username(),
-        public_key,
-        private_key.to_vec(),
-    )?;
-
-    *state.account_session.write() = Some(session);
-    Ok(())
+    permit.ensure_current()?;
+    {
+        let _signal_guard = signal_handler.acquire_lifecycle_lock().await;
+        permit.ensure_current()?;
+        signal_handler.clear_all();
+        *state.account_session.write() = None;
+        *state.database.write() = None;
+    }
+    let result = permit.commit(|| {
+        crate::commands::signal::initialize_native_account_signal(
+            signal_handler.clone(),
+            database.clone(),
+            session.username(),
+            public_key,
+            private_key.to_vec(),
+        )?;
+        *state.database.write() = Some(database);
+        *state.account_session.write() = Some(session);
+        Ok(())
+    });
+    if result.is_err() {
+        let _signal_guard = signal_handler.acquire_lifecycle_lock().await;
+        signal_handler.clear_all();
+    }
+    result
 }
 
 #[tauri::command]
@@ -68,6 +105,9 @@ pub async fn account_open(
     password: String,
     passphrase: String,
 ) -> Result<AccountOpenResult, String> {
+    let password = Zeroizing::new(password);
+    let passphrase = Zeroizing::new(passphrase);
+    let permit = state.inner().account_lifecycle.begin_open(&account_owner)?;
     let storage = state
         .inner()
         .storage()
@@ -76,27 +116,14 @@ pub async fn account_open(
         .await
         .map_err(|error| error.safe_message())?;
     let session = if created {
-        account_vault::create(
-            storage,
-            account_owner,
-            username,
-            Zeroizing::new(password),
-            Zeroizing::new(passphrase),
-        )
-        .await
+        account_vault::create(storage, account_owner, username, password, passphrase).await
     } else {
-        account_vault::unlock(
-            storage,
-            account_owner,
-            username,
-            Zeroizing::new(password),
-            Zeroizing::new(passphrase),
-        )
-        .await
+        account_vault::unlock(storage, account_owner, username, password, passphrase).await
     }
     .map_err(|error| error.safe_message())?;
     let public_keys = session.public_keys();
-    activate_session(&app_handle, state.inner(), session).await?;
+    permit.ensure_current()?;
+    activate_session(&app_handle, state.inner(), session, &permit).await?;
     Ok(AccountOpenResult {
         created,
         public_keys,
@@ -245,10 +272,7 @@ pub async fn account_token_vault_load(
     vault_kind: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let session = state
-        .inner()
-        .account_session()
-        .ok_or_else(|| "Native account is locked".to_string())?;
+    let (_guard, session) = acquire_token_vault_session(state.inner()).await?;
     let key = session
         .token_vault_storage_key(&server_scope, &vault_kind)
         .map_err(|error| error.safe_message())?;
@@ -257,7 +281,7 @@ pub async fn account_token_vault_load(
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
     let Some(encoded) = storage
-        .get(&key)
+        .get_text(&key)
         .await
         .map_err(|error| error.safe_message())?
     else {
@@ -279,10 +303,7 @@ pub async fn account_token_vault_store(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     let plaintext_json = Zeroizing::new(plaintext_json);
-    let session = state
-        .inner()
-        .account_session()
-        .ok_or_else(|| "Native account is locked".to_string())?;
+    let (_guard, session) = acquire_token_vault_session(state.inner()).await?;
     let key = session
         .token_vault_storage_key(&server_scope, &vault_kind)
         .map_err(|error| error.safe_message())?;
@@ -296,7 +317,7 @@ pub async fn account_token_vault_store(
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
     storage
-        .set(&key, &encoded)
+        .set_text(&key, &encoded)
         .await
         .map_err(|error| error.safe_message())?;
     Ok(true)
@@ -308,10 +329,7 @@ pub async fn account_token_vault_remove(
     vault_kind: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let session = state
-        .inner()
-        .account_session()
-        .ok_or_else(|| "Native account is locked".to_string())?;
+    let (_guard, session) = acquire_token_vault_session(state.inner()).await?;
     let key = session
         .token_vault_storage_key(&server_scope, &vault_kind)
         .map_err(|error| error.safe_message())?;
@@ -320,7 +338,7 @@ pub async fn account_token_vault_remove(
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
     storage
-        .remove(&key)
+        .remove_item(&key)
         .await
         .map_err(|error| error.safe_message())?;
     Ok(true)
@@ -329,22 +347,141 @@ pub async fn account_token_vault_remove(
 #[tauri::command]
 pub async fn account_lock(
     account_owner: String,
+    purge_tokens: Option<bool>,
+    server_scope: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let lifecycle_lock = state.inner().database_lifecycle_lock.clone();
+    lock_native_account(
+        state.inner(),
+        &account_owner,
+        purge_tokens == Some(true),
+        server_scope.as_deref(),
+    )
+    .await
+}
+
+async fn lock_native_account(
+    state: &AppState,
+    account_owner: &str,
+    purge_tokens: bool,
+    server_scope: Option<&str>,
+) -> Result<bool, String> {
+    // Revoke an in-flight unlock before waiting for database initialization.
+    state.account_lifecycle.cancel_open(account_owner)?;
+    let lifecycle_lock = state.database_lifecycle_lock.clone();
     let _guard = lifecycle_lock.lock_owned().await;
-    let matches = state
-        .inner()
+    let session = state
         .account_session()
-        .is_some_and(|session| session.account_owner() == account_owner);
-    if !matches {
+        .filter(|session| session.account_owner() == account_owner);
+    let Some(session) = session else {
         return Ok(false);
-    }
-    if let Some(handler) = state.inner().signal_handler() {
+    };
+    if let Some(handler) = state.signal_handler() {
         let _signal_guard = handler.acquire_lifecycle_lock().await;
         handler.clear_all();
     }
-    *state.inner().database.write() = None;
-    *state.inner().account_session.write() = None;
+    *state.database.write() = None;
+    *state.account_session.write() = None;
+    if purge_tokens {
+        // The session is already inaccessible to new commands. Keep only this
+        // local reference until both encrypted pools are deleted, under the same
+        // lock used by token-vault mutations so late writes cannot restore them.
+        let scope = server_scope
+            .ok_or_else(|| "Token-vault scope unavailable during logout".to_string())?;
+        let storage = state
+            .storage()
+            .ok_or_else(|| "Storage not initialized".to_string())?;
+        let mut cleanup_failed = false;
+        for kind in ["working", "resume"] {
+            let key = session
+                .token_vault_storage_key(scope, kind)
+                .map_err(|error| error.safe_message())?;
+            if storage.remove_item(&key).await.is_err() || storage.has(&key).await.unwrap_or(true) {
+                cleanup_failed = true;
+            }
+        }
+        if cleanup_failed {
+            return Err("Local token-vault deletion could not be verified".to_string());
+        }
+    }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn account_token_access_queued_before_switch_cannot_use_the_new_session() {
+        let state = Arc::new(AppState::new());
+        *state.account_session.write() = Some(account_vault::test_session(&"a".repeat(64), 1));
+        let guard = state.database_lifecycle_lock.clone().lock_owned().await;
+        let task_state = state.clone();
+        let queued =
+            tokio::spawn(async move { acquire_token_vault_session(&task_state).await.is_err() });
+        tokio::task::yield_now().await;
+        *state.account_session.write() = Some(account_vault::test_session(&"b".repeat(64), 2));
+        drop(guard);
+        assert!(queued.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn account_logout_revokes_access_and_deletes_both_encrypted_pools() {
+        let directory =
+            std::env::temp_dir().join(format!("qorc-account-audit-{}", uuid::Uuid::new_v4()));
+        let storage = Arc::new(
+            crate::storage::SecureStorage::new(directory.clone())
+                .await
+                .unwrap(),
+        );
+        let state = AppState::new();
+        let owner = "a".repeat(64);
+        let scope = "b".repeat(64);
+        let session = account_vault::test_session(&owner, 3);
+        for kind in ["working", "resume"] {
+            let key = session.token_vault_storage_key(&scope, kind).unwrap();
+            let sealed = session
+                .seal_token_vault(&scope, kind, b"test credentials")
+                .unwrap();
+            storage.set_text(&key, &sealed).await.unwrap();
+        }
+        *state.storage.write() = Some(storage.clone());
+        *state.account_session.write() = Some(session.clone());
+        assert!(
+            lock_native_account(&state, &owner, true, Some(&scope))
+                .await
+                .unwrap()
+        );
+        assert!(state.account_session().is_none());
+        assert!(acquire_token_vault_session(&state).await.is_err());
+        for kind in ["working", "resume"] {
+            assert!(
+                !storage
+                    .has(&session.token_vault_storage_key(&scope, kind).unwrap())
+                    .await
+                    .unwrap()
+            );
+        }
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_cleanup_failure_stays_locked_and_unrelated_owner_cannot_revoke() {
+        let state = AppState::new();
+        let owner = "a".repeat(64);
+        *state.account_session.write() = Some(account_vault::test_session(&owner, 4));
+        assert!(
+            !lock_native_account(&state, &"b".repeat(64), false, None)
+                .await
+                .unwrap()
+        );
+        assert!(state.account_session().is_some());
+        assert!(
+            lock_native_account(&state, &owner, true, None)
+                .await
+                .is_err()
+        );
+        assert!(state.account_session().is_none());
+    }
 }

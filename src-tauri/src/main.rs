@@ -5,15 +5,13 @@ compile_error!("qorc desktop supports only Linux and Windows");
 
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
-
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 // Module declarations
+mod account_lifecycle;
 mod account_vault;
 mod audio_codec;
 mod audio_playback;
@@ -40,129 +38,57 @@ mod tor;
 use state::AppState;
 
 #[cfg(target_os = "linux")]
-fn set_env_default(key: &str, value: &str) {
-    if std::env::var_os(key).is_none() {
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn prepend_env_paths(key: &str, candidates: Vec<PathBuf>) {
-    let mut paths = candidates
-        .into_iter()
-        .filter(|candidate| candidate.is_dir())
-        .collect::<Vec<_>>();
-    if let Some(existing) = std::env::var_os(key) {
-        for existing_path in std::env::split_paths(&existing) {
-            if !paths.contains(&existing_path) {
-                paths.push(existing_path);
-            }
-        }
-    }
-    if paths.is_empty() {
-        return;
-    }
-    if let Ok(value) = std::env::join_paths(paths) {
-        unsafe {
-            std::env::set_var(key, value);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn configure_linux_media_runtime() {
-    let Ok(executable) = std::env::current_exe() else {
-        return;
-    };
-    let Some(binary_dir) = executable.parent() else {
-        return;
-    };
-    if binary_dir.file_name().and_then(|name| name.to_str()) != Some("bin") {
-        return;
-    }
-    let Some(usr_dir) = binary_dir.parent() else {
-        return;
-    };
-    unsafe {
-        std::env::set_var("QORC_GSTREAMER_REQUIRE_BUNDLED", "1");
-    }
+    let executable = std::env::current_exe().expect("Application executable path is unavailable");
+    let binary_dir = executable
+        .parent()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("bin"))
+        .expect("Application executable must be installed under bin");
+    let usr_dir = binary_dir
+        .parent()
+        .expect("Application installation root is unavailable");
     let usr_lib = usr_dir.join("lib");
     let packaged_runtime = usr_lib.join("qorc").join("webkitgtk");
-    let capture_plugin_path = usr_lib
-        .join("qorc")
-        .join("screen-capture")
-        .join("gstreamer-1.0");
-    let private_capture_plugin_path = packaged_runtime.join("capture-plugins");
-    let private_plugin_path = packaged_runtime.join("gstreamer-1.0");
-    let app_plugin_path = usr_lib.join("gstreamer-1.0");
-    let private_library_path = packaged_runtime.join("lib");
-    let plugin_paths = vec![private_plugin_path.clone(), app_plugin_path.clone()];
-    let library_paths = vec![private_library_path.clone(), usr_lib.clone()];
-    prepend_env_paths("GST_PLUGIN_PATH_1_0", plugin_paths);
-    prepend_env_paths("LD_LIBRARY_PATH", library_paths);
-    if let Some(capture_plugin_path) = [private_capture_plugin_path, capture_plugin_path]
-        .into_iter()
-        .find(|path| path.is_dir())
-    {
-        unsafe {
-            std::env::set_var("QORC_GSTREAMER_CAPTURE_PLUGINS", capture_plugin_path);
-        }
-    }
-    if private_library_path.is_dir() {
-        unsafe {
-            std::env::set_var("QORC_GSTREAMER_RUNTIME_LIB", &private_library_path);
-        }
-    } else if usr_lib.is_dir() {
-        unsafe {
-            std::env::set_var("QORC_GSTREAMER_RUNTIME_LIB", &usr_lib);
-        }
-    }
-
-    unsafe {
-        std::env::remove_var("SPA_PLUGIN_DIR");
-        std::env::remove_var("QORC_GSTREAMER_SPA_PLUGINS");
-    }
-    let spa_paths = [packaged_runtime.join("spa-0.2"), usr_lib.join("spa-0.2")];
-    if let Some(spa_path) = spa_paths
-        .into_iter()
-        .find(|path| screen_capture::spa_runtime_is_complete(path))
-    {
-        unsafe {
-            std::env::set_var("SPA_PLUGIN_DIR", &spa_path);
-            std::env::set_var("QORC_GSTREAMER_SPA_PLUGINS", spa_path);
-        }
-    }
-
+    let capture_plugin_path = packaged_runtime.join("capture-plugins");
+    let plugin_path = packaged_runtime.join("gstreamer-1.0");
+    let library_path = packaged_runtime.join("lib");
+    let spa_path = packaged_runtime.join("spa-0.2");
     let gstreamer_launch = packaged_runtime.join("bin").join("qorc-gst-launch-1.0");
-    if gstreamer_launch.is_file() {
-        unsafe {
-            std::env::set_var("QORC_GSTREAMER_LAUNCH", gstreamer_launch);
-        }
+    let plugin_scanner = packaged_runtime.join("bin").join("qorc-gst-plugin-scanner");
+    assert!(capture_plugin_path.is_dir(), "GStreamer capture plugins are unavailable");
+    assert!(plugin_path.is_dir(), "GStreamer plugins are unavailable");
+    assert!(library_path.is_dir(), "GStreamer libraries are unavailable");
+    assert!(
+        screen_capture::spa_runtime_is_complete(&spa_path),
+        "PipeWire SPA runtime is unavailable"
+    );
+    assert!(gstreamer_launch.is_file(), "GStreamer launcher is unavailable");
+    assert!(plugin_scanner.is_file(), "GStreamer plugin scanner is unavailable");
+    let mut library_paths = vec![library_path.clone()];
+    if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+        library_paths.extend(std::env::split_paths(&existing));
     }
-    let plugin_scanner = [
-        packaged_runtime.join("bin").join("qorc-gst-plugin-scanner"),
-        binary_dir.join("qorc-gst-plugin-scanner"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file());
-    if let Some(plugin_scanner) = plugin_scanner {
-        unsafe {
-            std::env::set_var("GST_PLUGIN_SCANNER_1_0", &plugin_scanner);
-            std::env::set_var("QORC_GSTREAMER_PLUGIN_SCANNER", plugin_scanner);
-        }
+    let library_search_path =
+        std::env::join_paths(library_paths).expect("GStreamer library path is invalid");
+    unsafe {
+        std::env::set_var("GST_PLUGIN_PATH_1_0", &plugin_path);
+        std::env::set_var("LD_LIBRARY_PATH", library_search_path);
+        std::env::set_var("QORC_GSTREAMER_CAPTURE_PLUGINS", capture_plugin_path);
+        std::env::set_var("QORC_GSTREAMER_RUNTIME_LIB", library_path);
+        std::env::set_var("SPA_PLUGIN_DIR", &spa_path);
+        std::env::set_var("QORC_GSTREAMER_SPA_PLUGINS", spa_path);
+        std::env::set_var("QORC_GSTREAMER_LAUNCH", gstreamer_launch);
+        std::env::set_var("GST_PLUGIN_SCANNER_1_0", &plugin_scanner);
+        std::env::set_var("QORC_GSTREAMER_PLUGIN_SCANNER", plugin_scanner);
     }
 }
 
 #[cfg(target_os = "linux")]
 fn configure_linux_webview_rendering() {
-    set_env_default("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
-    configure_linux_media_runtime();
-
-    if std::env::var_os("QORC_SOFTWARE_RENDERING").is_some() {
-        set_env_default("LIBGL_ALWAYS_SOFTWARE", "1");
+    unsafe {
+        std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
     }
+    configure_linux_media_runtime();
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -411,7 +337,6 @@ pub fn run() {
             commands::audio::audio_opus_start,
             commands::audio::audio_opus_stop,
             commands::audio::audio_opus_encode,
-            commands::audio::audio_opus_decode,
             commands::audio::audio_opus_decode_playback,
             commands::audio::audio_playback_start,
             commands::audio::audio_playback_stop,
@@ -439,7 +364,6 @@ pub fn run() {
             commands::tor::tor_stop,
             commands::tor::tor_status,
             commands::tor::tor_verify_connection,
-            commands::tor::tor_info,
             commands::signal::signal_create_prekey_bundle,
             commands::signal::signal_process_prekey_bundle,
             commands::signal::signal_has_session,
@@ -481,7 +405,6 @@ pub fn run() {
             commands::system::forward_client_logs,
             commands::system::open_external,
             commands::system::request_media_access,
-            commands::system::get_screen_sources,
             commands::system::power_save_blocker_start,
             commands::system::power_save_blocker_stop,
             commands::system::get_close_to_tray,
@@ -513,21 +436,25 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
 
     // Instance isolation
     let instance_id = system::get_instance_id()?;
+    let instance_lock = system::acquire_instance_lock(&config_dir, &instance_id)?;
+    *state.instance_lock.write() = Some(instance_lock);
     info!("Applying instance isolation");
     let suffix = format!("-instance-{}", instance_id);
 
     // Handle config_dir
     let config_name = config_dir
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "qorc-client".to_string());
+        .and_then(|name| name.to_str())
+        .ok_or("Application config path is invalid")?
+        .to_owned();
     config_dir.set_file_name(format!("{}{}", config_name, suffix));
 
     // Handle data_dir
     let data_name = data_dir
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "com.qorc.app".to_string());
+        .and_then(|name| name.to_str())
+        .ok_or("Application data path is invalid")?
+        .to_owned();
     data_dir.set_file_name(format!("{}{}", data_name, suffix));
 
     // Initialize Tor manager
@@ -549,7 +476,7 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     // Initialize WebSocket handler
     let ws_handler = network::websocket::init().await?;
     if let Some(secure_storage) = state.storage() {
-        match secure_storage.get("server_url").await {
+        match secure_storage.get_text("server_url").await {
             Ok(Some(saved_server_url)) => {
                 if ws_handler.set_server_url(&saved_server_url).await.is_err() {
                     tracing::warn!("Stored server endpoint was invalid and was not restored");

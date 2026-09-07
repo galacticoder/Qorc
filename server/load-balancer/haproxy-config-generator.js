@@ -2,24 +2,65 @@
  * HAProxy config generator for lb
  */
 
-import fs from 'fs/promises';
 import path from 'path';
 import {
-  DEFAULT_HAPROXY_ADMIN_PASSWORD,
-  HAPROXY_PID_FILE,
-  IS_ROOT,
-  LOOPBACK_HOST,
-  TEMP_DIRECTORY,
+  haproxyStatsSocketPath,
 } from '../config/infrastructure.js';
+import { CLUSTER_SERVER_ID_RE } from '../cluster/signed-message.js';
+
+const HAPROXY_USERNAME_RE = /^[A-Za-z0-9_.-]{3,64}$/;
+const HAPROXY_PASSWORD_RE = /^[A-Za-z0-9_~!@$%^&*+=,.?/-]{16,128}$/;
+const HAPROXY_HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+const HAPROXY_SAFE_PATH_RE = /^[^\s#\0]+$/;
+const HAPROXY_TIMEOUT_RE = /^(?:[1-9]\d{0,8})(?:ms|s|m|h|d)$/;
+function exactInteger(value, minimum, maximum, label) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+
+export function parseHAProxyPort(value, label = 'HAProxy port') {
+  const port = typeof value === 'string' && /^\d{1,5}$/.test(value)
+    ? Number(value)
+    : value;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${label} must be an integer from 1 to 65535`);
+  }
+  return port;
+}
+
+function safeConfigPath(value, label) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4096 || !HAPROXY_SAFE_PATH_RE.test(value)) {
+    throw new Error(`${label} contains unsupported characters`);
+  }
+  return value;
+}
+
+function safeTimeouts(timeouts) {
+  const expected = ['client', 'connect', 'httpKeepAlive', 'httpRequest', 'server', 'tunnel'];
+  if (
+    !timeouts ||
+    Object.getPrototypeOf(timeouts) !== Object.prototype ||
+    Object.keys(timeouts).sort().join(',') !== expected.join(',')
+  ) throw new Error('Invalid HAProxy timeout configuration');
+  for (const value of Object.values(timeouts)) {
+    if (typeof value !== 'string' || !HAPROXY_TIMEOUT_RE.test(value)) {
+      throw new Error('Invalid HAProxy timeout value');
+    }
+  }
+  return { ...timeouts };
+}
 
 export class HAProxyConfigGenerator {
   constructor({
-    listenPort = 443,
-    statsPort = 8404,
-    tlsCertPath = process.env.HAPROXY_CERT_PATH || path.join(process.cwd(), 'server', 'config', 'certs'),
+    listenPort,
+    statsPort,
+    tlsCertPath,
     maxConnections = 100000,
-    statsUsername = 'admin', // Will be prompted for a new one. This is the default
-    statsPassword = DEFAULT_HAPROXY_ADMIN_PASSWORD, // Will be prompted for a new one. This is the default
+    statsUsername,
+    statsPassword,
+    statsBindAddress,
     timeouts = {
       connect: '30s',
       client: '24d',
@@ -29,63 +70,68 @@ export class HAProxyConfigGenerator {
       httpRequest: '60s',
     }
   } = {}) {
-    this.listenPort = listenPort;
-    this.statsPort = statsPort;
-    this.tlsCertPath = tlsCertPath;
-    this.maxConnections = maxConnections;
+    this.listenPort = parseHAProxyPort(listenPort, 'HAProxy listen port');
+    this.statsPort = parseHAProxyPort(statsPort, 'HAProxy statistics port');
+    this.tlsCertPath = safeConfigPath(tlsCertPath, 'HAProxy certificate path');
+    this.maxConnections = exactInteger(maxConnections, 1, 10_000_000, 'HAProxy maximum connections');
     this.statsUsername = statsUsername;
     this.statsPassword = statsPassword;
-    this.timeouts = timeouts;
-    const envCert = process.env.HAPROXY_CERT_FILE;
-    const candidate = envCert || path.join(this.tlsCertPath, 'cert.pem');
-    this.certFile = candidate;
-    this.dhParamFile = path.join(this.tlsCertPath, 'dhparams.pem');
-    const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
-    this.statsSocketPath = process.env.HAPROXY_STATS_SOCKET || path.join(TEMP_DIRECTORY, `haproxy-admin-${uid}.sock`);
+    if (!HAPROXY_USERNAME_RE.test(this.statsUsername || '') || !HAPROXY_PASSWORD_RE.test(this.statsPassword || '')) {
+      throw new Error('HAProxy statistics credentials contain unsupported characters or lengths');
+    }
+    if (!['127.0.0.1', '0.0.0.0'].includes(statsBindAddress)) {
+      throw new Error('HAPROXY_STATS_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0');
+    }
+    this.statsBindAddress = statsBindAddress;
+    this.timeouts = safeTimeouts(timeouts);
+    this.certFile = safeConfigPath(path.join(this.tlsCertPath, 'cert.pem'), 'HAProxy certificate file');
+    this.backendCaFile = safeConfigPath(
+      path.join(this.tlsCertPath, 'backend-ca.pem'),
+      'HAProxy backend CA file'
+    );
+    this.dhParamFile = safeConfigPath(path.join(this.tlsCertPath, 'dhparams.pem'), 'HAProxy DH parameter file');
+    this.statsSocketPath = safeConfigPath(
+      haproxyStatsSocketPath(),
+      'HAProxy statistics socket path'
+    );
     this.backends = [];
   }
 
   // Add backend server to configuration
   addBackend({
     name,
-    host = LOOPBACK_HOST,
+    host,
     port,
     weight = 100,
     maxconn = 10000,
-    checkInterval = '5s',
-    checkTimeout = '3s',
   }) {
     if (!name) {
       throw new Error('Backend name is required');
     }
 
-    if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
-      console.error('[HAPROXY] Invalid backend name', { name });
-      return;
+    if (typeof name !== 'string' || !CLUSTER_SERVER_ID_RE.test(name)) {
+      throw new Error('Invalid HAProxy backend name');
     }
 
-    if (typeof host !== 'string' || host.length > 255 || !/^[A-Za-z0-9._-]+$/.test(host)) {
-      console.error('[HAPROXY] Invalid backend host', { name, host });
-      return;
+    if (typeof host !== 'string' || !HAPROXY_HOST_RE.test(host)) {
+      throw new Error('Invalid HAProxy backend host');
     }
 
-    const portNum = parseInt(port, 10);
-    if (!portNum || portNum <= 0 || portNum > 65535) {
-      const errorMsg = `Server "${name}" at ${host}:${port} has invalid port - skipping from load balancer`;
-      console.error('[HAPROXY] Invalid backend port', { name, host, port });
-      console.error(`\n[ERROR] ${errorMsg}`);
-      console.error(`[ERROR] Server "${name}" needs to be restarted with a valid port\n`);
-      return;
+    const portNum = parseHAProxyPort(port, 'HAProxy backend port');
+
+    if (!Number.isSafeInteger(weight) || weight < 1 || weight > 256) {
+      throw new Error('Invalid HAProxy backend weight');
+    }
+    if (!Number.isSafeInteger(maxconn) || maxconn < 1 || maxconn > 10_000_000) {
+      throw new Error('Invalid HAProxy backend connection limit');
     }
 
     this.backends.push({
       name,
       host,
-      port,
+      port: portNum,
       weight,
       maxconn,
-      checkInterval,
-      checkTimeout,
     });
   }
 
@@ -119,6 +165,7 @@ global
     ssl-default-server-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3 no-tls-tickets
     
     # Performance tuning 
+    tune.ssl.cachesize 0
     tune.ssl.default-dh-param 2048
     tune.bufsize 32768
     tune.maxrewrite 8192
@@ -158,7 +205,7 @@ defaults
 # Stats interface
 #---------------------------------------------------------------------
 listen stats
-    bind *:${this.statsPort}
+    bind ${this.statsBindAddress}:${this.statsPort}
     stats enable
     stats uri /haproxy-stats
     stats refresh 30s
@@ -167,11 +214,6 @@ listen stats
     
     # SECURITY: Require authentication
     stats auth ${this.statsUsername}:${this.statsPassword}
-    stats admin if TRUE
-    
-    # Restrict to localhost only for security
-    acl local_network src 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
-    http-request deny if !local_network
 
 #---------------------------------------------------------------------
 # HTTPS frontend (main entry point)
@@ -185,37 +227,35 @@ frontend https-in
     http-response set-header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
     http-response set-header X-Frame-Options DENY
     http-response set-header X-Content-Type-Options nosniff
-    http-response set-header X-XSS-Protection "1; mode=block"
+    http-response set-header X-XSS-Protection "0"
     http-response set-header Referrer-Policy "strict-origin-when-cross-origin"
     http-response set-header Permissions-Policy "microphone=(self), camera=(self), usb=()"
-    http-response set-header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss: https:; media-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     http-response set-header X-Permitted-Cross-Domain-Policies "none"
     http-response del-header Server
     http-response del-header X-Powered-By
     
     # Rate limiting
     stick-table type ip size 100k expire 30s store http_req_rate(10s),http_err_rate(10s),conn_rate(3s),conn_cur
-    http-request track-sc0 src
+    acl from_local_tor src 127.0.0.0/8
+    http-request track-sc0 src unless from_local_tor
     
     # Deny excessive requests (rate limiting)
-    http-request deny deny_status 429 if { sc_http_req_rate(0) gt 100 }
+    http-request deny deny_status 429 if !from_local_tor { sc_http_req_rate(0) gt 100 }
     
     # Deny clients with too many errors (potential attacks)
-    http-request deny deny_status 403 if { sc_http_err_rate(0) gt 20 }
+    http-request deny deny_status 403 if !from_local_tor { sc_http_err_rate(0) gt 20 }
     
     # Deny clients with too many concurrent connections
-    http-request deny deny_status 429 if { sc_conn_cur(0) gt 50 }
+    http-request deny deny_status 429 if !from_local_tor { sc_conn_cur(0) gt 50 }
     
     # Deny rapid connection attempts (DDoS protection)
-    http-request deny deny_status 429 if { sc_conn_rate(0) gt 20 }
+    http-request deny deny_status 429 if !from_local_tor { sc_conn_rate(0) gt 20 }
     
     # WebSocket detection (case-insensitive, substring match)
     acl is_websocket hdr(Upgrade) -m sub -i websocket
     acl is_connection_upgrade hdr(Connection) -m sub -i upgrade
-    acl is_websocket_path path_beg /
-    
     # Use WebSocket backend for WebSocket connections
-    use_backend websocket_backend if is_websocket or is_connection_upgrade or is_websocket_path
+    use_backend websocket_backend if is_websocket is_connection_upgrade
     
     # Default backend for HTTP requests
     default_backend http_backend
@@ -246,10 +286,6 @@ ${this.generateBackendServers('http')}
 backend websocket_backend
     mode http
     balance leastconn
-    
-    # Sticky sessions for WebSocket using source IP
-    stick-table type ip size 100k expire 24d
-    stick on src
     
     # WebSocket-specific options
     no option http-server-close
@@ -294,7 +330,7 @@ cache quantum_cache
     }
     return this.backends.map(backend => {
       const checkParams = `check inter 2s fall 2 rise 2`;
-      const sslParams = 'ssl verify none';
+      const sslParams = `ssl verify required ca-file ${this.backendCaFile}`;
       const alpnParam = type === 'websocket' ? 'alpn http/1.1' : 'alpn h2,http/1.1';
       const cookieParam = type === 'websocket' ? '' : 'cookie SERVERID ';
 
@@ -304,116 +340,4 @@ cache quantum_cache
     }).join('\n');
   }
 
-  // Write configuration to file
-  async writeConfig(outputPath) {
-    try {
-      const config = this.generateConfig();
-      await fs.writeFile(outputPath, config, { encoding: 'utf8', mode: 0o600 });
-      console.log('[HAPROXY] Configuration written', { outputPath });
-      return config;
-    } catch (error) {
-      console.error('[HAPROXY] Failed to write configuration', error);
-      throw error;
-    }
-  }
-
-  // Validate configuration using HAProxy binary
-  async validateConfig(configPath) {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-
-    try {
-      await execFileAsync('haproxy', ['-c', '-f', configPath], { env: { ...process.env } });
-      console.log('[HAPROXY] Configuration validated successfully');
-      return true;
-    } catch (error) {
-      console.error('[HAPROXY] Configuration validation failed', error);
-      throw new Error(`HAProxy configuration is invalid: ${error.message}`);
-    }
-  }
-
-  // Reload HAProxy with new configuration
-  async reloadHAProxy(configPath) {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
-    const execFileAsync = promisify(execFile);
-
-    try {
-      await this.validateConfig(configPath);
-
-      const pidFile = process.env.HAPROXY_PID_FILE || (IS_ROOT && process.platform !== 'win32' ? `/var/run/${HAPROXY_PID_FILE}` : path.join(TEMP_DIRECTORY, HAPROXY_PID_FILE));
-      let oldPid = null;
-      try {
-        const pidStr = await fs.readFile(pidFile, 'utf8');
-        const n = parseInt(pidStr, 10);
-        if (Number.isFinite(n) && n > 0) oldPid = n;
-      } catch { }
-
-      const args = ['-f', configPath, '-D', '-p', pidFile];
-      if (oldPid) args.push('-sf', String(oldPid));
-
-      const env = { ...process.env };
-      if (process.env.LD_LIBRARY_PATH) env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
-      if (process.env.OPENSSL_CONF) env.OPENSSL_CONF = process.env.OPENSSL_CONF;
-
-      await execFileAsync('haproxy', args, { env });
-      console.log('[HAPROXY] Reloaded successfully');
-      return true;
-    } catch (error) {
-      console.error('[HAPROXY] Reload failed', error);
-      throw error;
-    }
-  }
-}
-
-// Generate HAProxy configuration from cluster state
-export async function generateConfigFromCluster(clusterManager, outputPath) {
-  try {
-    const status = await clusterManager.getClusterStatus();
-
-    const generator = new HAProxyConfigGenerator({
-      listenPort: parseInt(process.env.HAPROXY_HTTPS_PORT || '8443', 10),
-      statsPort: parseInt(process.env.HAPROXY_STATS_PORT || '8404', 10),
-      tlsCertPath: process.env.HAPROXY_CERT_PATH || path.join(process.cwd(), 'server', 'config', 'certs'),
-      statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
-      statsPassword: process.env.HAPROXY_STATS_PASSWORD || DEFAULT_HAPROXY_ADMIN_PASSWORD,
-    });
-
-    for (const server of status.servers) {
-      if (server.health?.status === 'healthy') {
-        const serverUrlEnv = process.env[`SERVER_${server.serverId}_URL`];
-        let host, port;
-
-        if (serverUrlEnv) {
-          const parts = serverUrlEnv.split(':');
-          host = parts[0];
-          port = parseInt(parts[1], 10);
-        } else {
-          host = server.host || LOOPBACK_HOST;
-          port = parseInt(server.port, 10) || 3000;
-        }
-
-        generator.addBackend({
-          name: server.serverId,
-          host,
-          port,
-          weight: 100,
-          maxconn: 10000,
-        });
-      }
-    }
-
-    await generator.writeConfig(outputPath);
-
-    console.log('[HAPROXY] Generated configuration from cluster', {
-      serverCount: status.serverCount,
-      outputPath
-    });
-
-    return generator;
-  } catch (error) {
-    console.error('[HAPROXY] Failed to generate configuration from cluster', error);
-    throw error;
-  }
 }

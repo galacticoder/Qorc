@@ -23,7 +23,7 @@ Current architecture docs:
 
 - Messaging app aimed to be the most secure and private in the world for anyone looking for serious self hosted messaging.
 - Anonymous account entry and resume flows using an OPAQUE-style password
-  envelope, a fixed-set oblivious record transfer, and Privacy Pass style
+  envelope, fixed-set YPIR retrieval, and Privacy Pass style
   one-time tokens instead of a stable account credential.
 - Discovery through an RFC 9497 verifiable OPRF over Ristretto255 and
   fixed-shape k-anonymous bucket retrieval, so the server never receives a
@@ -31,7 +31,7 @@ Current architecture docs:
 - Private append-only key transparency that authorizes discovered account roots,
   monitors contacts, and gossips signed heads inside encrypted messages. The log
   is unindexed and is never queried by account.
-- Server fallback delivery through a sealed global mix spool with no per-user
+- Server store-and-forward delivery through a sealed global mix spool with no per-user
   mailbox, plus direct P2P delivery over ephemeral Tor v3 onion services when
   peers can connect.
 - Anti-abuse that carries no client identity at all: the server never reads or
@@ -52,7 +52,7 @@ This is the source and terminal setup. It works with Docker Linux containers on
 You need only:
 
 - Docker Engine with Docker Compose v2 and Docker Buildx on Linux, or Docker
-  Desktop on Windows or macOS. Docker Desktop already includes both plugins;
+  Desktop on Windows or macOS. Docker Desktop already includes both plugins,
   Windows must be using Linux containers.
 - Node.js 18 or newer to run the small deployment helper.
 - This repository, downloaded as an archive or cloned with Git.
@@ -71,20 +71,20 @@ node scripts/start-docker.cjs all
 When you run it, the helper:
 
 1. Checks that Docker is running Linux containers on amd64 or arm64.
-2. Creates `.env` when needed. If `SERVER_PASSWORD` is not already configured,
-   it asks for that one 12-512-character value with hidden input.
+2. Reads operator credentials only from `.env` and stops with a clear error if
+   a value required by the selected profile is absent or invalid.
 3. Generates any missing database, Redis, authentication-root, and server
    identity secrets and saves them in `.env` with restricted permissions. An
    existing Redis password is replaced only when it cannot be accepted by the
    hardened Redis runtime (fewer than 32 characters or not base64url).
 4. Detects occupied host ports and saves available replacements automatically.
-5. Asks whether to run in the background; pressing Enter accepts the normal
+5. Asks whether to run in the background, pressing Enter accepts the normal
    background mode.
 6. Builds and starts PostgreSQL, Redis, the Qorc server, HAProxy, and the Tor
    onion-service edge. TLS certificates are generated inside the stack.
 
 The first build pulls the Docker base images and installs the Node server
-dependencies inside the images; it does not install them on the host. Later
+dependencies inside the images, it does not install them on the host. Later
 starts reuse the built images:
 
 ```bash
@@ -106,8 +106,9 @@ node scripts/start-docker.cjs --help
 ```
 
 Existing `.env` values are preserved, except for an invalid Redis password that
-cannot start the service. The load-balancer logs print the onion service address
-clients connect to. Keep `.env` and the Docker volumes backed up; they contain
+cannot start the service. The launcher never prompts for missing server or
+HAProxy credentials. The load-balancer logs print the onion service address
+clients connect to. Keep `.env` and the Docker volumes backed up, they contain
 the stable server identity and saved data.
 `reset` intentionally removes the Docker volumes and is not a normal restart
 command.
@@ -121,7 +122,7 @@ advanced or multi-host deployments, but a normal single host server should use
 Building the desktop application has additional requirements that are not
 needed for a Docker server or for an installed Qorc app:
 
-- Node.js 18 or newer.
+- Node.js 22 or newer for the server runtime.
 - pnpm through Corepack (`corepack enable pnpm`).
 - Rust and Cargo.
 - On Linux, the Tauri/GTK development stack, `dpkg-deb`, `patchelf`, and a
@@ -183,7 +184,7 @@ Native installers are written beneath `src-tauri/target/release/bundle`.
 Cross-built ARM64 installers are written beneath
 `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`. Docker must be able
 to build `linux/arm64` images. The ARM build keeps persistent BuildKit layers
-and named Cargo, pnpm, Tauri-tool, and runtime-download caches; exported layer
+and named Cargo, pnpm, Tauri-tool, and runtime-download caches, exported layer
 metadata is kept in `.cache/buildkit/client-linux-arm64`.
 
 For the fastest x86_64-hosted path, point the command at a native remote ARM64
@@ -203,7 +204,7 @@ node scripts/install-deps.cjs --client-arm64
 ```
 
 The frontend is built in its own Docker stage. UI-only edits reuse the pnpm
-dependency layer and all previously compiled Rust dependencies; only the final
+dependency layer and all previously compiled Rust dependencies, only the final
 application crate/link and package assembly are invalidated. AppImage assembly
 also reuses the already-built Debian payload and compresses the prepared AppDir
 once instead of first creating and then recompressing an intermediate AppImage.
@@ -238,7 +239,7 @@ Every boundary below has a named wire form with a required algorithm binding. Th
 
 - **Authentication.** Signup and login run an OPAQUE-style password envelope
   against a fixed-size anonymity set of opaque credential records, with a
-  1-out-of-N oblivious record transfer over the whole set. The server performs
+  1-out-of-N YPIR retrieval over the whole set. The server performs
   identical record work for every slot and never learns a credential ID,
   username, or slot index. Each request carries a 64-byte connection-bound
   nonce that is consumed exactly once, so a captured transcript cannot be
@@ -268,7 +269,7 @@ Every boundary below has a named wire form with a required algorithm binding. Th
   screen share ride dedicated streams inside that one authenticated session.
   File chunks travel over the same P2P session or the live server route and are
   never written to the offline spool.
-- **Server fallback delivery.** Sealed-sender envelopes are written to one
+- **Server store-and-forward delivery.** Sealed-sender envelopes are written to one
   shared global mix spool with randomized release times and shape-matched cover
   entries. There is no destination selector on the wire and no per-user mailbox.
   Live candidates are broadcast to authorized sockets and trial-decrypted
@@ -325,11 +326,10 @@ ML-KEM-1024, TLS is the outer wrapper, not the layer the message security rests
 on.
 
 OPAQUE/VOPRF, Ristretto255-based discovery and Privacy Pass, Signal identity
-keys, Tor path establishment, and TLS certificate signatures still contain
-classical public-key cryptography. The oblivious record transfer used at login
-is also not a malicious-receiver-secure OT construction, its exact residual
-assumptions are documented in
-[Authentication](docs/app/AUTHENTICATION.md).
+keys, Tor path establishment, TLS certificate signatures, and the YPIR
+single-server private-information-retrieval construction still contain
+classical public-key cryptography. The exact residual assumptions of private
+account retrieval are documented in [Authentication](docs/app/AUTHENTICATION.md).
 Application-layer hybrid encryption protects message bytes carried over those
 channels, but does not make availability, traffic analysis, discovery, or the
 whole transport stack post-quantum. See the detailed limitations in

@@ -3,7 +3,7 @@ import { RateLimiterRedis } from 'rate-limiter-flexible';
 
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { buildRedisTlsOptions } from '../session/redis-client.js';
+import { buildRedisTlsOptions, redisConnectionPassword } from '../session/redis-client.js';
 import { envInt } from '../utils/env.js';
 
 const REDIS_TLS_OPTIONS = Symbol('redisTlsOptions');
@@ -16,7 +16,7 @@ function wipeRedisTlsPrivateKey(client) {
 
 export async function createRedisClient(redisUrl) {
   if (typeof redisUrl !== 'string' || !redisUrl.startsWith('rediss://')) {
-    throw new Error('RATE_LIMIT_REDIS_URL/REDIS_URL must use rediss:// and TLS');
+    throw new Error('REDIS_URL must use rediss:// and TLS');
   }
 
   const tls = buildRedisTlsOptions();
@@ -31,8 +31,7 @@ export async function createRedisClient(redisUrl) {
     keepAlive: 30_000,
     enableReadyCheck: true,
     reconnectOnError: (error) => /READONLY|ECONNRESET/.test(error.message),
-    username: process.env.REDIS_USERNAME,
-    password: process.env.REDIS_PASSWORD,
+    password: redisConnectionPassword(),
     tls
   });
 
@@ -52,8 +51,8 @@ export async function createRedisClient(redisUrl) {
 
 export class DistributedRateLimiter {
   static async create({ redisClientFactory = createRedisClient } = {}) {
-    const redisUrl = process.env.RATE_LIMIT_REDIS_URL || process.env.REDIS_URL;
-    if (!redisUrl) throw new Error('RATE_LIMIT_REDIS_URL or REDIS_URL is required');
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) throw new Error('REDIS_URL is required');
 
     const redis = await redisClientFactory(redisUrl);
     try {

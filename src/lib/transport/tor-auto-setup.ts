@@ -8,7 +8,7 @@ import {
   DEFAULT_SNOWFLAKE_BRIDGE,
   isValidBridgeLine
 } from '../utils/tor-utils';
-import { tor, isTauri } from '../tauri-bindings';
+import { tor } from '../tauri-bindings';
 
 // Tor setup
 export class TorAutoSetup {
@@ -17,6 +17,8 @@ export class TorAutoSetup {
     isRunning: false,
     isBootstrapped: false,
     bootstrapProgress: 0,
+    socksPort: 9150,
+    controlPort: 9151,
     setupProgress: 0,
     currentStep: 'Initializing'
   };
@@ -49,11 +51,6 @@ export class TorAutoSetup {
   private async runAutoSetup(options: TorSetupOptions): Promise<boolean> {
     try {
       this.updateStatus(5, 'Checking system requirements...');
-
-      if (!isTauri()) {
-        this.updateStatus(0, 'Desktop application required', 'Tor setup requires the Tauri desktop application.');
-        return false;
-      }
 
       if (this.isKnownOffline()) {
         this.updateStatus(0, 'Offline', 'No internet connection detected. Reconnect and retry Tor setup.');
@@ -102,11 +99,6 @@ export class TorAutoSetup {
     try {
       const config = this.generateTorConfig(options);
 
-      if (!isTauri()) {
-        console.error('[TOR-SETUP] Tauri API not available');
-        return false;
-      }
-
       const result = await tor.configure(config);
       this.status.isConfigured = result;
       return result;
@@ -119,11 +111,6 @@ export class TorAutoSetup {
   // Start Tor
   private async startTor(): Promise<{ success: boolean; error?: string }> {
     try {
-      if (!isTauri()) {
-        console.error('[TOR-SETUP] Tauri API not available');
-        return { success: false, error: 'Tauri API not available' };
-      }
-
       const result = await tor.start();
       this.status.isRunning = result.success;
       return result;
@@ -137,24 +124,19 @@ export class TorAutoSetup {
   // Verify Tor connection
   private async verifyTorConnection(): Promise<boolean> {
     try {
-      if (!isTauri()) {
-        return false;
-      }
-
       const maxAttempts = 90;
       const waitMs = 2000;
       let localVerifyAttempts = 0;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const status = await tor.status().catch(() => null);
-        const info = await tor.info().catch(() => null);
-        const progress = status?.bootstrap_progress || info?.bootstrap_progress || 0;
-        const bootstrapped = Boolean(status?.bootstrapped || info?.bootstrapped);
+        const status = await tor.status();
+        const progress = status.bootstrap_progress;
+        const bootstrapped = status.bootstrapped;
 
-        this.status.isRunning = Boolean(status?.is_running || this.status.isRunning);
+        this.status.isRunning = status.is_running;
         this.status.isBootstrapped = bootstrapped;
         this.status.bootstrapProgress = progress;
-        if (info?.socks_port) this.status.socksPort = info.socks_port;
-        if (info?.control_port) this.status.controlPort = info.control_port;
+        this.status.socksPort = status.socks_port;
+        this.status.controlPort = status.control_port;
 
         this.updateStatus(
           Math.max(90, Math.min(99, 90 + Math.floor(progress / 10))),
@@ -179,7 +161,7 @@ export class TorAutoSetup {
     }
   }
 
-  private humanizeError(error: unknown, fallback: string): string {
+  private humanizeError(error: unknown, defaultMessage: string): string {
     const raw = error instanceof Error ? error.message : (typeof error === 'string' ? error : '');
     const text = raw.toLowerCase();
 
@@ -200,11 +182,11 @@ export class TorAutoSetup {
       return 'Network unavailable. Check your internet connection and retry.';
     }
 
-    return raw || fallback;
+    return raw || defaultMessage;
   }
 
   private isKnownOffline(): boolean {
-    return typeof navigator !== 'undefined' && navigator.onLine === false;
+    return navigator.onLine === false;
   }
 
   // Generate Tor configuration
@@ -242,12 +224,11 @@ export class TorAutoSetup {
       if (hasBridges) {
         const validBridges: string[] = [];
         for (const line of options.bridges!) {
-          const trimmed = (line || '').trim();
+          const trimmed = line.trim();
           if (!trimmed) continue;
 
           if (!isValidBridgeLine(trimmed)) {
-            console.warn('[TOR-SETUP] Invalid bridge line skipped');
-            continue;
+            throw new Error('Invalid bridge line provided.');
           }
 
           const bridgeLine = trimmed.startsWith('Bridge ') ? trimmed : `Bridge ${trimmed}`;
@@ -284,34 +265,18 @@ export class TorAutoSetup {
 
   // Refresh current setup status
   async refreshStatus(): Promise<TorSetupStatus> {
-    try {
-      if (!isTauri()) {
-        return { ...this.status };
-      }
+    const torStatus = await tor.status();
 
-      const torStatus = await tor.status();
-      const torInfo = await tor.info();
+    this.status.isRunning = torStatus.is_running;
+    this.status.isBootstrapped = torStatus.bootstrapped;
+    this.status.bootstrapProgress = torStatus.bootstrap_progress;
+    this.status.socksPort = torStatus.socks_port;
+    this.status.controlPort = torStatus.control_port;
 
-      this.status.isRunning = torStatus.is_running || false;
-      this.status.isBootstrapped = torStatus.bootstrapped || torInfo.bootstrapped || false;
-      this.status.bootstrapProgress = torStatus.bootstrap_progress || torInfo.bootstrap_progress || 0;
-
-      let newVersion = torInfo.version;
-      if (!newVersion || newVersion === 'unknown') {
-        newVersion = this.status.version;
-      }
-
-      this.status.version = newVersion;
-      this.status.socksPort = torInfo.socks_port;
-      this.status.controlPort = torInfo.control_port;
-
-      if (this.status.isRunning && this.status.version && this.status.version !== 'unknown') {
-        this.status.isConfigured = true;
-        this.status.setupProgress = 100;
-        this.status.currentStep = 'Tor setup complete';
-      }
-    } catch (_error) {
-      console.error('[TOR-SETUP] Failed to refresh status:', _error);
+    if (this.status.isRunning) {
+      this.status.isConfigured = true;
+      this.status.setupProgress = 100;
+      this.status.currentStep = 'Tor setup complete';
     }
 
     return { ...this.status };
@@ -320,10 +285,6 @@ export class TorAutoSetup {
   // Stop Tor
   async stopTor(): Promise<boolean> {
     try {
-      if (!isTauri()) {
-        return false;
-      }
-
       const result = await tor.stop();
       if (result) {
         this.status.isRunning = false;

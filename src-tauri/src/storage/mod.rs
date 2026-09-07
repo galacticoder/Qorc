@@ -384,13 +384,11 @@ impl SecureStorage {
         Ok(())
     }
 
-    /// Alias for set_item
-    pub async fn set(&self, key: &str, value: &str) -> QorcResult<()> {
+    pub async fn set_text(&self, key: &str, value: &str) -> QorcResult<()> {
         self.set_item(key, value.as_bytes()).await
     }
 
-    /// Alias for get_item
-    pub async fn get(&self, key: &str) -> QorcResult<Option<String>> {
+    pub async fn get_text(&self, key: &str) -> QorcResult<Option<String>> {
         match self.get_item(key).await? {
             Some(bytes) => {
                 let bytes = Zeroizing::new(bytes);
@@ -401,11 +399,6 @@ impl SecureStorage {
             }
             None => Ok(None),
         }
-    }
-
-    /// Alias for remove_item
-    pub async fn remove(&self, key: &str) -> QorcResult<()> {
-        self.remove_item(key).await
     }
 
     /// Check if item exists

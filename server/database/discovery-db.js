@@ -42,25 +42,25 @@ export class DiscoveryDB {
            "expiresAt" = EXCLUDED."expiresAt"`,
         [publishId, bucketIds, encryptedBlob, expiresAt]
       );
-      return result?.rowCount ?? 0;
+      return result.rowCount;
     } catch (error) {
       console.error('[DB][DISCOVERY] publication store failed', {
         error: error?.message || String(error)
       });
-      return 0;
+      throw error;
     }
   }
 
   static async snapshotActiveMetadata(maxRows = 4096, maxBytes = null) {
-    const capped = Number.isSafeInteger(maxRows)
-      ? Math.min(Math.max(maxRows, 1), 100_000)
-      : 4096;
-    const byteCap = Number.isSafeInteger(maxBytes) && maxBytes > 0
-      ? maxBytes
-      : null;
-    const rowLimit = byteCap === null
-      ? capped
-      : Math.min(capped, Math.floor(byteCap / DISCOVERY_BLOB_BASE64_CHARS));
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > 100_000) {
+      throw new Error('invalid_discovery_snapshot_limit');
+    }
+    if (maxBytes !== null && (!Number.isSafeInteger(maxBytes) || maxBytes < DISCOVERY_BLOB_BASE64_CHARS)) {
+      throw new Error('invalid_discovery_snapshot_byte_limit');
+    }
+    const rowLimit = maxBytes === null
+      ? maxRows
+      : Math.min(maxRows, Math.floor(maxBytes / DISCOVERY_BLOB_BASE64_CHARS));
 
     try {
       const pool = await getPgPool();
@@ -125,24 +125,19 @@ export class DiscoveryDB {
   }
 
   static async cleanup() {
-    let removed = 0;
-    try {
-      const pool = await getPgPool();
-      const result = await pool.query(
-        'DELETE FROM discovery_billboard WHERE "expiresAt" <= $1',
-        [Date.now()]
-      );
-      removed = result.rowCount || 0;
-    } catch (error) {
-      console.error('[DB][DISCOVERY] cleanup failed', { error: error?.message || String(error) });
-    }
+    const pool = await getPgPool();
+    const result = await pool.query(
+      'DELETE FROM discovery_billboard WHERE "expiresAt" <= $1',
+      [Date.now()]
+    );
+    const removed = result.rowCount;
     return removed + await this.enforceCap(DISCOVERY_STORED_PUBLICATION_CAP);
   }
 
   static async enforceCap(maxRows = DISCOVERY_STORED_PUBLICATION_CAP) {
-    const cap = Number.isSafeInteger(maxRows)
-      ? Math.min(Math.max(maxRows, 1), 100_000)
-      : DISCOVERY_STORED_PUBLICATION_CAP;
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > 100_000) {
+      throw new Error('invalid_discovery_storage_cap');
+    }
     let client;
     try {
       const pool = await getPgPool();
@@ -155,24 +150,24 @@ export class DiscoveryDB {
           [Date.now()]
         );
         const { rows } = await client.query('SELECT "publishId" FROM discovery_billboard');
-        if (rows.length <= cap) return expired?.rowCount ?? 0;
+        if (rows.length <= maxRows) return expired.rowCount;
 
         const evictedIds = selectRandomRankEvictionIds(
           rows.map((row) => row?.publishId),
-          cap,
+          maxRows,
           isPublishId
         );
         const evicted = await client.query(
           'DELETE FROM discovery_billboard WHERE "publishId" = ANY($1::text[])',
           [evictedIds]
         );
-        return (expired?.rowCount ?? 0) + (evicted?.rowCount ?? 0);
+        return expired.rowCount + evicted.rowCount;
       });
     } catch (error) {
       console.error('[DB][DISCOVERY] enforceCap failed', {
         error: error?.message || String(error)
       });
-      return 0;
+      throw error;
     } finally {
       client?.release();
     }

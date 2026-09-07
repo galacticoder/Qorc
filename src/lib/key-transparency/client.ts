@@ -306,12 +306,12 @@ class KeyTransparencyClient {
     clearKeyTransparencyVerifiedMaterials();
     
     if (incidentOwner) {
-      void this.discardPersistedAuthorizations(incidentOwner).catch(() => { });
+      void this.discardPersistedAuthorizations(incidentOwner).catch((error) => {
+        console.error('[KeyTransparency] Persisted authorizations could not be discarded', error);
+      });
     }
     this.stopContactMonitoring();
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT));
-    }
+    window.dispatchEvent(new Event(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT));
   }
 
   private async hasIncident(context: CurrentServerContext): Promise<boolean> {
@@ -484,20 +484,20 @@ class KeyTransparencyClient {
     const context = await captureCurrentServerContext();
     await this.assertNoIncident(context);
 
-    const nowEpoch = keyTransparencyCurrentEpoch(
-      websocketClient.getAuthenticatedServerNow() ?? Date.now(),
-    );
+    const trustedNow = websocketClient.getAuthenticatedServerNow();
+    if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
+    const nowEpoch = keyTransparencyCurrentEpoch(trustedNow);
     let checkpoint = await loadKeyTransparencyCheckpoint(context, ownerUsername);
     if (checkpoint && checkpoint.epoch > nowEpoch) {
-      checkpoint = null;
+      throw new Error('Stored key-transparency checkpoint is ahead of authenticated server time');
     }
     if (!checkpoint) {
       const probe = await this.requestHead(context, generation);
       checkpoint = keyTransparencyGenesisCheckpoint(probe.genesisEpoch);
     }
-    const currentEpoch = keyTransparencyCurrentEpoch(
-      websocketClient.getAuthenticatedServerNow() ?? Date.now(),
-    );
+    const currentTrustedNow = websocketClient.getAuthenticatedServerNow();
+    if (currentTrustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
+    const currentEpoch = keyTransparencyCurrentEpoch(currentTrustedNow);
 
     for (let round = 0; round < MAX_SYNC_ROUNDS && checkpoint.epoch <= currentEpoch; round += 1) {
       if (generation !== this.generation) throw new Error('Key-transparency account changed');
@@ -563,13 +563,10 @@ class KeyTransparencyClient {
       record: StoredKeyTransparencyRecord;
       epoch: number;
     }> = [];
-    let missingTransitions = 0;
     for (const record of records) {
       const cached = await loadKeyTransparencyTransition(context, ownerUsername, record.recordHash);
-      
       if (!cached) {
-        missingTransitions = records.length - published.length;
-        break;
+        throw new Error('Key-transparency contact transition is missing');
       }
       published.push({
         transition: cached as KeyTransparencyTransition,
@@ -577,16 +574,6 @@ class KeyTransparencyClient {
         epoch: record.epoch,
       });
     }
-    
-    if (records.length === 0 || missingTransitions > 0) {
-      console.warn('[KT] contact chain incomplete', {
-        records: records.length,
-        verified: published.length,
-        missingTransitions,
-        throughEpoch: Math.max(0, checkpoint.epoch - 1),
-      });
-    }
-
     let contact: VerifiedKeyTransparencyContactState | null = null;
     try {
       contact = verifyKeyTransparencyTransitions(null, published, discoveryEncryptionKey);
@@ -611,17 +598,14 @@ class KeyTransparencyClient {
 
   // Cache a transition found in a peers discovery publication
   async ingestPublishedTransition(ownerUsername: string, value: unknown): Promise<void> {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    const candidate = value as KeyTransparencyTransition;
-    let recordHash: string;
-    try {
-      recordHash = computeKeyTransparencyRecordHash(
-        candidate.signedUpdate,
-        candidate.authorization,
-      );
-    } catch {
-      return;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Invalid key-transparency transition');
     }
+    const candidate = value as KeyTransparencyTransition;
+    const recordHash = computeKeyTransparencyRecordHash(
+      candidate.signedUpdate,
+      candidate.authorization,
+    );
     const context = await captureCurrentServerContext();
     await saveKeyTransparencyTransition(context, ownerUsername, recordHash, candidate);
   }
@@ -772,9 +756,7 @@ class KeyTransparencyClient {
     const promise = (async (): Promise<number> => {
       const context = await captureCurrentServerContext();
       if (await this.hasIncident(context)) return 0;
-      const snapshot = await readKeyTransparencyAuthorizations(context, ownerUsername)
-        .catch(() => null);
-      if (!snapshot) return 0;
+      const snapshot = await readKeyTransparencyAuthorizations(context, ownerUsername);
       await assertCurrentServerContext(context);
       if (generation !== this.generation || this.securityIncidentActive) return 0;
       return importKeyTransparencyAuthorizations(ownerUsername, snapshot);
@@ -810,9 +792,8 @@ class KeyTransparencyClient {
 
   // Drop the persisted authorizations for this account
   async discardPersistedAuthorizations(ownerUsername: string): Promise<void> {
-    const context = await captureCurrentServerContext().catch(() => null);
-    if (!context) return;
-    await clearKeyTransparencyAuthorizations(context, ownerUsername).catch(() => { });
+    const context = await captureCurrentServerContext();
+    await clearKeyTransparencyAuthorizations(context, ownerUsername);
   }
 
   async activateWarningStore(ownerUsername: string): Promise<void> {
@@ -1355,7 +1336,7 @@ class KeyTransparencyClient {
     if (target.rootCommitment === contact.rootCommitment) return;
     revokeKeyTransparencyPeerAuthorization(ownerUsername, target.peer, contact);
     
-    void this.persistAuthorizations(ownerUsername).catch(() => { });
+    await this.persistAuthorizations(ownerUsername);
     const nativeRevocation = beginPeerIdentityRevocation(ownerUsername, target.peer);
     try {
       window.dispatchEvent(new CustomEvent(EventType.KEY_TRANSPARENCY_ROOT_CHANGED, {

@@ -6,11 +6,8 @@ import { getBlindRoutingClient } from './blind-routing-client';
 import { nextOutboundTag } from '../spool/tag-sender';
 import {
     clearDetectionKeyCaches,
-    peerDetectionKey,
-    persistPeerDetectionKey,
     resolvePeerDetectionKey,
 } from '../spool/detection-key';
-import { loadPersistedDiscoveryMaterial } from '../discovery/persisted-discovery-material';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { EventType } from '../types/event-types';
 import {
@@ -94,7 +91,7 @@ type DurableAckEntry = {
 type DeliveryAckPersistence = {
     load: () => Promise<unknown>;
     save: (entries: DurableAckEntry[]) => Promise<void>;
-    clearRecovery?: (peer: string, messageIds: string[]) => Promise<void>;
+    clearRecovery: (peer: string, messageIds: string[]) => Promise<void>;
 };
 
 // Unified Signal Transport
@@ -106,10 +103,11 @@ class UnifiedSignalTransport {
     private encryptionProvider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null = null;
     private lastEncryptionDenial: { to: string; type: string; reason: string; at: number } | null = null;
     private p2pSender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null = null;
+    private peerPreparer: ((to: string) => Promise<void>) | null = null;
     private pendingRedelivery: Map<string, {
         to: string;
         envelope: any;
-        type?: SignalType;
+        type: SignalType;
         firstAt: number;
         generation: number;
         reconnectOnly?: boolean;
@@ -160,13 +158,11 @@ class UnifiedSignalTransport {
     private durableAckReconcileAttempts = 0;
 
     constructor() {
-        if (typeof window !== 'undefined') {
-            window.addEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
-            window.addEventListener(
-                EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
-                this.keyTransparencySecurityIncidentListener
-            );
-        }
+        window.addEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
+        window.addEventListener(
+            EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT,
+            this.keyTransparencySecurityIncidentListener
+        );
     }
 
     private readonly keyTransparencySecurityIncidentListener = (): void => {
@@ -333,8 +329,19 @@ class UnifiedSignalTransport {
     }
 
     // Register a sender that can sign and send P2P messages with route proofs
-    setP2PSender(sender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null): void {
+    setP2PSender(
+        sender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null,
+        prepare: ((to: string) => Promise<void>) | null = null,
+    ): void {
         this.p2pSender = sender;
+        this.peerPreparer = sender ? prepare : null;
+    }
+
+    preparePeer(to: string): void {
+        if (!isCanonicalUsername(to) || to === 'server' || this.recipientPolicyError(to)) return;
+        try {
+            void this.peerPreparer?.(to).catch(() => { });
+        } catch { }
     }
 
     private clearDeliveryAckStateForPersistenceChange(): number {
@@ -468,7 +475,7 @@ class UnifiedSignalTransport {
                 this.fileTransferIdFromChunkMessageId(entry.messageId) === envelope.fileTransferId
             )) &&
             canonicalBase64Shape(envelope.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }) &&
-            isHybridEnvelopeWireShape(envelope.envelope);
+            isHybridEnvelopeWireShape(envelope.envelope, 'libsignal-message');
     }
 
     private validOutboundEnvelope(envelope: unknown, applicationType: SignalType): boolean {
@@ -481,7 +488,7 @@ class UnifiedSignalTransport {
             candidate.type !== SignalType.SEALED_ENVELOPE ||
             sanitizeMessageId(candidate.messageId) !== candidate.messageId ||
             !canonicalBase64Shape(candidate.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }) ||
-            !isHybridEnvelopeWireShape(candidate.envelope)
+            !isHybridEnvelopeWireShape(candidate.envelope, 'libsignal-message')
         ) return false;
         if (
             isFileChunk &&
@@ -532,14 +539,8 @@ class UnifiedSignalTransport {
             policyGeneration !== this.recipientPolicyGeneration ||
             !blockingSystem.isEnforcementReady()
         ) throw new Error('Blocking policy changed during recovery restore');
-        const discardMalformedJournal = async (): Promise<void> => {
-            this.durableAckEntries.clear();
-            this.earlyDeliveryAcks.clear();
-            await persistence.save([]);
-        };
         if (!Array.isArray(loaded) || loaded.length > MAX_AWAITING_ACK) {
-            await discardMalformedJournal();
-            return;
+            throw new Error('Delivery acknowledgement journal is invalid');
         }
         let encodedBytes = 2;
         const seen = new Set<string>();
@@ -548,19 +549,16 @@ class UnifiedSignalTransport {
         const now = Date.now();
         for (const candidate of loaded) {
             if (!this.validDurableAckEntry(candidate)) {
-                await discardMalformedJournal();
-                return;
+                throw new Error('Delivery acknowledgement journal is invalid');
             }
             const trackingKey = this.deliveryTrackingKey(candidate.to, candidate.messageId);
             if (seen.has(trackingKey)) {
-                await discardMalformedJournal();
-                return;
+                throw new Error('Delivery acknowledgement journal contains duplicates');
             }
             seen.add(trackingKey);
             encodedBytes += JSON.stringify(candidate).length + 1;
             if (encodedBytes > MAX_DURABLE_ACK_BYTES) {
-                await discardMalformedJournal();
-                return;
+                throw new Error('Delivery acknowledgement journal exceeds its byte budget');
             }
             // File transfer state is intentionally live-only. The source bytes,
             // receiver state, and NACK window do not survive an account/app
@@ -672,7 +670,7 @@ class UnifiedSignalTransport {
 
     private queueRecoveryClear(peer: string, messageId: string): void {
         const persistence = this.deliveryAckPersistence;
-        if (!persistence?.clearRecovery) return;
+        if (!persistence) return;
         let ids = this.recoveryClearPending.get(peer);
         if (!ids) {
             if (this.recoveryClearPending.size >= MAX_AWAITING_ACK) return;
@@ -693,13 +691,12 @@ class UnifiedSignalTransport {
 
     private flushRecoveryClears(): void {
         const persistence = this.deliveryAckPersistence;
-        const clearRecovery = persistence?.clearRecovery;
         if (
             !persistence ||
-            !clearRecovery ||
             this.recoveryClearPending.size === 0 ||
             this.recoveryClearTask
         ) return;
+        const clearRecovery = persistence.clearRecovery;
         const generation = this.accountGeneration;
         const deliveryGeneration = this.deliveryAckGeneration;
         const batches = new Map(Array.from(this.recoveryClearPending, ([peer, ids]) => [
@@ -788,6 +785,7 @@ class UnifiedSignalTransport {
             return { success: false, transport: 'server', error: 'send-queue-saturated' };
         }
 
+        this.preparePeer(to);
         this.totalSendTasks += 1;
         const result = new Promise<SendResult>((resolve) => {
             let settled = false;
@@ -918,12 +916,17 @@ class UnifiedSignalTransport {
         });
     }
 
-    private directP2PPayload(envelope: any): any {
+    private directP2PPayload(envelope: any, type: SignalType, payload: any): any {
+        const fileTransferId = type === SignalType.FILE_MESSAGE_CHUNK
+            ? envelope?.fileTransferId
+            : type === SignalType.FILE_TRANSPORT_ACK
+                ? this.fileTransferIdFromChunkMessageId(payload?.ackFor)
+                : null;
         return {
             type: SignalType.SEALED_ENVELOPE,
             messageId: envelope?.messageId,
-            ...(typeof envelope?.fileTransferId === 'string'
-                ? { fileTransferId: envelope.fileTransferId }
+            ...(typeof fileTransferId === 'string'
+                ? { fileTransferId }
                 : {}),
             envelope: envelope?.envelope
         };
@@ -941,18 +944,7 @@ class UnifiedSignalTransport {
             envelopeToSend.recipientKyberPublicBase64
         );
         try {
-            let detectionKey = await resolvePeerDetectionKey(client.identity, peer)
-                .catch(() => null);
-            if (!detectionKey) {
-                const record = await loadPersistedDiscoveryMaterial(client.identity, peer)
-                    .catch(() => null);
-                const published = (record?.material as any)?.spoolDetectionKey;
-                if (typeof published === 'string') {
-                    await persistPeerDetectionKey(client.identity, peer, published).catch(() => { });
-                    detectionKey = peerDetectionKey(peer);
-                }
-            }
-            
+            const detectionKey = await resolvePeerDetectionKey(client.identity, peer);
             const context = detectionKey
                 ? await nextOutboundTag(client.identity, peer, detectionKey)
                 : null;
@@ -992,7 +984,6 @@ class UnifiedSignalTransport {
         const initialPolicyFailure = policyFailure();
         if (initialPolicyFailure) return initialPolicyFailure;
         const encryptionProvider = this.encryptionProvider;
-        const p2pSender = this.p2pSender;
         
         if (!encryptionProvider) {
             console.error('[MSG-SEND] no encryption provider set');
@@ -1034,55 +1025,26 @@ class UnifiedSignalTransport {
 
         const preTransportPolicyFailure = policyFailure();
         if (preTransportPolicyFailure) return preTransportPolicyFailure;
+        const p2pSender = this.p2pSender;
         if (p2pSender) {
             try {
-                const alias = p2pTransport.resolveUsernameAlias(to);
-                const isP2PConnected = p2pTransport.isConnected(to) ||
-                    (!!alias && p2pTransport.isConnected(alias));
-                if (isP2PConnected) {
-                        try {
-                            const preP2PPolicyFailure = policyFailure();
-                            if (preP2PPolicyFailure) return preP2PPolicyFailure;
-                            await p2pSender(to, this.directP2PPayload(envelopeToSend), SignalType.SEALED_ENVELOPE);
-                            const postP2PPolicyFailure = policyFailure();
-                            if (postP2PPolicyFailure) return postP2PPolicyFailure;
-                            await this.trackDeliveryAck(to, { ...envelopeToSend }, type, sendPolicy);
-                            return { success: true, transport: 'p2p' };
-                        } catch {
-                            const p2pPolicyFailure = policyFailure();
-                            if (p2pPolicyFailure) return p2pPolicyFailure;
-                            console.warn('[MSG-SEND] P2P send failed (connected); using sealed server route');
-                    }
-                } else {
-                    if (UnifiedSignalTransport.P2P_RECOVERY_REDELIVER_TYPES.has(type)) {
-                        try {
-                            const preP2PPolicyFailure = policyFailure();
-                            if (preP2PPolicyFailure) return preP2PPolicyFailure;
-                            await p2pSender(to, this.directP2PPayload(envelopeToSend), SignalType.SEALED_ENVELOPE);
-                            const postP2PPolicyFailure = policyFailure();
-                            if (postP2PPolicyFailure) return postP2PPolicyFailure;
-                            
-                            await this.trackDeliveryAck(to, { ...envelopeToSend }, type, sendPolicy);
-                            return { success: true, transport: 'p2p' };
-                        } catch (p2pErr: any) {
-                            const p2pPolicyFailure = policyFailure();
-                            if (p2pPolicyFailure) return p2pPolicyFailure;
-                            const errorMessage = p2pErr?.message || String(p2pErr);
-                            const coldStartNotReady = /not ready|not connected|no active p2p connection/i.test(errorMessage);
-                            if (!coldStartNotReady) {
-                                console.warn('[MSG-SEND] P2P attempt failed, using sealed server route');
-                            }
-                        }
-                    }
-                }
-            } catch {
+                const preP2PPolicyFailure = policyFailure();
+                if (preP2PPolicyFailure) return preP2PPolicyFailure;
+                await p2pSender(to, this.directP2PPayload(envelopeToSend, type, payload), type);
+                const postP2PPolicyFailure = policyFailure();
+                if (postP2PPolicyFailure) return postP2PPolicyFailure;
+                await this.trackDeliveryAck(to, { ...envelopeToSend }, type, sendPolicy);
+                return { success: true, transport: 'p2p' };
+            } catch (error) {
                 const p2pPolicyFailure = policyFailure();
                 if (p2pPolicyFailure) return p2pPolicyFailure;
-                console.warn('[UnifiedTransport] P2P send failed, falling back to server');
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                if (!/not ready|not connected|no active p2p connection/i.test(errorMessage)) {
+                    console.warn('[MSG-SEND] P2P send failed, using sealed server route', { error: errorMessage });
+                }
             }
         }
 
-        // Fallback to Server
         let activeRequestId: string | null = null;
         try {
             const preServerPolicyFailure = policyFailure();
@@ -1271,7 +1233,7 @@ class UnifiedSignalTransport {
         });
 
         // Bind the connection ready listener
-        if (!this.redeliveryPeerListenerBound && typeof window !== 'undefined') {
+        if (!this.redeliveryPeerListenerBound) {
             this.redeliveryPeerListenerBound = true;
             window.addEventListener(EventType.P2P_PEER_CONNECTED, (evt: Event) => {
                 if (!(evt instanceof CustomEvent)) return;
@@ -1285,7 +1247,7 @@ class UnifiedSignalTransport {
             });
         }
 
-        if (this.redeliveryFlusher === null && typeof window !== 'undefined') {
+        if (this.redeliveryFlusher === null) {
             this.redeliveryFlusher = setInterval(() => { void this.flushRedeliveries(); }, REDELIVER_FLUSH_INTERVAL_MS);
         }
 
@@ -1385,7 +1347,11 @@ class UnifiedSignalTransport {
             if (this.redeliveryInFlight.has(trackingKey)) continue;
             this.redeliveryInFlight.add(trackingKey);
             try {
-                await sender(entry.to, this.directP2PPayload(entry.envelope), SignalType.SEALED_ENVELOPE);
+                await sender(
+                    entry.to,
+                    this.directP2PPayload(entry.envelope, entry.type, undefined),
+                    entry.type
+                );
                 if (
                     generation !== this.accountGeneration ||
                     entry.generation !== this.accountGeneration ||
@@ -1885,6 +1851,7 @@ class UnifiedSignalTransport {
         this.deliveryAckGeneration += 1;
         this.encryptionProvider = null;
         this.p2pSender = null;
+        this.peerPreparer = null;
         this.deliveryAckPersistence = null;
         this.durableAckStoreState = 'disabled';
         this.durableAckRestore = Promise.resolve();

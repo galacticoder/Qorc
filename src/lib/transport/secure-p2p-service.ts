@@ -22,6 +22,8 @@ import {
     AUTH_USERNAME_REGEX,
     CERT_CLOCK_SKEW_MS,
     MAX_CONCURRENT_P2P_CONNECTS,
+    P2P_FILE_CHUNK_RATE_LIMIT,
+    P2P_GLOBAL_FILE_CHUNK_RATE_LIMIT,
     P2P_GLOBAL_MESSAGE_RATE_LIMIT,
     P2P_CONNECTION_TIMEOUT_MS,
     P2P_MAX_PEERS,
@@ -86,7 +88,7 @@ const isDirectP2PPayload = (value: unknown): value is P2PMessage['payload'] => {
         value.fileTransferId.length > 128 ||
         value.fileTransferId.length < 1
     )) return false;
-    return isHybridEnvelopeWireShape(value.envelope);
+    return isHybridEnvelopeWireShape(value.envelope, 'libsignal-message');
 };
 
 const isSignedP2PMessageHeaderShape = (message: unknown): message is P2PMessage => {
@@ -137,9 +139,9 @@ export class SecureP2PService {
     private respondToHandshake: HybridKeys['respondToHandshake'] | null = null;
 
     // Event handling
-    private messageRateLimiter: Map<string, { count: number; resetTime: number }> = new Map();
+    private messageRateLimiter: Map<string, { fileChunkCount: number; messageCount: number; resetTime: number }> = new Map();
     private messageRateLimiterNextPruneAt = 0;
-    private globalMessageRateState = { count: 0, resetTime: 0 };
+    private globalMessageRateState = { fileChunkCount: 0, messageCount: 0, resetTime: 0 };
     private userBlockedListener: ((event: Event) => void) | null = null;
 
     private connectInFlight: Map<string, Promise<void>> = new Map();
@@ -165,9 +167,7 @@ export class SecureP2PService {
         this.localUsername = normalized;
         this.transport = p2pTransport;
 
-        // Set up blocked user handler
-        if (typeof window !== 'undefined') {
-            this.userBlockedListener = (event: Event) => {
+        this.userBlockedListener = (event: Event) => {
                 try {
                     if (!(event instanceof CustomEvent)) return;
                     const detail = event.detail;
@@ -183,8 +183,7 @@ export class SecureP2PService {
                 } catch { }
             };
 
-            window.addEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
-        }
+        window.addEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
     }
 
     private clearTransportSubscriptions(): void {
@@ -989,12 +988,13 @@ export class SecureP2PService {
         ) {
             return;
         }
-        if (!this.checkMessageRateLimit(message.from)) {
-            console.warn('[MSG-RECV] DROP: P2P rate limited');
-            return;
-        }
         if (!isSignedP2PMessageShape(message)) {
             console.warn('[SecureP2PService] Rejecting malformed P2P message');
+            return;
+        }
+        const isFileChunk = typeof message.payload.fileTransferId === 'string';
+        if (!this.checkMessageRateLimit(message.from, isFileChunk)) {
+            console.warn('[MSG-RECV] DROP: P2P rate limited');
             return;
         }
 
@@ -1149,7 +1149,7 @@ export class SecureP2PService {
     }
 
     // Check message rate limit
-    private checkMessageRateLimit(from: string): boolean {
+    private checkMessageRateLimit(from: string, isFileChunk: boolean): boolean {
         const now = Date.now();
 
         if (now >= this.messageRateLimiterNextPruneAt) {
@@ -1167,26 +1167,39 @@ export class SecureP2PService {
         }
         let senderState = this.messageRateLimiter.get(from);
         if (!senderState || now > senderState.resetTime) {
-            senderState = { count: 0, resetTime: now + P2P_MESSAGE_RATE_WINDOW_MS };
+            senderState = { fileChunkCount: 0, messageCount: 0, resetTime: now + P2P_MESSAGE_RATE_WINDOW_MS };
         }
-        if (senderState.count >= P2P_MESSAGE_RATE_LIMIT) return false;
+        if (isFileChunk
+            ? senderState.fileChunkCount >= P2P_FILE_CHUNK_RATE_LIMIT
+            : senderState.messageCount >= P2P_MESSAGE_RATE_LIMIT) return false;
 
         if (now > this.globalMessageRateState.resetTime) {
-            this.globalMessageRateState = { count: 0, resetTime: now + P2P_MESSAGE_RATE_WINDOW_MS };
+            this.globalMessageRateState = {
+                fileChunkCount: 0,
+                messageCount: 0,
+                resetTime: now + P2P_MESSAGE_RATE_WINDOW_MS,
+            };
         }
-        if (this.globalMessageRateState.count >= P2P_GLOBAL_MESSAGE_RATE_LIMIT) return false;
+        if (isFileChunk
+            ? this.globalMessageRateState.fileChunkCount >= P2P_GLOBAL_FILE_CHUNK_RATE_LIMIT
+            : this.globalMessageRateState.messageCount >= P2P_GLOBAL_MESSAGE_RATE_LIMIT) return false;
 
         if (!this.messageRateLimiter.has(from) && this.messageRateLimiter.size >= P2P_RATE_LIMITER_MAX_ENTRIES) {
             const oldest = this.messageRateLimiter.keys().next().value;
             if (oldest !== undefined) this.messageRateLimiter.delete(oldest);
         }
-        senderState.count++;
+        if (isFileChunk) {
+            senderState.fileChunkCount++;
+            this.globalMessageRateState.fileChunkCount++;
+        } else {
+            senderState.messageCount++;
+            this.globalMessageRateState.messageCount++;
+        }
         this.messageRateLimiter.set(from, senderState);
         this.messageRateLimiterNextPruneAt = Math.min(
             this.messageRateLimiterNextPruneAt,
             senderState.resetTime + 1
         );
-        this.globalMessageRateState.count++;
         return true;
     }
 
@@ -1229,8 +1242,7 @@ export class SecureP2PService {
         this.removeSessionAliases(session);
     }
 
-    // Check if service is compatible with given configuration
-    isCompatible(username: string, keys: HybridKeys | null): boolean {
+    matchesIdentity(username: string, keys: HybridKeys | null): boolean {
         if (
             !this.initialized ||
             this.shuttingDown ||
@@ -1278,7 +1290,7 @@ export class SecureP2PService {
         this.lifecycleGeneration += 1;
         this.initialized = false;
         this.clearTransportSubscriptions();
-        if (this.userBlockedListener && typeof window !== 'undefined') {
+        if (this.userBlockedListener) {
             window.removeEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
         }
         
@@ -1304,7 +1316,7 @@ export class SecureP2PService {
             this.peers.clear();
             this.messageRateLimiter.clear();
             this.messageRateLimiterNextPruneAt = 0;
-            this.globalMessageRateState = { count: 0, resetTime: 0 };
+            this.globalMessageRateState = { fileChunkCount: 0, messageCount: 0, resetTime: 0 };
             this.onMessageCallback = null;
             this.onPeerConnectedCallback = null;
             this.onPeerDisconnectedCallback = null;

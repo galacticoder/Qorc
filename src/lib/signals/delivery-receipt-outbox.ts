@@ -142,12 +142,7 @@ class DeliveryReceiptOutbox {
       }
 
       if (!valid) {
-        // This is a disposable retry ledger, not message/key material. A validly
-        // decrypted but malformed snapshot must not permanently lock receipt
-        // processing; clear it and let sender redelivery reconstruct entries.
-        await persistence.save([]);
-        if (!this.isCurrent(account, generation, persistence)) return;
-        restored.clear();
+        throw new Error('Delivery receipt outbox is invalid');
       }
 
       this.entries = restored;
@@ -371,8 +366,6 @@ class DeliveryReceiptOutbox {
 
 export const deliveryReceiptOutbox = new DeliveryReceiptOutbox();
 
-if (typeof window !== 'undefined') {
-  window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, () => {
-    deliveryReceiptOutbox.setActiveAccount(null);
-  });
-}
+window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, () => {
+  deliveryReceiptOutbox.setActiveAccount(null);
+});

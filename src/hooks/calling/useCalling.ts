@@ -3,7 +3,7 @@ import { SecureCallingService, CallState } from '../../lib/transport/secure-call
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
-import { clearCallMediaState, stopMediaStream, releaseVisualCanvas, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
+import { clearCallMediaState, releaseVisualCanvas, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
 import { power } from '../../lib/tauri-bindings';
 import {
   setupIncomingCallCallback,
@@ -31,9 +31,9 @@ import {
 // Hook wiring the calling service to the auth context
 export const useCalling = (
   authContext: ReturnType<typeof useAuth>,
-  options?: {
-    getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
-    checkPeerSession?: (username: string) => Promise<void>;
+  options: {
+    getPeerCertificate: (username: string) => Promise<PeerCertificateBundle | null>;
+    checkPeerSession: (username: string) => Promise<void>;
   }
 ) => {
   if (!authContext) {
@@ -41,7 +41,7 @@ export const useCalling = (
   }
 
   const eventDebouncer = useRef(debounceEventDispatcher());
-  const localStreamRef = useRef<MediaStream | null>(null);
+  const localMediaActiveRef = useRef(false);
   const localVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const localScreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const remoteVideoCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -52,7 +52,7 @@ export const useCalling = (
   const [callingService, setCallingService] = useState<SecureCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [pendingIncomingCalls, setPendingIncomingCalls] = useState<CallState[]>([]);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localMediaActive, setLocalMediaActive] = useState(false);
   const [localVideoCanvas, setLocalVideoCanvas] = useState<HTMLCanvasElement | null>(null);
   const [localScreenCanvas, setLocalScreenCanvas] = useState<HTMLCanvasElement | null>(null);
   const [remoteVideoCanvas, setRemoteVideoCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -62,26 +62,24 @@ export const useCalling = (
 
   const serviceRef = useRef<SecureCallingService | null>(null);
   const everConnectedRef = useRef<Set<string>>(new Set());
-  const lastCallTypeRef = useRef<Map<string, 'audio' | 'video'>>(new Map());
 
   const currentUsername = username || loginUsernameRef?.current || '';
   const isFullyAuthenticated = isLoggedIn && accountAuthenticated;
 
   const callbackRefs: CallbackRefs = {
-    localStreamRef,
+    localMediaActiveRef,
     localVideoCanvasRef,
     localScreenCanvasRef,
     remoteVideoCanvasRef,
     remoteScreenCanvasRef,
     everConnectedRef,
-    lastCallTypeRef,
     eventDebouncer
   };
 
   const callbackSetters: CallbackSetters = {
     setCurrentCall,
     setPendingIncomingCalls,
-    setLocalStream,
+    setLocalMediaActive,
     setLocalVideoCanvas,
     setLocalScreenCanvas,
     setRemoteVideoCanvas,
@@ -90,18 +88,18 @@ export const useCalling = (
 
   const actionRefs: ActionRefs = {
     serviceRef,
-    localStreamRef,
+    localMediaActiveRef,
     localVideoCanvasRef,
     localScreenCanvasRef,
     remoteVideoCanvasRef,
     remoteScreenCanvasRef,
-    getPeerCertificate: options?.getPeerCertificate,
-    checkPeerSession: options?.checkPeerSession,
+    getPeerCertificate: options.getPeerCertificate,
+    checkPeerSession: options.checkPeerSession,
   };
 
   const actionSetters: ActionSetters = {
     setCurrentCall,
-    setLocalStream,
+    setLocalMediaActive,
     setLocalVideoCanvas,
     setLocalScreenCanvas,
     setRemoteVideoCanvas,
@@ -111,13 +109,12 @@ export const useCalling = (
   useEffect(() => {
     return () => {
       eventDebouncer.current.cancel();
-      stopMediaStream(localStreamRef.current);
+      localMediaActiveRef.current = false;
       localVideoCanvasRef.current = null;
       localScreenCanvasRef.current = null;
       releaseVisualCanvas(remoteVideoCanvasRef.current);
       releaseVisualCanvas(remoteScreenCanvasRef.current);
       everConnectedRef.current.clear();
-      lastCallTypeRef.current.clear();
       power.stop().catch(() => { });
     };
   }, []);
@@ -162,7 +159,7 @@ export const useCalling = (
         setCallingService(null);
         setCurrentCall(null);
         setPendingIncomingCalls([]);
-        setLocalStream(null);
+        setLocalMediaActive(false);
         setLocalVideoCanvas(null);
         setLocalScreenCanvas(null);
         setRemoteVideoCanvas(null);
@@ -188,7 +185,6 @@ export const useCalling = (
       setIsScreenSharing(false);
       clearCallMediaState(callbackRefs, callbackSetters);
       everConnectedRef.current.clear();
-      lastCallTypeRef.current.clear();
       setIsInitialized(false);
     };
   }, [currentUsername, isFullyAuthenticated]);
@@ -227,7 +223,7 @@ export const useCalling = (
   return {
     currentCall,
     pendingIncomingCalls,
-    localStream,
+    localMediaActive,
     localVideoCanvas,
     localScreenCanvas,
     remoteVideoCanvas,

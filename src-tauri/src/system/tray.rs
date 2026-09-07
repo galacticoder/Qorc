@@ -2,7 +2,10 @@
 //!
 //! System tray integration for background
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU32, Ordering},
+};
 use tauri::{
     AppHandle, Manager,
     image::Image,
@@ -10,14 +13,22 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::error::QorcResult;
+use crate::error::{QorcError, QorcResult};
 
 static UNREAD_COUNT: AtomicU32 = AtomicU32::new(0);
+static UNREAD_MENU_ITEM: OnceLock<MenuItem<tauri::Wry>> = OnceLock::new();
 
 pub async fn init(app_handle: &AppHandle) -> QorcResult<()> {
     let app = app_handle.clone();
-    let menu = build_tray_menu(&app)?;
-    let icon = load_tray_icon();
+    let unread_item = MenuItem::with_id(
+        &app,
+        "unread",
+        unread_label(UNREAD_COUNT.load(Ordering::Relaxed)),
+        false,
+        None::<&str>,
+    )?;
+    let menu = build_tray_menu(&app, &unread_item)?;
+    let icon = load_tray_icon()?;
 
     let app_clone = app.clone();
     let _tray = TrayIconBuilder::with_id("main")
@@ -53,18 +64,21 @@ pub async fn init(app_handle: &AppHandle) -> QorcResult<()> {
         })
         .build(&app)?;
 
+    if UNREAD_MENU_ITEM.set(unread_item).is_err() {
+        tracing::warn!("Tray unread menu item was already initialized");
+    }
+
     tracing::info!("System tray initialized with menu");
     Ok(())
 }
 
-fn load_tray_icon() -> Image<'static> {
+fn load_tray_icon() -> QorcResult<Image<'static>> {
     Image::from_bytes(include_bytes!("../../icons/tray-icon.png"))
-        .unwrap_or_else(|_| Image::new_owned(vec![0, 0, 0, 255], 1, 1))
+        .map_err(|_| QorcError::SystemError("Tray icon is invalid".to_string()))
 }
 
-fn build_tray_menu(app: &AppHandle) -> QorcResult<Menu<tauri::Wry>> {
-    let unread = UNREAD_COUNT.load(Ordering::Relaxed);
-    let unread_label = if unread > 0 {
+fn unread_label(unread: u32) -> String {
+    if unread > 0 {
         format!(
             "{} unread message{}",
             unread,
@@ -72,12 +86,17 @@ fn build_tray_menu(app: &AppHandle) -> QorcResult<Menu<tauri::Wry>> {
         )
     } else {
         "No new messages".to_string()
-    };
+    }
+}
 
+fn build_tray_menu(
+    app: &AppHandle,
+    unread_item: &MenuItem<tauri::Wry>,
+) -> QorcResult<Menu<tauri::Wry>> {
     let menu = Menu::with_items(
         app,
         &[
-            &MenuItem::with_id(app, "unread", &unread_label, false, None::<&str>)?,
+            unread_item,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "open", "Open Qorc", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -89,38 +108,17 @@ fn build_tray_menu(app: &AppHandle) -> QorcResult<Menu<tauri::Wry>> {
 }
 
 fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    } else {
-        match tauri::WebviewWindowBuilder::new(
-            app,
-            "main",
-            tauri::WebviewUrl::App("index.html".into()),
-        )
-        .title("Qorc")
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(800.0, 600.0)
-        .center()
-        .decorations(true)
-        .build()
-        {
-            Ok(window) => {
-                let _ = window.show();
-                let _ = window.set_focus();
-                tracing::info!("Main window recreated from tray");
-            }
-            Err(e) => {
-                tracing::error!("Failed to create main window: {}", e);
-                return;
-            }
-        }
-    }
+    let Some(window) = app.get_webview_window("main") else {
+        tracing::error!("Main window is unavailable");
+        return;
+    };
+    let _ = window.show();
+    let _ = window.set_focus();
 
-    clear_unread(app);
+    clear_unread();
 }
 
-pub fn set_unread_count(app: &AppHandle, count: u32) {
+pub fn set_unread_count(count: u32) {
     let count = count.min(9999);
     let previous = UNREAD_COUNT.swap(count, Ordering::Relaxed);
 
@@ -128,26 +126,23 @@ pub fn set_unread_count(app: &AppHandle, count: u32) {
         return;
     }
 
-    match app.tray_by_id("main") {
-        Some(tray) => match build_tray_menu(app) {
-            Ok(menu) => {
-                if let Err(e) = tray.set_menu(Some(menu)) {
-                    tracing::warn!("Failed to set tray menu: {}", e);
-                } else {
-                    tracing::info!("Tray menu updated: {} unread", count);
-                }
-            }
-            Err(e) => tracing::warn!("Failed to build tray menu: {}", e),
-        },
-        None => tracing::warn!("Tray 'main' not found for menu update"),
+    let Some(unread_item) = UNREAD_MENU_ITEM.get() else {
+        tracing::warn!("Tray unread menu item is not initialized");
+        return;
+    };
+
+    if let Err(e) = unread_item.set_text(unread_label(count)) {
+        tracing::warn!("Failed to update tray unread label: {}", e);
+    } else {
+        tracing::info!("Tray unread label updated: {} unread", count);
     }
 }
 
-pub fn increment_unread(app: &AppHandle) {
+pub fn increment_unread() {
     let current = UNREAD_COUNT.load(Ordering::Relaxed);
-    set_unread_count(app, current + 1);
+    set_unread_count(current.saturating_add(1));
 }
 
-pub fn clear_unread(app: &AppHandle) {
-    set_unread_count(app, 0);
+pub fn clear_unread() {
+    set_unread_count(0);
 }

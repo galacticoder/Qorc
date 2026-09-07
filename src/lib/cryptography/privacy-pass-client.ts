@@ -9,7 +9,6 @@ import { PostQuantumWorker } from './worker-bridge';
 import { normalizePrivacyPassPurpose } from './privacy-pass-purpose';
 import { PRIVACY_PASS_CONFIG as PP_CONFIG } from '../../../shared/privacy-pass-protocol.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
 export function getPrivacyPassTokenEpoch(tokenSecret: Uint8Array): number {
     if (!(tokenSecret instanceof Uint8Array) || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE) {
@@ -44,14 +43,14 @@ export function isPrivacyPassTokenEpochUsable(tokenSecret: Uint8Array): boolean 
     return tokenEpoch <= currentEpoch && currentEpoch - tokenEpoch <= PP_CONFIG.TOKEN_MAX_AGE_EPOCHS;
 }
 
-export function isPrivacyPassTokenUsable(token: AnonymousToken, purpose?: string): boolean {
+export function isPrivacyPassTokenUsable(token: AnonymousToken, purpose: string): boolean {
     try {
         return Boolean(
             token &&
             !token.used &&
             token.unblindedToken?.length === PP_CONFIG.TOKEN_SIZE &&
             isPrivacyPassTokenEpochUsable(token.tokenSecret) &&
-            (!purpose || normalizePrivacyPassPurpose(token.purpose) === normalizePrivacyPassPurpose(purpose))
+            normalizePrivacyPassPurpose(token.purpose) === normalizePrivacyPassPurpose(purpose)
         );
     } catch {
         return false;
@@ -67,7 +66,7 @@ export interface AnonymousToken {
     blindingFactor?: Uint8Array;
     blindedElement?: Uint8Array;
     unblindedToken?: Uint8Array;
-    purpose?: string;
+    purpose: string;
     issuedAt: number;
     used: boolean;
     pending: boolean;
@@ -81,14 +80,14 @@ export interface AnonymousToken {
 export class PrivacyPassClient {
     private readonly purpose: string;
 
-    constructor(purpose: string = ACCOUNT_AUTH_PURPOSE) {
+    constructor(purpose: string) {
         this.purpose = normalizePrivacyPassPurpose(purpose);
     }
 
     /**
      * Generate a batch of tokens to be signed by server
      */
-    async generateTokenBatch(count: number = PP_CONFIG.DEFAULT_BATCH_SIZE): Promise<{
+    async generateTokenBatch(count: number): Promise<{
         blindedTokens: Uint8Array[];
         tokenSecrets: AnonymousToken[];
     }> {

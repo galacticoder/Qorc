@@ -32,7 +32,6 @@ export async function copyTextToClipboard(text: unknown): Promise<void> {
 
   const sanitized = sanitizeForClipboard(text);
   if (
-    typeof navigator === 'undefined' ||
     !navigator.clipboard ||
     typeof navigator.clipboard.writeText !== 'function'
   ) {

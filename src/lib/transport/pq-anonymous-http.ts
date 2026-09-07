@@ -30,6 +30,10 @@ import {
   SPOOL_PIR_AUDIENCE,
   SPOOL_TAG_INDEX_AUDIENCE,
 } from '../config/audiences';
+import {
+  KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
+  KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS,
+} from '../../../shared/key-transparency-protocol.js';
 
 export type AnonymousHttpOperation =
   | typeof AVATAR_BLOB_GET_AUDIENCE
@@ -55,7 +59,7 @@ const REQUEST_SMALL_BYTES = 64 * 1024;
 const REQUEST_PIR_BYTES = 2 * 1024 * 1024;
 const REQUEST_LARGE_BYTES = 512 * 1024;
 const RESPONSE_SMALL_BYTES = 64 * 1024;
-const RESPONSE_KEY_TRANSPARENCY_BYTES = 512 * 1024;
+const RESPONSE_TAG_INDEX_BYTES = 512 * 1024;
 const RESPONSE_PIR_BYTES = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES = 8912896;
@@ -91,10 +95,10 @@ const OPERATION_POLICY: Readonly<Record<AnonymousHttpOperation, {
   [AVATAR_POOL_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
   [DISCOVERY_BUCKET_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 4, responseBytes: RESPONSE_DISCOVERY_BYTES },
   [DISCOVERY_MANIFEST_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
-  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES },
+  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS, responseBytes: KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES },
   [KEY_TRANSPARENCY_APPEND_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
   [OPRF_EVALUATE_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES },
-  [SPOOL_TAG_INDEX_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_KEY_TRANSPARENCY_BYTES },
+  [SPOOL_TAG_INDEX_AUDIENCE]: { requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_TAG_INDEX_BYTES },
   [SPOOL_PIR_AUDIENCE]: { requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 5, responseBytes: RESPONSE_PIR_BYTES },
 });
 

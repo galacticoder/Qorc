@@ -2,10 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import { MAX_VOICE_NOTE_BYTES, MAX_VOICE_NOTE_DURATION_SECONDS } from '../../../lib/constants';
 import { Square, Play, Pause, Trash2, SendHorizontal } from 'lucide-react';
 import { requireNativeMediaAccess } from '../../../lib/tauri-bindings';
-import { syncEncryptedStorage } from '../../../lib/database/encrypted-storage';
 import { isValidMediaDeviceId } from '../../../lib/utils/calling-utils';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
-import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
+import { registerVoicePlayback } from '../../../lib/utils/voice-playback';
+import { readAppSettings } from '../../../lib/ui/app-settings';
 
 const LEVEL_HISTORY_SIZE = 96;
 const MICROPHONE_PERMISSION_ERROR = 'Microphone permission is required';
@@ -37,6 +37,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const unregisterPlaybackRef = useRef<(() => void) | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -53,7 +54,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const finalDurationRef = useRef(0);
   const recordedBytesRef = useRef(0);
   const recordingRejectedRef = useRef(false);
-  const visualizerSamplesRef = useRef<Uint8Array | null>(null);
+  const visualizerSamplesRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
   const levelHistoryRef = useRef<number[]>(Array.from({ length: LEVEL_HISTORY_SIZE }, () => 0));
   const smoothedLevelRef = useRef(0);
   const lastLevelSampleRef = useRef(0);
@@ -108,6 +109,8 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
+    unregisterPlaybackRef.current?.();
+    unregisterPlaybackRef.current = null;
     if (blobUrlRef.current) {
       URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = null;
@@ -222,15 +225,10 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
 
       // Load set microphone from settings
       let micDeviceId: string | undefined;
-      try {
-        const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (isValidMediaDeviceId(parsed.preferredMicId)) {
-            micDeviceId = parsed.preferredMicId;
-          }
-        }
-      } catch { }
+      const storedSettings = readAppSettings();
+      if (isValidMediaDeviceId(storedSettings.preferredCallMicId)) {
+        micDeviceId = storedSettings.preferredCallMicId;
+      }
 
       const audioConstraints: MediaTrackConstraints = {
         echoCancellation: true,
@@ -245,8 +243,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       streamRef.current = stream;
 
-      const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const audioContext = new AudioCtx();
+      const audioContext = new AudioContext();
 
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
@@ -404,6 +401,9 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       blobUrlRef.current = blobUrl;
       const audio = new Audio(blobUrl);
       audioRef.current = audio;
+      unregisterPlaybackRef.current = registerVoicePlayback(audio);
+      audio.onplay = () => { setIsPlaying(!audio.paused); };
+      audio.onpause = () => { setIsPlaying(false); };
 
       audio.onloadedmetadata = () => {
         if (
@@ -427,8 +427,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       };
     }
 
-    audioRef.current.play();
-    setIsPlaying(true);
+    void audioRef.current.play().catch(() => { setIsPlaying(false); });
   };
 
   // Pause playback of the recording

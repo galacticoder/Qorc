@@ -35,7 +35,7 @@ import {
   SPOOL_PIR_EPOCH_UNAVAILABLE,
   SPOOL_PIR_LAYOUT
 } from '../../shared/spool-pir-layout.js';
-import { KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY, KEY_TRANSPARENCY_APPEND_POW_DOMAIN, KEY_TRANSPARENCY_DELTA_MAX_EPOCHS, KEY_TRANSPARENCY_POW_EPOCH_MS, KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY, KEY_TRANSPARENCY_SYNC_POW_DOMAIN, exactPlainObject, isKeyTransparencyHash, isKeyTransparencyLabel, keyTransparencyPowEpoch } from '../../shared/key-transparency-protocol.js';
+import { KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY, KEY_TRANSPARENCY_APPEND_POW_DOMAIN, KEY_TRANSPARENCY_DELTA_MAX_EPOCHS, KEY_TRANSPARENCY_MAX_LOG_SIZE, KEY_TRANSPARENCY_POW_EPOCH_MS, KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY, KEY_TRANSPARENCY_SYNC_POW_DOMAIN, exactPlainObject, isKeyTransparencyHash, isKeyTransparencyLabel, keyTransparencyPowEpoch } from '../../shared/key-transparency-protocol.js';
 import {
   appendKeyTransparency,
   syncKeyTransparency
@@ -58,6 +58,7 @@ import { envInt } from '../utils/env.js';
 import { isCanonicalBase64Bytes } from '../utils/encoding.js';
 import { setNoStoreHeaders } from '../utils/http.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
+import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
   DISCOVERY_EPOCH_ID_RE,
   HEX_64_RE
@@ -76,6 +77,7 @@ const AVATAR_GET_POW_DIFFICULTY = 16;
 const AVATAR_PUT_POW_DIFFICULTY = 18;
 const router = express.Router();
 const PQ_ANONYMOUS_INTERNAL_REQUEST = Symbol('qorc.pqAnonymousInternalRequest');
+const PIR_COMPONENT_MAX_BYTES = 2 * 1024 * 1024;
 
 function fail(res, status, error) {
   return res.status(status).json({ ok: false, error });
@@ -101,6 +103,18 @@ router.use((_req, res, next) => {
 
 router.get('/health', (_req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: Date.now() });
+});
+
+const pqAnonymousOperationPaths = Object.freeze(Array.from(new Set(
+  Object.values(ANONYMOUS_OPERATION_ROUTES).map(({ path }) => path)
+)));
+
+router.use(pqAnonymousOperationPaths, (req, res, next) => {
+  if (req[PQ_ANONYMOUS_INTERNAL_REQUEST] !== true) {
+    fail(res, 404, 'anonymous_transport_required');
+    return;
+  }
+  next();
 });
 
 function deriveOprfPowSeed(blindedPoint, epoch, publicKey) {
@@ -140,7 +154,15 @@ const avatarGetRateLimiter = createTokenBucketRateLimiter(envInt('AVATAR_GET_HTT
 const avatarPutRateLimiter = createTokenBucketRateLimiter(envInt('AVATAR_PUT_HTTP_MAX_RPS', 20, 1, 2_000));
 const avatarPoolRateLimiter = createTokenBucketRateLimiter(envInt('AVATAR_POOL_HTTP_MAX_RPS', 10, 1, 2_000));
 
-const spoolRateLimiter = createTokenBucketRateLimiter(envInt('SPOOL_HTTP_MAX_RPS', 50, 1, 2_000));
+const spoolTagIndexRateLimiter = createTokenBucketRateLimiter(
+  envInt('SPOOL_TAG_INDEX_HTTP_MAX_RPS', 50, 1, 2_000)
+);
+const spoolPirRateLimiter = createTokenBucketRateLimiter(
+  envInt('SPOOL_PIR_HTTP_MAX_RPS', 8, 1, 128)
+);
+const SPOOL_PIR_MAX_INFLIGHT = envInt('SPOOL_PIR_MAX_INFLIGHT', 2, 1, 8);
+const SPOOL_PIR_MAX_RESPONSE_BYTES = 760 * 1024;
+let spoolPirInflight = 0;
 const keyTransparencySyncRateLimiter = createTokenBucketRateLimiter(envInt('KEY_TRANSPARENCY_SYNC_MAX_RPS', 50, 1, 2_000));
 const keyTransparencyAppendRateLimiter = createTokenBucketRateLimiter(envInt('KEY_TRANSPARENCY_APPEND_MAX_RPS', 8, 1, 256));
 const KEY_TRANSPARENCY_SYNC_MAX_INFLIGHT = envInt('KEY_TRANSPARENCY_SYNC_MAX_INFLIGHT', 16, 1, 128);
@@ -170,8 +192,12 @@ function keyTransparencyPowExpiresAt(epoch) {
 
 
 // whole tag index identical for every caller
-router.get('/spool/tag-index', async (_req, res) => {
-  if (!spoolRateLimiter()) {
+router.get('/spool/tag-index', async (req, res) => {
+  if (!hasExactObjectKeys(req.body, [])) {
+    fail(res, 400, 'invalid_spool_tag_index_request');
+    return;
+  }
+  if (!spoolTagIndexRateLimiter()) {
     fail(res, 503, 'spool_tag_index_busy');
     return;
   }
@@ -194,10 +220,15 @@ router.get('/spool/tag-index', async (_req, res) => {
 });
 
 router.post('/spool/pir', async (req, res) => {
-  if (!spoolRateLimiter()) {
+  let admitted = false;
+  let query = null;
+  let pubParams = null;
+  if (!spoolPirRateLimiter() || spoolPirInflight >= SPOOL_PIR_MAX_INFLIGHT) {
     fail(res, 503, 'spool_pir_busy');
     return;
   }
+  spoolPirInflight += 1;
+  admitted = true;
   try {
     const body = req.body;
     if (
@@ -205,19 +236,34 @@ router.post('/spool/pir', async (req, res) => {
       body.layout !== SPOOL_PIR_LAYOUT ||
       !Number.isSafeInteger(body.epoch) ||
       body.epoch < 0 ||
-      typeof body.query !== 'string' ||
-      typeof body.pubParams !== 'string'
+      !canonicalBase64Shape(body.query, { maxBytes: PIR_COMPONENT_MAX_BYTES }) ||
+      !canonicalBase64Shape(body.pubParams, { maxBytes: PIR_COMPONENT_MAX_BYTES })
     ) {
       fail(res, 400, 'invalid_pir_query');
       return;
     }
+    query = Buffer.from(body.query, 'base64');
+    pubParams = Buffer.from(body.pubParams, 'base64');
     const response = await answerPirQuery(
       body.epoch,
-      Buffer.from(body.query, 'base64'),
-      Buffer.from(body.pubParams, 'base64')
+      query,
+      pubParams
     );
+    if (
+      !Buffer.isBuffer(response) ||
+      response.length === 0 ||
+      response.length > SPOOL_PIR_MAX_RESPONSE_BYTES
+    ) {
+      response?.fill?.(0);
+      fail(res, 503, 'spool_pir_unavailable');
+      return;
+    }
     res.setHeader('Content-Type', 'application/json');
-    res.status(200).json({ ok: true, response: response.toString('base64') });
+    try {
+      res.status(200).json({ ok: true, response: response.toString('base64') });
+    } finally {
+      response.fill(0);
+    }
   } catch (error) {
     if (error?.message === 'PIR epoch is unavailable') {
       fail(res, 409, SPOOL_PIR_EPOCH_UNAVAILABLE);
@@ -225,6 +271,10 @@ router.post('/spool/pir', async (req, res) => {
     }
     console.error('[API] Spool PIR request failed', error);
     fail(res, 503, 'spool_pir_unavailable');
+  } finally {
+    query?.fill(0);
+    pubParams?.fill(0);
+    if (admitted) spoolPirInflight = Math.max(0, spoolPirInflight - 1);
   }
 });
 
@@ -273,7 +323,7 @@ async function getCachedAvatarPool() {
       const generation = apiCacheGeneration;
       const pending = AvatarBlobDB.samplePool(AVATAR_POOL_RESPONSE_SIZE).then((ids) => ({
         epoch,
-        ids: Array.isArray(ids) ? ids.slice().sort() : []
+        ids: ids.slice().sort()
       }));
       avatarPoolBuildPromise = pending;
       void pending.then((entry) => {
@@ -365,7 +415,12 @@ router.post('/avatar/blob/put', async (req, res) => {
         { ...accountRedemption, expectedPurpose: ACCOUNT_AUTH_PURPOSE },
         { ...serverEntryRedemption, expectedPurpose: SERVER_ENTRY_PURPOSE }
       ]);
-      if (redeemed?.valid !== true) {
+      if (
+        redeemed?.valid !== true ||
+        !PrivacyPassServer.isServerEntryCredentialGenerationCurrent(
+          redeemed.serverEntryCredentialGeneration
+        )
+      ) {
         fail(res, 401, 'avatar_upload_authorization_failed');
         return;
       }
@@ -834,6 +889,7 @@ router.post('/key-transparency/append', async (req, res) => {
       !isKeyTransparencyHash(req.body.recordHash) ||
       !Number.isSafeInteger(req.body.version) ||
       req.body.version < 1 ||
+      req.body.version > KEY_TRANSPARENCY_MAX_LOG_SIZE ||
       req.body.powEpoch !== keyTransparencyPowEpoch() ||
       !isCanonicalBase64Bytes(req.body.powNonce, POW_SEED_BYTES) ||
       typeof req.body.powSolution !== 'string'
@@ -879,13 +935,29 @@ router.post('/key-transparency/append', async (req, res) => {
       return;
     }
 
-    accountRedemption = PrivacyPassHelpers.parseRedemptionRequest(req.body.authorization);
-    serverEntryRedemption = PrivacyPassHelpers.parseRedemptionRequest(req.body.serverEntryAuthorization);
-    const redeemed = await PrivacyPassServer.redeemTokenBatch([
-      { ...accountRedemption, expectedPurpose: ACCOUNT_AUTH_PURPOSE },
-      { ...serverEntryRedemption, expectedPurpose: SERVER_ENTRY_PURPOSE }
-    ]);
-    if (redeemed?.valid !== true) {
+    try {
+      accountRedemption = PrivacyPassHelpers.parseRedemptionRequest(req.body.authorization);
+      serverEntryRedemption = PrivacyPassHelpers.parseRedemptionRequest(req.body.serverEntryAuthorization);
+    } catch {
+      fail(res, 401, 'key_transparency_authorization_failed');
+      return;
+    }
+    let redeemed;
+    try {
+      redeemed = await PrivacyPassServer.redeemTokenBatch([
+        { ...accountRedemption, expectedPurpose: ACCOUNT_AUTH_PURPOSE },
+        { ...serverEntryRedemption, expectedPurpose: SERVER_ENTRY_PURPOSE }
+      ]);
+    } catch {
+      fail(res, 503, 'key_transparency_unavailable');
+      return;
+    }
+    if (
+      redeemed?.valid !== true ||
+      !PrivacyPassServer.isServerEntryCredentialGenerationCurrent(
+        redeemed.serverEntryCredentialGeneration
+      )
+    ) {
       fail(res, 401, 'key_transparency_authorization_failed');
       return;
     }
@@ -914,9 +986,9 @@ router.post('/key-transparency/append', async (req, res) => {
 });
 
 export async function dispatchAnonymousApiOperation(operation, body) {
-  const target = ANONYMOUS_OPERATION_ROUTES[operation];
   if (
-    !target ||
+    typeof operation !== 'string' ||
+    !Object.hasOwn(ANONYMOUS_OPERATION_ROUTES, operation) ||
     !body ||
     typeof body !== 'object' ||
     Array.isArray(body) ||
@@ -924,6 +996,7 @@ export async function dispatchAnonymousApiOperation(operation, body) {
   ) {
     return { ok: false, error: 'invalid_anonymous_operation' };
   }
+  const target = ANONYMOUS_OPERATION_ROUTES[operation];
 
   return await new Promise((resolve) => {
     let settled = false;

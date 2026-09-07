@@ -2,9 +2,7 @@
  * Random Number Generation
  */
 
-import { blake3 } from '@noble/hashes/blake3.js';
 import { PQ_RANDOM_MAX_BYTES_LIMIT, PQ_RANDOM_DEFAULT_MAX_BYTES } from '../constants';
-import { bytesToHex } from '../utils/byte-utils';
 
 export class PostQuantumRandom {
   private static maxRandomBytes = PQ_RANDOM_DEFAULT_MAX_BYTES;
@@ -74,15 +72,9 @@ export class PostQuantumRandom {
 
   static randomUUID(): string {
     PostQuantumRandom.validateSecureRandom();
-    if (typeof globalThis.crypto?.randomUUID === 'function') {
-      return globalThis.crypto.randomUUID();
+    if (typeof globalThis.crypto.randomUUID !== 'function') {
+      throw new Error('Secure UUID generator not available. Requires current desktop WebView support.');
     }
-
-    const base = PostQuantumRandom.randomBytes(32);
-    const uuidBytes = blake3(base, { dkLen: 16 });
-    uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x40;
-    uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80;
-    const hex = bytesToHex(uuidBytes);
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+    return globalThis.crypto.randomUUID();
   }
 }

@@ -13,7 +13,6 @@ const ROOT_DIRECTORIES = Object.freeze([
     'shared',
     'src',
     'src-tauri',
-    'test-chat',
     'vendor',
     'workers'
 ]);

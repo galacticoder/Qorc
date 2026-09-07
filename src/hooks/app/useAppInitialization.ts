@@ -4,7 +4,7 @@ import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { torNetworkManager } from '../../lib/transport/tor-network';
 import { notifications, session } from '../../lib/tauri-bindings';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { STORAGE_KEYS } from '../../lib/database/storage-keys';
+import { readAppSettings } from '../../lib/ui/app-settings';
 
 interface AppInitializationProps {
   Authentication: {
@@ -40,8 +40,10 @@ export function useAppInitialization({
     let cancelled = false;
     setAvatarDataLoaded(false);
     profilePictureSystem.setSecureDB(db);
-    void profilePictureSystem.initialize().catch(() => undefined).then(() => {
+    void profilePictureSystem.initialize().then(() => {
       if (!cancelled && Database.secureDBRef.current === db) setAvatarDataLoaded(true);
+    }).catch((error) => {
+      console.error('[App] Failed to initialize profile pictures', error);
     });
     return () => { cancelled = true; };
   }, [Database.dbInitialized, Database.secureDBRef.current]);
@@ -61,15 +63,12 @@ export function useAppInitialization({
   // Load notification settings
   useEffect(() => {
     const applyNotificationSettings = () => {
-      try {
-        const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (parsed.notifications) {
-            notifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
-          }
-        }
-      } catch { }
+      const settings = readAppSettings();
+      if (settings.notifications) {
+        void notifications.setEnabled(settings.notifications.desktop).catch((error) => {
+          console.error('[App] Failed to apply notification setting', error);
+        });
+      }
     };
     applyNotificationSettings();
     return syncEncryptedStorage.subscribe(applyNotificationSettings);
@@ -104,7 +103,7 @@ export function useAppInitialization({
 
     return () => {
       window.removeEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
-      if (!isEnteringBackgroundRef.current && torNetworkManager.isSupported()) {
+      if (!isEnteringBackgroundRef.current) {
         torNetworkManager.shutdown();
       }
     };

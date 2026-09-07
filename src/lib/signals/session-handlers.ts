@@ -1,7 +1,8 @@
 import websocketClient from '../websocket/websocket';
+import type { AuthRefs } from '../types/signal-handler-types';
 
 // Handle error
-export async function handleError(data: any, message: string | undefined, auth: any): Promise<void> {
+export async function handleError(data: any, message: string | undefined, auth: AuthRefs): Promise<void> {
   const errorMsg = message || '';
   const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
   const op = typeof data?.op === 'string' ? data.op : '';
@@ -14,9 +15,9 @@ export async function handleError(data: any, message: string | undefined, auth: 
   const sessionError = errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session');
 
   if (!requestScoped && !authenticationRequired && !sessionError) {
-    try { auth.setIsSubmittingAuth?.(false); } catch { }
-    try { auth.setTokenValidationInProgress?.(false); } catch { }
-    try { auth.setAuthStatus?.(''); } catch { }
+    auth.setIsSubmittingAuth(false);
+    auth.setTokenValidationInProgress(false);
+    auth.setAuthStatus('');
   }
 
   if (sessionError) {

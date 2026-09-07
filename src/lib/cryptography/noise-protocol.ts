@@ -38,7 +38,7 @@ const MAX_HANDSHAKE_REPLAY_ENTRIES = 4096;
 const acceptedInitiatorHandshakes = new Map<string, number>();
 let acceptedInitiatorHandshakeGeneration = 0;
 const NOISE_REPLAY_WINDOW_SLOTS = Number(NOISE_REPLAY_WINDOW_SIZE);
-const monotonicNow = (): number => globalThis.performance?.now?.() ?? Date.now();
+const monotonicNow = (): number => performance.now();
 const CALL_STREAM_CONTEXT_RE = /^call-(?:audio|video|telemetry|screen):[a-f0-9]{16,64}$/;
 const CALL_STREAM_KEY_SALT = new TextEncoder().encode(PROTOCOL_KEYS.NOISE_CALL_STREAM_KEY_SALT);
 const MAX_CALL_STREAM_KEYS = 128;

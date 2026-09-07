@@ -47,9 +47,8 @@ export const useBlockStatus = (
       if (requestGenerationRef.current !== generation) return;
       setIsBlocked(blocked);
       blockStatusCache.set(target, blocked);
-    } catch {
-      if (requestGenerationRef.current !== generation) return;
-      setIsBlocked(blockStatusCache.get(target) ?? false);
+    } catch (error) {
+      console.error('[Blocking] Failed to read block status:', error);
     }
   }, [load, peer]);
 

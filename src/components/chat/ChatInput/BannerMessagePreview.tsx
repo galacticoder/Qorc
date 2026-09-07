@@ -41,7 +41,7 @@ export function BannerMessagePreview({
 
   useLayoutEffect(() => {
     const host = previewRef.current;
-    if (!host || typeof ResizeObserver === 'undefined') return;
+    if (!host) return;
     const observer = new ResizeObserver(scheduleMeasure);
     observer.observe(host);
     measure();

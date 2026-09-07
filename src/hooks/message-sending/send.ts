@@ -10,6 +10,7 @@ import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 import { validateSignalBundleForPeerIdentity } from '../../lib/utils/signal-bundle-utils';
 import { OUTBOUND_RETRY_MAX_AGE_MS } from '../../lib/constants';
 import { sanitizeMessageId } from '../../lib/sanitizers';
+import type { SecureDB } from '../../lib/database/secureDB';
 
 // Build message payload
 export const buildMessagePayload = (
@@ -106,14 +107,14 @@ export const dispatchLocalEvents = (
 
 // Store unacknowledged message for retry on session reset
 export const storeUnacknowledgedMessage = async (
-  secureDBRef: React.RefObject<any> | undefined,
+  secureDBRef: React.RefObject<SecureDB | null>,
   recipientUsername: string,
   messageData: any,
   isCurrent: () => boolean
 ) => {
-  const db = secureDBRef?.current;
+  const db = secureDBRef.current;
   if (!db || !isCurrent()) throw new Error('Secure database account is not current');
-  const operationId = sanitizeMessageId(messageData?.retryId || messageData?.originalMessageId);
+  const operationId = sanitizeMessageId(messageData?.retryId);
   if (!operationId) throw new Error('Unacknowledged message operation ID is invalid');
 
   try {
@@ -136,8 +137,8 @@ export const requestBundleForRetry = async (
   recipientUsername: string,
   currentUser: string,
   lastSessionBundleReqTsRef: React.RefObject<Map<string, number>>,
-  users: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }> | undefined,
-  findUser: ((handle: string) => Promise<any>) | undefined,
+  users: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }>,
+  findUser: (handle: string) => Promise<any>,
   isCurrent: () => boolean
 ) => {
   try {
@@ -146,11 +147,6 @@ export const requestBundleForRetry = async (
     const last = lastSessionBundleReqTsRef.current.get(recipientUsername) || 0;
     if (now - last >= 3000) {
       recordSessionRequest(lastSessionBundleReqTsRef.current, recipientUsername, now);
-
-      if (!findUser) {
-        console.warn('[Send] findUser not available for bundle retry');
-        return;
-      }
 
       if (!shouldAttemptDiscovery(recipientUsername)) {
         return;

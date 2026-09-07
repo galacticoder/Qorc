@@ -3,7 +3,7 @@
  */
 
 import { withRedisClient } from '../session/redis-client.js';
-import { HAProxyConfigGenerator } from './haproxy-config-generator.js';
+import { HAProxyConfigGenerator, parseHAProxyPort } from './haproxy-config-generator.js';
 
 import { HAProxyManager } from './haproxy-manager.js';
 import { TorManager } from './tor-manager.js';
@@ -11,42 +11,34 @@ import { LBCommandListener } from './lb-command-listener.js';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
-import net from 'net';
 import { fileURLToPath } from 'url';
 import {
-  DEFAULT_HAPROXY_ADMIN_PASSWORD,
   IS_ROOT,
-  LOOPBACK_HOST,
   TEMP_DIRECTORY,
   haproxyStatsDashboardUrl,
 } from '../config/infrastructure.js';
 import { CLUSTER_SERVERS_KEY, REDIS_KEYS } from '../config/redis-keys.js';
+import { processMatchesExecutable, readProcessIdFileSnapshot } from '../utils/process-identity.js';
+import { acquireProcessLock, releaseProcessLock } from '../utils/process-lock.js';
+import { safeServiceEndpointForDisplay } from '../utils/safe-url.js';
+import { parseClusterServerRecord } from '../cluster/server-record.js';
 
-const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (IS_ROOT ? '443' : '8443'), 10);
+const DEFAULT_HTTPS_PORT = parseHAProxyPort(
+  process.env.HAPROXY_HTTPS_PORT,
+  'HAPROXY_HTTPS_PORT'
+);
 const SERVER_ACTIVE_TIMEOUT_MS = Math.min(
   Math.max(parseInt(process.env.LB_SERVER_ACTIVE_TIMEOUT_MS || '45000', 10) || 45000, 10000),
   300000
 );
 
-const LOADBALANCER_LOCK_FILE = process.env.LOADBALANCER_LOCK_FILE ||
-  (IS_ROOT && process.platform !== 'win32' ? '/var/run/auto-loadbalancer.pid' : path.join(TEMP_DIRECTORY, 'auto-loadbalancer.pid'));
-const MIN_SERVERS_FOR_LB = 1;
-
-function isPortFree(port, host) {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.unref();
-    server.on('error', () => resolve(false));
-    server.listen({ port, host }, () => {
-      server.close(() => resolve(true));
-    });
-  });
-}
-
+const LOADBALANCER_LOCK_FILE = path.resolve(
+  IS_ROOT ? '/var/run/auto-loadbalancer.pid' : path.join(TEMP_DIRECTORY, 'auto-loadbalancer.pid')
+);
+const LOADBALANCER_ENTRY_PATH = fileURLToPath(import.meta.url);
 class AutoLoadBalancer {
   constructor() {
     this.listenPort = DEFAULT_HTTPS_PORT;
-    this.lastServerCount = 0;
     this.lastServerHash = '';
     this.monitorInterval = null;
     this.isStopping = false;
@@ -65,12 +57,8 @@ class AutoLoadBalancer {
   async handleCommand(cmd) {
     if (cmd.cmd === 'reload') {
       console.log('\n[COMMAND] Reloading HAProxy (requested from TUI)...');
-      const success = await this.haproxyManager.reload();
-      if (success) {
-        console.log('[COMMAND] HAProxy reloaded successfully\n');
-      } else {
-        console.error('[COMMAND] HAProxy reload failed\n');
-      }
+      await this.haproxyManager.reload();
+      console.log('[COMMAND] HAProxy reloaded successfully\n');
     } else {
       console.log(`[COMMAND] Unknown command: ${cmd.cmd}`);
     }
@@ -84,22 +72,14 @@ class AutoLoadBalancer {
       const activeServers = [];
 
       for (const [serverId, data] of Object.entries(servers)) {
-        try {
-          const serverInfo = JSON.parse(data);
-          const lastHeartbeat = serverInfo.lastHeartbeat || 0;
-          const age = now - lastHeartbeat;
-
-          if (age < SERVER_ACTIVE_TIMEOUT_MS) {
-            activeServers.push({
-              serverId,
-              host: serverInfo.host || LOOPBACK_HOST,
-              port: serverInfo.port || 8443,
-              lastHeartbeat,
-              ...serverInfo
-            });
-          }
-        } catch (err) {
-          console.error('[AUTO-LB] Failed to parse server data', { serverId, error: err.message });
+        const serverInfo = parseClusterServerRecord(data, serverId, now);
+        if (!serverInfo) {
+          console.warn('[AUTO-LB] Ignoring invalid cluster server record', { serverId });
+          continue;
+        }
+        const age = now - serverInfo.lastHeartbeat;
+        if (age >= -30_000 && age < SERVER_ACTIVE_TIMEOUT_MS) {
+          activeServers.push(serverInfo);
         }
       }
 
@@ -107,68 +87,24 @@ class AutoLoadBalancer {
     });
   }
 
-  // Find an available HTTPS listen port
-  async resolveListenPort(servers, currentPort = null) {
-    const backendPorts = new Set();
-    for (const s of servers || []) {
-      const p = Number(s.port) || 0;
-      if (p > 0 && p < 65536) backendPorts.add(p);
-    }
-
-    let candidate = DEFAULT_HTTPS_PORT;
-    for (let i = 0; i < 20; i += 1) {
-      const port = candidate + i;
-      if (backendPorts.has(port)) continue;
-
-      // If is current port and HAProxy is running then keep it
-      if (currentPort && port === currentPort && this.haproxyManager.isRunning) {
-        return port;
-      }
-
-      const free = await isPortFree(port, '0.0.0.0');
-      if (free) return port;
-    }
-    return currentPort || candidate;
-  }
-
-  // Find an available stats port
-  async resolveStatsPort(currentPort = null) {
-    const defaultStats = parseInt(process.env.HAPROXY_STATS_PORT || '8404', 10);
-
-    // If we have a current port and HAProxy is running then stay
-    if (currentPort && this.haproxyManager.isRunning) {
-      return currentPort;
-    }
-
-    for (let i = 0; i < 20; i += 1) {
-      const port = defaultStats + i;
-      if (await isPortFree(port, LOOPBACK_HOST)) return port;
-    }
-    return currentPort || defaultStats;
-  }
-
   // Generate HAProxy configuration
   async generateHAProxyConfig(servers) {
-    const listenPort = await this.resolveListenPort(servers, this.listenPort);
-    this.listenPort = listenPort;
-
-    const statsPort = await this.resolveStatsPort(this.statsPort);
+    const listenPort = this.listenPort;
+    const statsPort = parseHAProxyPort(process.env.HAPROXY_STATS_PORT, 'HAPROXY_STATS_PORT');
     this.statsPort = statsPort;
 
     const generator = new HAProxyConfigGenerator({
       listenPort,
       statsPort: statsPort,
-      tlsCertPath: process.env.HAPROXY_CERT_PATH || '/etc/haproxy/certs',
-      statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
-      statsPassword: process.env.HAPROXY_STATS_PASSWORD || DEFAULT_HAPROXY_ADMIN_PASSWORD,
+      tlsCertPath: path.join(this.serverDir, 'config', 'certs'),
+      statsUsername: process.env.HAPROXY_STATS_USERNAME,
+      statsPassword: process.env.HAPROXY_STATS_PASSWORD,
+      statsBindAddress: process.env.HAPROXY_STATS_BIND_ADDRESS,
     });
 
-    try {
-      await withRedisClient(async (client) => {
-        await client.set(REDIS_KEYS.LB_HTTPS_PORT, String(listenPort));
-      });
-    } catch {
-    }
+    await withRedisClient(async (client) => {
+      await client.set(REDIS_KEYS.LB_HTTPS_PORT, String(listenPort));
+    });
 
     for (const server of servers) {
       generator.addBackend({
@@ -178,11 +114,6 @@ class AutoLoadBalancer {
         weight: 100,
         maxconn: 10000,
       });
-    }
-
-    if (generator.backends.length === 0 && servers.length > 0) {
-      console.log(`\n[WARNING] No valid backends found - all servers have invalid ports`);
-      return null;
     }
 
     if (generator.backends.length === 0) {
@@ -205,117 +136,71 @@ class AutoLoadBalancer {
 
   // Monitor cluster and manage load balancer
   async monitor() {
-    try {
-      const servers = await this.getActiveServers();
-      const serverCount = servers.length;
-      const serverHash = this.generateServerHash(servers);
+    const servers = await this.getActiveServers();
+    const serverCount = servers.length;
+    const serverHash = this.generateServerHash(servers);
+    const serversChanged = serverHash !== this.lastServerHash;
 
-      const serversChanged = serverHash !== this.lastServerHash;
-
-      if (serversChanged) {
-        console.log(`\n[SERVER CHANGE] ${serverCount} server(s) detected`);
-        servers.forEach(s => {
-          const portStatus = (!s.port || s.port === 0 || s.port === '0') ? ' [INVALID PORT - will be skipped]' : '';
-          console.log(`\t${s.serverId}`);
-          console.log(`\t${s.host}:${s.port}${portStatus}`);
-        });
-
-        const onionAddr = await this.torManager.getOnionAddress();
-        if (onionAddr) {
-          console.log(`\tOnion URL:  https://${onionAddr}`);
-        }
-
-        this.lastServerCount = serverCount;
-        this.lastServerHash = serverHash;
-      }
-
-      if (serverCount >= MIN_SERVERS_FOR_LB) {
-        if (serversChanged) {
-          const config = await this.generateHAProxyConfig(servers);
-
-          if (config) {
-            if (!this.haproxyManager.isRunning) {
-              await this.haproxyManager.start();
-            } else {
-              await this.haproxyManager.reload();
-            }
-          } else if (this.haproxyManager.isRunning) {
-            console.log(`\n[WARNING] All backends invalid - keeping existing HAProxy config`);
-          }
-        } else if (!this.haproxyManager.isRunning) {
-          const config = await this.generateHAProxyConfig(servers);
-          if (config) {
-            await this.haproxyManager.start();
-          }
-        }
-      } else if (serverCount === 0) {
-        if (serversChanged) {
-          const config = await this.generateHAProxyConfig([]);
-          if (config) {
-            if (!this.haproxyManager.isRunning) {
-              await this.haproxyManager.start();
-            } else {
-              await this.haproxyManager.reload();
-            }
-          }
-        } else if (!this.haproxyManager.isRunning) {
-          const config = await this.generateHAProxyConfig([]);
-          if (config) {
-            await this.haproxyManager.start();
-          }
-        }
-        this.lastServerHash = '';
-      }
-
-      await this.torManager.monitor(this.listenPort);
-
-      const onionAddr = await this.torManager.getOnionAddress();
-      await withRedisClient(async (client) => {
-        if (onionAddr && this.torManager.isPublished()) {
-          await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`);
-        } else {
-          await client.del(REDIS_KEYS.LB_ONION_ADDRESS);
-        }
+    if (serversChanged) {
+      console.log(`\n[SERVER CHANGE] ${serverCount} server(s) detected`);
+      servers.forEach(s => {
+        console.log(`\t${s.serverId}`);
+        console.log(`\t${s.host}:${s.port}`);
       });
 
-    } catch (error) {
-      console.error('[AUTO-LB] Monitor cycle failed', error);
+      const onionAddr = await this.torManager.getOnionAddress();
+      if (onionAddr) {
+        console.log(`\tOnion URL:  https://${onionAddr}`);
+      }
     }
+
+    if (serversChanged || !this.haproxyManager.isRunning) {
+      await this.generateHAProxyConfig(servers);
+      if (this.haproxyManager.isRunning) {
+        await this.haproxyManager.reload();
+      } else {
+        await this.haproxyManager.start();
+      }
+      this.lastServerHash = serverHash;
+    }
+
+    await this.torManager.monitor(this.listenPort);
+
+    const onionAddr = await this.torManager.getOnionAddress();
+    await withRedisClient(async (client) => {
+      if (onionAddr && this.torManager.isPublished()) {
+        await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`);
+      } else {
+        await client.del(REDIS_KEYS.LB_ONION_ADDRESS);
+      }
+    });
   }
 
   async acquireLock() {
     try {
-      if (existsSync(LOADBALANCER_LOCK_FILE)) {
-        const existingPid = parseInt(await fs.readFile(LOADBALANCER_LOCK_FILE, 'utf8'), 10);
+      const lock = await acquireProcessLock(LOADBALANCER_LOCK_FILE, LOADBALANCER_ENTRY_PATH);
+      if (!lock.acquired) {
+        const existingPid = lock.pid;
+        console.log(`\n[INFO] Auto Load Balancer already running (PID: ${existingPid})`);
 
-        try {
-          process.kill(existingPid, 0);
-
-          console.log(`\n[INFO] Auto Load Balancer already running (PID: ${existingPid})`);
-
-          if (this.haproxyManager.pidFile && existsSync(this.haproxyManager.pidFile)) {
-            const haproxyPid = parseInt(await fs.readFile(this.haproxyManager.pidFile, 'utf8'), 10);
-            const servers = await this.getActiveServers();
-            await this.haproxyManager.displayStatus(haproxyPid, servers);
-          } else {
-            console.log(`\tStats Dashboard: ${haproxyStatsDashboardUrl()}`);
-          }
-
-          const onionAddr = await this.torManager.getOnionAddress();
-          if (onionAddr) {
-            console.log(`\tOnion URL:  https://${onionAddr}`);
-          }
-          console.log();
-
-          console.log(`[INFO] To stop the load balancer, run: kill ${existingPid}\n`);
-          process.exit(0);
-        } catch {
-          console.log(`[CLEANUP] Removing stale lock file for PID ${existingPid}`);
-          await fs.unlink(LOADBALANCER_LOCK_FILE);
+        if (this.haproxyManager.pidFile && existsSync(this.haproxyManager.pidFile)) {
+          const snapshot = await readProcessIdFileSnapshot(this.haproxyManager.pidFile);
+          const haproxyPid = snapshot?.pid && await processMatchesExecutable(
+            snapshot.pid,
+            this.haproxyManager.haproxyBin
+          ) ? snapshot.pid : null;
+          const servers = await this.getActiveServers();
+          if (haproxyPid) await this.haproxyManager.displayStatus(haproxyPid, servers);
+        } else {
+          console.log(`\tStats Dashboard: ${haproxyStatsDashboardUrl()}`);
         }
-      }
 
-      await fs.writeFile(LOADBALANCER_LOCK_FILE, process.pid.toString(), { mode: 0o600 });
+        const onionAddr = await this.torManager.getOnionAddress();
+        if (onionAddr) console.log(`\tOnion URL:  https://${onionAddr}`);
+        console.log();
+        console.log(`[INFO] To stop the load balancer, run: kill ${existingPid}\n`);
+        process.exit(0);
+      }
       console.log('[AUTO-LB] Acquired process lock', { pid: process.pid, lockFile: LOADBALANCER_LOCK_FILE });
       return true;
     } catch (error) {
@@ -326,13 +211,8 @@ class AutoLoadBalancer {
 
   async releaseLock() {
     try {
-      if (existsSync(LOADBALANCER_LOCK_FILE)) {
-        const lockPid = parseInt(await fs.readFile(LOADBALANCER_LOCK_FILE, 'utf8'), 10);
-
-        if (lockPid === process.pid) {
-          await fs.unlink(LOADBALANCER_LOCK_FILE);
-          console.log('[AUTO-LB] Released process lock', { pid: process.pid });
-        }
+      if (await releaseProcessLock(LOADBALANCER_LOCK_FILE)) {
+        console.log('[AUTO-LB] Released process lock', { pid: process.pid });
       }
     } catch (error) {
       console.error('[AUTO-LB] Failed to release lock', error);
@@ -347,8 +227,7 @@ class AutoLoadBalancer {
     console.log('[STARTING] Load balancer monitor');
     console.log(`\tPID: ${process.pid}`);
     console.log(`\tLock file: ${LOADBALANCER_LOCK_FILE}`);
-    console.log(`\tRedis: ${process.env.REDIS_URL || 'redis://127.0.0.1:6379'}`);
-    console.log(`\tMin servers: ${MIN_SERVERS_FOR_LB}`);
+    console.log(`\tRedis: ${safeServiceEndpointForDisplay(process.env.REDIS_URL)}`);
 
     const noGui = (process.env.NO_GUI || 'false').toLowerCase() === 'true';
     if (!noGui) {
@@ -358,12 +237,17 @@ class AutoLoadBalancer {
     }
 
     await this.monitor();
-    const torStarted = await this.torManager.start(this.listenPort);
-    if (!torStarted) {
-      throw new Error('Authenticated Tor hidden service failed to publish its descriptor');
-    }
+    await this.torManager.start(this.listenPort);
 
-    this.monitorInterval = setInterval(() => this.monitor(), 1000);
+    this.monitorInterval = setInterval(() => {
+      this.monitor().catch((error) => {
+        console.error('[AUTO-LB] Monitor cycle failed', error);
+        this.stop(1).catch((shutdownError) => {
+          console.error('[AUTO-LB] Fatal shutdown failed', shutdownError);
+          process.exit(1);
+        });
+      });
+    }, 1000);
 
     const handleShutdown = (signal) => {
       if (this.isStopping) {
@@ -384,7 +268,7 @@ class AutoLoadBalancer {
     });
   }
 
-  async stop() {
+  async stop(exitCode = 0) {
     if (this.isStopping) {
       return;
     }
@@ -415,7 +299,7 @@ class AutoLoadBalancer {
     await this.releaseLock();
     console.log('\t[OK] Released process lock\n');
 
-    process.exit(0);
+    process.exit(exitCode);
   }
 }
 

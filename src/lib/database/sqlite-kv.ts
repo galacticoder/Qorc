@@ -18,11 +18,16 @@ export class SQLiteKV {
   }
 
   static accountNamespace(value: string): string {
-    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-    if (!normalized || normalized.length > 120 || /[^a-z0-9._-]/.test(normalized)) {
+    if (
+      typeof value !== 'string' ||
+      value !== value.trim().toLowerCase() ||
+      !value ||
+      value.length > 120 ||
+      /[^a-z0-9._-]/.test(value)
+    ) {
       throw new Error('Invalid database owner');
     }
-    const input = new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.DATABASE_OWNER}\0${normalized}`);
+    const input = new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.DATABASE_OWNER}\0${value}`);
     const digest = blake3(input, { dkLen: 32 });
     try {
       return bytesToHex(digest);

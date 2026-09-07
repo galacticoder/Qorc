@@ -2,8 +2,7 @@ import { useMemo } from "react";
 import { Cross2Icon } from "../assets/icons";
 import { Message } from "../messaging/types";
 import { SignalType } from '@/lib/types/signal-types';
-import { AUDIO_EXTENSIONS } from '@/lib/constants';
-import { hasExtension } from '@/lib/utils/file-utils';
+import { parseCurrentVoiceNoteFilename } from '@/lib/utils/file-utils';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { MaterialFileIcon } from '../../ui/MaterialFileIcon';
 import { BannerMessagePreview } from './BannerMessagePreview';
@@ -15,11 +14,8 @@ interface ReplyBannerProps {
 }
 
 const isVoiceNote = (message: Message): boolean => {
-  return Boolean(
-    (message.filename && message.filename.toLowerCase().includes('voice-note')) ||
-    (message.mimeType && message.mimeType.startsWith('audio/')) ||
-    (message.filename && hasExtension(message.filename, AUDIO_EXTENSIONS))
-  );
+  const metadata = parseCurrentVoiceNoteFilename(message.filename);
+  return metadata !== null && metadata.mimeType === message.mimeType;
 };
 
 export function ReplyBanner({ replyTo, onCancelReply, displaySender }: ReplyBannerProps) {

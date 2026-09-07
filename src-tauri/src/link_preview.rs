@@ -47,24 +47,9 @@ pub struct NativeLinkPreview {
     pub url: String,
     pub display_url: String,
     pub host: String,
-    pub metadata_fetched: bool,
     pub title: Option<String>,
     pub description: Option<String>,
     pub image_data_url: Option<String>,
-}
-
-impl From<NativeMessageLinkTarget> for NativeLinkPreview {
-    fn from(target: NativeMessageLinkTarget) -> Self {
-        Self {
-            url: target.url,
-            display_url: target.display_url,
-            host: target.host,
-            metadata_fetched: false,
-            title: None,
-            description: None,
-            image_data_url: None,
-        }
-    }
 }
 
 fn valid_fetch_url(url: &Url) -> bool {
@@ -289,29 +274,28 @@ async fn fetch_image(client: &reqwest::Client, page_url: &Url, value: &str) -> O
 pub async fn fetch_link_preview(
     target: NativeMessageLinkTarget,
     socks_port: u16,
-) -> NativeLinkPreview {
-    let mut preview = NativeLinkPreview::from(target);
-    let Ok(page_url) = Url::parse(&preview.url) else {
+) -> Result<NativeLinkPreview, ()> {
+    let Ok(page_url) = Url::parse(&target.url) else {
         tracing::warn!(stage = "parse", "[LINK-PREVIEW] metadata transport failed");
-        return preview;
+        return Err(());
     };
     if !valid_fetch_url(&page_url) {
         tracing::warn!(stage = "policy", "[LINK-PREVIEW] metadata transport failed");
-        return preview;
+        return Err(());
     }
     let Ok(proxy) = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{socks_port}")) else {
         tracing::warn!(
             stage = "proxy-config",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     };
     let Ok(tls_config) = PUBLIC_WEB_TLS_CONFIG.as_ref() else {
         tracing::warn!(
             stage = "tls-config",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     };
     let Ok(client) = reqwest::Client::builder()
         .proxy(proxy.basic_auth(PREVIEW_ISOLATION_USER.as_str(), "isolate"))
@@ -327,7 +311,7 @@ pub async fn fetch_link_preview(
             stage = "client-build",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     };
     let Ok((mut response, resolved_url)) = get_with_redirects(
         &client,
@@ -340,7 +324,7 @@ pub async fn fetch_link_preview(
             stage = "page-request",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     };
     if response
         .headers()
@@ -356,19 +340,18 @@ pub async fn fetch_link_preview(
             stage = "content-type",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     }
     let Ok(body) = read_capped_html_prefix(&mut response, MAX_HTML_BYTES).await else {
         tracing::warn!(
             stage = "html-read",
             "[LINK-PREVIEW] metadata transport failed"
         );
-        return preview;
+        return Err(());
     };
-    preview.metadata_fetched = true;
     let html = String::from_utf8_lossy(&body);
     let metadata = metadata_values(&html);
-    preview.title = find_metadata(&metadata, &["og:title", "twitter:title"])
+    let title = find_metadata(&metadata, &["og:title", "twitter:title"])
         .and_then(|value| clean_text(value, 120))
         .or_else(|| {
             TITLE_RE
@@ -376,25 +359,33 @@ pub async fn fetch_link_preview(
                 .and_then(|captures| captures.get(1))
                 .and_then(|value| clean_text(value.as_str(), 120))
         });
-    preview.description = find_metadata(
+    let description = find_metadata(
         &metadata,
         &["og:description", "twitter:description", "description"],
     )
     .and_then(|value| clean_text(value, 240));
+    let mut image_data_url = None;
     if let Some(image) = find_metadata(
         &metadata,
         &["og:image:secure_url", "og:image", "twitter:image"],
     ) {
-        if let Ok(image_data_url) = tokio::time::timeout(
+        if let Ok(fetched_image_data_url) = tokio::time::timeout(
             Duration::from_secs(5),
             fetch_image(&client, &resolved_url, image),
         )
         .await
         {
-            preview.image_data_url = image_data_url;
+            image_data_url = fetched_image_data_url;
         }
     }
-    preview
+    Ok(NativeLinkPreview {
+        url: target.url,
+        display_url: target.display_url,
+        host: target.host,
+        title,
+        description,
+        image_data_url,
+    })
 }
 
 #[cfg(test)]

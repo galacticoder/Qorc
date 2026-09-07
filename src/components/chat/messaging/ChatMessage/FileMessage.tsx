@@ -8,23 +8,25 @@ import {
   formatFileSize,
   hasExtension,
   isSafeFileUrl,
+  parseCurrentVoiceNoteFilename,
 } from "../../../../lib/utils/file-utils";
 import { AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS } from "../../../../lib/constants";
 import type { Message } from "../types";
 import { MaterialFileIcon } from "../../../ui/MaterialFileIcon";
+import type { SecureDB } from '../../../../lib/database/secureDB';
 
 interface FileContentProps {
   readonly message: Message;
-  readonly secureDB?: any;
-  readonly onRendered?: () => void;
-  readonly loadFile?: boolean;
+  readonly secureDB: SecureDB;
+  readonly onRendered: () => void;
+  readonly loadFile: boolean;
 }
 
 export const FileContent: React.FC<FileContentProps> = ({
   message,
   secureDB,
   onRendered,
-  loadFile = true,
+  loadFile,
 }) => {
   const { filename, fileSize, mimeType } = message;
   const [imageError, setImageError] = React.useState(false);
@@ -39,7 +41,7 @@ export const FileContent: React.FC<FileContentProps> = ({
   onRenderedRef.current = onRendered;
 
   const normalizedMimeType = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
-  const isVoiceNote = filename?.includes('voice-note') === true;
+  const isVoiceNote = parseCurrentVoiceNoteFilename(filename) !== null;
   const imageByExtension = hasExtension(filename || "", IMAGE_EXTENSIONS);
   const audioByExtension = hasExtension(filename || "", AUDIO_EXTENSIONS) && !isVoiceNote;
   const videoByExtension = hasExtension(filename || "", VIDEO_EXTENSIONS);
@@ -62,7 +64,7 @@ export const FileContent: React.FC<FileContentProps> = ({
   const isGenericFile = !isImageFile && !isVideoFile && !isAudioFile;
 
   useEffect(() => {
-    onRenderedRef.current?.();
+    onRenderedRef.current();
   }, [message.id]);
 
   const previewKind = mediaRequested && !downloadRequested
@@ -76,7 +78,7 @@ export const FileContent: React.FC<FileContentProps> = ({
     : undefined;
 
   const { url: resolvedFileUrl, error: fileLoadError } = useFileUrl({
-    secureDB: secureDB || null,
+    secureDB,
     fileId: message.id,
     mimeType: mimeType || 'application/octet-stream',
     enabled: loadFile && (mediaRequested || downloadRequested),

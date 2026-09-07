@@ -2,11 +2,10 @@
 export interface TorSetupStatus {
   isConfigured: boolean;
   isRunning: boolean;
-  isBootstrapped?: boolean;
-  bootstrapProgress?: number;
-  version?: string;
-  socksPort?: number;
-  controlPort?: number;
+  isBootstrapped: boolean;
+  bootstrapProgress: number;
+  socksPort: number;
+  controlPort: number;
   error?: string;
   setupProgress: number;
   currentStep: string;
@@ -41,6 +40,6 @@ export interface TorConnectionStats {
   averageLatency: number;
   lastHealthCheck: number;
   circuitHealth: TorCircuitHealth;
-  isBootstrapped?: boolean;
-  bootstrapProgress?: number;
+  isBootstrapped: boolean;
+  bootstrapProgress: number;
 }

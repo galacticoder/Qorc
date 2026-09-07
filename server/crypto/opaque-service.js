@@ -8,21 +8,17 @@ import { randomBytes } from '@noble/hashes/utils.js';
 import crypto from 'node:crypto';
 import { deriveAuthRootKey } from './auth-root.js';
 import {
-    encryptPrivateAuthOtRecords,
     verifyAuthProofAcrossAnonymitySet,
 } from './auth-crypto-worker-service.js';
 import { throwIfAuthConnectionClosed } from '../authentication/auth-utils.js';
 import { decodeCanonicalBase64, UTF8_ENCODER } from '../utils/encoding.js';
 import {
     ML_DSA_87_PUBLIC_KEY_BYTES as ML_DSA_PUBLIC_KEY_BYTES,
-    ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_BYTES,
-    ML_KEM_1024_CIPHERTEXT_BYTES as ML_KEM_CIPHERTEXT_BYTES,
-    ML_KEM_1024_PUBLIC_KEY_BYTES as ML_KEM_PUBLIC_KEY_BYTES
+    ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_BYTES
 } from '../../shared/crypto-sizes.js';
 import {
     OPAQUE_AUTH_SIGNATURE_CONTEXT,
-    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-    PRIVATE_AUTH_OT_RECORD_BYTES
+    PRIVATE_AUTH_ANONYMITY_SET_SIZE
 } from '../../shared/private-auth-protocol.js';
 
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
@@ -63,7 +59,6 @@ function verifyMlDsaSignature(signature, message, publicKey) {
 // OPAQUE configuration
 const OPAQUE_CONFIG = {
     PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-    OT_RECORD_PADDED_BYTES: PRIVATE_AUTH_OT_RECORD_BYTES,
     REGISTRATION_RECORD_MAX_BYTES: 4096,
 };
 
@@ -162,7 +157,12 @@ export class OPAQUEServer {
     }
 
     static #parseStoredRecord(record) {
-        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        if (
+            !record ||
+            typeof record !== 'object' ||
+            Array.isArray(record) ||
+            Object.getPrototypeOf(record) !== Object.prototype
+        ) {
             throw new Error('Invalid private-auth record');
         }
         const keys = Object.keys(record).sort();
@@ -204,7 +204,12 @@ export class OPAQUEServer {
             await this.initialize();
         }
 
-        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        if (
+            !record ||
+            typeof record !== 'object' ||
+            Array.isArray(record) ||
+            Object.getPrototypeOf(record) !== Object.prototype
+        ) {
             throw new Error('Invalid server-entry authentication record');
         }
         const keys = Object.keys(record).sort();
@@ -423,104 +428,6 @@ export class OPAQUEServer {
         return OPAQUE_CONFIG.REGISTRATION_RECORD_MAX_BYTES;
     }
 
-    /**
-     * Oblivious Transfer
-     */
-    static async encryptAnonymitySetForOT(records, clientPubKeys, signal) {
-        const anonymitySetSize = this.getAnonymitySetSize();
-        if (
-            !Array.isArray(clientPubKeys) ||
-            clientPubKeys.length !== anonymitySetSize ||
-            clientPubKeys.some((key) => !(key instanceof Uint8Array) || key.length !== ML_KEM_PUBLIC_KEY_BYTES)
-        ) {
-            throw new Error('Invalid private-auth KEM public-key set');
-        }
-
-        const sourceRecords = Array.isArray(records) ? records : [];
-        if (sourceRecords.length > anonymitySetSize) {
-            throw new Error('Private authentication record set is too large');
-        }
-
-        let publicKeySlab = new Uint8Array(anonymitySetSize * ML_KEM_PUBLIC_KEY_BYTES);
-        let paddedRecordSlab = new Uint8Array(anonymitySetSize * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES);
-        let ciphertexts = null;
-        let maskedRecords = null;
-        try {
-            for (let slot = 0; slot < anonymitySetSize; slot += 1) {
-                throwIfAuthOperationAborted(signal);
-                publicKeySlab.set(clientPubKeys[slot], slot * ML_KEM_PUBLIC_KEY_BYTES);
-            }
-            crypto.randomFillSync(paddedRecordSlab);
-
-            const seenSlots = new Uint8Array(anonymitySetSize);
-            const paddedView = new DataView(paddedRecordSlab.buffer);
-            for (const row of sourceRecords) {
-                throwIfAuthOperationAborted(signal);
-                const slot = Number(row?.credential_index);
-                if (!Number.isInteger(slot) || slot < 0 || slot >= anonymitySetSize || seenSlots[slot] !== 0) {
-                    throw new Error('Invalid private-auth slot in database');
-                }
-                seenSlots[slot] = 1;
-                if (
-                    typeof row.opaqueRecord !== 'string' ||
-                    Buffer.byteLength(row.opaqueRecord, 'utf8') > this.getRegistrationRecordMaxBytes()
-                ) {
-                    throw new Error('Invalid private-auth record in database');
-                }
-
-                let rawRecord;
-                try {
-                    rawRecord = JSON.parse(row.opaqueRecord);
-                } catch {
-                    throw new Error('Invalid private-auth record in database');
-                }
-                const parsed = this.#parseStoredRecord(rawRecord);
-                let clientRecord = null;
-                try {
-                    clientRecord = Buffer.from(JSON.stringify({
-                        envelope: Buffer.from(parsed.envelope).toString('base64'),
-                        salt: Buffer.from(parsed.salt).toString('base64')
-                    }), 'utf8');
-                    if (clientRecord.length + 4 > OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES) {
-                        throw new Error('OPAQUE record exceeds padded transfer size');
-                    }
-                    const offset = slot * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
-                    paddedView.setUint32(offset, clientRecord.length, false);
-                    paddedRecordSlab.set(clientRecord, offset + 4);
-                } finally {
-                    clientRecord?.fill(0);
-                    parsed.envelope.fill(0);
-                    parsed.authPublicKey.fill(0);
-                    parsed.salt.fill(0);
-                }
-            }
-
-            const encryption = encryptPrivateAuthOtRecords(publicKeySlab, paddedRecordSlab, signal);
-            publicKeySlab = null;
-            paddedRecordSlab = null;
-            ({ ciphertexts, maskedRecords } = await encryption);
-
-            const encrypted = new Array(anonymitySetSize);
-            for (let slot = 0; slot < anonymitySetSize; slot += 1) {
-                const ciphertextOffset = slot * ML_KEM_CIPHERTEXT_BYTES;
-                const recordOffset = slot * OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
-                encrypted[slot] = {
-                    ct: Buffer.from(ciphertexts.buffer, ciphertextOffset, ML_KEM_CIPHERTEXT_BYTES).toString('base64'),
-                    masked: Buffer.from(
-                        maskedRecords.buffer,
-                        recordOffset,
-                        OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES
-                    ).toString('base64')
-                };
-            }
-            return encrypted;
-        } finally {
-            publicKeySlab?.fill(0);
-            paddedRecordSlab?.fill(0);
-            ciphertexts?.fill(0);
-            maskedRecords?.fill(0);
-        }
-    }
 }
 
 /**

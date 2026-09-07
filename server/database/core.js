@@ -2,14 +2,15 @@
  * Database Connection Pool and Utilities
  */
 
-import fs from 'fs';
 import crypto from 'crypto';
+import path from 'node:path';
 
 import { deriveAuthRootKey } from '../crypto/auth-root.js';
 import { envInt } from '../utils/env.js';
 import { SHA_512_ALGORITHM } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { recordStorageOperation } from '../telemetry/server-telemetry.js';
+import { readSecureTlsFile } from '../utils/secure-file.js';
 
 const ROUTING_IDENTIFIER_KEY = deriveAuthRootKey(PROTOCOL_KEYS.ROUTING_IDENTIFIER_ROOT);
 let routingIdentifierKeyDestroyed = false;
@@ -88,60 +89,37 @@ function buildPgSslConfig(serverName) {
   };
 
   const caPath = process.env.PGSSLROOTCERT;
-  if (caPath) {
-    try {
-      ssl.ca = fs.readFileSync(caPath, 'utf8');
-    } catch (e) {
-      throw new Error(`Failed to read Postgres CA certificate at ${caPath}: ${e?.message}`);
-    }
-  } else if (process.env.DATABASE_CA_CERT) {
-    ssl.ca = process.env.DATABASE_CA_CERT;
-  } else {
-    throw new Error('PGSSLROOTCERT or DATABASE_CA_CERT is required');
+  requiredDatabaseValue(caPath, 'PGSSLROOTCERT');
+  try {
+    ssl.ca = readSecureTlsFile(path.resolve(caPath));
+  } catch (e) {
+    throw new Error(`Failed to read Postgres CA certificate at ${caPath}: ${e?.message}`);
   }
   return ssl;
 }
 
 function databaseConnectionConfig() {
-  let host;
-  let port;
-  let user;
-  let password;
-  let database;
-  let certificateName;
-
-  if (typeof process.env.DATABASE_URL === 'string' && process.env.DATABASE_URL.length > 0) {
-    let url;
-    try {
-      url = new URL(process.env.DATABASE_URL);
-    } catch {
-      throw new Error('DATABASE_URL is invalid');
-    }
-    if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
-      throw new Error('DATABASE_URL must use postgres:// or postgresql://');
-    }
-    host = process.env.DB_CONNECT_HOST || url.hostname;
-    port = url.port || '5432';
-    user = decodeURIComponent(url.username);
-    password = decodeURIComponent(url.password);
-    database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-    certificateName = process.env.DB_TLS_SERVERNAME || url.hostname;
-  } else {
-    host = process.env.DB_CONNECT_HOST || process.env.PGHOST || process.env.DB_HOST;
-    port = process.env.PGPORT || process.env.DB_PORT;
-    user = process.env.PGUSER || process.env.DATABASE_USER;
-    password = process.env.PGPASSWORD || process.env.DATABASE_PASSWORD;
-    database = process.env.PGDATABASE || process.env.DB_NAME;
-    certificateName = process.env.DB_TLS_SERVERNAME || process.env.PGHOST || process.env.DB_HOST;
+  const rawUrl = requiredDatabaseValue(process.env.DATABASE_URL, 'DATABASE_URL');
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('DATABASE_URL is invalid');
+  }
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    throw new Error('DATABASE_URL must use postgres:// or postgresql://');
   }
 
-  requiredDatabaseValue(host, 'PGHOST/DB_HOST');
-  requiredDatabaseValue(user, 'PGUSER/DATABASE_USER');
-  requiredDatabaseValue(password, 'PGPASSWORD/DATABASE_PASSWORD');
-  requiredDatabaseValue(database, 'PGDATABASE/DB_NAME');
-  const parsedPort = Number(port);
+  const host = requiredDatabaseValue(url.hostname, 'DATABASE_URL host');
+  const user = requiredDatabaseValue(decodeURIComponent(url.username), 'DATABASE_URL user');
+  const password = requiredDatabaseValue(decodeURIComponent(url.password), 'DATABASE_URL password');
+  const database = requiredDatabaseValue(
+    decodeURIComponent(url.pathname.replace(/^\//, '')),
+    'DATABASE_URL database'
+  );
+  const parsedPort = Number(requiredDatabaseValue(url.port, 'DATABASE_URL port'));
   if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
-    throw new Error('PGPORT/DB_PORT must be an integer from 1 through 65535');
+    throw new Error('DATABASE_URL port must be an integer from 1 through 65535');
   }
 
   const statementTimeoutMs = envInt('PG_STATEMENT_TIMEOUT_MS', 15_000, 1_000, 30_000);
@@ -158,7 +136,7 @@ function databaseConnectionConfig() {
     user,
     password,
     database,
-    ssl: buildPgSslConfig(certificateName),
+    ssl: buildPgSslConfig(process.env.DB_TLS_SERVERNAME),
     max: envInt('PG_POOL_MAX', 20, 2, 100),
     idleTimeoutMillis: envInt('PG_IDLE_TIMEOUT_MS', 30_000, 10_000, 10 * 60_000),
     connectionTimeoutMillis: envInt('PG_CONNECTION_TIMEOUT_MS', 10_000, 1_000, 30_000),
@@ -180,7 +158,7 @@ export async function getPgPool() {
 
   const initialization = (async () => {
     const { default: pg } = await import('pg');
-    const Pool = pg.Pool || pg.default?.Pool;
+    const Pool = pg.Pool;
     if (!Pool) throw new Error('pg.Pool not found');
 
     const config = databaseConnectionConfig();

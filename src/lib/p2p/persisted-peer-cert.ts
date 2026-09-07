@@ -7,8 +7,11 @@ import { getCurrentLocalAccountScope } from '../security/local-account-scope';
 import { canonicalAuthUsername } from '../sanitizers';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 const MAX_PERSISTED_CERT_CHARS = 64 * 1024;
+const PERSISTED_RECORD_KEYS = ['cert', 'endpoint', 'protocol'];
+const PERSISTED_ENDPOINT_KEYS = new Set(['announcedAt', 'endpointUrl', 'signerPublicKeyBase64']);
 
 export interface PersistedPeerEndpoint {
   endpointUrl: string;
@@ -34,18 +37,24 @@ const persistedKey = async (owner: string, peer: string): Promise<string> => {
 };
 
 const validatePersistedEndpoint = (value: unknown): PersistedPeerEndpoint | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid persisted peer endpoint');
+  }
   const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).some((key) => !PERSISTED_ENDPOINT_KEYS.has(key))) {
+    throw new Error('Persisted peer endpoint contains unexpected fields');
+  }
   const parsed = parseP2PEndpointUrl(
     typeof candidate.endpointUrl === 'string' ? candidate.endpointUrl : null
   );
-  if (!parsed?.hasDirectAddress) return null;
+  if (!parsed?.hasDirectAddress) throw new Error('Invalid persisted peer endpoint URL');
   if (
     typeof candidate.signerPublicKeyBase64 !== 'string' ||
     candidate.signerPublicKeyBase64.length !== 4 * Math.ceil(PQ_SIG_PUBLIC_KEY_SIZE / 3) ||
     !Number.isSafeInteger(candidate.announcedAt) ||
     (candidate.announcedAt as number) < 0
-  ) return null;
+  ) throw new Error('Invalid persisted peer endpoint');
   return {
     endpointUrl: parsed.endpointUrl,
     signerPublicKeyBase64: candidate.signerPublicKeyBase64,
@@ -66,14 +75,18 @@ async function updateRecord(
   const previous = writeTails.get(tailKey) ?? Promise.resolve();
   const write = previous.catch(() => { }).then(async () => {
     const key = await persistedKey(owner, peer);
-    const next = mutate(await readRecord(key));
+    const next = mutate(await readRecord(key, peer));
     const serialized = JSON.stringify({
-      ...(next.cert ? { cert: next.cert } : {}),
-      ...(next.endpoint ? { endpoint: next.endpoint } : {}),
+      protocol: PROTOCOL_KEYS.PEER_CERTIFICATE_STORE,
+      cert: next.cert,
+      endpoint: next.endpoint,
     });
     if (serialized.length > MAX_PERSISTED_CERT_CHARS) throw new Error('Peer record is too large');
     if (!await storage.set(key, serialized)) {
       throw new Error('Peer record could not be persisted');
+    }
+    if (await storage.get(key) !== serialized) {
+      throw new Error('Peer record update could not be verified');
     }
   });
   const tail = write.then(() => { }, () => { });
@@ -89,19 +102,27 @@ async function updateRecord(
   }
 }
 
-async function readRecord(key: string): Promise<PersistedPeerRecord> {
-  try {
-    const raw = await storage.get(key);
-    if (!raw || raw.length > MAX_PERSISTED_CERT_CHARS) return { cert: null, endpoint: null };
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { cert: null, endpoint: null };
-    return {
-      cert: (parsed as Record<string, unknown>).cert as PeerCertificateBundle ?? null,
-      endpoint: validatePersistedEndpoint((parsed as Record<string, unknown>).endpoint),
-    };
-  } catch {
-    return { cert: null, endpoint: null };
+async function readRecord(key: string, peer: string): Promise<PersistedPeerRecord> {
+  const raw = await storage.get(key);
+  if (raw === null) return { cert: null, endpoint: null };
+  if (raw.length === 0) throw new Error('Invalid persisted peer record');
+  if (raw.length > MAX_PERSISTED_CERT_CHARS) throw new Error('Persisted peer record is too large');
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Invalid persisted peer record');
   }
+  const candidate = parsed as Record<string, unknown>;
+  if (Object.keys(candidate).sort().join(',') !== PERSISTED_RECORD_KEYS.join(',')) {
+    throw new Error('Invalid persisted peer record shape');
+  }
+  if (candidate.protocol !== PROTOCOL_KEYS.PEER_CERTIFICATE_STORE) {
+    throw new Error('Invalid persisted peer record protocol');
+  }
+  const cert = candidate.cert === null
+    ? null
+    : await validatePeerCertificateBundle(candidate.cert, peer, Date.now(), true);
+  if (candidate.cert !== null && !cert) throw new Error('Invalid persisted peer certificate');
+  return { cert, endpoint: validatePersistedEndpoint(candidate.endpoint) };
 }
 
 export async function loadPersistedPeerCert(
@@ -109,25 +130,19 @@ export async function loadPersistedPeerCert(
   peer: string,
   allowExpired = false,
 ): Promise<PeerCertificateBundle | null> {
-  try {
-    const record = await readRecord(await persistedKey(owner, peer));
-    if (!record.cert) return null;
-    return await validatePeerCertificateBundle(record.cert, peer, Date.now(), allowExpired);
-  } catch {
-    return null;
-  }
+  const record = await readRecord(await persistedKey(owner, peer), peer);
+  if (!record.cert) return null;
+  return await validatePeerCertificateBundle(record.cert, peer, Date.now(), allowExpired);
 }
 
 export async function savePersistedPeerCert(owner: string, peer: string, cert: PeerCertificateBundle): Promise<void> {
-  await updateRecord(owner, peer, (current) => ({ ...current, cert }));
+  const validated = await validatePeerCertificateBundle(cert, peer, Date.now());
+  if (!validated) throw new Error('Invalid peer certificate');
+  await updateRecord(owner, peer, (current) => ({ ...current, cert: validated }));
 }
 
 export async function loadPersistedPeerEndpoint(owner: string, peer: string): Promise<PersistedPeerEndpoint | null> {
-  try {
-    return (await readRecord(await persistedKey(owner, peer))).endpoint;
-  } catch {
-    return null;
-  }
+  return (await readRecord(await persistedKey(owner, peer), peer)).endpoint;
 }
 
 export async function savePersistedPeerEndpoint(
@@ -138,7 +153,6 @@ export async function savePersistedPeerEndpoint(
   const validated = validatePersistedEndpoint(endpoint);
   if (!validated) throw new Error('Invalid peer endpoint');
   await updateRecord(owner, peer, (current) => {
-    // A stale announcement must not roll a newer route backward here either.
     if (current.endpoint && current.endpoint.announcedAt > validated.announcedAt) return current;
     return { ...current, endpoint: validated };
   });

@@ -1,5 +1,4 @@
 (function initTrustedTypesPolicy() {
-  if (typeof window === 'undefined') return;
   try {
     const tt = (window as any).trustedTypes;
     if (!tt) return;

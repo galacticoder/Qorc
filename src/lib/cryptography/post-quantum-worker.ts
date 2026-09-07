@@ -181,32 +181,6 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
         }
         break;
       }
-      case 'opaque.startOTLogin': {
-        try {
-          const resOTLogin = OPAQUEOps.startOTLogin(data.passwordBytes, data.anonymitySetSize, data.myIndex);
-          postSuccess(id, resOTLogin);
-        } catch (err: any) {
-          self.postMessage({ id, success: false, error: `startOTLogin failed: ${err.message}` });
-        }
-        break;
-      }
-      case 'opaque.finishOTLogin': {
-        try {
-          const resFinOTLogin = OPAQUEOps.finishOTLogin(
-            data.passwordBytes,
-            data.blindingFactor,
-            data.myPrivKey,
-            data.otRecord,
-            data.evaluatedElement,
-            data.serverNonce,
-            data.authChannelBinding
-          );
-          postSuccess(id, resFinOTLogin);
-        } catch (err: any) {
-          self.postMessage({ id, success: true, result: { success: false, error: err.message } });
-        }
-        break;
-      }
       case 'argon2.hash': {
         try {
           const resultHash = await argon2.hash(data.params);

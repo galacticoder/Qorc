@@ -33,31 +33,29 @@ export function useOfflineMessages({
         !isReadyRef.current ||
         keyTransparencyClient.isSecurityIncidentActive()
       ) {
-        try { taggedLaneRetriever.stop(); } catch { }
+        taggedLaneRetriever.stop();
         return;
       }
-      try {
-        taggedLaneRetriever.configure(
-          username,
-          async (msg) => {
-            if (hybridKeysRef.current?.native !== true) return false;
-            return (await encryptedHandlerRef.current(msg, 'spool-pir')) !== false;
-          }
-        );
-        taggedLaneRetriever.start();
-      } catch { }
+      taggedLaneRetriever.configure(
+        username,
+        async (msg) => {
+          if (hybridKeysRef.current?.native !== true) return false;
+          return (await encryptedHandlerRef.current(msg, 'spool-pir')) !== false;
+        }
+      );
+      taggedLaneRetriever.start();
     };
 
     if (isReady) {
       startTaggedLane();
     } else {
-      try { taggedLaneRetriever.stop(); } catch { }
+      taggedLaneRetriever.stop();
     }
     window.addEventListener(EventType.WS_RECONNECTED, startTaggedLane);
     window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, startTaggedLane);
     window.addEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, startTaggedLane);
     return () => {
-      try { taggedLaneRetriever.stop(); } catch { }
+      taggedLaneRetriever.stop();
       window.removeEventListener(EventType.WS_RECONNECTED, startTaggedLane);
       window.removeEventListener(EventType.PQ_SESSION_ESTABLISHED, startTaggedLane);
       window.removeEventListener(EventType.KEY_TRANSPARENCY_SECURITY_INCIDENT, startTaggedLane);

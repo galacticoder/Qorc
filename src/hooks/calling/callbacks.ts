@@ -2,25 +2,23 @@ import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
-import { clearCallMediaState, stopMediaStream, releaseVisualCanvas, EventDebouncer } from '../../lib/utils/calling-utils';
+import { clearCallMediaState, releaseVisualCanvas, EventDebouncer } from '../../lib/utils/calling-utils';
 import { notifications, power, tray } from '../../lib/tauri-bindings';
-import { toast } from 'sonner';
 
 export interface CallbackRefs {
-  localStreamRef: React.RefObject<MediaStream | null>;
+  localMediaActiveRef: React.RefObject<boolean>;
   localVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   localScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteVideoCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   remoteScreenCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   everConnectedRef: React.RefObject<Set<string>>;
-  lastCallTypeRef: React.RefObject<Map<string, 'audio' | 'video'>>;
   eventDebouncer: React.RefObject<EventDebouncer>;
 }
 
 export interface CallbackSetters {
   setCurrentCall: React.Dispatch<React.SetStateAction<CallState | null>>;
   setPendingIncomingCalls: React.Dispatch<React.SetStateAction<CallState[]>>;
-  setLocalStream: React.Dispatch<React.SetStateAction<MediaStream | null>>;
+  setLocalMediaActive: React.Dispatch<React.SetStateAction<boolean>>;
   setLocalVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setLocalScreenCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
   setRemoteVideoCanvas: React.Dispatch<React.SetStateAction<HTMLCanvasElement | null>>;
@@ -62,14 +60,6 @@ export const setupCallStateChangeCallback = (
   account: string
 ) => {
   service.onCallStateChange((call, isActive) => {
-    const previousType = refs.lastCallTypeRef.current.get(call.id);
-    if (previousType && previousType !== call.type && previousType === 'video' && call.type === 'audio') {
-      toast.warning('Video unavailable', {
-        description: 'This call has switched to audio-only because video could not be started.'
-      });
-    }
-    refs.lastCallTypeRef.current.set(call.id, call.type);
-
     const statusDetail = {
       account,
       peer: call.peer,
@@ -111,8 +101,6 @@ export const setupCallStateChangeCallback = (
 
     if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
       if (isActive) power.stop().catch(() => { });
-
-      refs.lastCallTypeRef.current.delete(call.id);
 
       if (call.status === 'ended') {
         if (!wasConnected) {
@@ -214,12 +202,10 @@ export const setupStreamCallbacks = (
   refs: CallbackRefs,
   setters: CallbackSetters
 ) => {
-  service.onLocalStream((stream) => {
-    const previous = refs.localStreamRef.current;
-    if (previous && previous !== stream) stopMediaStream(previous);
+  service.onLocalMediaChange((active) => {
     unstable_batchedUpdates(() => {
-      refs.localStreamRef.current = stream;
-      setters.setLocalStream(stream);
+      refs.localMediaActiveRef.current = active;
+      setters.setLocalMediaActive(active);
     });
   });
 

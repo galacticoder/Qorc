@@ -14,12 +14,12 @@ interface StartupAvatarReadinessProps {
 }
 
 const preloadForUsername = async (username: string, isCurrentUser: boolean): Promise<void> => {
-    const fallback = generateDefaultAvatar(username);
+    const defaultAvatar = generateDefaultAvatar(username);
     const preferred = isCurrentUser
         ? profilePictureSystem.getOwnAvatar()
         : profilePictureSystem.getPeerAvatar(username);
     if (preferred && await preloadAvatarImage(preferred)) return;
-    await preloadAvatarImage(fallback);
+    await preloadAvatarImage(defaultAvatar);
 };
 
 export const useStartupAvatarReadiness = ({
@@ -35,9 +35,7 @@ export const useStartupAvatarReadiness = ({
             .filter((conversation) => conversation.isPinned)
             .sort((left, right) => (right.pinnedAt || 0) - (left.pinnedAt || 0));
         const unpinned = conversations.filter((conversation) => !conversation.isPinned);
-        const visibleRows = typeof window === 'undefined'
-            ? 16
-            : Math.max(12, Math.min(40, Math.ceil((window.innerHeight - 78) / 74) + 4));
+        const visibleRows = Math.max(12, Math.min(40, Math.ceil((window.innerHeight - 78) / 74) + 4));
         return [...pinned, ...unpinned]
             .slice(0, visibleRows)
             .map((conversation) => conversation.username);

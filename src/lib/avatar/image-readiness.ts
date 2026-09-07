@@ -28,8 +28,6 @@ export const preloadAvatarImage = (url: string): Promise<boolean> => {
     if (status) return Promise.resolve(status === 'ready');
     const existing = pending.get(url);
     if (existing) return existing;
-    if (typeof Image === 'undefined') return Promise.resolve(false);
-
     const operation = new Promise<boolean>((resolve) => {
         const image = new Image();
         let settled = false;

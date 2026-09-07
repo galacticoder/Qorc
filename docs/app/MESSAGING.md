@@ -84,8 +84,8 @@ Transport properties:
 
 Latency is that of a Tor rendezvous, roughly six hops. Calls use bounded lossy
 media streams and four ranked media lanes to keep video or screen writes off the
-selected audio circuit and to route around a delayed circuit. A bounded primary
-fallback keeps media setup from depending on a dedicated lane becoming ready,
+selected audio circuit and to route around a delayed circuit. The bounded primary
+route keeps media setup from depending on a dedicated lane becoming ready,
 but media still has Tor rendezvous latency. See `docs/app/CALLING.md`.
 
 Before application data is accepted, peers complete
@@ -123,7 +123,7 @@ its length-prefixed TCP frame. Sequence discontinuities trigger an authenticated
 keyframe request. The sender forces its next accepted codec input to be a
 keyframe, and the receiver replaces its bounded decoder and renders only fresh,
 newest frames without creating a playback buffer or container timeline. The
-dedicated lanes and primary fallback carry the same authenticated application
+dedicated lanes and primary route carry the same authenticated application
 frames.
 `docs/app/CALLING.md` defines the complete call frame and queue behavior.
 

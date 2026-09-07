@@ -3,7 +3,6 @@ import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { Message } from "./messaging/types";
 import { useFileSender } from "./ChatInput/useFileSender";
-import type { FileSenderController } from "./ChatInput/useFileSender";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
@@ -12,7 +11,7 @@ import { MessageReply } from "./messaging/types";
 import { HEX_PATTERN, MAX_FILE_SIZE, MAX_VOICE_NOTE_DURATION_SECONDS } from "@/lib/constants";
 import { sanitizeMessage } from "@/lib/sanitizers";
 import type { HybridKeys } from "@/lib/types/auth-types";
-import type { HybridPublicKeys } from '@/lib/types/message-sending-types';
+import type { SecureDB } from '@/lib/database/secureDB';
 import { toast } from "sonner";
 import { Paperclip, SendHorizontal } from "lucide-react";
 import { Cross2Icon } from "./assets/icons";
@@ -20,26 +19,22 @@ import { MaterialFileIcon } from "../ui/MaterialFileIcon";
 
 interface ChatInputProps {
   onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void;
-  isEncrypted: boolean;
 
   currentUsername: string;
   users: ReadonlyArray<User>;
   replyTo?: Message | null;
-  onCancelReply?: () => void;
+  onCancelReply: () => void;
   editingMessage?: Message | null;
-  onCancelEdit?: () => void;
-  onEditMessage?: (messageId: string, newContent: string) => void;
+  onCancelEdit: () => void;
   onTyping: () => void;
-  selectedConversation?: string;
-  getDisplayUsername?: (username: string) => Promise<string>;
+  selectedConversation: string;
+  getDisplayUsername: (username: string) => Promise<string>;
   disabled?: boolean;
   disabledPlaceholder?: string;
-  getKeysOnDemand?: () => Promise<HybridKeys | null>;
-  getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>;
-  findUser?: (handle: string) => Promise<any>;
-  secureDB?: any;
-  checkPeerSession?: (peerUsername: string) => Promise<void>;
-  fileSenderOverride?: FileSenderController;
+  getKeysOnDemand: () => Promise<HybridKeys | null>;
+  findUser: (handle: string) => Promise<any>;
+  secureDB: SecureDB;
+  checkPeerSession: (peerUsername: string) => Promise<void>;
 }
 
 const safeReplyDisplayName = (value: string): string => {
@@ -56,18 +51,15 @@ export function ChatInput({
   onCancelReply,
   editingMessage,
   onCancelEdit,
-  onEditMessage,
   onTyping,
   selectedConversation,
   getDisplayUsername,
   disabled = false,
   disabledPlaceholder,
   getKeysOnDemand,
-  getPeerHybridKeys,
   findUser,
   secureDB,
   checkPeerSession: checkPeerSession,
-  fileSenderOverride,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -82,7 +74,6 @@ export function ChatInput({
     selectedConversation,
     users,
     getKeysOnDemand,
-    getPeerHybridKeys,
     findUser,
     secureDB,
     checkPeerSession,
@@ -94,7 +85,7 @@ export function ChatInput({
     fileSendPhase,
     fileName,
     cancelCurrent,
-  } = fileSenderOverride ?? networkFileSender;
+  } = networkFileSender;
 
   useEffect(() => {
     if (!editingMessage) {
@@ -116,17 +107,14 @@ export function ChatInput({
     }
 
     let cancelled = false;
-    const fallback = safeReplyDisplayName(sender);
-    setReplyDisplaySender(fallback);
-    if (getDisplayUsername) {
-      void getDisplayUsername(sender)
-        .then((resolved) => {
-          if (!cancelled) setReplyDisplaySender(safeReplyDisplayName(resolved));
-        })
-        .catch(() => {
-          if (!cancelled) setReplyDisplaySender(fallback);
-        });
-    }
+    setReplyDisplaySender('');
+    void getDisplayUsername(sender)
+      .then((resolved) => {
+        if (!cancelled) setReplyDisplaySender(safeReplyDisplayName(resolved));
+      })
+      .catch((error) => {
+        console.error('[ChatInput] Reply display-name lookup failed', error);
+      });
     return () => {
       cancelled = true;
     };
@@ -149,7 +137,7 @@ export function ChatInput({
     if (!sanitizedMessage) return;
     setMessage("");
 
-    const isEdit = !!(editingMessage && onEditMessage);
+    const isEdit = editingMessage !== null && editingMessage !== undefined;
     const outboundReply = replyTo
       ? { ...replyTo, id: replyTo.wireMessageId || replyTo.id }
       : null;
@@ -162,12 +150,12 @@ export function ChatInput({
         )
       : onSendMessage("", sanitizedMessage, SignalType.MESSAGE, outboundReply);
 
-    if (isEdit) { onCancelEdit?.(); } else { onCancelReply?.(); }
+    if (isEdit) { onCancelEdit(); } else { onCancelReply(); }
 
     Promise.resolve(sendPromise).catch((error) => {
       console.error('Failed to send message:', error);
     });
-  }, [message, selectedConversation, disabled, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
+  }, [message, selectedConversation, disabled, editingMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
 
   // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
@@ -277,7 +265,12 @@ export function ChatInput({
     }
   }, [handleSend]);
 
-  const fileProgressPercent = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+  const fileProgressPercent = Math.max(0, Math.min(1, progress)) * 100;
+  const fileProgressLabel = fileSendPhase === 'preparing'
+    ? 'Preparing'
+    : fileProgressPercent > 0 && fileProgressPercent < 1
+      ? `${fileProgressPercent.toFixed(2)}%`
+      : `${Math.round(fileProgressPercent)}%`;
   const fileProgressStyle = {
     '--qorc-file-send-progress': `${fileProgressPercent}%`,
   } as React.CSSProperties;
@@ -294,14 +287,14 @@ export function ChatInput({
             aria-label={fileSendPhase === 'preparing' ? 'Preparing encrypted file' : 'Sending file'}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={fileProgressPercent}
+            aria-valuenow={fileSendPhase === 'preparing' ? undefined : Math.round(fileProgressPercent)}
           >
             <span className="qorc-file-send-banner-fill" aria-hidden="true" />
             <MaterialFileIcon fileName={fileName} className="qorc-file-send-banner-icon" />
             <span className="qorc-file-send-banner-name" title={fileName || 'File'}>
               {fileName || 'File'}
             </span>
-            <span className="qorc-file-send-banner-percent">{fileProgressPercent}%</span>
+            <span className="qorc-file-send-banner-percent">{fileProgressLabel}</span>
             <button
               type="button"
               className="qorc-file-send-banner-cancel"

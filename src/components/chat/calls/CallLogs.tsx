@@ -21,9 +21,9 @@ import { NEAR_BOTTOM_THRESHOLD, SCROLL_THRESHOLD } from '../../../lib/constants'
 import { CallLogRowsSkeleton } from '../../ui/ViewSkeletons';
 
 interface CallLogsProps {
-    readonly getDisplayUsername?: (username: string) => Promise<string>;
-    readonly onOpenConversation?: (username: string) => void;
-    readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
+    readonly getDisplayUsername: (username: string) => Promise<string>;
+    readonly onOpenConversation: (username: string) => void;
+    readonly onStartCall: (username: string, type: 'audio' | 'video') => void;
     readonly callsDisabled?: boolean;
 }
 
@@ -102,8 +102,8 @@ interface CallLogItemProps {
     readonly log: CallLogEntry;
     readonly callsDisabled: boolean;
     readonly onDelete: (id: string) => void;
-    readonly onOpenConversation?: (username: string) => void;
-    readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
+    readonly onOpenConversation: (username: string) => void;
+    readonly onStartCall: (username: string, type: 'audio' | 'video') => void;
 }
 
 const CallLogItem = React.memo(function CallLogItem({
@@ -122,9 +122,8 @@ const CallLogItem = React.memo(function CallLogItem({
             <button
                 type="button"
                 className="qorc-call-log-person"
-                onClick={() => onOpenConversation?.(log.peerUsername)}
-                disabled={!onOpenConversation}
-                aria-label={onOpenConversation ? `Open conversation with ${displayName}` : undefined}
+                onClick={() => onOpenConversation(log.peerUsername)}
+                aria-label={`Open conversation with ${displayName}`}
             >
                 <UserAvatar username={log.peerUsername} size="lg" className="qorc-call-log-avatar" />
 
@@ -165,26 +164,24 @@ const CallLogItem = React.memo(function CallLogItem({
             </time>
 
             <div className="qorc-call-pill qorc-call-log-actions" role="group" aria-label={`Actions for ${displayName}`}>
-                {onOpenConversation && (
-                    <Button
-                        size="sm"
-                        variant="ghost"
-                        className="qorc-call-pill-btn"
-                        title="Open chat"
-                        aria-label={`Open chat with ${displayName}`}
-                        onClick={() => onOpenConversation(log.peerUsername)}
-                    >
-                        <MessageCircle className="w-4 h-4" aria-hidden="true" />
-                    </Button>
-                )}
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="qorc-call-pill-btn"
+                    title="Open chat"
+                    aria-label={`Open chat with ${displayName}`}
+                    onClick={() => onOpenConversation(log.peerUsername)}
+                >
+                    <MessageCircle className="w-4 h-4" aria-hidden="true" />
+                </Button>
                 <Button
                     size="sm"
                     variant="ghost"
                     className="qorc-call-pill-btn"
                     title="Audio call"
                     aria-label={`Audio call ${displayName}`}
-                    disabled={callsDisabled || !onStartCall}
-                    onClick={() => onStartCall?.(log.peerUsername, 'audio')}
+                    disabled={callsDisabled}
+                    onClick={() => onStartCall(log.peerUsername, 'audio')}
                 >
                     <CallIcon className="w-4 h-4" aria-hidden="true" />
                 </Button>
@@ -194,8 +191,8 @@ const CallLogItem = React.memo(function CallLogItem({
                     className="qorc-call-pill-btn"
                     title="Video call"
                     aria-label={`Video call ${displayName}`}
-                    disabled={callsDisabled || !onStartCall}
-                    onClick={() => onStartCall?.(log.peerUsername, 'video')}
+                    disabled={callsDisabled}
+                    onClick={() => onStartCall(log.peerUsername, 'video')}
                 >
                     <Video className="w-4 h-4" aria-hidden="true" />
                 </Button>
@@ -266,7 +263,6 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     }, [handleScroll]);
 
     useEffect(() => {
-        if (!getDisplayUsername) return;
         let cancelled = false;
         const uniqueUsernames = Array.from(new Set(searchScopeLogs.map((log) => log.peerUsername)));
 

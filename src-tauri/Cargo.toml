@@ -23,7 +23,7 @@ sha2 = "0.10"
 
 [dependencies]
 # Tauri core
-tauri = { version = "2", features = ["tray-icon", "devtools", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 
@@ -84,6 +84,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rusty-opus = "0.9.1"
 flate2 = "1"
 parking_lot = "0.12"
+fs2 = "0.4"
 regex = "1"
 lazy_static = "1"
 futures-util = "0.3"

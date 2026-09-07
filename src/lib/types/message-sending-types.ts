@@ -28,9 +28,9 @@ export interface PendingRetryMessage {
   user: UserWithKeys;
   content: string;
   replyTo?: string | { id: string; sender?: string; content?: string };
-  messageSignalType?: string;
-  retryId?: string;
-  originalMessageId?: string;
+  messageSignalType: string;
+  retryId: string;
+  originalMessageId: string;
   editMessageId?: string;
   retryCount: number;
   queuedAt: number;

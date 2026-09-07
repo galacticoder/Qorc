@@ -41,7 +41,6 @@ const outputPath = path.join(bundleDir, `${productName}_${version}_${arch.packag
 const binaryPath = path.join(tauriDir, 'target', 'release', 'qorc');
 const appDirBinaryPath = path.join(appDir, 'usr', 'bin', 'qorc');
 const pluginsDir = path.join(repoRoot, '.cache', `gstreamer-plugins-${process.arch}`);
-const appDirPluginsDir = path.join(appDir, 'usr', 'lib', 'gstreamer-1.0');
 const captureManifestName = 'capture-runtime-manifest.json';
 const capturePluginNames = [
     'libgstcoreelements.so',
@@ -58,22 +57,22 @@ const requiredSpaPaths = [
     'spa-0.2/support/libspa-support.so',
     'spa-0.2/videoconvert/libspa-videoconvert.so'
 ];
-const appDirCaptureRuntimeDir = path.join(appDir, 'usr', 'lib', productName, 'screen-capture');
-const appDirCapturePluginsDir = path.join(appDirCaptureRuntimeDir, 'gstreamer-1.0');
+const appDirLibDir = path.join(appDir, 'usr', 'lib');
+const appDirCaptureRuntimeDir = path.join(appDirLibDir, productName, 'webkitgtk');
+const appDirCapturePluginsDir = path.join(appDirCaptureRuntimeDir, 'capture-plugins');
+const appDirCaptureLibraryDir = path.join(appDirCaptureRuntimeDir, 'lib');
 const appDirCaptureManifest = path.join(appDirCaptureRuntimeDir, captureManifestName);
 const pipeWireRuntimeDir = path.join(pluginsDir, 'runtime');
 const pipeWirePlugin = 'libgstpipewire.so';
-const appDirPipeWireLibrary = path.join(appDir, 'usr', 'lib', 'libpipewire-0.3.so.0');
-const appDirGStreamerControllerLibrary = path.join(appDir, 'usr', 'lib', 'libgstcontroller-1.0.so.0');
-const appDirGStreamerLauncher = path.join(appDir, 'usr', 'bin', 'qorc-gst-launch-1.0');
-const appDirGStreamerPluginScanner = path.join(appDir, 'usr', 'bin', 'qorc-gst-plugin-scanner');
-const appDirSpaDir = path.join(appDir, 'usr', 'lib', 'spa-0.2');
+const appDirPipeWireLibrary = path.join(appDirCaptureLibraryDir, 'libpipewire-0.3.so.0');
+const appDirGStreamerControllerLibrary = path.join(appDirCaptureLibraryDir, 'libgstcontroller-1.0.so.0');
+const appDirGStreamerLauncher = path.join(appDirCaptureRuntimeDir, 'bin', 'qorc-gst-launch-1.0');
+const appDirGStreamerPluginScanner = path.join(appDirCaptureRuntimeDir, 'bin', 'qorc-gst-plugin-scanner');
+const appDirSpaDir = path.join(appDirCaptureRuntimeDir, 'spa-0.2');
+const appDirPluginsDir = path.join(appDirCaptureRuntimeDir, 'gstreamer-1.0');
 const webKitSourceDir = path.join(tauriDir, 'resources', 'webkitgtk');
 const webKitSourceLibDir = path.join(webKitSourceDir, 'usr', 'lib', arch.libraryTriplet);
-const appDirLibDir = path.join(appDir, 'usr', 'lib');
 const webKitAppMetadataPath = path.join(appDirLibDir, productName, 'webkitgtk-runtime.json');
-const legacyPipeWireAppDir = path.join(appDirLibDir, productName, 'pipewire');
-const packagedWebKitAppDir = path.join(appDirLibDir, productName, 'webkitgtk');
 const webKitUpstreamVersion = '2.52.6';
 const webKitLibraries = [
     'libwebkit2gtk-4.1.so.0',
@@ -121,13 +120,13 @@ function captureRuntimeFiles(runtimeDir) {
 
 function appDirCaptureArtifactPath(relativePath) {
     if (relativePath.startsWith('bin/')) {
-        return path.join(appDir, 'usr', 'bin', relativePath.slice('bin/'.length));
+        return path.join(appDirCaptureRuntimeDir, relativePath);
     }
     if (relativePath.startsWith('capture-plugins/')) {
         return path.join(appDirCapturePluginsDir, relativePath.slice('capture-plugins/'.length));
     }
     if (relativePath.startsWith('lib/')) {
-        return path.join(appDirLibDir, relativePath.slice('lib/'.length));
+        return path.join(appDirCaptureLibraryDir, relativePath.slice('lib/'.length));
     }
     if (relativePath.startsWith('spa-0.2/')) {
         return path.join(appDirSpaDir, relativePath.slice('spa-0.2/'.length));
@@ -388,7 +387,7 @@ function appDirIsComplete() {
         const sourceCaptureRuntime = validateSourceCaptureRuntime();
         const installedCaptureRuntime = validateInstalledCaptureRuntime();
         if (sourceCaptureRuntime.sha256 !== installedCaptureRuntime.sha256 ||
-            metadata.gStreamerCaptureRuntime?.manifest !== path.posix.join('screen-capture', captureManifestName) ||
+            metadata.gStreamerCaptureRuntime?.manifest !== path.posix.join('webkitgtk', captureManifestName) ||
             metadata.gStreamerCaptureRuntime?.manifestSha256 !== sourceCaptureRuntime.sha256 ||
             metadata.gStreamerCaptureRuntime?.gstLaunchVersion !== sourceCaptureRuntime.manifest.gstLaunchVersion) return false;
     } catch {
@@ -534,17 +533,18 @@ function installPipeWireRuntime() {
         )) {
         throw new Error('staged PipeWire screen-capture runtime is incomplete');
     }
-    fs.rmSync(appDirPluginsDir, { recursive: true, force: true });
+    fs.rmSync(appDirCaptureRuntimeDir, { recursive: true, force: true });
+    fs.mkdirSync(appDirCaptureRuntimeDir, { recursive: true });
+    fs.mkdirSync(appDirCaptureLibraryDir, { recursive: true });
+    fs.mkdirSync(path.dirname(appDirGStreamerLauncher), { recursive: true });
     fs.mkdirSync(appDirPluginsDir, { recursive: true });
     for (const plugin of selectedPluginNames(pluginsDir)) {
         fs.copyFileSync(path.join(pluginsDir, plugin), path.join(appDirPluginsDir, plugin));
     }
-    fs.rmSync(appDirCaptureRuntimeDir, { recursive: true, force: true });
-    fs.mkdirSync(appDirCaptureRuntimeDir, { recursive: true });
     fs.cpSync(capturePluginsSource, appDirCapturePluginsDir, { recursive: true });
     for (const entry of fs.readdirSync(path.join(pipeWireRuntimeDir, 'lib'), { withFileTypes: true })) {
         if (entry.isFile()) {
-            const destination = path.join(appDirLibDir, entry.name);
+            const destination = path.join(appDirCaptureLibraryDir, entry.name);
             fs.rmSync(destination, { force: true });
             fs.copyFileSync(
                 path.join(pipeWireRuntimeDir, 'lib', entry.name),
@@ -569,7 +569,7 @@ function installPipeWireRuntime() {
     fs.writeFileSync(webKitAppMetadataPath, `${JSON.stringify({
         ...appMetadata,
         gStreamerCaptureRuntime: {
-            manifest: path.posix.join('screen-capture', captureManifestName),
+            manifest: path.posix.join('webkitgtk', captureManifestName),
             manifestSha256: sourceCaptureRuntime.sha256,
             gstLaunchVersion: sourceCaptureRuntime.manifest.gstLaunchVersion
         }
@@ -661,8 +661,6 @@ function cacheRuntimeFromAppImage() {
 function syncMutableFiles() {
     if (!filesAreIdentical(binaryPath, appDirBinaryPath)) fs.copyFileSync(binaryPath, appDirBinaryPath);
     fs.chmodSync(appDirBinaryPath, 0o755);
-    fs.rmSync(legacyPipeWireAppDir, { recursive: true, force: true });
-    fs.rmSync(packagedWebKitAppDir, { recursive: true, force: true });
     installWebKitGtkRuntime();
     installPipeWireRuntime();
     prepareAppRun();

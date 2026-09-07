@@ -23,7 +23,7 @@ import {
 import { encodeBase64AndWipeCopy, UTF8_ENCODER } from '../utils/encoding.js';
 import { envInt } from '../utils/env.js';
 import { HEX_32_RE, HEX_64_RE } from '../utils/patterns.js';
-import { isSafeJsonTree } from '../utils/validation.js';
+import { isSafeJsonTree, isSafeWireMessageType } from '../utils/validation.js';
 import { computeHybridPublicKeyFingerprint } from '../crypto/hybrid-key-fingerprint.js';
 import { createAbortableAdmissionGate } from '../utils/admission-gate.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
@@ -85,7 +85,7 @@ const WS_CELL_MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
 const WS_CELL_REASSEMBLY_TIMEOUT_MS = 200_000;
 const WS_CELL_AAD_DOMAIN = UTF8_ENCODER.encode(PROTOCOL_KEYS.WS_PQ_CELL_AAD);
 const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map([
-  [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
+  [SignalType.AUTH_PIR_REQUEST, 'authRequestId'],
   [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
 ]);
 const VERIFIED_AUTH_CHANNEL_BINDING = Symbol('qorc.verified-auth-channel-binding');
@@ -452,7 +452,7 @@ async function waitForWsDrain(ws, maxBufferedBytes, timeoutMs = 30000) {
  * Split a large authentication response into bounded progress chunks.
  */
 export async function sendSecureAuthResponse(ws, payload) {
-  if (payload?.type !== SignalType.AUTH_OT_RESPONSE) return false;
+  if (payload?.type !== SignalType.AUTH_PIR_RESPONSE) return false;
 
   let json;
   try {
@@ -468,7 +468,7 @@ export async function sendSecureAuthResponse(ws, payload) {
     return sendSecureMessage(ws, payload);
   }
 
-  const payloadType = SignalType.AUTH_OT_RESPONSE;
+  const payloadType = SignalType.AUTH_PIR_RESPONSE;
   
   const totalLength = json.length;
   if (totalBytes > SECURE_CHUNK_MAX_TOTAL_LENGTH || totalLength > SECURE_CHUNK_MAX_TOTAL_LENGTH) {
@@ -758,7 +758,8 @@ export async function handlePQHandshake({ ws, parsed, serverHybridKeyPair }) {
     }
     ws._pqHsCount = (ws._pqHsCount || 0) + 1;
     if (ws._pqHsCount > PQ_HS_MAX_PER_MIN) {
-      return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Handshake rate exceeded' });
+      if (isWebSocketOpen(ws)) ws.close(1008, 'Handshake rate exceeded');
+      return false;
     }
   }
 
@@ -1253,8 +1254,7 @@ export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage
     const innerPayload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(logicalBytes));
     if (
       !innerPayload || typeof innerPayload !== 'object' || Array.isArray(innerPayload) ||
-      typeof innerPayload.type !== 'string' || innerPayload.type.length < 1 ||
-      innerPayload.type.length > 64 ||
+      !isSafeWireMessageType(innerPayload.type) ||
       !isSafeJsonTree(innerPayload, {
         maxDepth: WS_ENVELOPE_MAX_JSON_DEPTH,
         maxNodes: WS_ENVELOPE_MAX_JSON_NODES,

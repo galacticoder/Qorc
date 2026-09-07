@@ -85,10 +85,10 @@ export function cleanTerminalText(value) {
     .replace(/\t/g, '  ');
 }
 
-export function logEntry(line, sequence, fallbackSource) {
+export function logEntry(line, sequence, defaultSource) {
   const message = cleanTerminalText(line).trimEnd();
   const sourceMatch = message.match(/^\s*\[([^\]]+)]\s*/);
-  const source = sourceMatch?.[1]?.slice(0, 18) || fallbackSource;
+  const source = sourceMatch?.[1]?.slice(0, 18) || defaultSource;
   const normalized = sourceMatch ? message.slice(sourceMatch[0].length) : message;
   const level = /\b(error|fatal|panic|failed|failure)\b/i.test(message)
     ? 'error'
@@ -100,7 +100,7 @@ export function logEntry(line, sequence, fallbackSource) {
   const timestampMatch = message.match(/\b(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\b/);
   const parsedTimestamp = timestampMatch ? Date.parse(timestampMatch[1]) : NaN;
   return Object.freeze({
-    id: `${fallbackSource}-${sequence}`,
+    id: `${defaultSource}-${sequence}`,
     timestamp: Number.isFinite(parsedTimestamp) ? parsedTimestamp : Date.now(),
     level,
     source,
@@ -109,7 +109,7 @@ export function logEntry(line, sequence, fallbackSource) {
 }
 
 function toneForState(state) {
-  if (['healthy', 'registered', 'valid', 'live', 'standalone'].includes(state)) return 'success';
+  if (['healthy', 'registered', 'valid', 'live'].includes(state)) return 'success';
   if (['starting', 'checking', 'pending', 'stale'].includes(state)) return 'warning';
   if (['degraded', 'missing', 'expired', 'unavailable', 'corrupt'].includes(state)) return 'error';
   return 'default';
@@ -299,7 +299,7 @@ function logsPanel(state, actions) {
 
 function serverView(state, actions) {
   const warning = state.status === 'healthy' ? null : stateBadge(state.statusLabel, state.status);
-  const clusterState = ['registered', 'standalone'].includes(state.registration)
+  const clusterState = state.registration === 'registered'
     ? 'good'
     : ['checking', 'pending'].includes(state.registration) ? 'warn' : 'bad';
   const tlsState = state.tlsState === 'valid'

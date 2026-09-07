@@ -6,13 +6,61 @@
 
 import { getPgPool, crypto, privateLookupId, withTransaction } from './core.js';
 import { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../shared/private-auth-protocol.js';
+import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../shared/crypto-sizes.js';
+import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
   REGISTRATION_ATTEMPT_MISMATCH,
   REGISTRATION_RECEIPT_EXPIRED
 } from '../config/error-codes.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { OPAQUE_ENVELOPE_BYTES, OPAQUE_SALT_BYTES } from '../utils/crypto-consts.js';
+import { isCanonicalBase64Bytes } from '../utils/encoding.js';
+import { hasExactPlainObjectKeys } from '../utils/validation.js';
 
 const REGISTRATION_RECEIPT_TTL_MS = 15 * 60_000;
+const PRIVATE_RECORD_ID_BYTES = 64;
+const PRIVATE_AUTH_RECORD_MAX_BYTES = 4096;
+const PRIVATE_AUTH_RECORD_KEYS = Object.freeze(['authPublicKey', 'envelope', 'salt']);
+
+function isPrivateRecordId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{86}$/.test(value)) return false;
+  try {
+    const decoded = Buffer.from(value, 'base64url');
+    return decoded.length === PRIVATE_RECORD_ID_BYTES && decoded.toString('base64url') === value;
+  } catch {
+    return false;
+  }
+}
+
+function parsePrivateAuthRecord(value) {
+  if (
+    typeof value !== 'string' ||
+    Buffer.byteLength(value, 'utf8') === 0 ||
+    Buffer.byteLength(value, 'utf8') > PRIVATE_AUTH_RECORD_MAX_BYTES
+  ) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (
+    !hasExactPlainObjectKeys(parsed, PRIVATE_AUTH_RECORD_KEYS) ||
+    !canonicalBase64Shape(parsed.authPublicKey, { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }) ||
+    !canonicalBase64Shape(parsed.envelope, { exactBytes: OPAQUE_ENVELOPE_BYTES }) ||
+    !canonicalBase64Shape(parsed.salt, { exactBytes: OPAQUE_SALT_BYTES })
+  ) return null;
+  return parsed;
+}
+
+function normalizeCredentialIndex(value) {
+  const index = Number(value);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= PRIVATE_AUTH_ANONYMITY_SET_SIZE) {
+    throw new Error('Invalid private authentication credential index');
+  }
+  return index;
+}
 
 function registrationError(message, code) {
   const error = new Error(message);
@@ -22,7 +70,7 @@ function registrationError(message, code) {
 
 export class UserDatabase {
   static createRecordId(registrationAttemptId) {
-    if (typeof registrationAttemptId !== 'string' || registrationAttemptId.length !== 44) {
+    if (!isCanonicalBase64Bytes(registrationAttemptId, 32)) {
       throw new Error('Invalid registration attempt identifier');
     }
     return privateLookupId(PROTOCOL_KEYS.OPAQUE_REGISTRATION_ATTEMPT, registrationAttemptId);
@@ -31,22 +79,24 @@ export class UserDatabase {
   static async stageUserRecord(userRecord) {
     const { recordId, opaqueRecord } = userRecord;
 
-    if (!recordId || typeof recordId !== 'string') {
+    if (!isPrivateRecordId(recordId)) {
       throw new Error('Invalid private authentication record ID');
     }
 
-    if (typeof opaqueRecord !== 'string' || opaqueRecord.length === 0) {
+    if (!parsePrivateAuthRecord(opaqueRecord)) {
       throw new Error('Invalid private auth record');
     }
 
     const pool = await getPgPool();
     const client = await pool.connect();
-    const now = Date.now();
-    const expiresAt = now + REGISTRATION_RECEIPT_TTL_MS;
     let stagedNewRecord = false;
     try {
       const output = await withTransaction(client, async () => {
         await client.query('LOCK TABLE users, pending_registrations IN SHARE ROW EXCLUSIVE MODE');
+        // Sample expiry after admission: waiting for another registration's lock
+        // must neither revive an expired receipt nor shorten a new receipt's TTL.
+        const now = Date.now();
+        const expiresAt = now + REGISTRATION_RECEIPT_TTL_MS;
         await client.query(
           'DELETE FROM pending_registrations WHERE "expiresAt" <= $1',
           [now]
@@ -62,6 +112,9 @@ export class UserDatabase {
         );
         if (existingReceipt.rows.length === 1) {
           const receipt = existingReceipt.rows[0];
+          if (!parsePrivateAuthRecord(receipt.opaqueRecord)) {
+            throw new Error('Pending registration record is invalid');
+          }
           const storedRecord = Buffer.from(String(receipt.opaqueRecord || ''), 'utf8');
           const suppliedRecord = Buffer.from(opaqueRecord, 'utf8');
           try {
@@ -80,7 +133,7 @@ export class UserDatabase {
             suppliedRecord.fill(0);
           }
           return {
-            credential_index: Number(receipt.credential_index),
+            credential_index: normalizeCredentialIndex(receipt.credential_index),
             expires_at: Number(receipt.expiresAt)
           };
         }
@@ -91,7 +144,7 @@ export class UserDatabase {
         );
         if (existingUser.rows.length > 0) {
           return {
-            credential_index: Number(existingUser.rows[0].credential_index),
+            credential_index: normalizeCredentialIndex(existingUser.rows[0].credential_index),
             recovery_only: true,
             expires_at: null
           };
@@ -158,7 +211,7 @@ export class UserDatabase {
   }
 
   static async confirmStagedUserRecord(recordId) {
-    if (!recordId || typeof recordId !== 'string') {
+    if (!isPrivateRecordId(recordId)) {
       throw new Error('Invalid private authentication record ID');
     }
 
@@ -167,20 +220,20 @@ export class UserDatabase {
     const now = Date.now();
     let committedNewRecord = false;
     try {
+      await client.query(
+        'DELETE FROM pending_registrations WHERE "expiresAt" <= $1',
+        [now]
+      );
       const output = await withTransaction(client, async () => {
         await client.query('LOCK TABLE users, pending_registrations IN SHARE ROW EXCLUSIVE MODE');
-        await client.query(
-          'DELETE FROM pending_registrations WHERE "expiresAt" <= $1',
-          [now]
-        );
 
         const receiptResult = await client.query(
           `
           SELECT "opaqueRecord", "credential_index"
           FROM pending_registrations
-          WHERE "recordId" = $1
+          WHERE "recordId" = $1 AND "expiresAt" > $2
         `,
-          [recordId]
+          [recordId, Date.now()]
         );
         if (receiptResult.rows.length !== 1) {
           const committedUser = await client.query(
@@ -189,7 +242,7 @@ export class UserDatabase {
           );
           if (committedUser.rows.length === 1) {
             return {
-              credential_index: Number(committedUser.rows[0].credential_index),
+              credential_index: normalizeCredentialIndex(committedUser.rows[0].credential_index),
               already_committed: true
             };
           }
@@ -197,8 +250,8 @@ export class UserDatabase {
         }
 
         const receipt = receiptResult.rows[0];
-        const credentialIndex = Number(receipt.credential_index);
-        if (typeof receipt.opaqueRecord !== 'string' || receipt.opaqueRecord.length === 0) {
+        const credentialIndex = normalizeCredentialIndex(receipt.credential_index);
+        if (!parsePrivateAuthRecord(receipt.opaqueRecord)) {
           throw new Error('Pending registration record is invalid');
         }
         await client.query(
@@ -234,6 +287,20 @@ export class UserDatabase {
        LIMIT $1`,
       [PRIVATE_AUTH_ANONYMITY_SET_SIZE + 1]
     );
+    if (rows.length > PRIVATE_AUTH_ANONYMITY_SET_SIZE) {
+      throw new Error('Private authentication record capacity exceeded');
+    }
+    const seenIndexes = new Set();
+    for (const row of rows) {
+      const credentialIndex = normalizeCredentialIndex(row?.credential_index);
+      if (
+        seenIndexes.has(credentialIndex) ||
+        !parsePrivateAuthRecord(row?.opaqueRecord)
+      ) {
+        throw new Error('Invalid private authentication database row');
+      }
+      seenIndexes.add(credentialIndex);
+    }
     return rows;
   }
 }

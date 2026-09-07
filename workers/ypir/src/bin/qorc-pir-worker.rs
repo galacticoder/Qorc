@@ -31,6 +31,7 @@ const STATUS_OK: u8 = 0;
 const STATUS_ERROR: u8 = 1;
 
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ANSWER_FRAME_BYTES: usize = 760 * 1024;
 const MAX_PUB_PARAM_MATRICES: usize = 64;
 const MAX_BATCH_QUERIES: usize = 16;
 
@@ -67,6 +68,13 @@ fn write_frame(output: &mut impl Write, status: u8, payload: &[u8]) -> io::Resul
     output.write_all(&[status])?;
     output.write_all(payload)?;
     output.flush()
+}
+
+fn bounded_answer(response: Vec<u8>) -> Result<Vec<u8>, String> {
+    if response.is_empty() || response.len() > MAX_ANSWER_FRAME_BYTES {
+        return Err("PIR answer exceeds the anonymous response cell".to_string());
+    }
+    Ok(response)
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -270,12 +278,16 @@ fn main() -> io::Result<()> {
                 Err(error) => Err(error),
             },
             OP_ANSWER => match (loaded.as_ref(), offline.as_ref()) {
-                (Some(state), Some(values)) => answer(state, values, payload),
+                (Some(state), Some(values)) => {
+                    answer(state, values, payload).and_then(bounded_answer)
+                }
                 _ => Err("no database loaded".to_string()),
             },
             OP_INFO => Ok(info(loaded.as_ref())),
             OP_ANSWER_BATCH => match (loaded.as_ref(), offline.as_ref()) {
-                (Some(state), Some(values)) => answer_batch(state, values, payload),
+                (Some(state), Some(values)) => {
+                    answer_batch(state, values, payload).and_then(bounded_answer)
+                }
                 _ => Err("no database loaded".to_string()),
             },
             _ => Err(format!("unknown operation {op}")),

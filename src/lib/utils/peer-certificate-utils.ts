@@ -41,7 +41,7 @@ function canonicalKey(value: unknown, length: number): Uint8Array | null {
 
 // Fully validate a peer certificate bundle
 export async function validatePeerCertificateBundle(
-  fetched: PeerCertificateBundle | null | undefined,
+  fetched: unknown,
   expectedUsername: string,
   now: number = Date.now(),
   allowExpired = false,

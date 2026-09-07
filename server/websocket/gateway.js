@@ -8,7 +8,9 @@ import {
   unregisterLocalSocket
 } from '../routing/blind-router.js';
 import { envInt } from '../utils/env.js';
+import { isSafeJsonTree, isSafeWireMessageType } from '../utils/validation.js';
 import { awaitMessageHandlerWithDeadline } from './message-handler-deadline.js';
+import { revokeAllWebSocketConnections } from './revoke-connections.js';
 
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -54,7 +56,7 @@ function decodeTextFrame(raw, byteLength) {
 export function attachGateway({
   wss,
   serverHybridKeyPair,
-  serverId = null,
+  serverId,
   rateLimiter = rateLimitMiddleware,
   logger = console,
   config,
@@ -67,6 +69,9 @@ export function attachGateway({
   }
   if (!serverHybridKeyPair) {
     throw new Error('attachGateway requires serverHybridKeyPair');
+  }
+  if (typeof serverId !== 'string' || serverId.length === 0) {
+    throw new Error('attachGateway requires serverId');
   }
 
   const {
@@ -118,7 +123,7 @@ export function attachGateway({
 
     const keyPayload = {
       type: SignalType.SERVER_PUBLIC_KEY,
-      serverId: serverId || 'default',
+      serverId,
       hybridKeys: {
         kyberPublicBase64,
         dilithiumPublicBase64,
@@ -179,12 +184,29 @@ export function attachGateway({
     if (typeof onBinaryMessage !== 'function') {
       throw new WsIngressFrameError(1003, 'Binary frames are unsupported', 'BINARY_FRAME');
     }
-    if (ws._connectionAbortSignal?.aborted) return { handled: false };
-    const handlerPromise = onBinaryMessage({ ws, frame });
-    await awaitMessageHandlerWithDeadline(handlerPromise, {
-      signal: ws._connectionAbortSignal,
-      timeoutMs: MESSAGE_HANDLER_TIMEOUT_MS
-    });
+    try {
+      if (ws._connectionAbortSignal?.aborted) return { handled: false };
+      const handlerPromise = onBinaryMessage({ ws, frame });
+      await awaitMessageHandlerWithDeadline(handlerPromise, {
+        signal: ws._connectionAbortSignal,
+        timeoutMs: MESSAGE_HANDLER_TIMEOUT_MS
+      });
+    } catch (error) {
+      if (error?.code === 'WS_MESSAGE_HANDLER_ABORTED') {
+        return { handled: false };
+      }
+      if (error?.code === 'WS_MESSAGE_HANDLER_TIMEOUT') {
+        throw new WsIngressFrameError(
+          1011,
+          'Message processing timeout',
+          'MESSAGE_HANDLER_TIMEOUT'
+        );
+      }
+      logger.error('[WS] Binary message handler error', {
+        error: error.message
+      });
+      throw error;
+    }
     return { handled: true };
   };
 
@@ -228,7 +250,47 @@ export function attachGateway({
 
   wss.on('connection', async (ws) => {
     const connectionAbortController = new AbortController();
+    ws._connectionAbortController = connectionAbortController;
     ws._connectionAbortSignal = connectionAbortController.signal;
+    const earlyFrames = [];
+    let earlyFrameBytes = 0;
+    const discardEarlyFrames = () => {
+      earlyFrames.length = 0;
+      earlyFrameBytes = 0;
+      ws.off('message', captureEarlyMessage);
+    };
+    const captureEarlyMessage = (messageBuffer, isBinary) => {
+      if (ws._ingressQueueRejected) return;
+      try {
+        const messageBytes = rawMessageByteLength(messageBuffer);
+        if (
+          earlyFrames.length + 1 > PENDING_MESSAGE_MAX_COUNT ||
+          earlyFrameBytes + messageBytes > PENDING_MESSAGE_MAX_BYTES
+        ) {
+          ws._ingressQueueRejected = true;
+          logger.warn('[WS] Early message queue exceeded', {
+            pendingCount: earlyFrames.length + 1,
+            pendingBytes: earlyFrameBytes + messageBytes,
+            maxCount: PENDING_MESSAGE_MAX_COUNT,
+            maxBytes: PENDING_MESSAGE_MAX_BYTES
+          });
+          discardEarlyFrames();
+          ws.close(1008, 'Pending message queue exceeded');
+          return;
+        }
+        earlyFrames.push({ messageBuffer, isBinary });
+        earlyFrameBytes += messageBytes;
+      } catch (error) {
+        ws._ingressQueueRejected = true;
+        discardEarlyFrames();
+        const frameError = error instanceof WsIngressFrameError
+          ? error
+          : new WsIngressFrameError(1002, 'Invalid frame format', 'INVALID_RAW_FRAME');
+        logger.warn('[WS] Early ingress frame rejected', { code: frameError.logCode });
+        ws.close(frameError.closeCode, frameError.closeReason);
+      }
+    };
+    ws.on('message', captureEarlyMessage);
     let connectionCleanupStarted = false;
     ws.on('error', (error) => {
       connectionAbortController.abort();
@@ -240,6 +302,7 @@ export function attachGateway({
       if (connectionCleanupStarted) return;
       connectionCleanupStarted = true;
       connectionAbortController.abort();
+      discardEarlyFrames();
       try {
         clearSocketPQSession(ws);
         await removeLocalConnection(ws);
@@ -255,6 +318,7 @@ export function attachGateway({
 
     if (wss.clients.size > MAX_CONCURRENT_CONNECTIONS) {
       logger.warn('[WS] Concurrent connection capacity reached');
+      discardEarlyFrames();
       ws.close(1013, 'Server connection capacity reached');
       return;
     }
@@ -262,10 +326,12 @@ export function attachGateway({
     try {
       const allowed = await rateLimiter.checkConnectionLimit(ws);
       if (!allowed) {
+        discardEarlyFrames();
         return;
       }
     } catch (error) {
       logger.error('[WS] Rate limiting error during connection:', error);
+      discardEarlyFrames();
       ws.close(1011, 'Rate limiting error');
       return;
     }
@@ -310,11 +376,12 @@ export function attachGateway({
         stack: error.stack,
         code: 1011
       });
+      discardEarlyFrames();
       ws.close(1011, 'Key exchange failed');
       return;
     }
 
-    ws.on('message', async (messageBuffer, isBinary) => {
+    const handleIngressMessage = async (messageBuffer, isBinary) => {
       try {
       const binaryFrame = isBinary === true;
       const receivedAt = Date.now();
@@ -433,10 +500,19 @@ export function attachGateway({
           } catch {
             throw new WsIngressFrameError(1002, 'Invalid JSON payload', 'INVALID_JSON');
           }
-          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          if (
+            !parsed ||
+            typeof parsed !== 'object' ||
+            Array.isArray(parsed) ||
+            !isSafeJsonTree(parsed, {
+              maxDepth: 32,
+              maxNodes: 20_000,
+              maxKeyLength: 256
+            })
+          ) {
             throw new WsIngressFrameError(1002, 'Invalid message structure', 'INVALID_MESSAGE_OBJECT');
           }
-          if (typeof parsed.type !== 'string' || parsed.type.length === 0 || parsed.type.length > 64) {
+          if (!isSafeWireMessageType(parsed.type)) {
             throw new WsIngressFrameError(1002, 'Invalid message type', 'INVALID_MESSAGE_TYPE');
           }
           await handleMessage({ ws, parsed });
@@ -477,7 +553,15 @@ export function attachGateway({
           ws.close(frameError.closeCode, frameError.closeReason);
         } catch { }
       }
-    });
+    };
+
+    ws.off('message', captureEarlyMessage);
+    ws.on('message', handleIngressMessage);
+    const queuedFrames = earlyFrames.splice(0, earlyFrames.length);
+    earlyFrameBytes = 0;
+    for (const { messageBuffer, isBinary } of queuedFrames) {
+      void handleIngressMessage(messageBuffer, isBinary);
+    }
 
   });
 
@@ -488,6 +572,7 @@ export function attachGateway({
       logger.info('[WS] Gateway stopped');
     },
     removeLocalConnection,
+    revokeAllConnections: () => revokeAllWebSocketConnections(wss),
     getServerPublicKeyPayload: getCachedPublicKeyPayload,
     getServerPublicKeyMessage: getCachedPublicKeyMessage,
   };

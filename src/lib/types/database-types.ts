@@ -1,9 +1,10 @@
 import type { Message, MessageReceipt, MessageReply } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
+import type { useAuth } from '../../hooks/auth/useAuth';
 
 // SecureDB hook props
 export interface UseSecureDBProps {
-  Authentication: any;
+  Authentication: ReturnType<typeof useAuth>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 

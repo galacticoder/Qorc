@@ -3,6 +3,7 @@ import { Message } from '../../components/chat/messaging/types';
 import { INACTIVITY_TIMEOUT_MS, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS, MAX_FILE_SIZE_BYTES, GLOBAL_INBOUND_FILE_MEMORY_BUDGET, FILE_NACK_STALL_MS, MAX_NACK_ATTEMPTS, MAX_RETRANSMIT_CHUNKS_PER_REQUEST } from "../../lib/constants";
 import { dispatchProgressEvent, dispatchCanceledEvent, totalInboundFileBytes, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
+import { shouldQueueFileTransportAck } from './transport-ack';
 import { extractChunkData, validateNewTransfer, createFileEntry, isValidChunkIndex } from "./chunk-validation";
 import { parseEncryptedChunk, decryptEnvelope, verifyChunkMac, decryptChunk, cleanupFailedTransfer } from "./chunk-decryption";
 import { completeFileTransfer, deriveIncomingFileMessageId, handleAssemblyFailure } from "./file-assembly";
@@ -12,6 +13,7 @@ import { SignalType } from "../../lib/types/signal-types";
 import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
 import type { HybridKeys } from '../../lib/types/auth-types';
 import { isCanonicalAuthUsername, sanitizeMessageId } from '../../lib/sanitizers';
+import type { SecureDB } from '../../lib/database/secureDB';
 
 const FILE_PERSIST_RETRY_BASE_MS = 1_500;
 const FILE_PERSIST_RETRY_MAX_MS = 15_000;
@@ -21,10 +23,10 @@ export function useFileHandler(
   getKeysOnDemand: () => Promise<HybridKeys | null>,
   onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void,
-  secureDBRef?: React.RefObject<any | null>,
-  usersRef?: React.RefObject<User[]>,
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
-  activeAccount?: string | null
+  secureDBRef: React.RefObject<SecureDB | null>,
+  usersRef: React.RefObject<User[]>,
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
+  activeAccount: string | null
 ) {
   const incomingFileChunksRef = useRef<Record<string, ExtendedFileState>>({});
   const macStateRef = useRef<Map<string, { macKey: Uint8Array }>>(new Map());
@@ -181,12 +183,12 @@ export function useFileHandler(
     async (payload: any, message: any) => {
       const generation = accountGenerationRef.current;
       const account = activeAccountRef.current;
-      const secureDB = secureDBRef?.current || null;
+      const secureDB = secureDBRef.current;
       const isCurrent = () => (
         generation === accountGenerationRef.current &&
         account !== null &&
         activeAccountRef.current === account &&
-        secureDBRef?.current === secureDB
+        secureDBRef.current === secureDB
       );
       try {
         if (!account || !secureDB || !isCurrent()) return false;
@@ -254,7 +256,7 @@ export function useFileHandler(
           if (!canAcknowledge()) return;
           entry.transportAckedIndices ??= new Set<number>();
           entry.transportAckPending ??= new Map<number, string>();
-          if (entry.transportAckedIndices.has(chunkIndex) && !force) return;
+          if (!shouldQueueFileTransportAck(entry, chunkIndex, Date.now(), force)) return;
           entry.transportAckPending.set(chunkIndex, transportMessageId);
 
           const startNextAck = () => {
@@ -433,7 +435,7 @@ export function useFileHandler(
             return false;
           }
 
-          const keys = await decryptEnvelope(envelope, account, from, usersRef?.current, findUser);
+          const keys = await decryptEnvelope(envelope, account, from, usersRef.current, findUser);
           if (!isCurrent()) {
             keys?.macKey.fill(0);
             return false;

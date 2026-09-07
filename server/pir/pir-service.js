@@ -143,10 +143,11 @@ async function buildAndPublishSnapshot(now) {
   const slot = publishedSlot === null ? slots[0] : availableBuildSlot();
   if (!slot) return publishedSlot?.snapshot?.epoch ?? null;
   slot.building = true;
-  
+  let source = null;
+  let rows = null;
   slot.snapshot = null;
   try {
-    const source = await readGlobalMixPirSnapshot(now);
+    source = await readGlobalMixPirSnapshot(now);
     if (sameIndex(publishedSlot?.snapshot, source)) {
       await prepareBuildSlot(slot);
       lastRefreshAt = Date.now();
@@ -161,7 +162,8 @@ async function buildAndPublishSnapshot(now) {
     });
     await prepareBuildSlot(slot);
     if (source.records.length > 0) {
-      await slot.worker.build(epoch, pirRows(source.records), SPOOL_PIR_ROW_BYTES);
+      rows = pirRows(source.records);
+      await slot.worker.build(epoch, rows, SPOOL_PIR_ROW_BYTES);
     }
     slot.snapshot = {
       epoch,
@@ -179,6 +181,8 @@ async function buildAndPublishSnapshot(now) {
     });
     return epoch;
   } finally {
+    for (const row of rows || []) row.fill(0);
+    for (const record of source?.records || []) record.fill(0);
     slot.building = false;
   }
 }

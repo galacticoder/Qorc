@@ -98,7 +98,7 @@ password and the local encryption passphrase.
 After unlock, Qorc attempts a one-time anonymous resume credential. If the
 resume pool is empty, it continues through normal private account
 authentication. The expensive local account unlock is not repeated during that
-fallback.
+authentication step.
 
 ## Renderer IPC Boundary
 

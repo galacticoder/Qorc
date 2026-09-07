@@ -4,16 +4,12 @@ if (process.platform !== 'linux') {
   throw new Error('Native server deployment supports only Linux');
 }
 
-if (!global.crypto) {
-  global.crypto = nodeCrypto.webcrypto;
-}
-import fs from 'fs';
+if (!globalThis.crypto?.subtle) throw new Error('Node.js 22 or newer is required');
 import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import {
   isLinkedAuthenticationSignalType,
+  isPreServerEntrySignalType,
   isUnlinkedApplicationSignalType,
   SignalType
 } from './signals.js';
@@ -23,18 +19,27 @@ import {
   destroyDatabaseSecrets,
   DiscoveryDB,
   initDatabase,
-  privateLookupId
+  privateLookupId,
+  UserDatabase
 } from './database/database.js';
 import { AvatarBlobDB } from './database/avatar-blob-db.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { initializeServerPasswordGate } from './authentication/auth-utils.js';
+import { ServerGatekeeper } from './authentication/gatekeeper.js';
+import { startServerPasswordMonitor } from './authentication/server-password-monitor.js';
+import {
+  startPrivateAuthPirService,
+  stopPrivateAuthPirService,
+} from './authentication/private-auth-pir.js';
+import { destroyAdminAuth, initializeAdminAuth } from '../scripts/admin-auth.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 import apiRoutes, {
   destroyApiRoutes,
   dispatchAnonymousApiOperation
 } from './routes/api-routes.js';
 import {
+  createPqAnonymousBodyAdmission,
   createPqAnonymousHttpHandler,
   handlePqAnonymousHttpParseError,
   PQ_ANONYMOUS_HTTP_MAX_REQUEST_BYTES
@@ -54,11 +59,14 @@ import {
   destroyEnvelopeHandler
 } from './messaging/pq-envelope-handler.js';
 import { initializeCluster, shutdownCluster } from './cluster/cluster-integration.js';
+import { CLUSTER_SERVER_ID_RE } from './cluster/signed-message.js';
 import { getServerRuntimeTelemetry } from './telemetry/runtime-telemetry.js';
 import clusterRoutes from './routes/cluster-routes.js';
 import {
   handleBlindRoute,
-  handleActivateDelivery
+  handleActivateDelivery,
+  hasAnonymousDeliveryAuthorization,
+  isLiveDeliverySocket
 } from './handlers/delivery-handlers.js';
 import { BlindRouter } from './routing/blind-router.js';
 import { TimingProtection } from './routing/timing-protection.js';
@@ -68,6 +76,10 @@ import {
   startDiscoveryPublicationRelay,
   stopDiscoveryPublicationRelay
 } from './discovery/publication-privacy.js';
+import {
+  destroyDiscoveryPublicationAuthentication,
+  initializeDiscoveryPublicationAuthentication
+} from './discovery/publication-auth.js';
 import { getDiscoveryEpochInfo } from './discovery/epoch.js';
 import {
   destroyDiscoveryBucketSecrets,
@@ -127,6 +139,7 @@ import {
 
 const DISCOVERY_PUBLISH_POW_DOMAIN = PROTOCOL_KEYS.DISCOVERY_PUBLISH_POW;
 const DISCOVERY_PUBLISH_POW_DIFFICULTY = 18;
+const SERVER_ENTRY_TOKEN_INVALID = 'SERVER_ENTRY_TOKEN_INVALID';
 
 function startServerCoverTraffic() {
   TimingProtection.startCoverTraffic(async () => {
@@ -167,19 +180,15 @@ async function enforceConnectionPrivacyMode(ws, message) {
   return false;
 }
 
-let server, wss, gateway, serverHybridKeyPair, retentionCleanupInterval;
+let server, wss, gateway, serverHybridKeyPair, retentionCleanupInterval, serverPasswordMonitor;
 let retentionCleanupInFlight = null;
 
 async function runRetentionCleanup() {
   if (retentionCleanupInFlight) return retentionCleanupInFlight;
   const pending = (async () => {
-    try {
-      await DiscoveryDB.cleanup();
-    } catch { }
-    try {
-      await AvatarBlobDB.pruneExpired();
-      await AvatarBlobDB.enforceCap(SERVER_CONSTANTS.AVATAR_BLOB_MAX_COUNT);
-    } catch { }
+    await DiscoveryDB.cleanup();
+    await AvatarBlobDB.pruneExpired();
+    await AvatarBlobDB.enforceCap(SERVER_CONSTANTS.AVATAR_BLOB_MAX_COUNT);
   })();
   retentionCleanupInFlight = pending;
   try {
@@ -192,7 +201,9 @@ async function runRetentionCleanup() {
 function startRetentionCleanup() {
   if (retentionCleanupInterval) return;
   retentionCleanupInterval = setInterval(() => {
-    void runRetentionCleanup();
+    void runRetentionCleanup().catch((error) => {
+      console.error('[SERVER] Retention cleanup failed', error);
+    });
   }, 30 * 60_000);
   retentionCleanupInterval.unref?.();
 }
@@ -250,8 +261,10 @@ async function createExpressApp({ context }) {
     serverHybridKeyPair: context.serverHybridKeyPair,
     dispatchOperation: dispatchAnonymousApiOperation
   });
+  const pqAnonymousBodyAdmission = createPqAnonymousBodyAdmission();
   app.post(
     '/api/anonymous',
+    pqAnonymousBodyAdmission,
     express.raw({
       type: 'application/octet-stream',
       limit: PQ_ANONYMOUS_HTTP_MAX_REQUEST_BYTES,
@@ -261,25 +274,11 @@ async function createExpressApp({ context }) {
     handlePqAnonymousHttpParseError
   );
 
-  app.use(express.json({ limit: SERVER_CONSTANTS.MAX_JSON_PAYLOAD_SIZE }));
   app.use('/api/cluster', clusterRoutes);
   app.use('/api', apiRoutes);
-
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = path.dirname(__filename);
-  const distPath = path.join(__dirname, '../dist');
-  if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
-
-    app.get(/^\/(?!api\/).*/, (req, res) => {
-      const indexPath = path.join(distPath, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-      } else {
-        res.status(404).send('Application not built. Run: npm run build');
-      }
-    });
-  }
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'not_found' });
+  });
 
   // Terminal error handler
   app.use((err, req, res, _next) => {
@@ -307,26 +306,17 @@ async function createExpressApp({ context }) {
 }
 
 async function createWebSocketServer({ server: httpsServer }) {
-  const configuredWsMaxPayload = Number.parseInt(process.env.WS_MAX_PAYLOAD_BYTES || '', 10);
-  const wsMaxPayload = Number.isFinite(configuredWsMaxPayload)
-    ? Math.min(16 * 1024 * 1024, Math.max(64 * 1024, configuredWsMaxPayload))
-    : 16 * 1024 * 1024;
   wss = new WebSocketServer({
     server: httpsServer,
-    maxPayload: wsMaxPayload,
+    maxPayload: SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES,
     verifyClient: ({ origin }, done) => {
       const allowed = !origin || (CORS_CONFIG.ALLOWED_ORIGINS || []).includes(origin);
       done(allowed, allowed ? 101 : 403, allowed ? undefined : 'Forbidden');
     }
   });
 
-  // Set up blind delivery subscriber
-  try {
-    await BlindRouter.subscribeToBlindDelivery();
-    console.log('[CROSS-INSTANCE] Blind delivery subscriber initialized');
-  } catch (error) {
-    console.error('[CROSS-INSTANCE] Blind delivery subscriber setup failed', error);
-  }
+  await BlindRouter.subscribeToBlindDelivery();
+  console.log('[CROSS-INSTANCE] Blind delivery subscriber initialized');
 
   try {
     await startPirService();
@@ -351,12 +341,8 @@ async function createWebSocketServer({ server: httpsServer }) {
     throw error;
   }
 
-  try {
-    startDiscoveryPublicationRelay();
-    console.log('[DISCOVERY] Publication relay started');
-  } catch (error) {
-    console.error('[DISCOVERY] Publication relay setup failed', error);
-  }
+  startDiscoveryPublicationRelay();
+  console.log('[DISCOVERY] Publication relay started');
 
   return wss;
 }
@@ -389,21 +375,35 @@ async function prepareServerContext() {
       secretKey: flatKeyPair.x25519SecretKey
     }
   };
+  BlindRouter.initializeGlobalMixAuthentication(serverHybridKeyPair.dilithium);
+  initializeDiscoveryPublicationAuthentication(serverHybridKeyPair.dilithium);
   await initializeKeyTransparencyService(serverHybridKeyPair.dilithium);
 
   initializeEnvelopeHandler(serverHybridKeyPair);
 
   const { getPgPool } = await import('./database/database.js');
   const db = await getPgPool();
+  await rateLimitMiddleware.limiter();
 
   // Initialize OPAQUE server
   const { OPAQUEServer } = await import('./crypto/opaque-service.js');
   await OPAQUEServer.initialize();
+  await startPrivateAuthPirService(await UserDatabase.getPrivateAuthRecords());
 
   // Initialize Privacy Pass server
   const { PrivacyPassServer, NullifierStore } = await import('./authentication/privacy-pass-server.js');
   const nullifierStore = new NullifierStore(db);
   await PrivacyPassServer.initialize(nullifierStore);
+
+  const clusterAdminUsername = process.env.CLUSTER_ADMIN_USERNAME?.trim();
+  const clusterAdminPassword = process.env.CLUSTER_ADMIN_PASSWORD;
+  if ((clusterAdminUsername && !clusterAdminPassword) || (!clusterAdminUsername && clusterAdminPassword)) {
+    throw new Error('CLUSTER_ADMIN_USERNAME and CLUSTER_ADMIN_PASSWORD must be configured together');
+  }
+  if (clusterAdminUsername && clusterAdminPassword) {
+    await initializeAdminAuth(clusterAdminUsername, clusterAdminPassword);
+    delete process.env.CLUSTER_ADMIN_PASSWORD;
+  }
 
   // Initialize OPRF Discovery server
   await oprfDiscoveryServer.initialize();
@@ -433,7 +433,7 @@ function destroyServerTransportKeys() {
   serverHybridKeyPair = null;
 }
 
-async function onServerReady({ server: httpsServer, wss: wsServer, context, workerId, tls }) {
+async function onServerReady({ server: httpsServer, wss: wsServer, context }) {
   server = httpsServer;
   wss = wsServer;
   serverHybridKeyPair = context.serverHybridKeyPair;
@@ -441,7 +441,7 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
   gateway = attachGateway({
     wss,
     serverHybridKeyPair,
-    serverId: process.env.SERVER_ID || 'default',
+    serverId: process.env.SERVER_ID,
     config: {
       bandwidthQuota: SERVER_CONSTANTS.BANDWIDTH_QUOTA,
       bandwidthWindowMs: SERVER_CONSTANTS.BANDWIDTH_WINDOW,
@@ -507,44 +507,62 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
     throw new Error('HTTPS server did not expose a bound TCP address');
   }
   const actualPort = boundAddress.port;
-  const wasDynamicPort = (ServerConfig.PORT === 0 || ServerConfig.PORT === '0');
-  if (wasDynamicPort) {
-    process.env.PORT = actualPort.toString();
-  }
 
   console.log('[SERVER] Server listening', {
     port: actualPort,
-    workerId,
-    tlsSource: tls?.source || 'unknown',
     serverId: process.env.SERVER_ID,
     address: bindAddress
   });
 
+  serverPasswordMonitor = await startServerPasswordMonitor({
+    rotatePassword: (password) => ServerGatekeeper.rotateExplicit(password),
+    onPasswordRotated: async ({ disconnectClients }) => {
+      if (disconnectClients) {
+        const revoked = gateway?.revokeAllConnections?.() || 0;
+        console.log('[SERVER] Revoked sockets after password rotation', { revoked });
+        return;
+      }
+      const retainedClients = Array.from(wss?.clients || []).filter((socket) => (
+        socket.readyState === 1 && socket._pqSessionId && socket._hasServerAuth
+      ));
+      const notificationResults = await Promise.allSettled(retainedClients.map((socket) => sendSecureMessage(socket, {
+        type: SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED,
+      })));
+      console.log('[SERVER] Existing sockets retained after password rotation', {
+        retained: retainedClients.length,
+        notified: notificationResults.filter((result) => (
+          result.status === 'fulfilled' && result.value !== false
+        )).length
+      });
+    },
+  });
+
   startServerCoverTraffic();
 
-  if (process.env.ENABLE_CLUSTERING === 'true') {
-    try {
-      console.log('[CLUSTER] Initializing server clustering');
-      const clusterManager = await initializeCluster({
-        serverHybridKeyPair,
-        serverId: process.env.SERVER_ID,
-        isPrimary: process.env.CLUSTER_PRIMARY === 'true' ? true : null,
-        autoApprove: process.env.CLUSTER_AUTO_APPROVE === 'true',
-      });
-      if (wasDynamicPort && clusterManager) {
-        await clusterManager.updateServerPort(actualPort);
-      }
-      console.log('[CLUSTER] Server clustering ready', {
-        serverId: clusterManager.serverId,
-        isPrimary: clusterManager.isPrimary,
-        isApproved: clusterManager.isApproved
-      });
-    } catch (error) {
-      console.error('[CLUSTER] Failed to initialize clustering', error);
-    }
-  } else {
-    console.log('[CLUSTER] Clustering disabled (set ENABLE_CLUSTERING=true in env to enable)');
+  console.log('[CLUSTER] Initializing server clustering');
+  if (!['true', 'false'].includes(process.env.CLUSTER_PRIMARY)) {
+    throw new Error('CLUSTER_PRIMARY must be explicitly set to true or false');
   }
+  if (!['true', 'false'].includes(process.env.CLUSTER_AUTO_APPROVE)) {
+    throw new Error('CLUSTER_AUTO_APPROVE must be explicitly set to true or false');
+  }
+  const clusterManager = await initializeCluster({
+    serverHybridKeyPair,
+    serverId: process.env.SERVER_ID,
+    isPrimary: process.env.CLUSTER_PRIMARY === 'true',
+    autoApprove: process.env.CLUSTER_AUTO_APPROVE === 'true',
+  });
+  const terminateAfterClusterRemoval = () => {
+    console.error('[CLUSTER] This server lost cluster membership; shutting down the server process');
+    process.kill(process.pid, 'SIGTERM');
+  };
+  clusterManager.once('self-force-removed', terminateAfterClusterRemoval);
+  clusterManager.once('self-membership-lost', terminateAfterClusterRemoval);
+  console.log('[CLUSTER] Server clustering ready', {
+    serverId: clusterManager.serverId,
+    isPrimary: clusterManager.isPrimary,
+    isApproved: clusterManager.isApproved
+  });
 }
 
 const recentPublishTokens = new Map();
@@ -611,35 +629,11 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
       return;
     }
 
-    const ephemeralState = authentication.SecureStateManager.getState(ws);
-    const state = { ...ephemeralState };
-    if (ws._authenticated || ws._hasAuthenticated) {
-      state.hasAuthenticated = true;
-    }
-    if (ws._hasServerAuth) {
-      state.hasServerAuth = true;
-    }
-
     const serverPasswordRequired = ServerConfig.isServerPasswordGateReady();
 
     const isTransportSignal = [
       SignalType.REQUEST_SERVER_PUBLIC_KEY,
       SignalType.PQ_HANDSHAKE_INIT
-    ].includes(normalizedMessage.type);
-
-    const isPreEntryLivenessSignal = normalizedMessage.type === SignalType.PQ_HEARTBEAT_PING;
-
-    const isGatekeeperSignal = [
-      SignalType.SERVER_ENTRY_REQUEST,
-      SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
-      SignalType.PRIVACY_PASS_REDEMPTION
-    ].includes(normalizedMessage.type);
-
-    const isAccountAuthSignal = [
-      SignalType.AUTH_OT_REQUEST,
-      SignalType.AUTH_OT_FINALIZE,
-      SignalType.TOKEN_VALIDATION,
-      SignalType.ACTIVATE_DELIVERY
     ].includes(normalizedMessage.type);
 
     if (!ws._pqSessionId && !isTransportSignal) {
@@ -658,10 +652,15 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
       return;
     }
 
-    if (serverPasswordRequired && !state.hasServerAuth && !ws._unlinkedSession && !isTransportSignal && !isPreEntryLivenessSignal && !isGatekeeperSignal && !isAccountAuthSignal) {
+    if (
+      serverPasswordRequired &&
+      !ws._hasServerAuth &&
+      !ws._unlinkedSession &&
+      !isPreServerEntrySignalType(normalizedMessage.type)
+    ) {
       console.warn('[GATEKEEPER] Access denied: Server entry token required', {
         signalType: normalizedMessage.type,
-        state: { hasServerAuth: !!state.hasServerAuth }
+        hasServerAuth: ws._hasServerAuth === true
       });
       return await sendSecureMessage(ws, {
         type: SignalType.AUTH_ERROR,
@@ -696,43 +695,45 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
       return;
     }
 
+    if (!isLiveDeliverySocket(ws)) return false;
+
     switch (normalizedMessage.type) {
-      case SignalType.AUTH_OT_REGISTER_REQUEST:
-        await authHandler.handleOTRegisterRequest(ws, normalizedMessage);
+      case SignalType.AUTH_REGISTER_REQUEST:
+        await authHandler.handleRegisterRequest(ws, normalizedMessage);
         break;
-      case SignalType.AUTH_OT_REGISTER_FINALIZE:
-        await authHandler.handleOTRegisterFinalize(ws, normalizedMessage);
+      case SignalType.AUTH_REGISTER_FINALIZE:
+        await authHandler.handleRegisterFinalize(ws, normalizedMessage);
         break;
-      case SignalType.AUTH_OT_REGISTER_CONFIRM:
-        const otRegRes = await authHandler.handleOTRegisterConfirm(ws, normalizedMessage);
-        if (otRegRes?.success) {
-          const grantsServerEntry = !serverPasswordRequired || !!ws._hasServerAuth;
+      case SignalType.AUTH_REGISTER_CONFIRM:
+        const registrationResult = await authHandler.handleRegisterConfirm(ws, normalizedMessage);
+        if (registrationResult?.success) {
+          if (!isLiveDeliverySocket(ws)) return false;
+          const grantsServerEntry = !ServerConfig.isServerPasswordGateReady() || !!ws._hasServerAuth;
           ws._authenticated = true;
-          ws._hasAuthenticated = true;
           ws._accountAuthViaAnonymousToken = false;
           ws._hasServerAuth = grantsServerEntry;
           if (grantsServerEntry) {
             console.log('[GATEKEEPER] Server entry granted');
           } else {
-            console.log('[GATEKEEPER] Server entry still required after OT registration');
+            console.log('[GATEKEEPER] Server entry still required after registration');
           }
         }
         break;
-      case SignalType.AUTH_OT_REQUEST:
-        await authHandler.handleOTSignIn(ws, normalizedMessage);
+      case SignalType.AUTH_PIR_REQUEST:
+        await authHandler.handlePIRSignIn(ws, normalizedMessage);
         break;
-      case SignalType.AUTH_OT_FINALIZE:
-        const otFinalRes = await authHandler.handleSignInFinalize(ws, normalizedMessage);
-        if (otFinalRes?.success) {
-          const grantsServerEntry = !serverPasswordRequired || !!ws._hasServerAuth;
+      case SignalType.AUTH_PIR_FINALIZE:
+        const pirFinalResult = await authHandler.handleSignInFinalize(ws, normalizedMessage);
+        if (pirFinalResult?.success) {
+          if (!isLiveDeliverySocket(ws)) return false;
+          const grantsServerEntry = !ServerConfig.isServerPasswordGateReady() || !!ws._hasServerAuth;
           ws._authenticated = true;
-          ws._hasAuthenticated = true;
           ws._accountAuthViaAnonymousToken = false;
           ws._hasServerAuth = grantsServerEntry;
           if (grantsServerEntry) {
-            console.log('[GATEKEEPER] Server entry granted via OT login');
+            console.log('[GATEKEEPER] Server entry granted via private login');
           } else {
-            console.log('[GATEKEEPER] Server entry still required after OT login');
+            console.log('[GATEKEEPER] Server entry still required after private login');
           }
         }
         break;
@@ -778,19 +779,36 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             hasNullifier: !!normalizedMessage.nullifier,
             hasMac: !!normalizedMessage.mac
           });
-          const isValid = await authHandler.gatekeeper.verifyEntryToken(normalizedMessage);
-          if (isValid) {
+          const verification = await authHandler.gatekeeper.verifyEntryToken(normalizedMessage);
+          if (
+            verification.valid &&
+            isLiveDeliverySocket(ws) &&
+            ServerGatekeeper.isServerEntryAuthorizationGenerationCurrent(
+              verification.authorizationGeneration
+            )
+          ) {
             const delivered = await sendSecureMessage(ws, {
               type: SignalType.OK,
               requestId,
               message: 'Server entry granted'
             });
             if (delivered === false) return false;
+            if (
+              !isLiveDeliverySocket(ws) ||
+              !ServerGatekeeper.isServerEntryAuthorizationGenerationCurrent(
+                verification.authorizationGeneration
+              )
+            ) return false;
             ws._hasServerAuth = true;
             console.log('[GATEKEEPER] Server entry granted');
           } else {
             console.warn('[GATEKEEPER] Privacy Pass token verification returned false');
-            await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, requestId, message: 'Invalid entry token' });
+            await sendSecureMessage(ws, {
+              type: SignalType.AUTH_ERROR,
+              requestId,
+              message: 'Invalid entry token',
+              code: SERVER_ENTRY_TOKEN_INVALID
+            });
           }
         } catch (error) {
           console.error('[GATEKEEPER] Token redemption failed', { error: error.message });
@@ -809,8 +827,16 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
           : null;
         const rollbackTokenValidationAuthorization = () => {
           if (!tokenValidationPreviousAuth) return;
+          if (
+            !isLiveDeliverySocket(ws) ||
+            !ServerGatekeeper.isServerEntryAuthorizationGenerationCurrent(
+              tokenValidationPreviousAuth.serverEntryAuthorizationGeneration
+            )
+          ) {
+            tokenValidationPreviousAuth = null;
+            return;
+          }
           ws._authenticated = tokenValidationPreviousAuth.authenticated;
-          ws._hasAuthenticated = tokenValidationPreviousAuth.hasAuthenticated;
           ws._hasServerAuth = tokenValidationPreviousAuth.hasServerAuth;
           if (tokenValidationPreviousAuth.accountAuthViaAnonymousToken === undefined) {
             delete ws._accountAuthViaAnonymousToken;
@@ -827,7 +853,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
               code: INVALID_REQUEST
             });
           }
-          if (state.hasAuthenticated || ws._authenticated || ws._hasAuthenticated) {
+          if (ws._authenticated) {
             return await sendSecureMessage(ws, {
               type: SignalType.TOKEN_VALIDATION_RESPONSE,
               requestId: tokenValidationRequestId,
@@ -898,17 +924,18 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             });
           }
 
-          const serverEntryRequired = serverPasswordRequired && !state.hasServerAuth && !ws._hasServerAuth;
+          if (!isLiveDeliverySocket(ws)) return false;
+          const serverEntryRequired = ServerConfig.isServerPasswordGateReady() && !ws._hasServerAuth;
           const serverEntryGranted = !serverEntryRequired;
 
           tokenValidationPreviousAuth = {
             authenticated: ws._authenticated,
-            hasAuthenticated: ws._hasAuthenticated,
             hasServerAuth: ws._hasServerAuth,
-            accountAuthViaAnonymousToken: ws._accountAuthViaAnonymousToken
+            accountAuthViaAnonymousToken: ws._accountAuthViaAnonymousToken,
+            serverEntryAuthorizationGeneration:
+              ServerGatekeeper.getServerEntryAuthorizationGeneration()
           };
           ws._authenticated = true;
-          ws._hasAuthenticated = true;
           ws._accountAuthViaAnonymousToken = true;
           ws._hasServerAuth = serverEntryGranted;
 
@@ -958,6 +985,10 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
         break;
 
       case SignalType.REQUEST_SERVER_PUBLIC_KEY:
+        if (!hasExactPlainObjectKeys(normalizedMessage, ['type'])) {
+          ws.close(1008, 'Invalid server key request');
+          break;
+        }
         try {
           const payload = await gateway.getServerPublicKeyPayload();
           await sendSecureMessage(ws, payload);
@@ -970,7 +1001,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
 
       case SignalType.OPRF_DISCOVERY_PUBLIC_KEY:
         if (
-          ws._unlinkedSession !== true ||
+          !hasAnonymousDeliveryAuthorization(ws) ||
           Object.keys(normalizedMessage).sort().join(',') !== 'type'
         ) {
           return await sendSecureMessage(ws, {
@@ -1022,7 +1053,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             }
           };
 
-          if (ws._unlinkedSession !== true) {
+          if (!hasAnonymousDeliveryAuthorization(ws)) {
             return await sendPublishAck({
               success: false,
               error: 'unlinked_session_required'
@@ -1128,6 +1159,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
               error: 'discovery_work_replayed'
             });
           }
+          if (!hasAnonymousDeliveryAuthorization(ws)) return false;
 
           // Rolling discoverability lease
           let publishSuccess = false;
@@ -1145,7 +1177,8 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
               enqueueWork = enqueueDiscoveryPublication({
                 publication,
                 encryptedBlob: normalizedMessage.encryptedBlob,
-                leaseMs: DISCOVERY_LEASE_TTL_MS
+                leaseMs: DISCOVERY_LEASE_TTL_MS,
+                authorizationCheck: () => hasAnonymousDeliveryAuthorization(ws)
               });
               pendingPublishTokens.set(publishTokenKey, enqueueWork);
               ownsEnqueueWork = true;
@@ -1168,6 +1201,8 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             }
           }
 
+          if (!hasAnonymousDeliveryAuthorization(ws)) return false;
+
           await sendPublishAck({
             success: publishSuccess,
             error: publishSuccess ? undefined : enqueueResult?.error
@@ -1180,17 +1215,21 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
         break;
 
       case SignalType.PQ_HEARTBEAT_PING:
-        if (ws._pqSessionId) {
+        if (
+          ws._pqSessionId &&
+          hasExactPlainObjectKeys(normalizedMessage, ['sessionId', 'timestamp', 'type']) &&
+          normalizedMessage.sessionId === ws._pqSessionId &&
+          Number.isSafeInteger(normalizedMessage.timestamp) &&
+          Math.abs(normalizedMessage.timestamp - Date.now()) <= 5 * 60_000
+        ) {
           await sendSecureMessage(ws, {
             type: SignalType.PQ_HEARTBEAT_PONG,
             sessionId: ws._pqSessionId,
             timestamp: Date.now()
           });
+        } else {
+          ws.close(1008, 'Invalid heartbeat request');
         }
-        break;
-
-      case SignalType.PING:
-        await sendSecureMessage(ws, { type: SignalType.PONG, timestamp: Date.now() });
         break;
 
       case SignalType.BLIND_ROUTE:
@@ -1198,12 +1237,12 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
         break;
 
       case SignalType.ACTIVATE_DELIVERY:
-        await handleActivateDelivery({ ws, parsed: normalizedMessage, state });
+        await handleActivateDelivery({ ws, parsed: normalizedMessage });
         break;
 
       default:
         console.warn('[WS] Unknown message type', normalizedMessage.type);
-        await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Unknown message type' });
+        ws.close(1008, 'Unknown message type');
     }
   } catch (error) {
     try {
@@ -1217,7 +1256,8 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
     try {
       await sendSecureMessage(ws, {
         type: SignalType.ERROR,
-        message: `Internal server error [DIAG type=${parsed?.type} err=${error?.message}]`,
+        code: 'INTERNAL_ERROR',
+        message: 'Internal server error',
       });
     } catch (_sendError) {
     }
@@ -1290,6 +1330,9 @@ async function shutdownServer(signal) {
   recentPublishTokens.clear();
   pendingPublishTokens.clear();
 
+  await serverPasswordMonitor?.stop?.();
+  serverPasswordMonitor = null;
+
   await gateway?.stop?.();
   gateway = null;
 
@@ -1304,16 +1347,23 @@ async function shutdownServer(signal) {
   await closeHttpsServer();
 
   await stopDiscoveryPublicationRelay();
+  destroyDiscoveryPublicationAuthentication();
   await TimingProtection.stopCoverTraffic();
   try {
     await BlindRouter.stopBlindDeliverySubscription();
-    if (pirPrebuildTimer) {
-      clearInterval(pirPrebuildTimer);
-      pirPrebuildTimer = null;
-    }
-    await stopPirService();
   } catch (error) {
     console.error('[SERVER] Blind delivery shutdown failed', error);
+  } finally {
+    BlindRouter.destroyGlobalMixAuthentication();
+  }
+  if (pirPrebuildTimer) {
+    clearInterval(pirPrebuildTimer);
+    pirPrebuildTimer = null;
+  }
+  try {
+    await stopPirService();
+  } catch (error) {
+    console.error('[SERVER] PIR shutdown failed', error);
   }
 
   try {
@@ -1335,6 +1385,12 @@ async function shutdownServer(signal) {
   }
 
   try {
+    await stopPrivateAuthPirService();
+  } catch (error) {
+    console.error('[SERVER] Private authentication PIR shutdown failed', error);
+  }
+
+  try {
     const [{ PrivacyPassServer }, { OPAQUEServer }, { ServerGatekeeper }] = await Promise.all([
       import('./authentication/privacy-pass-server.js'),
       import('./crypto/opaque-service.js'),
@@ -1343,6 +1399,7 @@ async function shutdownServer(signal) {
     await PrivacyPassServer.destroy();
     OPAQUEServer.destroy();
     await ServerGatekeeper.destroy();
+    destroyAdminAuth();
   } catch (error) {
     console.error('[SERVER] Authentication secret shutdown failed', error);
   }
@@ -1377,6 +1434,10 @@ async function shutdownServer(signal) {
 async function startServer() {
   let unregisterShutdownHandlers = null;
   try {
+    if (!CLUSTER_SERVER_ID_RE.test(process.env.SERVER_ID || '')) {
+      throw new Error('SERVER_ID is required and must be a valid cluster server ID');
+    }
+    ServerConfig.validateConfig();
     setDeliveryTelemetryProvider(BlindRouter.getTelemetrySnapshot);
     setRuntimeTelemetryProvider(getServerRuntimeTelemetry);
     startServerTelemetry();

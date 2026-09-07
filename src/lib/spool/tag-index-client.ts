@@ -17,7 +17,7 @@ export interface SpoolTagIndex {
   probes: string[];
 }
 
-export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagIndex | null> {
+export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagIndex> {
   const raw = await anonymousHttpFetch(SPOOL_TAG_INDEX_AUDIENCE, {}, serverUrl) as Record<string, unknown> | null;
   if (
     !raw ||
@@ -29,7 +29,7 @@ export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagInd
     !Number.isSafeInteger(raw.count) ||
     !Number.isSafeInteger(raw.epoch) ||
     (raw.epoch as number) < 0
-  ) return null;
+  ) throw new Error('Invalid spool tag index response');
 
   const packed = raw.tags as string;
   const count = raw.count as number;
@@ -38,7 +38,7 @@ export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagInd
     count < 0 ||
     packed.length !== count * SPOOL_TAG_HEX_CHARS ||
     packedProbes.length !== count * SPOOL_DETECTION_PROBE_HEX_CHARS
-  ) return null;
+  ) throw new Error('Invalid spool tag index response');
 
   const tags: string[] = new Array(count);
   const probes: string[] = new Array(count);

@@ -4,7 +4,7 @@
 
 import { EventType } from '../types/event-types';
 import { SignalType } from '../types/signal-types';
-import { p2p, events, isTauri } from '../tauri-bindings';
+import { p2p, events } from '../tauri-bindings';
 import { UnlistenFn } from '@tauri-apps/api/event';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumSignature } from '../cryptography/signature';
@@ -1051,9 +1051,6 @@ class P2PConnection implements SecureConnection {
 
     // Connect to a peer through their Tor onion service
     private async connectViaP2PBridge(): Promise<void> {
-        if (!isTauri()) {
-            throw new Error('P2P bridge unavailable in browser mode');
-        }
         const endpoint = parseP2PEndpointUrl(this.peerIdentity.endpointUrl);
         if (!endpoint) {
             this.owner.requestPeerCertificate(this.peerId);
@@ -1751,7 +1748,11 @@ class P2PConnection implements SecureConnection {
                 ? { audioLaneRttCeiling: mediaLaneRttCeiling }
                 : {}),
         });
-        if (res.audioLanes) {
+        const bridgeUnchanged =
+            bridgeGeneration === this.bridgeGeneration &&
+            bridgeId === this.getActiveBridgeConnectionId() &&
+            connectionToken === this.nativeConnectionToken;
+        if (bridgeUnchanged && res.audioLanes) {
             const selectedPath = res.audioLanes.selectedLane ? 'lane' : 'primary';
             this.audioLaneTelemetry = {
                 ...res.audioLanes,
@@ -1769,22 +1770,20 @@ class P2PConnection implements SecureConnection {
             }
         }
 
-        if (
-            bridgeGeneration !== this.bridgeGeneration ||
-            bridgeId !== this.getActiveBridgeConnectionId() ||
-            connectionToken !== this.nativeConnectionToken
-        ) {
-            throw new Error('P2P bridge changed while sending');
-        }
-        if (audioEndpoint && (res.success || res.audioLanes?.endpointAvailable)) {
+        if (bridgeUnchanged && audioEndpoint && (res.success || res.audioLanes?.endpointAvailable)) {
             this.sentAudioEndpointUrl = audioEndpoint;
         }
 
         if (!res.success) {
-            const errLower = (res.error || '').toLowerCase();
+            const failure = res.error || (
+                bridgeUnchanged
+                    ? 'Failed to send through native P2P bridge'
+                    : 'P2P bridge changed while sending'
+            );
+            const errLower = failure.toLowerCase();
             const isConnectionDead =
-                res.error === 'Connection not found' ||
-                res.error === 'Not connected' ||
+                failure === 'Connection not found' ||
+                failure === 'Not connected' ||
                 errLower.includes('connection closed') ||
                 errLower.includes('connection lost') ||
                 errLower.includes('writer unavailable') ||
@@ -1792,11 +1791,11 @@ class P2PConnection implements SecureConnection {
                 errLower.includes('reset by peer') ||
                 errLower.includes('send timed out') ||
                 errLower.includes('identity changed');
-            if (isConnectionDead) {
+            if (bridgeUnchanged && isConnectionDead) {
                 this.handleDisconnect();
             }
 
-            throw new Error(res.error || 'Failed to send through native P2P bridge');
+            throw new Error(failure);
         }
         this._lastActivity = Date.now();
     }
@@ -2362,12 +2361,10 @@ class P2PConnection implements SecureConnection {
             } catch { }
         }
 
-        if (typeof window !== 'undefined') {
-            const event = new CustomEvent(EventType.P2P_CONNECTION_STATE_CHANGE, {
-                detail: { peerId: this.owner.resolveAppPeerId(this.peerId), state }
-            });
-            window.dispatchEvent(event);
-        }
+        const event = new CustomEvent(EventType.P2P_CONNECTION_STATE_CHANGE, {
+            detail: { peerId: this.owner.resolveAppPeerId(this.peerId), state }
+        });
+        window.dispatchEvent(event);
 
         if (state === 'failed') {
             this.streamHandlers.clear();
@@ -2376,7 +2373,6 @@ class P2PConnection implements SecureConnection {
     }
 
     private async authenticateNativeConnection(): Promise<void> {
-        if (!isTauri()) return;
         if (
             this.bridgeConnectionId &&
             this.nativeAuthenticatedConnectionId === this.bridgeConnectionId
@@ -3373,7 +3369,6 @@ export class P2PTransport implements SecureTransport {
 
     async getLocalEndpointForIdentity(localUsername: string): Promise<string | undefined> {
         if (
-            !isTauri() ||
             !this.initialized ||
             this.initializing ||
             !!this.shutdownPromise ||
@@ -3433,7 +3428,7 @@ export class P2PTransport implements SecureTransport {
         if (this.shutdownPromise) {
             await this.shutdownPromise;
         }
-        if (isTauri() && !this.nativeIdentityReady) {
+        if (!this.nativeIdentityReady) {
             throw new Error('Native P2P identity rotation has not completed');
         }
 
@@ -3451,7 +3446,7 @@ export class P2PTransport implements SecureTransport {
             if (this.shutdownPromise) {
                 await this.shutdownPromise;
             }
-            if (isTauri() && !this.nativeIdentityReady) {
+            if (!this.nativeIdentityReady) {
                 throw new Error('Native P2P identity rotation has not completed');
             }
         }
@@ -3475,7 +3470,7 @@ export class P2PTransport implements SecureTransport {
                     respondToHandshake: options.respondToHandshake,
                 };
 
-                if (isTauri() && !this.bridgeEventUnlisten) {
+                if (!this.bridgeEventUnlisten) {
                     const unlisten = await events.onP2PMessage((evtData: unknown) => {
                         try {
                             this.enqueueInboundBridgeEvent(
@@ -3585,10 +3580,8 @@ export class P2PTransport implements SecureTransport {
                             if (certifiedPeerIdentity.kyberPublicKey?.length > 0) {
                                 existing.updatePeerIdentity(certifiedPeerIdentity);
                             }
-                            const stateAgeMs = typeof (existing as any).getStateAgeMs === 'function'
-                                ? (existing as any).getStateAgeMs()
-                                : 0;
-                            if (stateAgeMs > (options.timeout || P2P_CONNECTION_TIMEOUT_MS)) {
+                            const stateAgeMs = existing.getStateAgeMs();
+                            if (stateAgeMs > options.timeout) {
                                 try { await existing.close('stale-connecting-timeout'); } catch { }
                                 assertCurrent();
                                 if (this.isCurrentConnection(peerKey, existing)) {
@@ -3651,7 +3644,7 @@ export class P2PTransport implements SecureTransport {
                                             ? 'Connection timeout waiting for existing connection'
                                             : 'P2P connect crossed an account transition'
                                     ));
-                                }, options.timeout || P2P_CONNECTION_TIMEOUT_MS);
+                                }, options.timeout);
                             });
                         }
 
@@ -3769,7 +3762,7 @@ export class P2PTransport implements SecureTransport {
             this.usernameAliases.size > 0 ||
             this.connectSingleflight.size > 0 ||
             !!this.bridgeEventUnlisten;
-        const mustRotateNativeIdentity = isTauri() && (hasRendererIdentity || !this.nativeIdentityReady);
+        const mustRotateNativeIdentity = hasRendererIdentity || !this.nativeIdentityReady;
         if (!hasRendererIdentity && !mustRotateNativeIdentity) return;
 
         this.initialized = false;
@@ -4224,7 +4217,7 @@ export class P2PTransport implements SecureTransport {
     }
 
     public requestPeerCertificate(peerId: string): void {
-        if (typeof window === 'undefined' || !this.initialized || !this.localUsername || !peerId) return;
+        if (!this.initialized || !this.localUsername || !peerId) return;
         const appPeerId = this.resolveAppPeerId(peerId);
         if (!this.isSafePeerId(appPeerId)) return;
         const now = Date.now();

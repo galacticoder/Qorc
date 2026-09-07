@@ -114,7 +114,7 @@ export const pruneOldReceipts = (store: Map<string, number>) => {
 
 // Update message receipt in state and optionally queue for DB flush
 export const receiptOwnershipOk = (
-  target: Message,
+  target: { sender?: string; recipient?: string },
   from?: string,
   selfUsername?: string,
 ): boolean => {
@@ -127,9 +127,9 @@ export const updateMessageReceipt = async (
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   messageId: string,
   updater: ReceiptUpdater,
-  dbReceiptQueueRef?: React.RefObject<Map<string, DbQueuedReceipt>>,
-  dbFlushTimeoutRef?: React.RefObject<ReturnType<typeof setTimeout> | null>,
-  flushDBReceiptsRef?: React.RefObject<(() => Promise<void>) | null>,
+  dbReceiptQueueRef: React.RefObject<Map<string, DbQueuedReceipt>>,
+  dbFlushTimeoutRef: React.RefObject<ReturnType<typeof setTimeout> | null>,
+  flushDBReceiptsRef: React.RefObject<(() => Promise<void>) | null>,
   from?: string,
   selfUsername?: string,
   queueKind?: 'delivered' | 'read',
@@ -179,7 +179,6 @@ export const updateMessageReceipt = async (
 
   {
     if (
-      dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef &&
       queueKind && from && selfUsername
     ) {
       const queueKey = receiptScopeKey(from || '', messageId);

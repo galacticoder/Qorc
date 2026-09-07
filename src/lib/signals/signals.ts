@@ -17,7 +17,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   const { Authentication, handleEncryptedMessagePayload } = handlers;
 
   const type = data?.type;
-  const message = data?.message ?? data?.data ?? data?.payload ?? '';
+  const message = typeof data?.message === 'string' ? data.message : '';
 
   if (!type) {
     console.warn('[signals] message missing type');
@@ -28,28 +28,28 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   if (type === SignalType.PQ_HEARTBEAT_PONG || type === SignalType.PQ_HEARTBEAT_PING) return;
 
   const auth = {
-    setServerHybridPublic: Authentication?.setServerHybridPublic,
-    handleAuthSuccess: Authentication?.handleAuthSuccess,
-    loginUsernameRef: Authentication?.loginUsernameRef,
-    originalUsernameRef: Authentication?.originalUsernameRef,
-    setAccountAuthenticated: Authentication?.setAccountAuthenticated,
-    setIsLoggedIn: Authentication?.setIsLoggedIn,
-    setLoginError: Authentication?.setLoginError,
-    passphrasePlaintextRef: Authentication?.passphrasePlaintextRef,
-    setShowPassphrasePrompt: Authentication?.setShowPassphrasePrompt,
-    setShowPasswordPrompt: Authentication?.setShowPasswordPrompt,
-    passwordRef: Authentication?.passwordRef,
-    setIsSubmittingAuth: Authentication?.setIsSubmittingAuth,
-    setAuthStatus: Authentication?.setAuthStatus,
-    setTokenValidationInProgress: Authentication?.setTokenValidationInProgress,
-    keyManagerOwnerRef: Authentication?.keyManagerOwnerRef,
-    setUsername: Authentication?.setUsername,
-    setRecoveryActive: Authentication?.setRecoveryActive,
-    setVaultReady: Authentication?.setVaultReady,
-    getKeysOnDemand: Authentication?.getKeysOnDemand,
-    hybridKeysRef: Authentication?.hybridKeysRef,
-    serverHybridPublicRef: Authentication?.serverHybridPublicRef,
-    authLifecycle: Authentication?.authLifecycle
+    setServerHybridPublic: Authentication.setServerHybridPublic,
+    handleAuthSuccess: Authentication.handleAuthSuccess,
+    loginUsernameRef: Authentication.loginUsernameRef,
+    originalUsernameRef: Authentication.originalUsernameRef,
+    setAccountAuthenticated: Authentication.setAccountAuthenticated,
+    setIsLoggedIn: Authentication.setIsLoggedIn,
+    setLoginError: Authentication.setLoginError,
+    passphrasePlaintextRef: Authentication.passphrasePlaintextRef,
+    setShowPassphrasePrompt: Authentication.setShowPassphrasePrompt,
+    setShowPasswordPrompt: Authentication.setShowPasswordPrompt,
+    passwordRef: Authentication.passwordRef,
+    setIsSubmittingAuth: Authentication.setIsSubmittingAuth,
+    setAuthStatus: Authentication.setAuthStatus,
+    setTokenValidationInProgress: Authentication.setTokenValidationInProgress,
+    keyManagerOwnerRef: Authentication.keyManagerOwnerRef,
+    setUsername: Authentication.setUsername,
+    setRecoveryActive: Authentication.setRecoveryActive,
+    setVaultReady: Authentication.setVaultReady,
+    getKeysOnDemand: Authentication.getKeysOnDemand,
+    hybridKeysRef: Authentication.hybridKeysRef,
+    serverHybridPublicRef: Authentication.serverHybridPublicRef,
+    authLifecycle: Authentication.authLifecycle
   };
 
   try {
@@ -65,9 +65,9 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         await handleAuthFullSuccess(data, auth);
         break;
 
-      case SignalType.AUTH_OT_REGISTER_RESPONSE:
-      case SignalType.AUTH_OT_REGISTER_READY:
-      case SignalType.AUTH_OT_RESPONSE:
+      case SignalType.AUTH_REGISTER_RESPONSE:
+      case SignalType.AUTH_REGISTER_READY:
+      case SignalType.AUTH_PIR_RESPONSE:
         // handled in handlers.ts
         break;
 
@@ -89,7 +89,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   } catch (_error) {
     if (isStaleAuthOperation(_error)) return;
     console.error('[signals] signal-processing-error', (_error as Error).message);
-    auth.setLoginError?.('Error processing server message');
+    auth.setLoginError('Error processing server message');
     if (type === SignalType.AUTH_FULL_SUCCESS && typeof data?.authRequestId === 'string') {
       window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
         detail: {

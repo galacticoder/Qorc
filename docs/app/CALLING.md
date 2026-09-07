@@ -128,9 +128,9 @@ capture. Microphone and camera frames therefore do not traverse WebKit.
 Linux screen sharing is a separate native path. The xdg-desktop-portal chooser
 authorizes one monitor or window and returns a restricted PipeWire connection,
 the app-private GStreamer runtime consumes that PipeWire stream and requests up
-to 60 frames per second. A lower-rate desktop source remains at its actual rate, the capture pipeline does not synthesize duplicate frames. Other supported
-runtimes use `getDisplayMedia()` as the fallback. Denial, cancellation, stale
-call ownership, a failed native session, or a capture source that does not
+to 60 frames per second. A lower-rate desktop source remains at its actual rate, the capture pipeline does not synthesize duplicate frames. Windows uses
+`getDisplayMedia()` as its capture path. Denial, cancellation, stale call
+ownership, a failed capture session, or a capture source that does not
 produce its first frame within eight seconds of starting the capture child
 aborts setup and releases resources already acquired. Time spent choosing a
 source in the portal is outside that first-frame deadline.
@@ -332,7 +332,7 @@ Call signals never enter:
 
 - the WebSocket reconnect queue,
 - the durable outbound message retry queue,
-- the delivery-ACK journal or ACK-timeout spool fallback,
+- the delivery-ACK journal or ACK-timeout spool route,
 - P2P reconnect/recovery redelivery,
 - the server Redis delayed-mix recovery pool,
 - the global offline spool.
@@ -589,18 +589,16 @@ five consecutive gaps, then emits silence until a later sequence lets playout
 resynchronize. Duplicate, late, oversized, and excess buffered packets are
 dropped.
 
-Decoded PCM normally goes to a selectable native output: PulseAudio on Linux or
-CPAL on Windows. That playback queue is capped at ten 20 ms frames and discards
-the oldest complete frame when full. If native playback cannot start, the
-renderer falls back to the receiver `AudioWorklet`, whose queue remains capped
-at five frames. Capture, realtime encryption, native sending, encrypted
-receive, jitter, decode, and playback are therefore bounded to current audio
-rather than seconds of accumulated speech. Played, dropped, and destroyed
-sample buffers are wiped on a best-effort basis.
+Decoded PCM goes to a selectable native output: PulseAudio on Linux or CPAL on
+Windows. That playback queue is capped at ten 20 ms frames and discards the
+oldest complete frame when full. A call fails media startup when native playback
+cannot start. Capture, realtime encryption, native sending, encrypted receive,
+jitter, decode, and playback are therefore bounded to current audio rather than
+seconds of accumulated speech. Played, dropped, and destroyed sample buffers
+are wiped on a best-effort basis.
 
 Code references:
 
-- `public/audio-worklet-processor.js`
 - `src-tauri/src/audio_codec.rs`
 - `src-tauri/src/microphone_capture.rs`
 - `src-tauri/src/audio_playback.rs`
@@ -609,10 +607,10 @@ Code references:
 
 ## Camera Video Pipeline
 
-A video call opens the preferred microphone and camera through native sessions,
-falling back to each platform's default device when no preference is stored or
-the saved device is unavailable. Linux camera capture uses Video4Linux and
-Windows uses Media Foundation. A video call requires working audio and camera
+A video call opens the preferred microphone and camera through native sessions.
+When no preference is stored, the platform default device is selected. An
+unavailable saved device fails media startup. Linux camera capture uses
+Video4Linux and Windows uses Media Foundation. A video call requires working audio and camera
 sessions, a denied permission or unusable camera fails setup instead of silently
 changing the call type. The local preview and outgoing encoder share the same
 persistent canvas, so the camera has one native consumer. Selecting the active
@@ -634,7 +632,7 @@ Visual calls require WebCodecs `VideoEncoder`, `VideoDecoder`, `VideoFrame`, and
 `EncodedVideoChunk` support for VP8 plus `createImageBitmap()` JPEG decoding for
 native camera and Linux screen frames. They do not use canvas media streams,
 browser media recording, a container format, object URLs, or media-source
-buffers. The non-Linux screen fallback alone uses a hidden live video element.
+buffers. The Windows screen path alone uses a hidden live video element.
 Unsupported visual codec APIs fail that media operation, the transport does not
 substitute another codec or downgrade a video call to audio.
 
@@ -698,8 +696,8 @@ second playout limit. The decoder watchdog resets a stalled codec, dependent
 delta frames remain blocked until a fresh keyframe, and authenticated control
 frames request that keyframe at most once every two seconds. Camera and native
 Linux screen capture both use latest-only slots and one prefetched binary pull,
-so neither source can create an unbounded producer queue. The browser screen
-fallback is timer-paced at its reported source rate.
+so neither source can create an unbounded producer queue. The Windows WebView
+screen path is timer-paced at its reported source rate.
 
 Each visual transport payload starts with this batch framing:
 
@@ -778,13 +776,13 @@ pipewiresrc(portal fd/node)
 ```
 
 The native worker reports capture started only after its first complete JPEG,
-not after the chooser closes or GStreamer spawns. Other supported
-runtimes use `getDisplayMedia()`, attach its video track to a private capture
+not after the chooser closes or GStreamer spawns. Windows uses
+`getDisplayMedia()`, attaches its video track to a private capture
 element, and feed that element into the same VP8 pipeline.
 
 Starting a share performs capture and peer authorization in this order:
 
-1. Acquire the native portal session or fallback browser track and require its
+1. Acquire the Linux native portal session or Windows WebView track and require its
    first usable source frame.
 2. Create a random lossy `call-screen` stream.
 3. Install the ready waiter before sending `screen-share-start`, preventing an
@@ -813,7 +811,6 @@ Code references:
 - `src/lib/transport/secure-calling-service.ts`
 - `src/lib/transport/call-video-codec.ts`
 - `src-tauri/src/screen_capture.rs`
-- `src/lib/types/screen-sharing-types.ts`
 - `scripts/stage-gstreamer-plugins.cjs`
 
 ### Screen-Share Diagnostics
@@ -920,9 +917,7 @@ Cleanup first invalidates outstanding media and device generations. It then:
 - cancels pending Signal-session and screen-ready waits,
 - removes stream listeners and detaches capture/render media elements,
 - stops native microphone, camera, speaker, and Linux screen sessions plus any
-  fallback browser screen track, and releases local and remote render surfaces,
-- destroys fallback call-audio worklet nodes and suspends its shared audio
-  context,
+  Windows WebView screen track, and releases local and remote render surfaces,
 - stops the native Opus session and closes every visual encoder and decoder,
 - closes or aborts audio, video, telemetry, and screen logical streams,
 - wipes call-owned media scratch buffers,
@@ -982,8 +977,8 @@ Code references:
 Readable live media necessarily exists while a call is active. Microphone audio
 crosses Tauri as bounded `Float32Array` frames. Camera images and native Linux
 screen images cross Tauri as bounded JPEG bytes, are decoded one at a time, and
-share reused canvases with their WebCodecs VP8 encoders. The non-Linux screen
-fallback instead draws from its capture element. Received media uses bounded
+share reused canvases with their WebCodecs VP8 encoders. The Windows screen
+path instead draws from its capture element. Received media uses bounded
 compressed frames, one `VideoDecoder` per visual stream, short-lived decoded
 `VideoFrame` objects, and visible render canvases. Raw visual pixels do not cross
 Tauri IPC.

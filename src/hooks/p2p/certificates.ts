@@ -12,8 +12,8 @@ export interface CertificateRefs {
 
 export interface CertificateOptions {
   ownerUsername: string;
-  fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
-  isCurrentOwner?: () => boolean;
+  fetchPeerCertificates: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
+  isCurrentOwner: () => boolean;
 }
 
 export function createGetPeerCertificate(
@@ -74,7 +74,7 @@ export function createGetPeerCertificate(
     const persistLatestCachedCert = async (peerUsername: string): Promise<void> => {
       const previous = persistedWriteTails.get(peerUsername) ?? Promise.resolve();
       const write = previous.catch(() => { }).then(async () => {
-        if (options.isCurrentOwner?.() === false) return;
+        if (!options.isCurrentOwner()) return;
         const latest = refs.peerCertificateCacheRef.current.get(peerUsername)?.cert;
         if (!latest) return;
         await savePersistedPeerCert(options.ownerUsername, peerUsername, latest);
@@ -95,7 +95,7 @@ export function createGetPeerCertificate(
     bypassCache = false,
     cacheOnly = false,
   ): Promise<PeerCertificateBundle | null> => {
-    const isCurrentOwner = () => options.isCurrentOwner?.() !== false;
+    const isCurrentOwner = options.isCurrentOwner;
     if (!isCurrentOwner()) return null;
     const now = Date.now();
     const cached = bypassCache ? null : refs.peerCertificateCacheRef.current.get(peerUsername);
@@ -114,25 +114,18 @@ export function createGetPeerCertificate(
 
     if (cacheOnly) return null;
 
-    if (!options?.fetchPeerCertificates) {
+    const fetched = await options.fetchPeerCertificates(peerUsername, bypassCache);
+    const cert = await validatePeerCertificateBundle(fetched, peerUsername, Date.now());
+    if (!isCurrentOwner()) return null;
+    if (!cert) {
       return null;
     }
-    try {
-      const fetched = await options.fetchPeerCertificates(peerUsername, bypassCache);
-      const cert = await validatePeerCertificateBundle(fetched, peerUsername, Date.now());
-      if (!isCurrentOwner()) return null;
-      if (!cert) {
-        return null;
-      }
-      if (!isTransparencyAuthorized(peerUsername, cert)) return null;
-      const cachedResult = cacheValidatedCert(peerUsername, cert);
-      if (cachedResult.accepted) {
-        await persistLatestCachedCert(peerUsername).catch(() => { });
-      }
-      if (!isCurrentOwner()) return null;
-      return cachedResult.cert;
-    } catch {
-      return null;
+    if (!isTransparencyAuthorized(peerUsername, cert)) return null;
+    const cachedResult = cacheValidatedCert(peerUsername, cert);
+    if (cachedResult.accepted) {
+      await persistLatestCachedCert(peerUsername);
     }
+    if (!isCurrentOwner()) return null;
+    return cachedResult.cert;
   };
 }

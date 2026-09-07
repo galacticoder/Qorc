@@ -11,7 +11,6 @@ import {
 } from '../constants';
 import type { WorkerRequestMessage } from '../types/crypto-types';
 import { AUTH_CHANNEL_BINDING_BYTES } from '../../../shared/auth-channel-binding.js';
-import { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../../shared/private-auth-protocol.js';
 import { PRIVACY_PASS_CONFIG } from '../../../shared/privacy-pass-protocol.js';
 import { hasExactKeys, hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
 import { ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE } from '../config/audiences';
@@ -23,7 +22,6 @@ export const ARGON2_MAX_PARALLELISM = 4;
 export const WORKER_AEAD_MAX_INPUT_BYTES = 20 * 1024 * 1024;
 export const WORKER_AEAD_MAX_AAD_BYTES = 1024 * 1024;
 export const WORKER_SIGNATURE_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
-export { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../../shared/private-auth-protocol.js';
 export const PRIVACY_PASS_MAX_BATCH_SIZE = PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE;
 export const OPAQUE_PASSWORD_MAX_BYTES = 4096;
 
@@ -246,31 +244,6 @@ export function validateWorkerRequest(value: unknown): asserts value is WorkerRe
       if (!hasExactKeys(value.serverResponse, ['evaluatedElement', 'envelope', 'serverNonce', 'salt'])) {
         throw new Error('Unexpected login response fields');
       }
-      break;
-    case 'opaque.startOTLogin':
-      exact(['passwordBytes', 'anonymitySetSize', 'myIndex']);
-      validateOpaquePassword(value.passwordBytes);
-      if (
-        value.anonymitySetSize !== PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
-        !Number.isInteger(value.myIndex) ||
-        (value.myIndex as number) < 0 ||
-        (value.myIndex as number) >= PRIVATE_AUTH_ANONYMITY_SET_SIZE
-      ) {
-        throw new Error('Invalid private-auth slot');
-      }
-      break;
-    case 'opaque.finishOTLogin':
-      exact(['authChannelBinding', 'passwordBytes', 'blindingFactor', 'myPrivKey', 'otRecord', 'evaluatedElement', 'serverNonce']);
-      validateOpaquePassword(value.passwordBytes);
-      assertExactBytes(value.blindingFactor, 32, 'OPAQUE blinding factor');
-      assertExactBytes(value.myPrivKey, PQ_KEM_SECRET_KEY_SIZE, 'private-auth secret key');
-      assertExactBytes(value.evaluatedElement, 32, 'private-auth evaluated element');
-      assertExactBytes(value.serverNonce, 32, 'private-auth server nonce');
-      assertExactBytes(value.authChannelBinding, AUTH_CHANNEL_BINDING_BYTES, 'authentication channel binding');
-      assertPlainObject(value.otRecord, 'private-auth record');
-      if (!hasExactKeys(value.otRecord, ['ct', 'masked'])) throw new Error('Unexpected private-auth record fields');
-      assertExactBytes(value.otRecord.ct, PQ_KEM_CIPHERTEXT_SIZE, 'private-auth ciphertext');
-      assertExactBytes(value.otRecord.masked, 1024, 'private-auth masked record');
       break;
     case 'argon2.hash':
       exact(['params']);

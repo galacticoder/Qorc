@@ -7,14 +7,13 @@ variables. Defaults are the values used after parsing.
 
 | Name | Requirement | Owner | Purpose |
 | ---- | ----------- | ----- | ------- |
-| `SERVER_PASSWORD` | Required: 12-512 characters | `server/authentication/auth-utils.js` | Password for the anonymous server entry OPAQUE gate. Startup fails on invalid input and deletes the plaintext from `process.env` after initialization.|
+| `SERVER_PASSWORD` | Required: 12-512 characters | `server/authentication/auth-utils.js`, `server/authentication/server-password-monitor.js` | Password for the anonymous server entry OPAQUE gate. Startup fails on invalid input and deletes the plaintext from `process.env` after initialization. Editing the mounted `.env` rotates the gate record and password bound server entry issuer.|
 | `AUTH_ROOT_SEED` | Required: exactly 32 random bytes as 64 hex characters | `server/crypto/auth-root.js` | Root seed for deriving authentication, discovery, privacy-pass, routing, decoy, and avatar privacy keys. It must remain consistent across authorized nodes and restarts. The first derivation copies it to private process memory and deletes it from `process.env`. |
 | `SERVER_TRANSPORT_IDENTITY_SEED` | Required: exactly 32 random bytes as 64 hex characters | `server/server.js` | Deterministically derives the server's ML-KEM-1024, ML-DSA-87, and X25519 transport identity. Nodes behind one advertised identity must share it. Startup deletes the environment copy after derivation. Rotating it intentionally changes the client visible server fingerprint. |
 | `TLS_CERT_PATH` | Required | `server/bootstrap/server-bootstrap.js`, launchers | HTTPS certificate path. Relative paths are resolved from the repository by the launchers. |
 | `TLS_KEY_PATH` | Required | `server/bootstrap/server-bootstrap.js`, launchers  | Private key corresponding to `TLS_CERT_PATH`. |
-| `REDIS_URL` | Required by the runtime and must use `rediss://` | `server/session/redis-client.js` | TLS Redis endpoint used for anonymous coordination, routing, rate limits, discovery relay, and clustering. `scripts/start-server.cjs` and `scripts/start-loadbalancer.cjs` default to local `rediss://127.0.0.1:6379` while preparing a local deployment. Plaintext `redis://` is rejected by runtime clients. |
-| `PGSSLROOTCERT` | One of this or `DATABASE_CA_CERT` is required | `server/database/core.js` | Path to an explicitly trusted PostgreSQL CA bundle. The launcher validates the file but never learns a CA from the endpoint it is about to trust. |
-| `DATABASE_CA_CERT` | One of this or `PGSSLROOTCERT` is required | `server/database/core.js` | Inline PEM alternative to `PGSSLROOTCERT`. PostgreSQL always uses `rejectUnauthorized: true`. |
+| `REDIS_URL` | Required by the runtime and must use `rediss://` with an explicit host and port | `server/session/redis-client.js` | Credential-free TLS Redis endpoint used for anonymous coordination, routing, rate limits, discovery relay, and clustering.  |
+| `PGSSLROOTCERT` | Required | `server/database/core.js` | Path to the explicitly trusted PostgreSQL CA bundle. The launcher validates the file but never learns a CA from the endpoint it is about to trust. |
 
 Use independent random values for `AUTH_ROOT_SEED` and
 `SERVER_TRANSPORT_IDENTITY_SEED`. Do not derive either from `SERVER_PASSWORD`.
@@ -23,19 +22,16 @@ absent and saves them to `.env`. It never replaces a
 present malformed value or rotates an existing value. Every authorized node
 behind the same logical server identity must use the same values.
 
-For the single-host Docker deployment, `scripts/start-docker.cjs` also fills
-missing container connection defaults and generates independent
-`DATABASE_PASSWORD` and `REDIS_PASSWORD` values. Existing values are preserved
-except when `REDIS_PASSWORD` cannot satisfy the bundled Redis ACL policy. A
-Redis password shorter than 32 characters or containing characters outside the
-base64url alphabet is replaced before the containers start so Redis cannot be
-left permanently unhealthy by an incompatible saved credential.
+For the single-host Docker deployment, `scripts/start-docker.cjs` fills missing
+container connection defaults and generates independent `DATABASE_PASSWORD`
+and `REDIS_PASSWORD` values.
 
 ## Server and HTTPS
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `PORT` | `8443`, `dynamic` selects port `0`, Docker runtime uses `3000` | `server/config/config.js`, launchers | HTTPS listen port. `scripts/start-server.cjs` selects an available port beginning at 8443 when unset. |
+| `DISCONNECT_CLIENTS_ON_SERVER_PASSWORD_CHANGE` | `no`; enabled by `yes`, `true`, or `1` | `server/authentication/server-password-monitor.js` | When enabled at the moment `SERVER_PASSWORD` changes, synchronously removes authorization from and closes all WebSockets connected to that server process. When disabled, existing sockets remain authorized but all new connections use the new password bound issuer. |
+| `PORT` | Required by the runtime, Docker supplies `3000` | `server/config/config.js`, launchers | HTTPS listen port. |
 | `BIND_ADDRESS` | `127.0.0.1` | `server/bootstrap/server-bootstrap.js` | HTTPS bind interface. Docker sets `0.0.0.0`. |
 | `ALLOWED_CORS_ORIGINS` | Empty in the runtime, launcher supplies localhost development origins | `server/config/constants.js` | Comma separated browser origins. The fixed first-party Tauri origins are always included. Unknown browser origins receive no CORS grant and websocket upgrades with an unknown `Origin` are rejected. |
 | `HTTPS_REQUEST_TIMEOUT_MS` | `180000`, 5000-300000 | `server/bootstrap/server-bootstrap.js` | Complete HTTPS request timeout. The default admits a fixed 2 MiB anonymous PIR upload over a fresh Tor circuit. |
@@ -52,7 +48,6 @@ left permanently unhealthy by an incompatible saved credential.
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `WS_MAX_PAYLOAD_BYTES` | 16 MiB, 64 KiB-16 MiB | `server/server.js` | Protocol level `ws` frame cap applied during receive. |
 | `WS_BANDWIDTH_QUOTA_BYTES` | 64 MiB, 8-512 MiB | `server/config/constants.js` | Per connection inbound byte budget. |
 | `WS_BANDWIDTH_WINDOW_MS` | `60000`, 5000-600000 | same | Bandwidth budget window. |
 | `WS_FRAME_MAX_PER_WINDOW` | `500`, 50-100000 | same | Per connection inbound frame count. |
@@ -76,14 +71,8 @@ left permanently unhealthy by an incompatible saved credential.
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `DATABASE_URL` | Optional alternative to discrete credentials | `server/database/core.js` | `postgres://` or `postgresql://` URL supplying port, user, password, database, and default certificate name. `DB_CONNECT_HOST`, `DB_TLS_SERVERNAME`, and the explicit CA configuration still apply. |
-| `DB_CONNECT_HOST` | URL host, otherwise unset | same | TCP destination override. Useful when connecting to an IP while verifying a DNS certificate name. |
-| `PGHOST`, `DB_HOST` | Required in discrete mode, `PGHOST` wins | same | PostgreSQL host and default TLS certificate name. |
-| `PGPORT`, `DB_PORT` | Required in discrete mode, `PGPORT` wins, 1-65535 | same | PostgreSQL port. |
-| `PGUSER`, `DATABASE_USER` | Required in discrete mode, `PGUSER` wins | same | PostgreSQL user. |
-| `PGPASSWORD`, `DATABASE_PASSWORD` | Required in discrete mode, `PGPASSWORD` wins | same | PostgreSQL password. |
-| `PGDATABASE`, `DB_NAME` | Required in discrete mode, `PGDATABASE` wins | same | PostgreSQL database name. |
-| `DB_TLS_SERVERNAME` | URL/host certificate name | same | Explicit SNI and hostname verification name. Required when the connect host is not the certificate identity. |
+| `DATABASE_URL` | Required | `server/database/core.js` | `postgres://` or `postgresql://` URL with an explicit host, port, user, password, and database. |
+| `DB_TLS_SERVERNAME` | Required | same | Explicit SNI and hostname verification name. |
 | `PG_STATEMENT_TIMEOUT_MS` | `15000`, 1000-30000 | same | Server-side statement timeout. |
 | `PG_QUERY_TIMEOUT_MS` | `20000`, statement timeout to 30000 | same | Client-side query timeout. |
 | `PG_POOL_MAX` | `20`, 2-100 | same | PostgreSQL pool size. |
@@ -96,13 +85,11 @@ left permanently unhealthy by an incompatible saved credential.
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `REDIS_CLUSTER_NODES` | Unset | `server/session/redis-client.js` | Comma separated `host:port` seed nodes. When set, the client uses Redis Cluster with the same verified TLS policy. |
-| `REDIS_USERNAME` | Unset | Redis clients | Redis ACL username. |
-| `REDIS_PASSWORD` | Unset; bundled Docker requires at least 32 base64url characters | Redis clients and Docker Redis | Redis ACL password. The Docker startup helper generates a compatible value when this is missing and repairs an incompatible saved value before Redis starts. |
-| `REDIS_TLS_SERVERNAME` | `redis` | Redis clients | SNI and certificate-verification name. |
-| `REDIS_CA_CERT_PATH` | System roots when unset | Redis clients | Explicit Redis CA bundle. |
-| `REDIS_CLIENT_CERT_PATH` | Unset | Redis clients | Client certificate for Redis mutual TLS. |
-| `REDIS_CLIENT_KEY_PATH` | Unset | Redis clients | Private key for `REDIS_CLIENT_CERT_PATH`, cached key bytes are wiped on teardown. |
+| `REDIS_PASSWORD` | Required, at least 32 base64url characters | Redis clients and Docker Redis | The sole Redis authentication credential. It must not also be embedded in `REDIS_URL`. The Docker startup helper generates it only during initial setup when it is missing. |
+| `REDIS_TLS_SERVERNAME` | Required | Redis clients | SNI and certificate-verification name. |
+| `REDIS_CA_CERT_PATH` | Required | Redis clients | Explicit Redis CA bundle. |
+| `REDIS_CLIENT_CERT_PATH` | Required | Redis clients | Client certificate for Redis mutual TLS. |
+| `REDIS_CLIENT_KEY_PATH` | Required | Redis clients | Private key for `REDIS_CLIENT_CERT_PATH`, cached key bytes are wiped on teardown. |
 | `REDIS_POOL_MIN` | `4`, 1-100 and no greater than max | `server/session/redis-client.js` | Minimum pooled clients. |
 | `REDIS_POOL_MAX` | `50`, 10-500 | same | Maximum pooled clients. |
 | `REDIS_POOL_ACQUIRE_TIMEOUT` | `15000`, 1000-60000 | same | Pool acquisition timeout. |
@@ -114,7 +101,6 @@ left permanently unhealthy by an incompatible saved credential.
 | `REDIS_SOCKET_TIMEOUT` | `120000`, 30000-600000 | same | Redis socket timeout. |
 | `REDIS_QUIET_ERRORS` | `false`, load-balancer launcher sets `true` | same | Throttles repeated identical operational errors. It does not suppress the first error. |
 | `REDIS_ERROR_THROTTLE_MS` | `5000`, 1000-60000 | same | Duplicate error throttle interval. |
-| `RATE_LIMIT_REDIS_URL` | Falls back to `REDIS_URL`, must use `rediss://` | `server/rate-limiting/distributed-rate-limiter.js` | Optional dedicated Redis endpoint for the anonymous global connection limiter. |
 | `RATE_LIMIT_REDIS_CONNECT_TIMEOUT` | `10000`, 1000-60000 | same | Rate-limit Redis connection timeout. |
 | `RATE_LIMIT_REDIS_COMMAND_TIMEOUT` | `10000`, 1000-30000 | same | Rate-limit Redis command timeout. |
 
@@ -127,8 +113,10 @@ the password does not appear in command arguments. It is not an operator setting
 | ---- | --------------- | ----- | ------- |
 | `PQ_ANONYMOUS_HTTP_MAX_INFLIGHT` | `8`, 5-16 | `server/routes/pq-anonymous-http.js` | Concurrent admitted replay/KEM/decrypt/dispatch/response operations per process. |
 | `PQ_ANONYMOUS_HTTP_MAX_RPS` | `100`, 1-2000 | same | Process wide token bucket for work-valid requests before KEM processing. |
+| `PQ_ANONYMOUS_HTTP_BODY_MAX_INFLIGHT` | `32`, 1-256 | same | Pre-parser cap on simultaneous fixed-cell uploads, preventing unauthenticated 2 MiB PIR bodies from accumulating without bound. Excess sockets are closed before body buffering. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 64 KiB opaque failure writes, excess failures close without allocating a response. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS` | `200`, 1-4000 | same | Process wide token bucket for opaque failure writes. |
+| `PQ_ANONYMOUS_HTTP_REJECT_LOG_MAX_RPS` | `5`, 1-20 | same | Process-wide ceiling for fixed, non-attacker-controlled anonymous transport rejection diagnostics. |
 | `PQ_ANONYMOUS_HTTP_WRITE_TIMEOUT_MS` | `180000`, 5000-300000 | same | Deadline for a success or opaque failure response write, including clients that disconnect or stop reading. |
 
 ## Authentication and cryptography
@@ -145,8 +133,8 @@ the password does not appear in command arguments. It is not an operator setting
 | `AUTH_PREFLIGHT_POW_BITS` | `20`, 18 to `AUTH_POW_MAX_BITS` | same | Baseline work before expensive registration/login processing. |
 | `AUTH_FINALIZE_POW_BITS` | `22`, 22 to `AUTH_POW_MAX_BITS` | same | Baseline work before expensive authentication finalization. |
 | `AUTH_PREFLIGHT_STEP_REQUESTS` | `32`, 1-1000000 | same | Paid requests per logarithmic preflight step. |
-| `AUTH_OT_MAX_QUEUE` | `8`, 0-8 | same | Maximum waiters for the isolated constant-work private-auth worker. |
-| `AUTH_OT_QUEUE_TIMEOUT_MS` | `90000`, 1000-120000 | same | Maximum wait for that worker. |
+| `AUTH_PIR_MAX_QUEUE` | `8`, 0-8 | same | Maximum waiters for the isolated constant-work private-auth worker. |
+| `AUTH_PIR_QUEUE_TIMEOUT_MS` | `90000`, 1000-120000 | same | Maximum wait for that worker. |
 | `ARGON2_TIME` | `4`, 3-10 | `server/crypto/unified-crypto.js` | Argon2id time cost. |
 | `ARGON2_MEMORY` | 262144 KiB, 131072-1048576 KiB | same | Argon2id memory cost. |
 
@@ -171,8 +159,9 @@ the password does not appear in command arguments. It is not an operator setting
 | `MIXNET_COVER_WRITES_MAX` | `2`, minimum to 64 | same | Maximum cover writes in a nonempty flush. |
 | `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400`, 60-604800 | same | Global sealed-spool row lifetime (24-hour default, seven-day maximum). |
 | `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768`, 64-10000000 | same | Global sealed-spool row cap held across the whole server for the full TTL. |
-| `GLOBAL_MIX_SPOOL_MAX_BYTES` | 512 MiB, 1 MiB-4 GiB | same | Global sealed-spool byte cap. Only the standard 128 KiB ciphertext class is retained, base64 and envelope framing make the serialized Redis row larger. Both caps refuse writes when reached until rows age out through `GLOBAL_MIX_SPOOL_TTL_SECONDS`. |
+| `GLOBAL_MIX_SPOOL_MAX_BYTES` | 512 MiB, 1 MiB-1 GiB | same | Global sealed-spool byte cap. Only the standard 128 KiB ciphertext class is retained; base64 and envelope framing make the serialized Redis row larger. The 1 GiB hard ceiling keeps the PIR tag index inside its fixed response class. Both caps refuse writes when reached until rows age out through `GLOBAL_MIX_SPOOL_TTL_SECONDS`. |
 | `GLOBAL_MIX_PUBLICATION_MAX_BYTES` | 2 MiB, 64 KiB-16 MiB | same | Maximum cross-node publication payload. |
+| `GLOBAL_MIX_PUBLICATION_VERIFY_MAX_RPS` | `128`, 1-2000 | same | Process-wide ML-DSA verification ceiling for signed cross-node Redis publications. |
 | `GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES` | `64`, 1-4096 | same | Local cross-node delivery queue count. |
 | `GLOBAL_MIX_DELIVERY_QUEUE_MAX_BYTES` | 32 MiB, 1-512 MiB | same | Local cross-node delivery queue bytes. |
 | `GLOBAL_MIX_PUBLICATION_QUEUE_MAX_MESSAGES` | `64`, 1-4096 | same | Local publication queue count. |
@@ -213,7 +202,7 @@ the password does not appear in command arguments. It is not an operator setting
 | `DISCOVERY_PUBLICATION_BATCH_MAX` | `32`, 1-512 | same | Real publications claimed per flush. |
 | `DISCOVERY_PUBLICATION_FLUSH_CONCURRENCY` | `8`, 1-32 | same | Concurrent claimed-publication processing. |
 | `DISCOVERY_PUBLICATION_PROCESSING_TIMEOUT_MS` | `120000`, 60000-600000 | same | Recovery age for unfinished claims. |
-| `DISCOVERY_PUBLICATION_MAX_POOL_ENTRIES` | `512`, 100-8192 | same | Combined delayed/processing entry cap. Each entry contains one fixed 64 KiB publication. |
+| `DISCOVERY_PUBLICATION_MAX_POOL_ENTRIES` | `512`, 100-8192 | same | Combined delayed/processing entry cap. Each entry contains one fixed 128 KiB base64 character encrypted publication plus its server signature and bounded queue metadata. |
 | `DISCOVERY_PUBLICATION_POOL_TTL_SECONDS` | `604800`, 60-2592000 | same | Redis queue-state lifetime. |
 | `DISCOVERY_PUBLICATION_COVER_WRITES_MIN` | `1`, 0-64 | same | Minimum cover rows in a nonempty flush. |
 | `DISCOVERY_PUBLICATION_COVER_WRITES_MAX` | `3`, minimum to 128 | same | Maximum cover rows in a nonempty flush. |
@@ -231,39 +220,25 @@ the password does not appear in command arguments. It is not an operator setting
 | `AVATAR_POOL_HTTP_MAX_RPS` | `10`, 1-2000 | same | Per-process cover-pool token bucket. |
 | `AVATAR_BLOB_MAX_COUNT` | `20000`, 100-100000 | `server/config/constants.js` | Mandatory global encrypted-avatar row cap. Oldest-expiring rows are evicted, the cap cannot be disabled. |
 | `AVATAR_ENFORCE_EVERY` | `100`, 1-1000 | `server/routes/api-routes.js` | Successful writes between inline cap enforcement passes. |
-| `SPOOL_HTTP_MAX_RPS` | `50`, 1-2000 | same | Per-process token bucket shared by the tag-index and PIR endpoints. |
+| `SPOOL_TAG_INDEX_HTTP_MAX_RPS` | `50`, 1-2000 | same | Per-process token bucket for fixed-cell tag-index requests. |
+| `SPOOL_PIR_HTTP_MAX_RPS` | `8`, 1-128 | same | Per-process token bucket for native PIR requests. |
+| `SPOOL_PIR_MAX_INFLIGHT` | `2`, 1-8 | same | Concurrent native PIR worker requests per process. |
 
 ## Clustering and load balancing
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `SERVER_ID` | Launcher generates `server-<hostname>-<timestamp>` | server and cluster modules | Logical node identifier. It identifies a server process, never a user. |
-| `SERVER_HOST` | Launcher detects a non-loopback address | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
-| `HOST` | OS hostname | `server/cluster/cluster-manager.js` | Fallback when `SERVER_HOST` is unset. |
-| `HOSTNAME` | `server` fallback | `server/cluster/cluster-integration.js` | Input to generated cluster node IDs. |
-| `ENABLE_CLUSTERING` | Launcher default `true`, only exact `true` enables | `server/server.js` | Enables Redis-backed cluster registration. |
-| `CLUSTER_WORKERS` | `1` | `server/bootstrap/server-bootstrap.js` | Node worker count, values greater than one use local process clustering. |
-| `CLUSTER_PRIMARY` | Unset | cluster modules | Exact `true` marks the node primary. |
-| `SERVER_ROLE` | Unset | `server/cluster/cluster-integration.js` | `primary` is an alternate primary marker. |
-| `CLUSTER_AUTO_APPROVE` | Launcher default `true` | cluster modules | Exact `true` automatically approves new cluster nodes. |
+| `SERVER_ID` | Required | server and cluster modules | Logical node identifier. It identifies a server process, never a user. |
+| `SERVER_HOST` | Required by the runtime; Docker supplies `server` | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
+| `CLUSTER_PRIMARY` | Required | cluster modules | Must be exactly `true` for the primary node or `false` for a joining node. The role is never inferred from Redis state. |
+| `CLUSTER_AUTO_APPROVE` | Required | cluster modules | Must be exactly `true` or `false`. `true` lets the primary automatically approve authenticated pending join requests. Joining nodes can never approve themselves. |
 | `NO_GUI` | `false` | launchers | Disables the interactive server/load-balancer terminal UI. |
-| `HAPROXY_HTTPS_PORT` | Root auto-LB `443`, otherwise `8443` | load-balancer modules | External HAProxy HTTPS port. |
-| `HAPROXY_STATS_PORT` | `8404` | load-balancer modules | HAProxy statistics listener port. |
-| `HAPROXY_STATS_USERNAME` | Initialized by launcher | load-balancer modules | HAProxy statistics and command-channel credential. |
-| `HAPROXY_STATS_PASSWORD` | Generated or prompted by launcher | load-balancer modules | Companion secret, launcher stores its protected form under `server/config`. |
-| `HAPROXY_CERT_PATH` | Repository cert directory or `/etc/haproxy/certs` | `server/load-balancer/haproxy-config-generator.js` | HAProxy certificate directory. |
-| `HAPROXY_CERT_FILE` | Auto-selected certificate | same | Specific certificate file override. |
-| `HAPROXY_CONFIG_PATH` | Platform/root-dependent | cluster and load-balancer modules | Generated HAProxy configuration path. |
-| `HAPROXY_PID_FILE` | Platform/root-dependent | load-balancer modules | HAProxy PID file. |
-| `HAPROXY_STATS_SOCKET` | `${TMPDIR}/haproxy-admin-<uid>.sock` | load-balancer modules | Local HAProxy command socket. |
-| `LOADBALANCER_LOCK_FILE` | Platform/root-dependent | `server/load-balancer/auto-loadbalancer.js` | Single-instance process lock. |
+| `HAPROXY_HTTPS_PORT` | Required | load-balancer modules | External HAProxy HTTPS port. |
+| `HAPROXY_STATS_PORT` | Required | load-balancer modules | HAProxy statistics listener port. |
+| `HAPROXY_STATS_BIND_ADDRESS` | Required | load-balancer modules | Must be `127.0.0.1` for native deployment or `0.0.0.0` inside the Docker container. Docker publishes the statistics port only on host loopback. |
+| `HAPROXY_STATS_USERNAME` | Required for the load balancer, configured through `.env` | load-balancer modules | HAProxy statistics and command channel identity. |
+| `HAPROXY_STATS_PASSWORD` | Required for the load balancer, configured through `.env` | load-balancer modules | Companion secret. On first startup the launcher derives and stores its protected command channel material under `server/config`. |
 | `LB_SERVER_ACTIVE_TIMEOUT_MS` | `45000`, 10000-300000 | same | Age after which a cluster backend is no longer considered active. |
-| `HAPROXY_AUTO_CONFIG` | `false` | `server/cluster/cluster-integration.js` | Exact `true` lets a primary write HAProxy configuration from cluster state. |
-| `HAPROXY_AUTO_RELOAD` | `false` | same | Exact `true` validates and reloads HAProxy after an update. |
-| `HAPROXY_UPDATE_INTERVAL` | `60000`, 5000-3600000 | same | Single-flight configuration refresh interval. |
-| `LB_HAPROXY_CFG` | `server/config/haproxy-quantum.cfg` | load-balancer launcher | PQ-enabled HAProxy configuration. |
-| `LB_OPENSSL_CONF` | Derived from `OPENSSL_CONF` | load-balancer launcher | OpenSSL provider configuration passed to HAProxy. |
-| `SERVER_<server-id>_URL` | Unset | `server/load-balancer/haproxy-config-generator.js` | Optional backend URL override for a discovered server ID. |
 
 ## PQ TLS and installation tooling
 
@@ -273,10 +248,6 @@ the password does not appear in command arguments. It is not an operator setting
 | `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qorc-edge`; external overrides are not accepted. |
 | `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qorc-edge`; external overrides are not accepted. |
 | `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qorc-edge`; inherited paths are not used by HAProxy or Tor. |
-| `OQS_SIG` | Tool-selected | `scripts/setup-quantum-haproxy.cjs` | Preferred supported PQ signature algorithm for generated PQ certificate tooling. |
-| `TLS_REDIS_SERVER` | Installer-generated path | `scripts/start-server.cjs` | Repository-local TLS Redis executable override. |
-| `REDIS_SERVER_BIN` | `redis-server` | same | System Redis executable fallback. |
-| `REDIS_TLS_SOURCE_URL` | Redis 7.2.5 release URL | `scripts/install-deps.cjs` | Source archive used to build the local TLS Redis helper. |
 | `TLS_CERT_CN` | `localhost` | `scripts/generate_tls.cjs` | Common name used by local TLS certificate generation. |
 
 ## Client and build tooling
@@ -284,18 +255,16 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `VITE_WS_URL` | Unset | `src/components/setup/ConnectSetup.tsx` | Packaged web-client websocket endpoint, for example `wss://localhost:8443`. |
-| `QORC_INSTANCE_ID` | `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and `logs/instance-<id>-logs.txt` output for multi instance testing. |
+| `QORC_INSTANCE_ID` | Auto-selected by the client launcher, direct app launches use `1` | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | Selects a distinct native data directory and `logs/instance-<id>-logs.txt` output for multi-instance testing. Concurrent launcher runs atomically select different numeric IDs. |
 | `PROTOC` | Auto-detected | `scripts/start-client.cjs` | Explicit Protocol Buffers compiler path. |
 | `QORC_PROTOC_VERSION` | `33.0` | same | Windows protoc download version. |
 | `QORC_PROTOC_URL` | Version-derived official release URL | same | Explicit Windows protoc archive URL. |
 | `QORC_STRAWBERRY_PERL_URL` | Pinned Strawberry Perl download URL | same | Windows native-build dependency URL. |
-| `QORC_SOFTWARE_RENDERING` | Unset | `src-tauri/src/main.rs`, `scripts/start-client.cjs` | When present on Linux, defaults `LIBGL_ALWAYS_SOFTWARE` to `1`. This is a diagnostic compatibility fallback, not the normal rendering path. |
 | `WEBKIT_DMABUF_RENDERER_FORCE_SHM` | `1` on Linux | same | WebKitGTK rendering compatibility setting. An explicit inherited value is preserved. |
 | `GSTREAMER_PLUGINS_DIR` | `.cache/gstreamer-plugins-<arch>` during client builds | `scripts/start-client.cjs`, Linux bundle scripts | Build-time location of the staged curated GStreamer tree. It is not required by an installed package. |
 | `QORC_GSTREAMER_SYSTEM_PLUGINS_DIR` | `pkg-config` result or a standard system directory | `scripts/stage-gstreamer-plugins.cjs` | Advanced build-time override for the GStreamer plugin directory copied into the private staged runtime. |
 | `QORC_GSTREAMER_LAUNCH_SOURCE` | `/usr/bin/gst-launch-1.0` or `/bin/gst-launch-1.0` | same | Advanced build-time override for the `gst-launch-1.0` executable copied into the private capture runtime. |
 | `QORC_GSTREAMER_PLUGIN_SCANNER_SOURCE` | Auto-detected system scanner | same | Advanced build-time override for the GStreamer plugin scanner copied into the private capture runtime. |
-| `QORC_GSTREAMER_REQUIRE_BUNDLED` | `1` for packaged Linux launches and staged development launches | native Linux startup and screen capture | Exact `1` disables automatic fallback to system capture libraries, plugins, launcher, or scanner. Normal launch paths also supply the private runtime locations automatically. |
 | `QORC_GSTREAMER_LAUNCH` | Packaged or staged private launcher | native Linux screen capture | Advanced runtime override for the private GStreamer capture launcher. Normal builds set it automatically. |
 | `QORC_GSTREAMER_CAPTURE_PLUGINS` | Packaged or staged capture-plugin directory | same | Advanced runtime override for the curated capture-only plugin directory. |
 | `QORC_GSTREAMER_RUNTIME_LIB` | Packaged or staged private library directory | same | Advanced runtime override for the capture process dynamic-library directory. |

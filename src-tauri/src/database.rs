@@ -774,12 +774,11 @@ impl DatabaseManager {
 
 // Tauri Commands --
 
-pub(crate) async fn activate_native_account_database(
+pub(crate) async fn prepare_native_account_database(
     app_handle: AppHandle,
-    state: &AppState,
     account_owner: &str,
     master_key: &[u8; 32],
-) -> Result<(), String> {
+) -> Result<Arc<DatabaseManager>, String> {
     if account_owner.len() != 64
         || !account_owner
             .chars()
@@ -787,8 +786,6 @@ pub(crate) async fn activate_native_account_database(
     {
         return Err("Invalid database account owner".to_string());
     }
-    let lifecycle_lock = state.database_lifecycle_lock.clone();
-    let _lifecycle_guard = lifecycle_lock.lock_owned().await;
     let account_namespace = account_namespace(account_owner);
     let account_file_id = account_file_id(master_key, account_owner);
 
@@ -800,8 +797,9 @@ pub(crate) async fn activate_native_account_database(
     let suffix = format!("-instance-{}", instance_id);
     let config_name = app_config_dir
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "qorc-client".to_string());
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Application storage path is invalid".to_string())?
+        .to_owned();
     app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
     crate::storage::file::check_dir(&app_config_dir, 0o700)
         .await
@@ -823,19 +821,7 @@ pub(crate) async fn activate_native_account_database(
         .map_err(|error| error.safe_message())?;
     db_manager.set_account_context(format!("{}_", account_namespace), account_owner.to_string());
 
-    let signal_handler = state.signal_handler();
-    let _signal_lifecycle_guard = if let Some(handler) = signal_handler.as_ref() {
-        Some(handler.acquire_lifecycle_lock().await)
-    } else {
-        None
-    };
-    if let Some(handler) = signal_handler.as_ref() {
-        handler.clear_all();
-    }
-    let mut db_state = state.database.write();
-    *db_state = Some(Arc::new(db_manager));
-
-    Ok(())
+    Ok(Arc::new(db_manager))
 }
 
 #[tauri::command]

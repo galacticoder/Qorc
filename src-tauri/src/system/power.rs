@@ -59,62 +59,27 @@ fn create_blocker() -> QorcResult<BlockerHandle> {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    let sleep = ["/usr/bin/sleep", "/bin/sleep"]
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
-        .ok_or_else(|| {
-            QorcError::SystemError("Sleep inhibitor helper is unavailable".to_string())
-        })?;
-
-    for inhibitor in [
-        "/usr/bin/gnome-session-inhibit",
-        "/bin/gnome-session-inhibit",
-    ] {
-        if !Path::new(inhibitor).is_file() {
-            continue;
-        }
-        if let Ok(child) = Command::new(inhibitor)
-            .args([
-                "--inhibit",
-                "idle:suspend",
-                "--reason",
-                "Qorc call in progress",
-                sleep,
-                "infinity",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            return Ok(BlockerHandle { child });
-        }
+    let sleep = "/usr/bin/sleep";
+    let inhibitor = "/usr/bin/systemd-inhibit";
+    if !Path::new(sleep).is_file() || !Path::new(inhibitor).is_file() {
+        return Err(QorcError::SystemError(
+            "Sleep inhibitor is unavailable".to_string(),
+        ));
     }
-
-    for inhibitor in ["/usr/bin/systemd-inhibit", "/bin/systemd-inhibit"] {
-        if !Path::new(inhibitor).is_file() {
-            continue;
-        }
-        if let Ok(child) = Command::new(inhibitor)
-            .args([
-                "--what=idle:sleep",
-                "--mode=block",
-                "--why=Qorc call in progress",
-                sleep,
-                "infinity",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            return Ok(BlockerHandle { child });
-        }
-    }
-
-    Err(QorcError::SystemError(
-        "No supported sleep inhibitor is available".to_string(),
-    ))
+    let child = Command::new(inhibitor)
+        .args([
+            "--what=idle:sleep",
+            "--mode=block",
+            "--why=Qorc call in progress",
+            sleep,
+            "infinity",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| QorcError::SystemError("Failed to start sleep inhibitor".to_string()))?;
+    Ok(BlockerHandle { child })
 }
 
 #[cfg(target_os = "linux")]
@@ -122,14 +87,12 @@ fn release_blocker(mut handle: BlockerHandle) -> QorcResult<()> {
     match handle.child.try_wait() {
         Ok(Some(_)) => Ok(()),
         Ok(None) => {
-            handle
-                .child
-                .kill()
-                .map_err(|_| QorcError::SystemError("Failed to stop sleep inhibitor".to_string()))?;
-            handle
-                .child
-                .wait()
-                .map_err(|_| QorcError::SystemError("Failed to reap sleep inhibitor".to_string()))?;
+            handle.child.kill().map_err(|_| {
+                QorcError::SystemError("Failed to stop sleep inhibitor".to_string())
+            })?;
+            handle.child.wait().map_err(|_| {
+                QorcError::SystemError("Failed to reap sleep inhibitor".to_string())
+            })?;
             Ok(())
         }
         Err(_) => Err(QorcError::SystemError(

@@ -1,15 +1,36 @@
 import Redis from 'ioredis';
 import { createPool } from 'generic-pool';
-import fs from 'fs';
+import path from 'node:path';
 import { envInt } from '../utils/env.js';
+import { readSecureTlsFile } from '../utils/secure-file.js';
 import { recordStorageOperation } from '../telemetry/server-telemetry.js';
 
 const REDIS_URL = process.env.REDIS_URL;
-if (!REDIS_URL) {
-    throw new Error('REDIS_URL must be explicitly configured using an environment variable');
+let parsedRedisUrl;
+try {
+    parsedRedisUrl = new URL(REDIS_URL);
+} catch {
+    throw new Error('REDIS_URL must be a valid rediss:// URL');
 }
-const REDIS_CLUSTER_NODES = (process.env.REDIS_CLUSTER_NODES || '').trim();
-const USING_CLUSTER = REDIS_CLUSTER_NODES.length > 0;
+if (
+    parsedRedisUrl.protocol !== 'rediss:' ||
+    !parsedRedisUrl.hostname ||
+    !parsedRedisUrl.port ||
+    parsedRedisUrl.username ||
+    parsedRedisUrl.password ||
+    parsedRedisUrl.search ||
+    parsedRedisUrl.hash
+) {
+    throw new Error('REDIS_URL must be a credential-free rediss:// URL with an explicit host and port');
+}
+
+export function redisConnectionPassword() {
+    const password = process.env.REDIS_PASSWORD;
+    if (typeof password !== 'string' || password.length < 32 || !/^[A-Za-z0-9_-]+$/.test(password)) {
+        throw new Error('REDIS_PASSWORD must contain at least 32 base64url characters');
+    }
+    return password;
+}
 
 const REDIS_QUIET_ERRORS = (process.env.REDIS_QUIET_ERRORS || '').toLowerCase() === 'true';
 const REDIS_ERROR_THROTTLE_MS = envInt('REDIS_ERROR_THROTTLE_MS', 5000, 1000, 60000);
@@ -48,29 +69,42 @@ const POOL_CONFIG = {
 
 let cachedTlsOptions = null;
 
-function wipeCachedTlsPrivateKey() {
-    const key = cachedTlsOptions?.key;
-    if (Buffer.isBuffer(key)) key.fill(0);
+function wipeCachedTlsOptions() {
+    const buffers = [
+        ...(Array.isArray(cachedTlsOptions?.ca) ? cachedTlsOptions.ca : []),
+        cachedTlsOptions?.cert,
+        cachedTlsOptions?.key,
+    ];
+    for (const buffer of buffers) {
+        if (Buffer.isBuffer(buffer)) buffer.fill(0);
+    }
     cachedTlsOptions = null;
 }
 
 export function buildRedisTlsOptions() {
-    const tlsOptions = {
-        servername: process.env.REDIS_TLS_SERVERNAME || 'redis',
-        rejectUnauthorized: true
-    };
-
-    if (process.env.REDIS_CA_CERT_PATH) {
-        tlsOptions.ca = [fs.readFileSync(process.env.REDIS_CA_CERT_PATH)];
+    const servername = process.env.REDIS_TLS_SERVERNAME;
+    const caPath = process.env.REDIS_CA_CERT_PATH;
+    const certPath = process.env.REDIS_CLIENT_CERT_PATH;
+    const keyPath = process.env.REDIS_CLIENT_KEY_PATH;
+    if (!servername || !caPath || !certPath || !keyPath) {
+        throw new Error('Redis mutual TLS configuration is incomplete');
     }
-    if (process.env.REDIS_CLIENT_CERT_PATH) {
-        tlsOptions.cert = fs.readFileSync(process.env.REDIS_CLIENT_CERT_PATH);
+    const tlsOptions = { servername, rejectUnauthorized: true };
+    try {
+        tlsOptions.ca = [readSecureTlsFile(path.resolve(caPath))];
+        tlsOptions.cert = readSecureTlsFile(path.resolve(certPath));
+        tlsOptions.key = readSecureTlsFile(path.resolve(keyPath), { privateKey: true });
+        return tlsOptions;
+    } catch (error) {
+        for (const buffer of [
+            ...(Array.isArray(tlsOptions.ca) ? tlsOptions.ca : []),
+            tlsOptions.cert,
+            tlsOptions.key,
+        ]) {
+            if (Buffer.isBuffer(buffer)) buffer.fill(0);
+        }
+        throw error;
     }
-    if (process.env.REDIS_CLIENT_KEY_PATH) {
-        tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
-    }
-
-    return tlsOptions;
 }
 
 function getTlsOptions() {
@@ -160,34 +194,6 @@ function disconnectRedisClient(client) {
     client.disconnect(false);
 }
 
-function parseRedisClusterNodes(redisClusterNodes) {
-    if (!redisClusterNodes) return [];
-    return redisClusterNodes.split(',').map(s => {
-        const [host, portStr] = s.trim().split(':');
-        return { host, port: Number.parseInt(portStr || '6379', 10) };
-    }).filter(n => n.host);
-}
-
-let clusterClient = null;
-
-if (USING_CLUSTER) {
-    try {
-        const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
-        clusterClient = new Redis.Cluster(nodes, {
-            redisOptions: {
-                ...getRedisOptions(),
-                username: process.env.REDIS_USERNAME,
-                password: process.env.REDIS_PASSWORD
-            }
-        });
-        attachRedisClientLifecycle(clusterClient, 'Redis cluster');
-        clusterClient.on('ready', () => console.log('Redis cluster client ready'));
-        clusterClient.on('error', (error) => logRedisError('Redis cluster error', error));
-    } catch (e) {
-        console.error('Failed to initialize Redis cluster client', e);
-    }
-}
-
 const factory = {
     create: async () => {
         if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
@@ -196,8 +202,7 @@ const factory = {
 
         const client = new Redis(REDIS_URL, {
             ...getRedisOptions(),
-            username: process.env.REDIS_USERNAME,
-            password: process.env.REDIS_PASSWORD
+            password: redisConnectionPassword()
         });
 
         attachRedisClientLifecycle(client, 'Redis client');
@@ -266,20 +271,12 @@ const factory = {
     }
 };
 
-const redisPool = USING_CLUSTER ? null : createPool(factory, {
+const redisPool = createPool(factory, {
     ...POOL_CONFIG,
     testOnBorrow: true
 });
 
 export async function withRedisClient(operation) {
-    if (USING_CLUSTER && clusterClient) {
-        return operation(clusterClient);
-    }
-
-    if (!redisPool) {
-        throw new Error('Redis pool not available');
-    }
-
     try {
         const client = await redisPool.acquire();
         try {
@@ -306,8 +303,7 @@ export async function createSubscriber() {
 
     const sub = new Redis(REDIS_URL, {
         ...getRedisOptions(),
-        username: process.env.REDIS_USERNAME,
-        password: process.env.REDIS_PASSWORD
+        password: redisConnectionPassword()
     });
 
     attachRedisClientLifecycle(sub, 'Redis subscriber');
@@ -376,24 +372,12 @@ export async function closeSubscriber(subscriber) {
 export const cleanup = async () => {
     console.log('Cleaning up Redis resources');
 
-    if (redisPool) {
-        try {
-            await redisPool.drain();
-            await redisPool.clear();
-            console.log('Redis connection pool cleaned up');
-        } catch (error) {
-            console.error('Error cleaning up Redis pool', error);
-        }
+    try {
+        await redisPool.drain();
+        await redisPool.clear();
+        console.log('Redis connection pool cleaned up');
+    } catch (error) {
+        console.error('Error cleaning up Redis pool', error);
     }
-
-    const activeClusterClient = clusterClient;
-    clusterClient = null;
-    if (activeClusterClient) {
-        try {
-            await activeClusterClient.quit();
-        } catch (err) {
-            console.error('Error quitting cluster client in cleanup', err);
-        }
-    }
-    wipeCachedTlsPrivateKey();
+    wipeCachedTlsOptions();
 };

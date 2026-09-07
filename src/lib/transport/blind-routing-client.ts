@@ -87,7 +87,7 @@ export class BlindRoutingClient {
     this.localUsername = username;
   }
 
-  isCompatible(username: string): boolean {
+  matchesIdentity(username: string): boolean {
     return this.localUsername === username;
   }
 
@@ -283,7 +283,7 @@ export class BlindRoutingClient {
 let blindRoutingClient: BlindRoutingClient | null = null;
 
 export function getBlindRoutingClient(username?: string): BlindRoutingClient {
-  if (blindRoutingClient && username && !blindRoutingClient.isCompatible(username)) {
+  if (blindRoutingClient && username && !blindRoutingClient.matchesIdentity(username)) {
     blindRoutingClient.destroy();
     blindRoutingClient = null;
   }

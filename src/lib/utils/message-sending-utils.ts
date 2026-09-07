@@ -157,7 +157,7 @@ export const createLocalMessage = async (
 // Create cover padding
 export const createCoverPadding = () => {
   if (!globalThis.crypto?.getRandomValues) {
-    return undefined;
+    throw new Error('Secure random number generator is unavailable');
   }
   const lengthBias = globalThis.crypto.getRandomValues(new Uint8Array(1))[0] % 32;
   const length = 32 + lengthBias;

@@ -1,7 +1,6 @@
 //! System Commands
 
 use crate::state::AppState;
-use crate::system::screen_capture::ScreenSource;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use url::Url;
@@ -264,26 +263,6 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
     }
 }
 
-#[tauri::command]
-pub async fn get_screen_sources(app: AppHandle) -> Result<Vec<ScreenSource>, String> {
-    let _dialog_guard = MediaDialogGuard::acquire()?;
-    let confirmed = confirm_native_dialog(
-        &app,
-        "Show screen sources",
-        "Show Qorc the names of your open windows and displays for the screen-share picker? Nothing is shared until you select a source."
-            .to_string(),
-        "Show sources",
-    )
-    .await;
-    if !confirmed {
-        return Err("Screen source access denied".to_string());
-    }
-
-    crate::system::screen_capture::get_sources()
-        .await
-        .map_err(|e| e.safe_message())
-}
-
 /// Start the single call sleep inhibitor.
 #[tauri::command]
 pub fn power_save_blocker_start(state: State<'_, AppState>) -> Result<bool, String> {
@@ -311,12 +290,12 @@ pub fn set_close_to_tray(enabled: bool, state: State<'_, AppState>) -> bool {
 
 /// Increment tray unread badge count
 #[tauri::command]
-pub fn tray_increment_unread(app: AppHandle) {
-    crate::system::tray::increment_unread(&app);
+pub fn tray_increment_unread() {
+    crate::system::tray::increment_unread();
 }
 
 /// Clear tray unread badge count
 #[tauri::command]
-pub fn tray_clear_unread(app: AppHandle) {
-    crate::system::tray::clear_unread(&app);
+pub fn tray_clear_unread() {
+    crate::system::tray::clear_unread();
 }

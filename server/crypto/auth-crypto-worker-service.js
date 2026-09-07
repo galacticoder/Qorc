@@ -3,12 +3,9 @@ import { Worker } from 'node:worker_threads';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_DSA_87_SIGNATURE_BYTES,
-  ML_KEM_1024_CIPHERTEXT_BYTES,
-  ML_KEM_1024_PUBLIC_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
 import {
   PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-  PRIVATE_AUTH_OT_RECORD_BYTES,
   PRIVATE_AUTH_TRANSCRIPT_BYTES,
 } from '../../shared/private-auth-protocol.js';
 import {
@@ -44,8 +41,6 @@ function wipePayload(payload) {
 
 function wipeResult(result) {
   if (!result || typeof result !== 'object') return;
-  wipe(result.ciphertexts);
-  wipe(result.maskedRecords);
   wipe(result.evaluatedTokens);
   wipe(result.proof);
 }
@@ -112,17 +107,7 @@ function validateWorkerResponse(message, job) {
     return { evaluatedTokens: message.evaluatedTokens, proof: message.proof };
   }
 
-  const keys = Object.keys(message).sort().join(',');
-  if (
-    keys !== 'ciphertexts,id,maskedRecords,success' ||
-    !exactStandaloneBytes(message.ciphertexts, PRIVATE_AUTH_ANONYMITY_SET_SIZE * ML_KEM_1024_CIPHERTEXT_BYTES) ||
-    !exactStandaloneBytes(message.maskedRecords, PRIVATE_AUTH_ANONYMITY_SET_SIZE * PRIVATE_AUTH_OT_RECORD_BYTES)
-  ) {
-    wipe(message.ciphertexts);
-    wipe(message.maskedRecords);
-    return null;
-  }
-  return { ciphertexts: message.ciphertexts, maskedRecords: message.maskedRecords };
+  return null;
 }
 
 function validateWorker() {
@@ -274,21 +259,6 @@ export function verifyAuthProofAcrossAnonymitySet(authPublicKeys, signature, tra
     AUTH_CRYPTO_OPERATION.VERIFY_ANONYMITY_SET,
     { authPublicKeys, signature, transcript },
     [authPublicKeys.buffer, signature.buffer, transcript.buffer],
-    signal
-  );
-}
-
-export function encryptPrivateAuthOtRecords(clientPublicKeys, paddedRecords, signal) {
-  if (
-    !exactStandaloneBytes(clientPublicKeys, PRIVATE_AUTH_ANONYMITY_SET_SIZE * ML_KEM_1024_PUBLIC_KEY_BYTES) ||
-    !exactStandaloneBytes(paddedRecords, PRIVATE_AUTH_ANONYMITY_SET_SIZE * PRIVATE_AUTH_OT_RECORD_BYTES)
-  ) {
-    throw new Error('Invalid private-auth OT buffers');
-  }
-  return enqueueJob(
-    AUTH_CRYPTO_OPERATION.ENCRYPT_OT_RECORDS,
-    { clientPublicKeys, paddedRecords },
-    [clientPublicKeys.buffer, paddedRecords.buffer],
     signal
   );
 }

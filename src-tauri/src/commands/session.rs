@@ -20,12 +20,16 @@ pub async fn session_get_background_state(
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
 
-    let active = storage
-        .get(crate::storage_keys::BACKGROUND_SESSION_ACTIVE)
+    let active = match storage
+        .get_text(crate::storage_keys::BACKGROUND_SESSION_ACTIVE)
         .await
         .map_err(|e| e.safe_message())?
-        .map(|s| s == "true")
-        .unwrap_or(false);
+        .as_deref()
+    {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err("Invalid background session state".to_string()),
+    };
 
     Ok(BackgroundSessionState { active })
 }
@@ -42,7 +46,7 @@ pub async fn session_set_background_state(
         .ok_or_else(|| "Storage not initialized".to_string())?;
 
     storage
-        .set(
+        .set_text(
             crate::storage_keys::BACKGROUND_SESSION_ACTIVE,
             if active { "true" } else { "false" },
         )

@@ -65,5 +65,6 @@ export interface ChatMessageProps {
   onReact?: (message: Message, emoji: string) => void;
   onReplyClick?: (replyId: string) => void;
   currentUsername?: string;
-  secureDB?: any;
+  secureDB: SecureDB;
 }
+import type { SecureDB } from '../../../lib/database/secureDB';

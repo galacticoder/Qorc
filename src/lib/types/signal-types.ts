@@ -44,9 +44,6 @@ export enum SignalType {
 
   // Status and Control
   OK = 'ok',
-  PING = 'ping',
-  PONG = 'pong',
-
   // Typing Indicators
   TYPING_START = 'typing-start',
   TYPING_STOP = 'typing-stop',
@@ -58,12 +55,12 @@ export enum SignalType {
   ACTIVATE_DELIVERY = 'activate-delivery',
   ACTIVATE_DELIVERY_RESPONSE = 'activate-delivery-response',
 
-  // Total Blind Authentication
-  AUTH_OT_REGISTER_REQUEST = 'auth-ot-register-request',
-  AUTH_OT_REGISTER_RESPONSE = 'auth-ot-register-response',
-  AUTH_OT_REGISTER_FINALIZE = 'auth-ot-register-finalize',
-  AUTH_OT_REGISTER_READY = 'auth-ot-register-ready',
-  AUTH_OT_REGISTER_CONFIRM = 'auth-ot-register-confirm',
+  // Private Authentication
+  AUTH_REGISTER_REQUEST = 'auth-register-request',
+  AUTH_REGISTER_RESPONSE = 'auth-register-response',
+  AUTH_REGISTER_FINALIZE = 'auth-register-finalize',
+  AUTH_REGISTER_READY = 'auth-register-ready',
+  AUTH_REGISTER_CONFIRM = 'auth-register-confirm',
   PRIVACY_PASS_REDEMPTION = 'privacy-pass-redemption',
   AUTH_FULL_SUCCESS = 'AUTH_FULL_SUCCESS',
 
@@ -73,10 +70,11 @@ export enum SignalType {
   SERVER_ENTRY_REQUEST = 'server-entry-request',
   SERVER_ENTRY_CHALLENGE = 'server-entry-challenge',
   SERVER_ENTRY_TOKEN_ISSUANCE = 'server-entry-token-issuance',
+  SERVER_ENTRY_CREDENTIAL_ROTATED = 'server-entry-credential-rotated',
   ACCOUNT_AUTH_TOKEN_REFRESH = 'account-auth-token-refresh',
   ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE = 'account-auth-token-refresh-response',
-  AUTH_OT_REQUEST = 'auth-ot-request',
-  AUTH_OT_RESPONSE = 'auth-ot-response',
-  AUTH_OT_FINALIZE = 'auth-ot-finalize',
+  AUTH_PIR_REQUEST = 'auth-pir-request',
+  AUTH_PIR_RESPONSE = 'auth-pir-response',
+  AUTH_PIR_FINALIZE = 'auth-pir-finalize',
   SECURE_CHUNK = 'secure-chunk',
 }

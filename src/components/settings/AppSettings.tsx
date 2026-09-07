@@ -18,7 +18,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react';
-import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
+import { encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
 import { nativeCamera, nativeMicrophone, notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
@@ -40,6 +40,11 @@ import {
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../ui/UserAvatar';
 import { installAppSettingsStyles } from './sections/AppSettingsStyles';
+import {
+  readAppSettings,
+  updateAppSettings,
+  type AppSettingsState,
+} from '../../lib/ui/app-settings';
 import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 import {
   readNavigationLayout,
@@ -52,10 +57,10 @@ import { SettingsIcon } from '../chat/assets/icons';
 installAppSettingsStyles();
 
 interface AppSettingsProps {
-  currentUsername?: string;
-  currentDisplayName?: string;
-  onLogout?: () => void | Promise<void>;
-  onOpenBlockConversationChooser?: () => void;
+  currentUsername: string;
+  currentDisplayName: string;
+  onLogout: () => void | Promise<void>;
+  onOpenBlockConversationChooser: () => void;
 }
 
 interface NotificationSettings {
@@ -126,8 +131,6 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
   const displayName = useDisplayUsername({ username });
   const showUsername = displayName.trim().toLowerCase() !== username.trim().toLowerCase();
 
-  if (typeof document === 'undefined') return null;
-
   return createPortal(
     <div className={`qorc-settings-host ${themeClass} qorc-unblock-overlay`} onClick={onCancel}>
       <div
@@ -173,8 +176,8 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
 });
 
 export const AppSettings = React.memo(function AppSettings({
-  currentUsername = '',
-  currentDisplayName = '',
+  currentUsername,
+  currentDisplayName,
   onLogout,
   onOpenBlockConversationChooser,
 }: AppSettingsProps) {
@@ -210,30 +213,14 @@ export const AppSettings = React.memo(function AppSettings({
 
   const activeTheme = theme === 'system' ? resolvedTheme : theme;
   const themeClass = activeTheme === 'light' ? 'light' : 'dark';
-  const displayUsername = currentDisplayName || currentUsername || 'User';
-  const copyUsername = currentDisplayName || currentUsername || '';
-  const blockingAvailable = Boolean(currentUsername);
+  const displayUsername = currentDisplayName || currentUsername;
+  const copyUsername = currentDisplayName || currentUsername;
 
-  const saveSettings = useCallback((updates: Partial<{
-    notifications: NotificationSettings;
-    preferredCallMicId: string;
-    preferredSpeakerId: string;
-    preferredCameraId: string;
-  }>) => {
-    try {
-      const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-      const parsed = stored ? JSON.parse(stored) : {};
-      syncEncryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, JSON.stringify({ ...parsed, ...updates }));
-    } catch { }
+  const saveSettings = useCallback((updates: Partial<AppSettingsState>) => {
+    updateAppSettings(updates);
   }, []);
 
   const loadBlockedUsers = useCallback(async () => {
-    if (!blockingAvailable) {
-      setBlockedUsersError('Please log in.');
-      setBlockedUsers([]);
-      return;
-    }
-
     setBlockedUsersLoading(true);
     setBlockedUsersError(null);
 
@@ -247,7 +234,7 @@ export const AppSettings = React.memo(function AppSettings({
     } finally {
       setBlockedUsersLoading(false);
     }
-  }, [blockingAvailable]);
+  }, []);
 
   const refreshMediaDevices = useCallback(async () => {
     if (devicesLoadingRef.current) return;
@@ -278,47 +265,42 @@ export const AppSettings = React.memo(function AppSettings({
     let cancelled = false;
 
     const initTraySettings = async () => {
-      try {
-        setCloseToTray(await tray.getCloseToTray());
-      } catch { }
+      setCloseToTray(await tray.getCloseToTray());
       setIsTrayLoading(false);
     };
 
     const initProfilePicture = async () => {
-      try {
-        await profilePictureSystem.initialize();
-        setAvatarUrl(profilePictureSystem.getOwnAvatar());
-      } catch (error) {
-        console.error('[AppSettings] Failed to init profile picture:', error);
-      }
+      await profilePictureSystem.initialize();
+      setAvatarUrl(profilePictureSystem.getOwnAvatar());
     };
 
-    try {
-      const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.notifications) {
-          setNotifications(parsed.notifications);
-          tauriNotifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
-        }
-        if (parsed.preferredCallMicId) setPreferredMicId(parsed.preferredCallMicId);
-        if (parsed.preferredSpeakerId) setPreferredSpeakerId(parsed.preferredSpeakerId);
-        if (parsed.preferredCameraId) setPreferredCameraId(parsed.preferredCameraId);
-      }
-    } catch { }
+    const storedSettings = readAppSettings();
+    if (storedSettings.notifications) {
+      setNotifications(storedSettings.notifications);
+      void tauriNotifications.setEnabled(storedSettings.notifications.desktop).catch((error) => {
+        console.error('[AppSettings] Failed to apply notification setting', error);
+      });
+    }
+    if (storedSettings.preferredCallMicId !== undefined) setPreferredMicId(storedSettings.preferredCallMicId);
+    if (storedSettings.preferredSpeakerId !== undefined) setPreferredSpeakerId(storedSettings.preferredSpeakerId);
+    if (storedSettings.preferredCameraId !== undefined) setPreferredCameraId(storedSettings.preferredCameraId);
 
     const initialize = async () => {
-      await Promise.allSettled([
-        initTraySettings(),
-        initProfilePicture(),
-        blockingAvailable ? loadBlockedUsers() : Promise.resolve(),
-      ]);
-      if (!cancelled) setInitialSettingsReady(true);
+      try {
+        await Promise.all([
+          initTraySettings(),
+          initProfilePicture(),
+          loadBlockedUsers(),
+        ]);
+        if (!cancelled) setInitialSettingsReady(true);
+      } catch (error) {
+        if (!cancelled) console.error('[AppSettings] Failed to initialize settings', error);
+      }
     };
 
     void initialize();
     return () => { cancelled = true; };
-  }, [blockingAvailable, loadBlockedUsers]);
+  }, [loadBlockedUsers]);
 
   useEffect(() => {
     const handleAvatarUpdate = (event: Event) => {
@@ -354,7 +336,7 @@ export const AppSettings = React.memo(function AppSettings({
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && blockingAvailable) {
+      if (document.visibilityState === 'visible') {
         loadBlockedUsers();
       }
     };
@@ -375,9 +357,7 @@ export const AppSettings = React.memo(function AppSettings({
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
         if (!sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH)) return;
 
-        if (blockingAvailable) {
-          loadBlockedUsers();
-        }
+        loadBlockedUsers();
       } catch { }
     };
 
@@ -388,7 +368,7 @@ export const AppSettings = React.memo(function AppSettings({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
     };
-  }, [blockingAvailable, loadBlockedUsers]);
+  }, [loadBlockedUsers]);
 
   const handleCopyUsername = async () => {
     if (!copyUsername) return;
@@ -496,7 +476,7 @@ export const AppSettings = React.memo(function AppSettings({
 
     setIsClearingData(true);
     try {
-      await encryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, '');
+      await encryptedStorage.removeItem(STORAGE_KEYS.APP_SETTINGS);
       window.location.reload();
     } catch {
       toast.error('Failed to clear data');
@@ -529,7 +509,7 @@ export const AppSettings = React.memo(function AppSettings({
       clearTimeout(logoutTimerRef.current);
       logoutTimerRef.current = null;
     }
-    void onLogout?.();
+    void onLogout();
   }, [onLogout]);
 
   useEffect(() => () => {
@@ -548,12 +528,6 @@ export const AppSettings = React.memo(function AppSettings({
 
   const confirmUnblock = useCallback(async () => {
     if (!unblockTarget || unblocking) return;
-    if (!blockingAvailable) {
-      setBlockedUsersError('Please log in.');
-      setUnblockTarget(null);
-      return;
-    }
-
     setUnblocking(true);
     setBlockedUsersError(null);
     try {
@@ -566,7 +540,7 @@ export const AppSettings = React.memo(function AppSettings({
     } finally {
       setUnblocking(false);
     }
-  }, [unblockTarget, unblocking, blockingAvailable, loadBlockedUsers]);
+  }, [unblockTarget, unblocking, loadBlockedUsers]);
 
   if (!initialSettingsReady) {
     return (
@@ -610,7 +584,7 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className={`avatar-preview ${avatarUrl ? 'has-image' : ''}`} aria-hidden="true">
                         {avatarUrl
                           ? <img src={avatarUrl} alt="" />
-                          : <span className="avatar-preview-fallback">{displayUsername.slice(0, 1).toUpperCase()}</span>}
+                          : <span className="avatar-preview-placeholder">{displayUsername.slice(0, 1).toUpperCase()}</span>}
                         <span className="avatar-hover-overlay">
                           <Camera aria-hidden="true" />
                         </span>
@@ -806,7 +780,6 @@ export const AppSettings = React.memo(function AppSettings({
                 <button
                   className="settings-head-action"
                   type="button"
-                  disabled={!blockingAvailable || !onOpenBlockConversationChooser}
                   onClick={onOpenBlockConversationChooser}
                 >
                   <Ban aria-hidden="true" />

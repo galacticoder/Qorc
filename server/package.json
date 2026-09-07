@@ -5,16 +5,15 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "start:cluster": "cross-env CLUSTER_WORKERS=4 node server.js",
-    "cluster": "node scripts/cluster-cli.js",
-    "cluster:status": "node scripts/cluster-cli.js status",
-    "cluster:pending": "node scripts/cluster-cli.js pending",
-    "cluster:approve": "node scripts/cluster-cli.js approve",
-    "cluster:reject": "node scripts/cluster-cli.js reject",
-    "cluster:keys": "node scripts/cluster-cli.js keys",
-    "cluster:health": "node scripts/cluster-cli.js health",
-    "cluster:watch": "node scripts/cluster-cli.js watch",
+    "start": "node ../scripts/start-server.cjs",
+    "cluster": "node ../scripts/cluster-cli.js",
+    "cluster:status": "node ../scripts/cluster-cli.js status",
+    "cluster:pending": "node ../scripts/cluster-cli.js pending",
+    "cluster:approve": "node ../scripts/cluster-cli.js approve",
+    "cluster:reject": "node ../scripts/cluster-cli.js reject",
+    "cluster:keys": "node ../scripts/cluster-cli.js keys",
+    "cluster:health": "node ../scripts/cluster-cli.js health",
+    "cluster:watch": "node ../scripts/cluster-cli.js watch",
     "audit": "npm audit",
     "audit:fix": "npm audit fix",
     "lint": "../node_modules/.bin/eslint ."
@@ -30,7 +29,6 @@
     "chalk": "^5.3.0",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.2",
-    "cross-env": "^10.1.0",
     "express": "^5.1.0",
     "generic-pool": "^3.9.0",
     "ioredis": "^5.8.2",
@@ -45,6 +43,6 @@
     "globals": "^14.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

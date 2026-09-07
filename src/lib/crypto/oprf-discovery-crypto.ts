@@ -19,6 +19,7 @@ import {
 } from '../utils/byte-utils';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { hasPrototypePollutionKeys } from '../sanitizers';
 
 export { DISCOVERY_BLOB_BASE64_CHARS } from '../constants';
 
@@ -34,6 +35,7 @@ export interface OPRFServerResponse {
 }
 
 export interface OPRFDiscoveryMaterial {
+    spoolDetectionKey: string;
     publicKeys: {
         kyberPublicBase64: string;
         dilithiumPublicBase64: string;
@@ -49,11 +51,11 @@ export interface OPRFDiscoveryMaterial {
 }
 
 export interface OPRFDiscoveryBlob {
-    spoolDetectionKey?: string;
+    spoolDetectionKey: string;
     fullBundle: unknown;
     certifiedPeerBundle: CertifiedPeerBundleV3;
     avatarRef?: AvatarRef;
-    keyTransparencyTransition?: {
+    keyTransparencyTransition: {
         signedUpdate: unknown;
         authorization: unknown;
     };
@@ -71,11 +73,14 @@ const DISCOVERY_BLOB_PLAINTEXT_BYTES = DISCOVERY_BLOB_WIRE_BYTES -
     DISCOVERY_BLOB_PREFIX_BYTES -
     DISCOVERY_BLOB_TAG_BYTES -
     DISCOVERY_BLOB_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-const DISCOVERY_BLOB_REQUIRED_KEYS = ['certifiedPeerBundle', 'fullBundle'];
-const DISCOVERY_BLOB_OPTIONAL_KEYS = [
-    'avatarRef',
+const DISCOVERY_BLOB_REQUIRED_KEYS = [
+    'certifiedPeerBundle',
+    'fullBundle',
     'keyTransparencyTransition',
     'spoolDetectionKey',
+];
+const DISCOVERY_BLOB_OPTIONAL_KEYS = [
+    'avatarRef',
 ];
 const DISCOVERY_DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_BYTES * 2}}$`);
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -356,14 +361,13 @@ export class OPRFDiscoveryClient {
                 DISCOVERY_BLOB_HEADER_BYTES,
                 DISCOVERY_BLOB_HEADER_BYTES + contentLength
             );
-            const parsed = JSON.parse(strictTextDecoder.decode(content), (key, value) =>
-                key === '__proto__' || key === 'prototype' || key === 'constructor' ? undefined : value
-            );
+            const parsed = JSON.parse(strictTextDecoder.decode(content));
             if (
                 !parsed ||
                 typeof parsed !== 'object' ||
                 Array.isArray(parsed) ||
-                Object.getPrototypeOf(parsed) !== Object.prototype
+                Object.getPrototypeOf(parsed) !== Object.prototype ||
+                hasPrototypePollutionKeys(parsed)
             ) return null;
             
             const keys = Object.keys(parsed);
@@ -375,16 +379,17 @@ export class OPRFDiscoveryClient {
                 ))
             ) return null;
             const detectionKey = (parsed as OPRFDiscoveryBlob).spoolDetectionKey;
-            if (detectionKey !== undefined && !DISCOVERY_DETECTION_KEY_RE.test(detectionKey)) {
+            if (typeof detectionKey !== 'string' || !DISCOVERY_DETECTION_KEY_RE.test(detectionKey)) {
                 return null;
             }
             const transition = (parsed as OPRFDiscoveryBlob).keyTransparencyTransition;
-            if (transition !== undefined && (
+            if (
                 !transition ||
                 typeof transition !== 'object' ||
                 Array.isArray(transition) ||
+                hasPrototypePollutionKeys(transition) ||
                 Object.keys(transition).sort().join(',') !== 'authorization,signedUpdate'
-            )) return null;
+            ) return null;
             return parsed as OPRFDiscoveryBlob;
         } catch {
             return null;
@@ -404,7 +409,7 @@ export class OPRFDiscoveryClient {
 }
 
 function hexToBytes(hex: string, expectedBytes: number): Uint8Array {
-    const bytes = decodeHex(hex, { exactBytes: expectedBytes, allowUppercase: true });
+    const bytes = decodeHex(hex, { exactBytes: expectedBytes });
     if (!bytes) throw new Error('Invalid hexadecimal value');
     return bytes;
 }

@@ -35,8 +35,9 @@ import { loadLastAuthenticatedAccount } from "../lib/security/local-account-scop
 import { shouldAttemptDiscovery } from "../lib/utils/discovery-utils";
 import { computePeerCertificateFingerprint, isSelfSignedPeerCertificate } from "../lib/utils/peer-certificate-utils";
 import { resolveTrustedPeerHybridPublicKeys } from "../lib/utils/signal-bundle-utils";
-import { isLiveOnlySignalType, unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
-import { websocket, isTauri, tray } from "../lib/tauri-bindings";
+import { unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
+import { createPeerSignalSender } from "../lib/transport/peer-signal-sender";
+import { websocket, tray } from "../lib/tauri-bindings";
 import type { PeerCertificateBundle } from "../lib/types/p2p-types";
 import type { CallState } from "../lib/types/calling-types";
 
@@ -70,12 +71,6 @@ import { keyTransparencyClient } from "../lib/key-transparency/client";
 import { getInstanceLocalStorageItem, setInstanceLocalStorageItem } from "../lib/runtime/instance-storage";
 import { boundMessageState, releaseUnretainedVaultEntries } from "../lib/utils/message-state-limits";
 import { hasResumeToken } from "../lib/signals/resume-tokens";
-import {
-  LOCAL_TEST_CHAT_USERNAME,
-  useLocalTestChatFixture,
-} from "../../test-chat/useLocalTestChatFixture";
-
-const COLD_SEND_P2P_DIAL_BUDGET_MS = 3000;
 
 const loadCallModal = () => import("../components/chat/calls/CallModal").then((module) => module.default);
 const loadAppSettings = () => import("../components/settings/AppSettings").then((module) => module.AppSettings);
@@ -148,14 +143,21 @@ const ChatApp: React.FC = () => {
 
   useEffect(() => {
     if (!Authentication.isLoggedIn || !discoveryUsername) return;
-    keyTransparencyClient.startContactMonitoring(discoveryUsername);
-
-    void keyTransparencyClient.restorePersistedAuthorizations(discoveryUsername)
-      .catch(() => { });
+    let cancelled = false;
+    void keyTransparencyClient.restorePersistedAuthorizations(discoveryUsername).then(() => {
+      if (!cancelled) keyTransparencyClient.startContactMonitoring(discoveryUsername);
+    }).catch((error) => {
+      if (!cancelled) {
+        Authentication.setLoginError(
+          error instanceof Error ? error.message : 'Key-transparency state could not be restored'
+        );
+      }
+    });
     return () => {
+      cancelled = true;
       keyTransparencyClient.stopContactMonitoring(discoveryUsername);
     };
-  }, [Authentication.isLoggedIn, discoveryUsername]);
+  }, [Authentication.isLoggedIn, Authentication.setLoginError, discoveryUsername]);
 
   // Background resume
   const {
@@ -188,16 +190,6 @@ const ChatApp: React.FC = () => {
     setMessages,
   });
 
-  const localTestChat = useLocalTestChatFixture({
-    ready: Authentication.isLoggedIn
-      && Authentication.accountAuthenticated
-      && Authentication.vaultReady
-      && Database.dbInitialized
-      && Database.initialDataLoaded,
-    currentUsername: Authentication.loginUsernameRef.current || '',
-    setMessages,
-  });
-
   const { loadMoreConversationMessages, flushPendingSaves } = Database;
 
   const usersRef = useRef<User[]>([]);
@@ -206,54 +198,46 @@ const ChatApp: React.FC = () => {
   }, [Database.users]);
   const fetchPeerCertificates = useCallback(async (peer: string, bypassCache = false): Promise<PeerCertificateBundle | null> => {
     if (!peer) return null;
-    try {
-      const account = Authentication.loginUsernameRef.current || '';
-      if (!account) return null;
-      if (!shouldAttemptDiscovery(peer)) {
-        return null;
-      }
-      const material = await findUser(peer, { forceRefresh: bypassCache });
-      if (Authentication.loginUsernameRef.current !== account) return null;
-      const cert = material?.peerCertificate || null;
-      if (!cert) {
-        return null;
-      }
-      if (!isSelfSignedPeerCertificate(cert)) {
-        return null;
-      }
-      const trusted = await resolveTrustedPeerHybridPublicKeys(account, peer, material);
-      if (
-        Authentication.loginUsernameRef.current !== account ||
-        !trusted.valid ||
-        !trusted.hybridKeys
-      ) return null;
-      const fingerprint = computePeerCertificateFingerprint(cert);
-      if (
-        trusted.peerCertificateFingerprint !== fingerprint ||
-        !trusted.identityRootFingerprint
-      ) return null;
-
-      const verifiedAt = Date.now();
-      Database.setUsers(prev => {
-        const idx = prev.findIndex(u => u.username === peer);
-        const nextUser: User = {
-          ...(idx >= 0 ? prev[idx] : { id: crypto.randomUUID(), username: peer }),
-          hybridPublicKeys: trusted.hybridKeys!,
-          peerCertificateFingerprint: fingerprint,
-          peerCertificateVerifiedAt: verifiedAt,
-          identityRootFingerprint: trusted.identityRootFingerprint,
-          identityBundleFingerprint: trusted.identityBundleFingerprint,
-        };
-        if (idx < 0) return [...prev, nextUser];
-        const next = [...prev];
-        next[idx] = nextUser;
-        return next;
-      });
-
-      return cert;
-    } catch {
+    const account = Authentication.loginUsernameRef.current || '';
+    if (!account) return null;
+    if (!shouldAttemptDiscovery(peer)) {
       return null;
     }
+    const material = await findUser(peer, { forceRefresh: bypassCache });
+    if (Authentication.loginUsernameRef.current !== account) return null;
+    const cert = material?.peerCertificate || null;
+    if (!cert) return null;
+    if (!isSelfSignedPeerCertificate(cert)) return null;
+    const trusted = await resolveTrustedPeerHybridPublicKeys(account, peer, material);
+    if (
+      Authentication.loginUsernameRef.current !== account ||
+      !trusted.valid ||
+      !trusted.hybridKeys
+    ) return null;
+    const fingerprint = computePeerCertificateFingerprint(cert);
+    if (
+      trusted.peerCertificateFingerprint !== fingerprint ||
+      !trusted.identityRootFingerprint
+    ) return null;
+
+    const verifiedAt = Date.now();
+    Database.setUsers(prev => {
+      const idx = prev.findIndex(u => u.username === peer);
+      const nextUser: User = {
+        ...(idx >= 0 ? prev[idx] : { id: crypto.randomUUID(), username: peer }),
+        hybridPublicKeys: trusted.hybridKeys!,
+        peerCertificateFingerprint: fingerprint,
+        peerCertificateVerifiedAt: verifiedAt,
+        identityRootFingerprint: trusted.identityRootFingerprint,
+        identityBundleFingerprint: trusted.identityBundleFingerprint,
+      };
+      if (idx < 0) return [...prev, nextUser];
+      const next = [...prev];
+      next[idx] = nextUser;
+      return next;
+    });
+
+    return cert;
   }, [findUser, Database.users, Database.setUsers]);
 
   const startupBeganRef = useRef(false);
@@ -262,13 +246,8 @@ const ChatApp: React.FC = () => {
     startupBeganRef.current = true;
     let cancelled = false;
 
-    (async () => {
-      let savedUrl = '';
-      try {
-        savedUrl = await startupConnection.loadConfiguredServerUrl();
-      } catch (err) {
-        console.error('[Index] Failed to load configured server URL:', err);
-      }
+    void (async () => {
+      const savedUrl = await startupConnection.loadConfiguredServerUrl();
       if (cancelled) return;
 
       setServerUrlResolved(true);
@@ -280,21 +259,16 @@ const ChatApp: React.FC = () => {
       setSelectedServerUrl(savedUrl);
       setSetupComplete(true);
 
-      let canResume = false;
-      try {
-        const explicitLogout = await isExplicitlyLoggedOut();
-        const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
-        canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
-        if (cancelled) return;
-        if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated) {
-          if (canResume) {
-            Authentication.setTokenValidationInProgress(true);
-          } else if (!storedUsername) {
-            Authentication.setIsRegistrationMode(true);
-          }
+      const explicitLogout = await isExplicitlyLoggedOut();
+      const storedUsername = explicitLogout ? '' : (await loadLastAuthenticatedAccount()).username;
+      const canResume = storedUsername ? await hasResumeToken(storedUsername) : false;
+      if (cancelled) return;
+      if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated) {
+        if (canResume) {
+          Authentication.setTokenValidationInProgress(true);
+        } else if (!storedUsername) {
+          Authentication.setIsRegistrationMode(true);
         }
-      } catch (err) {
-        console.error('[Index] Failed to resolve stored session state:', err);
       }
 
       if (canResume) {
@@ -312,10 +286,26 @@ const ChatApp: React.FC = () => {
       finally {
         if (!cancelled) setServerEntryPreflightInProgress(false);
       }
-    })();
+    })().catch((error) => {
+      if (cancelled) return;
+      const message = error instanceof Error ? error.message : 'Startup state could not be loaded';
+      console.error('[Index] Startup state could not be loaded:', error);
+      Authentication.setLoginError(message);
+      toast.error(message);
+      setServerUrlResolved(true);
+      setServerEntryPreflightInProgress(false);
+    });
 
     return () => { cancelled = true; };
-  }, [backgroundCheckComplete, promptForServerEntryIfRequired]);
+  }, [
+    Authentication.accountAuthenticated,
+    Authentication.isLoggedIn,
+    Authentication.setIsRegistrationMode,
+    Authentication.setLoginError,
+    Authentication.setTokenValidationInProgress,
+    backgroundCheckComplete,
+    promptForServerEntryIfRequired,
+  ]);
 
   useEffect(() => {
     if (startup.phase !== 'ready') return;
@@ -387,7 +377,6 @@ const ChatApp: React.FC = () => {
     Authentication.isLoggedIn && Authentication.accountAuthenticated,
     Authentication.getKeysOnDemand,
     usersRef,
-    undefined,
     fileHandler.handleFileMessageChunk,
     fileHandler.cancelIncomingFileTransfer,
     Database.secureDBRef,
@@ -463,12 +452,10 @@ const ChatApp: React.FC = () => {
   }, [Database.discardPreloadedConversationMessages, removeConversation]);
 
   useEffect(() => {
-    if (
-      selectedConversation &&
-      selectedConversation !== LOCAL_TEST_CHAT_USERNAME &&
-      typeof messageSender?.prefetchSessionForPeer === 'function'
-    ) {
-      try { messageSender.prefetchSessionForPeer(selectedConversation); } catch { }
+    if (selectedConversation) {
+      void messageSender.prefetchSessionForPeer(selectedConversation).catch((error) => {
+        console.error('[MessageSender] Session prefetch failed', error);
+      });
     }
   }, [selectedConversation, messageSender.prefetchSessionForPeer]);
 
@@ -506,7 +493,7 @@ const ChatApp: React.FC = () => {
   }, []);
 
   const handleBlockConversationFromSettings = useCallback(async (username: string) => {
-    if (!username || username === LOCAL_TEST_CHAT_USERNAME) {
+    if (!username) {
       throw new Error('That conversation cannot be blocked.');
     }
     if (blockingSystem.isBlockedSync(username)) {
@@ -598,33 +585,14 @@ const ChatApp: React.FC = () => {
   useEffect(() => {
     const service = p2pServiceRef.current;
     if (service && p2pMessaging.p2pStatus.isInitialized) {
-      unifiedSignalTransport.setP2PSender(async (to, payload, type) => {
-        if (!p2pMessaging.isPeerConnected(to)) {
-          const dial = p2pMessaging.connectToPeer(to).catch(() => { });
-          if (!isLiveOnlySignalType(type)) {
-            let deadline: ReturnType<typeof setTimeout> | undefined;
-            try {
-              await Promise.race([
-                dial,
-                new Promise<void>((resolve) => {
-                  deadline = setTimeout(resolve, COLD_SEND_P2P_DIAL_BUDGET_MS);
-                }),
-              ]);
-            } finally {
-              if (deadline !== undefined) clearTimeout(deadline);
-            }
-          }
-          if (!p2pMessaging.isPeerConnected(to)) {
-            throw new Error('P2P connection not ready');
-          }
-        }
-        if (type !== SignalType.SEALED_ENVELOPE) {
-          throw new Error('Invalid message type');
-        }
-        if (service !== p2pServiceRef.current) {
-          throw new Error('P2P service changed during account transition');
-        }
-        await service.sendMessage(to, payload, SignalType.SEALED_ENVELOPE);
+      unifiedSignalTransport.setP2PSender(createPeerSignalSender({
+        isCurrent: () => service === p2pServiceRef.current,
+        isPeerConnected: p2pMessaging.isPeerConnected,
+        connectToPeer: p2pMessaging.connectToPeer,
+        sendMessage: (to, payload) => service.sendMessage(to, payload, SignalType.SEALED_ENVELOPE),
+      }), async (to) => {
+        if (service !== p2pServiceRef.current) return;
+        await p2pMessaging.connectToPeer(to);
       });
     } else {
       unifiedSignalTransport.setP2PSender(null);
@@ -681,7 +649,6 @@ const ChatApp: React.FC = () => {
     selectedConversation,
     getOrCreateUser,
     messageSender,
-    p2pMessaging,
   });
 
   // Call event handlers
@@ -734,12 +701,6 @@ const ChatApp: React.FC = () => {
     return getConversationMessages(peer);
   }, [selectedConversation, messages, getConversationMessages]);
 
-  const p2pConnectedPeers = p2pMessaging?.p2pStatus?.connectedPeers ?? [];
-  const p2pConnectedStatus = useMemo(() => {
-    if (!selectedConversation || !p2pMessaging?.isPeerConnected) return false;
-    return p2pMessaging.isPeerConnected(selectedConversation);
-  }, [selectedConversation, p2pConnectedPeers.includes(selectedConversation)]);
-
   const handleServerSelected = useCallback(async (serverUrl: string) => {
     clearRecoveryConnectionIssue();
     setSelectedServerUrl(serverUrl);
@@ -759,7 +720,10 @@ const ChatApp: React.FC = () => {
       }
     } catch (err) {
       console.error('[Index] Failed to resolve session state after server selection:', err);
-      Authentication.setIsRegistrationMode(true);
+      Authentication.setLoginError(
+        err instanceof Error ? err.message : 'Stored session state could not be loaded'
+      );
+      throw err;
     }
   }, [Authentication, clearRecoveryConnectionIssue, promptForServerEntryIfRequired]);
 
@@ -774,9 +738,7 @@ const ChatApp: React.FC = () => {
       await websocketClient.close();
     } catch { }
     try {
-      if (isTauri()) {
-        await websocket.disconnect();
-      }
+      await websocket.disconnect();
     } catch { }
   }, [Authentication, clearRecoveryConnectionIssue]);
 
@@ -1047,7 +1009,6 @@ const ChatApp: React.FC = () => {
                       await addConversation(username, true, signal);
                       handleConversationDialogOpenChange(false);
                     }}
-                    getDisplayUsername={stableGetDisplayUsername}
                     showNewChatInput={showNewChatInput}
                     onNewChatOpenChange={handleConversationDialogOpenChange}
                     onRemoveConversation={handleRemoveConversation}
@@ -1071,23 +1032,15 @@ const ChatApp: React.FC = () => {
                       currentUsername={Authentication.loginUsernameRef.current || ''}
                       getDisplayUsername={stableGetDisplayUsername}
                       getKeysOnDemand={Authentication.getKeysOnDemand}
-                      getPeerHybridKeys={getPeerHybridKeys}
                       findUser={findUser}
                       checkPeerSession={messageSender.prefetchSessionForPeer}
-                      p2pConnected={p2pConnectedStatus}
                       loadMoreMessages={loadMoreConversationMessages}
                       sendServerReadReceipt={sendServerReadReceipt}
                       markMessageAsRead={markMessageAsRead}
                       getSmartReceiptStatus={getSmartReceiptStatus}
                       secureDB={Database.secureDBRef.current}
-                      onSendMessage={selectedConversation === localTestChat.username
-                        ? localTestChat.onSendMessage
-                        : onSendMessage}
-                      fileSenderOverride={selectedConversation === localTestChat.username
-                        ? localTestChat.fileSender
-                        : undefined}
+                      onSendMessage={onSendMessage}
                       onToggleBlock={handleToggleBlock}
-                      isEncrypted={true}
                       users={Database.users}
                       selectedConversation={selectedConversation}
                       saveMessageToLocalDB={saveMessageWithContext}
@@ -1132,7 +1085,7 @@ const ChatApp: React.FC = () => {
         currentCall && CallModalPanel && createPortal(
           <CallModalPanel
             call={currentCall}
-            localStream={callingHook.localStream}
+            localMediaActive={callingHook.localMediaActive}
             localVideoCanvas={callingHook.localVideoCanvas}
             localScreenCanvas={callingHook.localScreenCanvas}
             remoteVideoCanvas={callingHook.remoteVideoCanvas}
@@ -1160,7 +1113,7 @@ const ChatApp: React.FC = () => {
           <CallModalPanel
             key={foregroundIncomingCall.id}
             call={foregroundIncomingCall}
-            localStream={null}
+            localMediaActive={false}
             localVideoCanvas={null}
             localScreenCanvas={null}
             remoteVideoCanvas={null}

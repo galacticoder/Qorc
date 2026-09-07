@@ -5,19 +5,18 @@ import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '../../../lib/utils/shared-utils';
-import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
-import { encryptedStorage } from '../../../lib/database/encrypted-storage';
+import { readAppSettingsAsync } from '../../../lib/ui/app-settings';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import { nativeCamera, nativeMicrophone } from '../../../lib/tauri-bindings';
 import { getDefaultAvatarColor } from '../../../lib/utils/avatar-utils';
 
 interface CallModalProps {
   readonly call: CallState | null;
-  readonly localStream: MediaStream | null;
+  readonly localMediaActive: boolean;
   readonly localVideoCanvas: HTMLCanvasElement | null;
   readonly localScreenCanvas: HTMLCanvasElement | null;
   readonly remoteVideoCanvas: HTMLCanvasElement | null;
-  readonly remoteScreenCanvas?: HTMLCanvasElement | null;
+  readonly remoteScreenCanvas: HTMLCanvasElement | null;
   readonly onAnswer: () => void | Promise<void>;
   readonly onDecline: () => void;
   readonly onEndCall: () => void;
@@ -286,7 +285,7 @@ const OutputDeviceControl = ({
 
 export const CallModal: React.FC<CallModalProps> = memo(({
   call,
-  localStream,
+  localMediaActive,
   localVideoCanvas,
   localScreenCanvas,
   remoteVideoCanvas,
@@ -437,7 +436,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, [isExpandedScreenShare, isVideoCall, remoteScreenCanvas, isScreenSharing]);
 
   useEffect(() => {
-    if (!localStream) {
+    if (!localMediaActive) {
       setMicDevices([]);
       setSpeakerDevices([]);
       setVideoDevices([]);
@@ -456,18 +455,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         setSpeakerDevices(speakers.map(speaker => ({ deviceId: speaker.device_id, label: speaker.label })));
         setVideoDevices(cameras.map(camera => ({ deviceId: camera.device_id, label: camera.label })));
 
-        // Load preferred camera
-        try {
-          const saved = await encryptedStorage.getItem(STORAGE_KEYS.PREFERRED_CAMERA);
-          if (saved && typeof saved === 'string') setPreferredCameraId(saved);
-        } catch { }
-        try {
-          const storedSettings = await encryptedStorage.getItem(STORAGE_KEYS.APP_SETTINGS);
-          const parsed = storedSettings ? JSON.parse(storedSettings) : null;
-          if (parsed && typeof parsed.preferredSpeakerId === 'string') {
-            setPreferredSpeakerId(parsed.preferredSpeakerId);
-          }
-        } catch { }
+        const settings = await readAppSettingsAsync();
+        setPreferredCameraId(settings.preferredCameraId || null);
+        setPreferredSpeakerId(settings.preferredSpeakerId || null);
       } catch (e) {
         if (cancelled) return;
         console.error("Device enumeration failed", e);
@@ -477,17 +467,16 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     return () => {
       cancelled = true;
     };
-  }, [localStream, isVideoCall]);
+  }, [localMediaActive, isVideoCall]);
 
   useEffect(() => {
-    if (!localStream) {
+    if (!localMediaActive) {
       setIsVideoEnabled(isVideoCall);
       return;
     }
-    const audioTrack = localStream.getAudioTracks()[0];
     setIsVideoEnabled(isVideoCall);
-    setIsMuted(audioTrack ? !audioTrack.enabled : false);
-  }, [localStream, isVideoCall, call?.id]);
+    setIsMuted(false);
+  }, [localMediaActive, isVideoCall, call?.id]);
 
   useEffect(() => {
     if (isConnected && call?.startTime) {
@@ -603,7 +592,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const sharedScreenCanvas = remoteScreenCanvas ?? (isScreenSharing ? localScreenCanvas : null);
   const hasSharedScreen = Boolean(sharedScreenCanvas);
   const hasRemoteVideo = Boolean(remoteVideoCanvas);
-  const showLocalPreview = isVideoCall && Boolean(localVideoCanvas || localStream);
+  const showLocalPreview = isVideoCall && Boolean(localVideoCanvas);
   useEffect(() => {
     const screenBecameAvailable = hasSharedScreen && !sharedScreenWasAvailableRef.current;
     sharedScreenWasAvailableRef.current = hasSharedScreen;
@@ -653,10 +642,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         height: attachmentBounds.height
       }
       : { left: position.x, bottom: position.bottom };
-  const callModalStyle = {
+  const callModalStyle: React.CSSProperties & { '--qorc-call-ring-color': string } = {
     ...modalStyle,
     '--qorc-call-ring-color': peerAvatarColor,
-  } as React.CSSProperties;
+  };
 
   return (
     <div

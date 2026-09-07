@@ -124,10 +124,10 @@ If you find a bug, please create an issue on GitHub. Include:
 *   Expected vs. actual behavior.
 *   Screenshots if applicable.
 *   Your OS and environment details.
-*   For call or device failures reproduced through the client launcher, the
-    relevant `logs/instance-<QORC_INSTANCE_ID>-logs.txt` file. Use a different
-    `QORC_INSTANCE_ID` for each simultaneously running test client so their
-    native data and logs remain separate.
+*   For call or device failures reproduced through the client launcher, include
+    the relevant `logs/instance-<id>-logs.txt` file. Simultaneous launcher runs
+    automatically receive separate instance IDs, native data, and log files.
+    Set `QORC_INSTANCE_ID` only when a stable explicit test identity is needed.
 
 ## Suggesting Enhancements
 

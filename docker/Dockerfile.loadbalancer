@@ -52,7 +52,7 @@ COPY scripts/ ./scripts/
 COPY server/ ./server/
 COPY shared/ ./shared/
 
-EXPOSE 8443 8080 8404
+EXPOSE 8443 8080
 
 COPY server/package.json /app/package.json
 RUN npm install --omit=dev --no-audit --no-fund \

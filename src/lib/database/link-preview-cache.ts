@@ -1,6 +1,7 @@
 import { blake3 } from '@noble/hashes/blake3.js';
 import type { NativeLinkPreview } from '../tauri-bindings';
 import { bytesToHex } from '../utils/byte-utils';
+import { hasExactObjectKeys } from '../sanitizers';
 import type { SecureDB } from './secureDB';
 import { STORAGE_KEYS, STORAGE_STORES } from './storage-keys';
 
@@ -58,7 +59,6 @@ const parsePreview = (value: unknown, expectedUrl: string): NativeLinkPreview | 
     !isBoundedString(candidate.url, 2048) ||
     !isBoundedString(candidate.displayUrl, 2048) ||
     !isBoundedString(candidate.host, 253) ||
-    candidate.metadataFetched !== true ||
     !isNullableBoundedString(candidate.title, 120) ||
     !isNullableBoundedString(candidate.description, 240) ||
     !isNullableBoundedString(candidate.imageDataUrl, MAX_IMAGE_DATA_URL_LENGTH) ||
@@ -70,7 +70,6 @@ const parsePreview = (value: unknown, expectedUrl: string): NativeLinkPreview | 
     url: candidate.url,
     displayUrl: candidate.displayUrl,
     host: candidate.host,
-    metadataFetched: true,
     title: candidate.title,
     description: candidate.description,
     imageDataUrl: candidate.imageDataUrl,
@@ -78,15 +77,22 @@ const parsePreview = (value: unknown, expectedUrl: string): NativeLinkPreview | 
 };
 
 const parseIndex = (value: unknown): LinkPreviewCacheIndexEntry[] => {
-  if (!value || typeof value !== 'object') return [];
-  const candidate = value as Partial<LinkPreviewCacheIndex>;
-  if (candidate.version !== 1 || !Array.isArray(candidate.entries)) return [];
+  if (value === null || value === undefined) return [];
+  if (!hasExactObjectKeys(value, ['entries', 'version'])) {
+    throw new Error('Link preview cache index is invalid');
+  }
+  const candidate = value as unknown as LinkPreviewCacheIndex;
+  if (candidate.version !== 1 || !Array.isArray(candidate.entries)) {
+    throw new Error('Link preview cache index is invalid');
+  }
+  if (candidate.entries.length > MAX_CACHE_ENTRIES) {
+    throw new Error('Link preview cache index exceeds its fixed capacity');
+  }
   const seen = new Set<string>();
   const entries: LinkPreviewCacheIndexEntry[] = [];
   for (const entry of candidate.entries) {
     if (
-      !entry ||
-      typeof entry !== 'object' ||
+      !hasExactObjectKeys(entry, ['fetchedAt', 'key', 'size']) ||
       !/^[a-f0-9]{64}$/.test(entry.key) ||
       !Number.isSafeInteger(entry.fetchedAt) ||
       entry.fetchedAt <= 0 ||
@@ -95,7 +101,7 @@ const parseIndex = (value: unknown): LinkPreviewCacheIndexEntry[] => {
       entry.size > MAX_RECORD_BYTES ||
       seen.has(entry.key)
     ) {
-      continue;
+      throw new Error('Link preview cache index is invalid');
     }
     seen.add(entry.key);
     entries.push({ key: entry.key, fetchedAt: entry.fetchedAt, size: entry.size });
@@ -128,10 +134,13 @@ export const loadLinkPreviewFromCache = async (
   url: string,
 ): Promise<NativeLinkPreview | null> => {
   const pendingWrite = writeChains.get(db);
-  if (pendingWrite) await pendingWrite.catch(() => undefined);
+  if (pendingWrite) await pendingWrite;
   const key = cacheKey(url);
   const value = await db.retrieve(STORAGE_STORES.LINK_PREVIEWS, key);
-  if (!value || typeof value !== 'object') return null;
+  if (value === null || value === undefined) return null;
+  if (!hasExactObjectKeys(value, ['fetchedAt', 'preview', 'size', 'version'])) {
+    throw new Error('Link preview cache record is invalid');
+  }
   const record = value as Partial<LinkPreviewCacheRecord>;
   const preview = parsePreview(record.preview, url);
   const actualSize = preview ? encoder.encode(JSON.stringify(preview)).byteLength : 0;
@@ -145,11 +154,10 @@ export const loadLinkPreviewFromCache = async (
     record.size !== actualSize ||
     !preview
   ) {
-    void removeRecord(db, key).catch(() => undefined);
-    return null;
+    throw new Error('Link preview cache record is invalid');
   }
   if (Date.now() - record.fetchedAt! > CACHE_TTL_MS) {
-    void removeRecord(db, key).catch(() => undefined);
+    await removeRecord(db, key);
     return null;
   }
   return preview;
@@ -160,11 +168,11 @@ export const saveLinkPreviewToCache = async (
   preview: NativeLinkPreview,
 ): Promise<void> => {
   const normalized = parsePreview(preview, preview.url);
-  if (!normalized) return;
+  if (!normalized) throw new Error('Link preview is invalid');
   const fetchedAt = Date.now();
   const serializedPreview = JSON.stringify(normalized);
   const size = encoder.encode(serializedPreview).byteLength;
-  if (size <= 0 || size > MAX_RECORD_BYTES) return;
+  if (size <= 0 || size > MAX_RECORD_BYTES) throw new Error('Link preview exceeds its fixed capacity');
   const key = cacheKey(normalized.url);
   const record: LinkPreviewCacheRecord = { version: 1, fetchedAt, size, preview: normalized };
 

@@ -2,7 +2,7 @@
 //!
 //! WebSocket connections through Tor SOCKS5 proxy
 
-use log::{error, warn};
+use log::{error, info, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, MutexGuard, mpsc, watch};
+use tokio::sync::{Mutex, MutexGuard, mpsc, oneshot, watch};
 use tokio_socks::tcp::Socks5Stream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
@@ -26,13 +26,14 @@ use crate::json_bounds::enforce_bounded_json_structure;
 // Constants
 const WEBSOCKET_UPGRADE_TIMEOUT_SECS: u64 = 30;
 const SOCKS_CONNECT_TIMEOUT_SECS: u64 = 150;
-const SERVER_CONNECTION_TIMEOUT_SECS: u64 = 10;
+const SERVER_CONNECTION_TIMEOUT_SECS: u64 =
+    SOCKS_CONNECT_TIMEOUT_SECS + WEBSOCKET_UPGRADE_TIMEOUT_SECS + 10;
 const _: () = assert!(
     SOCKS_CONNECT_TIMEOUT_SECS > 120,
     "must outlast Tor's own SocksTimeout so Tor owns the give-up decision"
 );
 const WEBSOCKET_WRITE_TIMEOUT_SECS: u64 = 30;
-const STALE_CONNECTING_SECS: u64 = 180;
+const STALE_CONNECTING_SECS: u64 = SERVER_CONNECTION_TIMEOUT_SECS + 10;
 const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WS_JSON_DEPTH: usize = 32;
 const MAX_WS_JSON_STRUCTURAL_TOKENS: usize = 16 * 1024;
@@ -289,6 +290,7 @@ type WsStream = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream
 struct QueuedWsMessage {
     message: Option<Message>,
     reservation: Option<(Arc<PendingWriteBudget>, usize)>,
+    completion: Option<oneshot::Sender<bool>>,
 }
 
 impl QueuedWsMessage {
@@ -297,13 +299,34 @@ impl QueuedWsMessage {
         budget.try_reserve(byte_len).then_some(Self {
             message: Some(message),
             reservation: Some((budget, byte_len)),
+            completion: None,
         })
+    }
+
+    fn tracked(
+        message: Message,
+        budget: Arc<PendingWriteBudget>,
+    ) -> Option<(Self, oneshot::Receiver<bool>)> {
+        let byte_len = message.len();
+        if !budget.try_reserve(byte_len) {
+            return None;
+        }
+        let (completion_tx, completion_rx) = oneshot::channel();
+        Some((
+            Self {
+                message: Some(message),
+                reservation: Some((budget, byte_len)),
+                completion: Some(completion_tx),
+            },
+            completion_rx,
+        ))
     }
 
     fn control(message: Message) -> Self {
         Self {
             message: Some(message),
             reservation: None,
+            completion: None,
         }
     }
 }
@@ -632,6 +655,12 @@ impl WebSocketHandler {
             .connect_attempt_id
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
+        let attempt_started_at = Instant::now();
+        info!(
+            "[WS-CONNECT-DIAG] native-connect-start attempt={} timeout_ms={}",
+            attempt_id,
+            SERVER_CONNECTION_TIMEOUT_SECS * 1000
+        );
         let (connect_cancel_tx, connect_cancel_rx) = watch::channel(false);
         *self.connecting_attempt.write() = Some(ConnectingAttempt {
             attempt_id,
@@ -647,24 +676,35 @@ impl WebSocketHandler {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(QorcError::Network(
-                "Server connection timed out after 10 seconds".to_string(),
-            )),
+            Err(_) => Err(QorcError::Network(format!(
+                "Server connection timed out after {} seconds",
+                SERVER_CONNECTION_TIMEOUT_SECS
+            ))),
         };
         self.clear_connecting_attempt(attempt_id);
         match connection_result {
-            Ok(_) => Ok(ConnectResult {
-                success: true,
-                already_connected: Some(false),
-                new_connection: Some(true),
-                connection_token: Some(attempt_id),
-                error: None,
-            }),
+            Ok(_) => {
+                info!(
+                    "[WS-CONNECT-DIAG] native-connect-ready attempt={} duration_ms={}",
+                    attempt_id,
+                    attempt_started_at.elapsed().as_millis()
+                );
+                Ok(ConnectResult {
+                    success: true,
+                    already_connected: Some(false),
+                    new_connection: Some(true),
+                    connection_token: Some(attempt_id),
+                    error: None,
+                })
+            }
             Err(e) => {
                 let (stage, cause) = connection_failure_diagnostic(&e);
                 error!(
-                    "[WS-CONNECT] connection attempt failed stage={} cause={}",
-                    stage, cause
+                    "[WS-CONNECT] connection attempt failed stage={} cause={} duration_ms={} attempt={}",
+                    stage,
+                    cause,
+                    attempt_started_at.elapsed().as_millis(),
+                    attempt_id
                 );
                 if self.connect_attempt_id.load(Ordering::Relaxed) == attempt_id {
                     *self.state.write() = ConnectionState::Disconnected;
@@ -698,11 +738,16 @@ impl WebSocketHandler {
         let port = url.port().unwrap_or(443);
 
         let socks_port = self.tor_socks_port.load(Ordering::Relaxed);
+        let connection_started_at = Instant::now();
 
         // Connect through SOCKS5 proxy
         let socks_addr = format!("127.0.0.1:{}", socks_port);
         const ISOLATION_PASSWORD: &str = "isolate";
         let isolation_username = self.socks_isolation_username.read().clone();
+        info!(
+            "[WS-CONNECT-DIAG] native-socks-start attempt={} socks_port={}",
+            attempt_id, socks_port
+        );
         let tcp_stream = tokio::select! {
             _ = Self::wait_for_connect_cancellation(&mut connect_cancel_rx) => {
                 return Err(Self::connection_cancelled_error());
@@ -728,6 +773,11 @@ impl WebSocketHandler {
                 })?,
             },
         };
+        info!(
+            "[WS-CONNECT-DIAG] native-socks-ready attempt={} duration_ms={}",
+            attempt_id,
+            connection_started_at.elapsed().as_millis()
+        );
 
         let tcp = tcp_stream.into_inner();
         let tls_config = crate::crypto::tls::controlled_client_config(host.ends_with(".onion"))
@@ -735,6 +785,11 @@ impl WebSocketHandler {
                 QorcError::Network(format!("Failed to build PQ TLS connector: {error}"))
             })?;
         let connector = tokio_tungstenite::Connector::Rustls(tls_config);
+        info!(
+            "[WS-CONNECT-DIAG] native-websocket-upgrade-start attempt={} elapsed_ms={}",
+            attempt_id,
+            connection_started_at.elapsed().as_millis()
+        );
 
         let ws_config = WebSocketConfig {
             max_message_size: Some(MAX_WS_MESSAGE_BYTES),
@@ -773,6 +828,11 @@ impl WebSocketHandler {
             }
             Ok(Ok(pair)) => pair,
         };
+        info!(
+            "[WS-CONNECT-DIAG] native-websocket-upgrade-ready attempt={} elapsed_ms={}",
+            attempt_id,
+            connection_started_at.elapsed().as_millis()
+        );
 
         // Split the stream
         let (write, read) = ws_stream.split();
@@ -794,6 +854,11 @@ impl WebSocketHandler {
                 local_closing: local_closing.clone(),
             },
         )?;
+        info!(
+            "[WS-CONNECT-DIAG] native-transport-published attempt={} elapsed_ms={}",
+            attempt_id,
+            connection_started_at.elapsed().as_millis()
+        );
 
         // Send connected event
         if let Some(event_tx) = self.event_tx.read().as_ref() {
@@ -870,6 +935,8 @@ impl WebSocketHandler {
         mut cancel_rx: watch::Receiver<bool>,
     ) {
         let mut notify_closed = false;
+        let mut exit_reason = "cancelled-or-replaced";
+        let mut first_data_frame_logged = false;
         'read_loop: loop {
             if *cancel_rx.borrow()
                 || tx_handle
@@ -901,6 +968,14 @@ impl WebSocketHandler {
                     }
                     match msg {
                         Message::Text(text) => {
+                            if !first_data_frame_logged {
+                                info!(
+                                    "[WS-CONNECT-DIAG] native-first-inbound-frame token={} kind=text bytes={}",
+                                    connection_token,
+                                    text.len()
+                                );
+                                first_data_frame_logged = true;
+                            }
                             if enforce_bounded_json_structure(
                                 text.as_bytes(),
                                 MAX_WS_JSON_DEPTH,
@@ -915,6 +990,7 @@ impl WebSocketHandler {
                                 if let Some(ref tx) = *event_tx.read() {
                                     let byte_len = text.len();
                                     if !try_reserve_ws_inbound(byte_len) {
+                                        exit_reason = "text-buffer-budget";
                                         warn!(
                                             "[WS-BRIDGE] inbound buffer budget exhausted; dropping frame"
                                         );
@@ -925,6 +1001,7 @@ impl WebSocketHandler {
                                         data: parsed,
                                         byte_len,
                                     }) {
+                                        exit_reason = "text-bridge-closed";
                                         release_ws_inbound_bytes(byte_len);
                                         warn!(
                                             "[WS-BRIDGE] failed to forward ws-message event: {}",
@@ -934,6 +1011,7 @@ impl WebSocketHandler {
                                     }
                                 }
                             } else {
+                                exit_reason = "invalid-text-frame";
                                 warn!("[WS-BRIDGE] received non-json text message");
                                 Self::queue_connection_error(&event_tx, connection_token);
                                 break 'read_loop;
@@ -941,13 +1019,22 @@ impl WebSocketHandler {
                         }
                         Message::Binary(data) => {
                             let byte_len = data.len();
+                            if !first_data_frame_logged {
+                                info!(
+                                    "[WS-CONNECT-DIAG] native-first-inbound-frame token={} kind=binary bytes={}",
+                                    connection_token, byte_len
+                                );
+                                first_data_frame_logged = true;
+                            }
                             if byte_len != PQ_WS_FIXED_CELL_BYTES {
+                                exit_reason = "invalid-binary-cell-size";
                                 warn!("[WS-BRIDGE] received invalid binary cell size");
                                 Self::queue_connection_error(&event_tx, connection_token);
                                 break 'read_loop;
                             }
                             if let Some(ref tx) = *binary_tx.read() {
                                 if !try_reserve_ws_inbound(byte_len) {
+                                    exit_reason = "binary-buffer-budget";
                                     warn!(
                                         "[WS-BRIDGE] inbound buffer budget exhausted; dropping frame"
                                     );
@@ -959,6 +1046,7 @@ impl WebSocketHandler {
                                     data: data.to_vec(),
                                     byte_len,
                                 }) {
+                                    exit_reason = "binary-bridge-closed";
                                     release_ws_inbound_bytes(byte_len);
                                     warn!(
                                         "[WS-BRIDGE] failed to forward binary ws-message event: {}",
@@ -993,11 +1081,24 @@ impl WebSocketHandler {
                             }
                         }
                         Message::Pong(_) => {}
-                        Message::Close(_frame) => {
+                        Message::Close(frame) => {
+                            if let Some(frame) = frame.as_ref() {
+                                info!(
+                                    "[WS-CONNECT-DIAG] native-remote-close token={} code={:?} reason={}",
+                                    connection_token, frame.code, frame.reason
+                                );
+                            } else {
+                                info!(
+                                    "[WS-CONNECT-DIAG] native-remote-close token={} code=none",
+                                    connection_token
+                                );
+                            }
+                            exit_reason = "remote-close";
                             notify_closed = true;
                             break;
                         }
                         _ => {
+                            exit_reason = "unsupported-frame";
                             warn!("[WS-BRIDGE] unsupported WebSocket message rejected");
                             Self::queue_connection_error(&event_tx, connection_token);
                             break 'read_loop;
@@ -1018,10 +1119,12 @@ impl WebSocketHandler {
                         "[WS] read failed for token={}: {}",
                         connection_token, read_error
                     );
+                    exit_reason = "read-error";
                     Self::queue_connection_error(&event_tx, connection_token);
                     break;
                 }
                 None => {
+                    exit_reason = "remote-eof";
                     notify_closed = true;
                     break;
                 }
@@ -1051,6 +1154,14 @@ impl WebSocketHandler {
                 let _ = tx.try_send(WsEvent::ConnectionClosed { connection_token });
             }
         }
+        info!(
+            "[WS-CONNECT-DIAG] native-read-exit token={} cause={} current={} notify_closed={} local_closing={}",
+            connection_token,
+            exit_reason,
+            was_current,
+            notify_closed,
+            local_closing.load(Ordering::Acquire)
+        );
     }
 
     /// Write task for outgoing messages
@@ -1106,9 +1217,13 @@ impl WebSocketHandler {
                             write.send(message),
                         ) => result,
                     };
+                    let delivered = matches!(send_result, Ok(Ok(())));
+                    if let Some(completion) = queued.completion.take() {
+                        let _ = completion.send(delivered);
+                    }
                     drop(queued);
 
-                    if !matches!(send_result, Ok(Ok(()))) {
+                    if !delivered {
                         error!("WebSocket write failed");
                         Self::queue_connection_error(&event_tx, connection_token);
                         break;
@@ -1202,8 +1317,8 @@ impl WebSocketHandler {
                 .end()
                 .map_err(|_| QorcError::InvalidArgument("Invalid WebSocket JSON".to_string()))?;
 
-            let Some(queued) =
-                QueuedWsMessage::reserved(Message::Text(payload), entry.pending_writes)
+            let Some((queued, completion)) =
+                QueuedWsMessage::tracked(Message::Text(payload), entry.pending_writes)
             else {
                 return Ok(SendResult {
                     success: false,
@@ -1216,6 +1331,21 @@ impl WebSocketHandler {
                     success: false,
                     queued: None,
                     error: Some("Failed to queue message (channel closed)".to_string()),
+                });
+            }
+
+            if !matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(WEBSOCKET_WRITE_TIMEOUT_SECS + 1),
+                    completion,
+                )
+                .await,
+                Ok(Ok(true))
+            ) {
+                return Ok(SendResult {
+                    success: false,
+                    queued: Some(false),
+                    error: Some("WebSocket write failed".to_string()),
                 });
             }
 
@@ -1269,8 +1399,8 @@ impl WebSocketHandler {
                 error: Some("WebSocket connection generation changed".to_string()),
             });
         }
-        let Some(queued) =
-            QueuedWsMessage::reserved(Message::Binary(payload.into()), entry.pending_writes)
+        let Some((queued, completion)) =
+            QueuedWsMessage::tracked(Message::Binary(payload.into()), entry.pending_writes)
         else {
             return Ok(SendResult {
                 success: false,
@@ -1285,6 +1415,20 @@ impl WebSocketHandler {
                 error: Some("Failed to queue message (channel closed)".to_string()),
             });
         }
+        if !matches!(
+            tokio::time::timeout(
+                Duration::from_secs(WEBSOCKET_WRITE_TIMEOUT_SECS + 1),
+                completion,
+            )
+            .await,
+            Ok(Ok(true))
+        ) {
+            return Ok(SendResult {
+                success: false,
+                queued: Some(false),
+                error: Some("WebSocket write failed".to_string()),
+            });
+        }
         Ok(SendResult {
             success: true,
             queued: Some(false),
@@ -1293,10 +1437,16 @@ impl WebSocketHandler {
     }
 
     pub async fn disconnect(&self, expected_connection_token: Option<u64>) -> QorcResult<bool> {
+        info!(
+            "[WS-CONNECT-DIAG] native-disconnect-request expected_token={:?} state={:?}",
+            expected_connection_token,
+            *self.state.read()
+        );
         let (close_entry, cancelled_connect) = {
             let mut connecting_attempt = self.connecting_attempt.write();
 
             if expected_connection_token.is_none() && self.tx.read().is_some() {
+                info!("[WS-CONNECT-DIAG] native-disconnect-rejected cause=missing-token");
                 return Ok(false);
             }
 
@@ -1307,6 +1457,10 @@ impl WebSocketHandler {
                     .map(|entry| entry.connection_token != expected)
                     .unwrap_or(true)
             {
+                info!(
+                    "[WS-CONNECT-DIAG] native-disconnect-rejected cause=generation-mismatch expected_token={:?}",
+                    expected_connection_token
+                );
                 return Ok(false);
             }
             if let Some(entry) = current.as_ref() {
@@ -1337,7 +1491,13 @@ impl WebSocketHandler {
             let _ = entry.cancel_tx.send(true);
         }
 
-        Ok(closed_connection || cancelled_connect || expected_connection_token.is_none())
+        let disconnected =
+            closed_connection || cancelled_connect || expected_connection_token.is_none();
+        info!(
+            "[WS-CONNECT-DIAG] native-disconnect-complete expected_token={:?} closed_connection={} cancelled_connect={} result={}",
+            expected_connection_token, closed_connection, cancelled_connect, disconnected
+        );
+        Ok(disconnected)
     }
 
     pub fn is_connected(&self) -> bool {

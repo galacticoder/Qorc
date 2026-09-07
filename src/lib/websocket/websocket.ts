@@ -56,6 +56,7 @@ interface SecureControlSendOptions extends DispatchOptions {
 }
 
 const SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS = 30_000;
+const SERVER_ENTRY_TOKEN_INVALID = 'SERVER_ENTRY_TOKEN_INVALID';
 
 const SECURE_CHUNK_MAX_TOTAL_CHUNKS = 512;
 const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
@@ -66,15 +67,15 @@ const SECURE_CHUNK_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const WS_INBOUND_PENDING_MAX_COUNT = 128;
 const WS_INBOUND_PENDING_MAX_BYTES = 24 * 1024 * 1024;
 const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map<string, 'authRequestId' | 'requestId'>([
-  [SignalType.AUTH_OT_REQUEST, 'authRequestId'],
+  [SignalType.AUTH_PIR_REQUEST, 'authRequestId'],
   [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
 ]);
 const NON_QUEUEABLE_CONTROL_TYPES = new Set<string>([
-  SignalType.AUTH_OT_REGISTER_REQUEST,
-  SignalType.AUTH_OT_REGISTER_FINALIZE,
-  SignalType.AUTH_OT_REGISTER_CONFIRM,
-  SignalType.AUTH_OT_REQUEST,
-  SignalType.AUTH_OT_FINALIZE,
+  SignalType.AUTH_REGISTER_REQUEST,
+  SignalType.AUTH_REGISTER_FINALIZE,
+  SignalType.AUTH_REGISTER_CONFIRM,
+  SignalType.AUTH_PIR_REQUEST,
+  SignalType.AUTH_PIR_FINALIZE,
   SignalType.SERVER_ENTRY_REQUEST,
   SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
   SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
@@ -90,11 +91,11 @@ const PLAINTEXT_WIRE_TYPES = new Set<string>([
   SignalType.PQ_HANDSHAKE_ACK
 ]);
 const UNLINKED_FORBIDDEN_ACCOUNT_TYPES = new Set<string>([
-  SignalType.AUTH_OT_REGISTER_REQUEST,
-  SignalType.AUTH_OT_REGISTER_FINALIZE,
-  SignalType.AUTH_OT_REGISTER_CONFIRM,
-  SignalType.AUTH_OT_REQUEST,
-  SignalType.AUTH_OT_FINALIZE,
+  SignalType.AUTH_REGISTER_REQUEST,
+  SignalType.AUTH_REGISTER_FINALIZE,
+  SignalType.AUTH_REGISTER_CONFIRM,
+  SignalType.AUTH_PIR_REQUEST,
+  SignalType.AUTH_PIR_FINALIZE,
   SignalType.SERVER_ENTRY_REQUEST,
   SignalType.SERVER_ENTRY_TOKEN_ISSUANCE
 ]);
@@ -155,7 +156,11 @@ export class UnlinkedAuthorizationError extends Error {
   readonly response: ResumeAuthorizationResponse;
 
   constructor(response: ResumeAuthorizationResponse) {
-    super(response.valid ? 'Server entry is required' : 'Anonymous session authorization was rejected');
+    super(
+      response.valid && response.serverEntryRequired
+        ? 'Server entry is required'
+        : 'Anonymous session authorization was rejected'
+    );
     this.name = 'UnlinkedAuthorizationError';
     this.response = response;
   }
@@ -306,6 +311,7 @@ export class WebSocketConnection {
   private lastAuthUsername?: string;
   private connectivityWatchdog?: ReturnType<typeof setInterval>;
   private accountAuthReplacementConnectionToken: number | null = null;
+  private accountAuthReplacementInFlightConnectionToken: number | null = null;
   private bridgeReadyPromise: Promise<void>;
   private connectingPromise: Promise<void> | null = null;
   private connectingPromiseGeneration: number | null = null;
@@ -346,6 +352,8 @@ export class WebSocketConnection {
   private timestampRecoveryGeneration = 0;
   private lastTimestampRecoveryAt = 0;
   private lastCoverBackpressureLogAt = 0;
+  private connectionDiagnosticStartedAt = Date.now();
+  private connectionDiagnosticSequence = 0;
 
   private deliveryReadyRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private deliveryReadyRetryAttempts = 0;
@@ -368,7 +376,7 @@ export class WebSocketConnection {
 
     this.heartbeat = new WebSocketHeartbeat({
       onSendHeartbeat: () => this.sendHeartbeatMessage(),
-      onConnectionLost: () => this.handleConnectionError(),
+      onConnectionLost: () => this.handleConnectionError({ source: 'heartbeat-timeout' }),
       onRehandshakeNeeded: () => { void this.performHandshake(true); },
       getLifecycleState: () => this.lifecycleState,
       getSessionId: () => this.sessionKeyMaterial?.sessionId
@@ -425,7 +433,19 @@ export class WebSocketConnection {
       unregisterMessageHandler: (type, handler) => this.messageHandler.unregisterHandler(type, handler),
       getTorAdaptedTimeout: (timeout) => this.torIntegration.getAdaptedTimeout(timeout),
       onSessionEstablished: (session) => this.onSessionEstablished(session),
-      onHandshakeError: () => this.handleConnectionError(),
+      onHandshakeError: (error) => {
+        this.logConnectionDiagnostic('handshake.error-callback', {
+          errorName: error.name,
+          errorMessage: error.message,
+          retryOwner: this.connectingPromise ? 'active-connect-operation' : 'websocket-reconnect-loop',
+        }, 'error');
+        if (!this.connectingPromise) {
+          this.handleConnectionError({ source: 'handshake-error-callback', error });
+        }
+      },
+      onDiagnostic: (phase, details, level) => {
+        this.logConnectionDiagnostic(`handshake.${phase}`, details, level);
+      },
       onAuthenticatedServerTime: (serverTime) => {
         if (!this.updateServerClockOffset(serverTime)) {
           throw new Error('Authenticated server time is outside the accepted clock window');
@@ -455,29 +475,29 @@ export class WebSocketConnection {
     this.bridgeReadyPromise = this.initializeBridge();
   }
 
-  getDiagnostics(): Record<string, unknown> {
-    let queueLength: number | string = 'n/a';
-    try { queueLength = ((this.queue as any).pendingQueue?.length) ?? 'n/a'; } catch { }
-    const now = Date.now();
-    return {
-      lifecycleState: this._lifecycleState,
+  private logConnectionDiagnostic(
+    phase: string,
+    details: Record<string, unknown> = {},
+    level: 'info' | 'warn' | 'error' = 'info'
+  ): void {
+    const entry = {
+      sequence: ++this.connectionDiagnosticSequence,
+      phase,
+      elapsedMs: Date.now() - this.connectionDiagnosticStartedAt,
+      lifecycle: this._lifecycleState,
+      operationGeneration: this.connectionOperationGeneration,
       nativeToken: this.nativeConnectionToken,
-      retiredToken: this.retiredNativeConnectionToken,
       hasSessionKeys: !!this.sessionKeyMaterial,
-      sessionId: this.sessionKeyMaterial?.sessionId?.slice?.(0, 8),
-      connectingPromise: !!this.connectingPromise,
-      opGeneration: this.connectionOperationGeneration,
-      isManualClose: this.isManualClose,
-      handshakeInFlight: this.handshake?.isInFlight?.(),
-      queueLength,
-      rateLimitedForMs: Math.max(0, this.globalRateLimitUntil - now),
-      trustTransportForMs: Math.max(0, this.trustTransportUntil - now),
-      torReady: (() => { try { return this.torIntegration.isTorReady(); } catch { return 'err'; } })(),
-      torCircuitHealth: (() => { try { return this.torIntegration.getCircuitHealth(); } catch { return 'err'; } })(),
-      unlinkedMode: this.isInUnlinkedMode,
-      unlinkedSessionReady: this.unlinkedSessionReady,
-      serverAuthGranted: this.serverAuthGranted,
+      handshakeInFlight: this.handshake.isInFlight(),
+      ...details,
     };
+    if (level === 'error') {
+      console.error('[WS-CONNECT-DIAG]', entry);
+    } else if (level === 'warn') {
+      console.warn('[WS-CONNECT-DIAG]', entry);
+    } else {
+      console.info('[WS-CONNECT-DIAG]', entry);
+    }
   }
 
   private async getGatekeeper(): Promise<GatekeeperClient> {
@@ -614,23 +634,43 @@ export class WebSocketConnection {
   private async waitForCurrentServerBootstrap(connectionToken: number): Promise<void> {
     const timeoutMs = Math.min(30_000, this.torIntegration.getAdaptedTimeout(5_000));
     const startedAt = Date.now();
-    let lastRequestAt = 0;
+    let lastRequestAt = startedAt;
+    let requestCount = 0;
     while (this.serverBootstrapConnectionToken !== connectionToken) {
       if (this.nativeConnectionToken !== connectionToken) {
+        this.logConnectionDiagnostic('bootstrap.connection-generation-changed', {
+          expectedNativeToken: connectionToken,
+        }, 'warn');
         throw operationAbortError('WebSocket connection generation changed before server bootstrap');
       }
       const now = Date.now();
       if (now - startedAt >= timeoutMs) {
+        this.logConnectionDiagnostic('bootstrap.timeout', {
+          waitMs: now - startedAt,
+          requestCount,
+        }, 'error');
         throw new Error('Current WebSocket generation did not provide a valid server bootstrap');
       }
       if (now - lastRequestAt >= 1_500) {
         try {
+          requestCount += 1;
+          this.logConnectionDiagnostic('bootstrap.key-request-send', { requestCount });
           await this.transmit(JSON.stringify({ type: SignalType.REQUEST_SERVER_PUBLIC_KEY }));
-        } catch { }
+        } catch (error) {
+          this.logConnectionDiagnostic('bootstrap.key-request-failed', {
+            requestCount,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          }, 'warn');
+        }
         lastRequestAt = now;
       }
       await waitForAbortableDelay(100);
     }
+    this.logConnectionDiagnostic('bootstrap.wait-complete', {
+      waitMs: Date.now() - startedAt,
+      requestCount,
+    });
   }
 
   private invalidateInboundMessages(): void {
@@ -662,8 +702,8 @@ export class WebSocketConnection {
       const serialized = JSON.stringify(payload);
       if (typeof serialized !== 'string') throw new Error('Invalid WebSocket payload');
       bytes = serialized.length;
-    } catch {
-      this.handleConnectionError();
+    } catch (error) {
+      this.handleConnectionError({ source: 'inbound-text-serialization', error });
       void websocket.disconnect(connectionToken).catch(() => { });
       return;
     }
@@ -673,7 +713,14 @@ export class WebSocketConnection {
       this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES
     ) {
       this.invalidateInboundMessages();
-      this.handleConnectionError();
+      this.handleConnectionError({
+        source: 'inbound-text-budget',
+        details: {
+          incomingBytes: bytes,
+          pendingCount: this.inboundMessageCount,
+          pendingBytes: this.inboundMessageBytes,
+        },
+      });
       void websocket.disconnect(connectionToken).catch(() => { });
       return;
     }
@@ -692,14 +739,21 @@ export class WebSocketConnection {
 
   private enqueueInboundCell(cell: Uint8Array, connectionToken: number): void {
     const bytes = cell.byteLength;
-    if (
-      bytes !== 64 * 1024 ||
+    const invalidCellSize = bytes !== WS_BINARY_CELL_BYTES;
+    const exceedsBudget =
       this.inboundMessageCount + 1 > WS_INBOUND_PENDING_MAX_COUNT ||
-      this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES
-    ) {
+      this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES;
+    if (invalidCellSize || exceedsBudget) {
       cell.fill(0);
       this.invalidateInboundMessages();
-      this.handleConnectionError();
+      this.handleConnectionError({
+        source: invalidCellSize ? 'inbound-binary-cell-size' : 'inbound-binary-budget',
+        details: {
+          incomingBytes: bytes,
+          pendingCount: this.inboundMessageCount,
+          pendingBytes: this.inboundMessageBytes,
+        },
+      });
       void websocket.disconnect(connectionToken).catch(() => { });
       return;
     }
@@ -740,8 +794,12 @@ export class WebSocketConnection {
               await this.handleEdgeServerMessage(entry.payload, false, entry.connectionToken);
             }
           }
-        } catch {
-          this.handleConnectionError();
+        } catch (error) {
+          this.handleConnectionError({
+            source: entry.binary ? 'inbound-binary-processing' : 'inbound-text-processing',
+            error,
+            details: { incomingBytes: entry.bytes },
+          });
           void websocket.disconnect(entry.connectionToken).catch(() => { });
         } finally {
           this.inboundMessageCount = Math.max(0, this.inboundMessageCount - 1);
@@ -780,7 +838,6 @@ export class WebSocketConnection {
 
   // Setup bridge from Tauri events
   private async setupTauriBridge(): Promise<void> {
-    if (typeof window === 'undefined') return;
     try {
       await events.onWsMessage((payload) => {
         if (
@@ -814,9 +871,14 @@ export class WebSocketConnection {
           cell = bridgeBytes.slice(8);
           this.enqueueInboundCell(cell, token);
           cell = null;
-        } catch {
+        } catch (error) {
+          const incomingBytes = bridgeBytes.length;
           cell?.fill(0);
-          this.handleConnectionError();
+          this.handleConnectionError({
+            source: 'native-binary-bridge-frame',
+            error,
+            details: { incomingBytes },
+          });
           const token = this.nativeConnectionToken;
           if (isNativeWsConnectionToken(token)) {
             void websocket.disconnect(token).catch(() => { });
@@ -854,7 +916,13 @@ export class WebSocketConnection {
         !isNativeWsConnectionToken(message.connectionToken)
       ) return;
       const connectionToken = message.connectionToken as number;
+      this.logConnectionDiagnostic('native-event.opened', {
+        eventNativeToken: connectionToken,
+      });
       if (this.isManualClose) {
+        this.logConnectionDiagnostic('native-event.opened-during-manual-close', {
+          eventNativeToken: connectionToken,
+        }, 'warn');
         this.retiredNativeConnectionToken = Math.max(this.retiredNativeConnectionToken, connectionToken);
         void websocket.disconnect(connectionToken).catch(() => { });
         return;
@@ -863,8 +931,18 @@ export class WebSocketConnection {
         connectionToken <= this.retiredNativeConnectionToken ||
         this.nativeConnectionToken !== null &&
         connectionToken < this.nativeConnectionToken
-      ) return;
-      if (this.nativeConnectionToken === connectionToken) return;
+      ) {
+        this.logConnectionDiagnostic('native-event.stale-open-ignored', {
+          eventNativeToken: connectionToken,
+        }, 'warn');
+        return;
+      }
+      if (this.nativeConnectionToken === connectionToken) {
+        this.logConnectionDiagnostic('native-event.duplicate-open-ignored', {
+          eventNativeToken: connectionToken,
+        });
+        return;
+      }
 
       const openedByCurrentDial =
         this.lifecycleState === 'connecting' &&
@@ -881,6 +959,11 @@ export class WebSocketConnection {
       const wasReconnect = this.hasOpenedTransport;
       this.hasOpenedTransport = true;
       this.handleConnectionOpened(openedByCurrentDial);
+      this.logConnectionDiagnostic('native-event.open-adopted', {
+        eventNativeToken: connectionToken,
+        openedByCurrentDial,
+        wasReconnect,
+      });
       this.dispatchToFrontend(message, false);
       if (wasReconnect) {
         window.dispatchEvent(new Event(EventType.WS_RECONNECTED));
@@ -893,7 +976,16 @@ export class WebSocketConnection {
         Object.keys(message).sort().join(',') !== 'connectionToken,type' ||
         !isNativeWsConnectionToken(message.connectionToken)
       ) return;
-      if (message.connectionToken !== this.nativeConnectionToken) return;
+      if (message.connectionToken !== this.nativeConnectionToken) {
+        this.logConnectionDiagnostic('native-event.stale-close-ignored', {
+          eventNativeToken: message.connectionToken,
+        });
+        return;
+      }
+      this.logConnectionDiagnostic('native-event.closed', {
+        eventNativeToken: message.connectionToken,
+        willAutoReconnect: !this.isManualClose,
+      }, 'warn');
       this.retiredNativeConnectionToken = Math.max(
         this.retiredNativeConnectionToken,
         message.connectionToken as number
@@ -915,7 +1007,17 @@ export class WebSocketConnection {
         typeof message.error !== 'string' ||
         message.error.length > 512
       ) return;
-      if (message.connectionToken !== this.nativeConnectionToken) return;
+      if (message.connectionToken !== this.nativeConnectionToken) {
+        this.logConnectionDiagnostic('native-event.stale-error-ignored', {
+          eventNativeToken: message.connectionToken,
+        }, 'warn');
+        return;
+      }
+      this.logConnectionDiagnostic('native-event.error', {
+        eventNativeToken: message.connectionToken,
+        nativeError: message.error,
+        willAutoReconnect: !this.isManualClose,
+      }, 'error');
       this.retiredNativeConnectionToken = Math.max(
         this.retiredNativeConnectionToken,
         message.connectionToken as number
@@ -943,6 +1045,7 @@ export class WebSocketConnection {
 
     this.sessionKeyMaterial = session;
     this.encryption.resetCounters();
+    this.logConnectionDiagnostic('handshake.session-installed');
   }
 
   // Set and get username
@@ -977,9 +1080,18 @@ export class WebSocketConnection {
 
     // Handle handshake signals internally
     if (messageType === SignalType.SERVER_PUBLIC_KEY) {
+      this.logConnectionDiagnostic('bootstrap.message-received', {
+        expectedNativeToken: expectedConnectionToken,
+      });
       const bootstrap = parseServerKeyBootstrap(message);
-      if (!bootstrap) return true;
-      if (!this.updateServerClockOffset(bootstrap.serverTime)) return true;
+      if (!bootstrap) {
+        this.logConnectionDiagnostic('bootstrap.message-invalid', {}, 'warn');
+        return true;
+      }
+      if (!this.updateServerClockOffset(bootstrap.serverTime)) {
+        this.logConnectionDiagnostic('bootstrap.clock-rejected', {}, 'warn');
+        return true;
+      }
 
       const connectionEpoch = expectedConnectionToken;
       const isCurrent = () => this.isConnectionPrivacyEpochCurrent(connectionEpoch);
@@ -990,29 +1102,47 @@ export class WebSocketConnection {
           throw new Error('Server identity activation failed');
         }
         this.serverPasswordRequired = bootstrap.requiresServerPassword;
-      } catch {
+      } catch (error) {
         if (!isCurrent()) return true;
+        this.logConnectionDiagnostic('bootstrap.identity-rejected', {
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }, 'error');
         await this.close({ killSession: true }).catch(() => { });
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
-            detail: {
-              type: 'SERVER_IDENTITY_REJECTED',
-              code: 'SERVER_IDENTITY_REJECTED',
-              message: 'Server identity verification failed. Connection blocked.'
-            }
-          }));
-        }
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+          detail: {
+            type: 'SERVER_IDENTITY_REJECTED',
+            code: 'SERVER_IDENTITY_REJECTED',
+            message: 'Server identity verification failed. Connection blocked.'
+          }
+        }));
         return true;
       }
 
       if (!isCurrent()) return true;
       this.serverBootstrapConnectionToken = expectedConnectionToken;
+      this.logConnectionDiagnostic('bootstrap.identity-accepted', {
+        requiresServerPassword: bootstrap.requiresServerPassword,
+      });
       this.dispatchToFrontend(bootstrap, false);
       return true;
     }
 
     if (messageType === SignalType.PQ_HEARTBEAT_PONG) {
       this.noteHeartbeatPong(message);
+      return true;
+    }
+
+    if (isSecure && messageType === SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED) {
+      try {
+        const gatekeeper = await this.getGatekeeper();
+        await gatekeeper.purgeStoredTokens();
+        console.warn('[WebSocket] Purged server-entry token store after issuer rotation');
+      } catch (error) {
+        console.error('[WebSocket] Failed to purge rotated server-entry tokens', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
       return true;
     }
 
@@ -1037,7 +1167,6 @@ export class WebSocketConnection {
 
   // Dispatch message to frontend hooks via custom event
   private dispatchToFrontend(message: any, isSecure: boolean = false): void {
-    if (typeof window === 'undefined') return;
     const eventType = isSecure ? EventType.SECURE_SERVER_MESSAGE : EventType.EDGE_SERVER_MESSAGE;
     window.dispatchEvent(new CustomEvent(eventType, { detail: message }));
   }
@@ -1046,6 +1175,10 @@ export class WebSocketConnection {
   private handleConnectionOpened(openedByCurrentDial = false): void {
     this.transportEventReceived = !openedByCurrentDial;
     this.trustTransportUntil = Date.now() + 5000;
+    this.logConnectionDiagnostic('native-open.processed', {
+      openedByCurrentDial,
+      willStartConnect: !this.connectingPromise,
+    });
 
     if (this.connectingPromise) {
       return;
@@ -1096,9 +1229,9 @@ export class WebSocketConnection {
 
     this.coverTrafficInFlightGeneration = generation;
     try {
-      const state = await websocket.getState().catch(() => null);
+      const state = await websocket.getState();
       if (generation !== this.coverTrafficGeneration) return;
-      if (state && Number(state.queue_size || 0) > 0) {
+      if (Number(state.queue_size || 0) > 0) {
         const now = Date.now();
         if (now - this.lastCoverBackpressureLogAt > 60000) {
           this.lastCoverBackpressureLogAt = now;
@@ -1128,12 +1261,20 @@ export class WebSocketConnection {
 
   // Connect to WebSocket
   async connect(options: ConnectOptions = {}): Promise<void> {
+    this.logConnectionDiagnostic('connect.requested', {
+      autoReconnectOnFailure: options.autoReconnectOnFailure !== false,
+      hasPrivacyBoundaryTransition: !!this.privacyBoundaryTransition,
+      hasConnectingPromise: !!this.connectingPromise,
+    });
     const transition = this.privacyBoundaryTransition;
     if (transition) {
+      this.logConnectionDiagnostic('connect.awaiting-privacy-boundary');
       await transition.promise;
       if (this.lifecycleState !== 'connected') {
+        this.logConnectionDiagnostic('connect.privacy-boundary-failed', {}, 'error');
         throw new Error('Tor privacy-boundary transition did not establish a connection');
       }
+      this.logConnectionDiagnostic('connect.privacy-boundary-ready');
       return;
     }
     return this.connectTransport(options);
@@ -1143,15 +1284,20 @@ export class WebSocketConnection {
     const autoReconnectOnFailure = options.autoReconnectOnFailure !== false;
 
     if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
-      if (this.connectingPromise) return this.connectingPromise;
+      if (this.connectingPromise) {
+        this.logConnectionDiagnostic('connect.join-existing-operation');
+        return this.connectingPromise;
+      }
 
       if (this.handshake.isInFlight() && this.handshake.getPromise()) {
+        this.logConnectionDiagnostic('connect.await-existing-handshake');
         try { await this.handshake.getPromise(); } catch { }
       }
       return;
     }
 
     if (this.lifecycleState === 'connected') {
+      this.logConnectionDiagnostic('connect.already-ready');
       return;
     }
 
@@ -1160,8 +1306,13 @@ export class WebSocketConnection {
       isNativeWsConnectionToken(this.nativeConnectionToken) &&
       !!this.sessionKeyMaterial
     ) {
+      this.logConnectionDiagnostic('connect.paused-settle-begin');
       const resumed = await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(3000));
-      if (resumed) return;
+      if (resumed) {
+        this.logConnectionDiagnostic('connect.paused-settle-ready');
+        return;
+      }
+      this.logConnectionDiagnostic('connect.paused-settle-expired', {}, 'warn');
     }
 
     if (this.connectingPromise) {
@@ -1170,25 +1321,33 @@ export class WebSocketConnection {
         this.connectingPromiseGeneration === this.connectionOperationGeneration &&
         !this.isManualClose
       ) {
+        this.logConnectionDiagnostic('connect.join-pending-operation');
         return pending;
       }
+      this.logConnectionDiagnostic('connect.await-stale-operation');
       try { await pending; } catch { }
       return this.connectTransport(options);
     }
 
     this.isManualClose = false;
     const operationGeneration = ++this.connectionOperationGeneration;
+    this.connectionDiagnosticStartedAt = Date.now();
+    this.logConnectionDiagnostic('connect.operation-start', {
+      autoReconnectOnFailure,
+    });
     const operation = (async () => {
 
       try {
         await PinnedServer.load();
         this.assertConnectionOperationCurrent(operationGeneration);
+        this.logConnectionDiagnostic('connect.pinned-server-loaded');
         this.torIntegration.checkTorListener();
 
         if (!await this.torIntegration.checkTorReadyAsync()) {
           throw new Error('Tor network not ready');
         }
         this.assertConnectionOperationCurrent(operationGeneration);
+        this.logConnectionDiagnostic('connect.tor-ready');
 
         if (
           this.lifecycleState === 'connected' &&
@@ -1200,7 +1359,15 @@ export class WebSocketConnection {
 
         await this.bridgeReadyPromise;
         this.assertConnectionOperationCurrent(operationGeneration);
+        this.logConnectionDiagnostic('connect.bridge-ready');
         const state = await websocket.getState();
+        this.logConnectionDiagnostic('connect.native-state', {
+          nativeConnected: state.connected,
+          nativeConnecting: state.connecting,
+          nativeStateToken: state.connectionToken ?? null,
+          nativeQueueSize: state.queue_size,
+          transportEventReceived: this.transportEventReceived,
+        });
         await this.rejectStaleConnectionOperation(
           operationGeneration,
           state.connected ? state.connectionToken : undefined
@@ -1213,32 +1380,52 @@ export class WebSocketConnection {
           }
           this.adoptNativeConnectionToken(state.connectionToken);
           this.transportEventReceived = false;
+          this.logConnectionDiagnostic('connect.reuse-native-transport');
           await this.establishConnection({ forceConnect: false }, operationGeneration);
         } else if (hasGhost) {
           this.transportEventReceived = false;
           this.lifecycleState = 'connecting';
+          this.logConnectionDiagnostic('connect.replace-ghost-transport', {}, 'warn');
           await this.establishConnection({ forceConnect: true }, operationGeneration);
         } else {
           this.lifecycleState = 'connecting';
+          this.logConnectionDiagnostic('connect.open-native-transport');
           await this.establishConnection({ forceConnect: true }, operationGeneration);
         }
+        this.logConnectionDiagnostic('connect.operation-ready');
       } catch (_error: unknown) {
         if (
           operationGeneration !== this.connectionOperationGeneration ||
           this.isManualClose
         ) {
+          this.logConnectionDiagnostic('connect.operation-cancelled', {
+            errorName: _error instanceof Error ? _error.name : 'UnknownError',
+            errorMessage: _error instanceof Error ? _error.message : String(_error),
+          }, 'warn');
           throw operationAbortError('WebSocket connection operation was cancelled');
         }
+        this.logConnectionDiagnostic('connect.operation-failed', {
+          errorName: _error instanceof Error ? _error.name : 'UnknownError',
+          errorMessage: _error instanceof Error ? _error.message : String(_error),
+          autoReconnectOnFailure,
+        }, 'error');
         if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
           this.lifecycleState = SignalType.ERROR;
         }
-        this.handleConnectionError({ autoReconnect: autoReconnectOnFailure });
+        this.handleConnectionError({
+          autoReconnect: autoReconnectOnFailure,
+          source: 'connect-operation',
+          error: _error,
+        });
         throw _error;
       } finally {
         if (this.connectingPromise === operation) {
           this.connectingPromise = null;
           this.connectingPromiseGeneration = null;
         }
+        this.logConnectionDiagnostic('connect.operation-finished', {
+          operationWasCurrent: operationGeneration === this.connectionOperationGeneration,
+        });
       }
     })();
     this.connectingPromise = operation;
@@ -1253,9 +1440,15 @@ export class WebSocketConnection {
   ): Promise<void> {
     const { forceConnect = true } = options;
     this.assertConnectionOperationCurrent(operationGeneration);
+    this.logConnectionDiagnostic('establish.begin', { forceConnect });
 
     if (forceConnect) {
       const state = await websocket.getState();
+      this.logConnectionDiagnostic('establish.pre-dial-native-state', {
+        nativeConnected: state.connected,
+        nativeConnecting: state.connecting,
+        nativeStateToken: state.connectionToken ?? null,
+      });
       await this.rejectStaleConnectionOperation(
         operationGeneration,
         state.connected ? state.connectionToken : undefined
@@ -1286,26 +1479,38 @@ export class WebSocketConnection {
     assertConnectionCurrent();
 
     this.lifecycleState = 'handshaking';
+    this.logConnectionDiagnostic('establish.handshaking');
 
     await this.bridgeReadyPromise;
     assertConnectionCurrent();
+    this.logConnectionDiagnostic('establish.bridge-ready');
 
+    this.logConnectionDiagnostic('establish.bootstrap-wait-begin');
     await this.waitForCurrentServerBootstrap(connectionToken);
     assertConnectionCurrent();
+    this.logConnectionDiagnostic('establish.bootstrap-ready');
 
+    this.logConnectionDiagnostic('establish.handshake-begin');
     await this.performHandshake(false);
     assertConnectionCurrent();
+    this.logConnectionDiagnostic('establish.handshake-ready');
 
     {
       try {
+        this.logConnectionDiagnostic('establish.entry-store-open-begin');
         const gk = await this.getGatekeeper();
         assertConnectionCurrent();
+        this.logConnectionDiagnostic('establish.entry-store-ready', { hasEntryTokens: gk.hasTokens });
         if (gk.hasTokens) {
           let entryGranted = false;
           for (let attempt = 0; attempt < 3 && !entryGranted; attempt++) {
             const redemption = await gk.getRedemptionPayload();
             assertConnectionCurrent();
-            if (!redemption) break;
+            if (!redemption) {
+              this.logConnectionDiagnostic('establish.entry-token-unavailable', { attempt: attempt + 1 }, 'warn');
+              break;
+            }
+            this.logConnectionDiagnostic('establish.entry-redemption-send', { attempt: attempt + 1 });
             const redemptionRequestId = crypto.randomUUID();
             const grantWaiter = this.createServerEntryGrantWaiter(
               this.torIntegration.getAdaptedTimeout(SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS),
@@ -1325,8 +1530,16 @@ export class WebSocketConnection {
             }
             const grantResult = await grantWaiter.promise;
             assertConnectionCurrent();
+            this.logConnectionDiagnostic('establish.entry-redemption-result', {
+              attempt: attempt + 1,
+              result: grantResult,
+            }, grantResult === 'granted' ? 'info' : 'warn');
             if (grantResult === 'granted') {
               entryGranted = true;
+            } else if (grantResult === 'invalid-token') {
+              await gk.purgeStoredTokens();
+              console.warn('[WebSocket] Purged server-entry token store after issuer rejection');
+              break;
             } else if (grantResult === 'rejected') {
               try { await gk.commitPendingTokenUsage(); } catch { }
               assertConnectionCurrent();
@@ -1352,14 +1565,23 @@ export class WebSocketConnection {
             window.dispatchEvent(new CustomEvent(EventType.SERVER_ENTRY_GRANTED));
           }
         }
-      } catch {
+      } catch (error) {
         assertConnectionCurrent();
+        this.logConnectionDiagnostic('establish.entry-redemption-failed', {
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }, 'warn');
         console.warn('[WebSocket] Automatic entry token redemption failed');
       }
     }
 
     assertConnectionCurrent();
     this.lifecycleState = 'connected';
+    this.logConnectionDiagnostic('establish.transport-ready', {
+      unlinkedMode: this.isInUnlinkedMode,
+      serverPasswordRequired: this.serverPasswordRequired,
+      serverAuthGranted: this.serverAuthGranted,
+    });
     
     this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
     this.unlinkedSessionReady = false;
@@ -1382,6 +1604,7 @@ export class WebSocketConnection {
       } else {
         const deliveryReady = await this.checkUnlinkedDeliveryReady();
         assertConnectionCurrent();
+        this.logConnectionDiagnostic('establish.unlinked-delivery-result', { deliveryReady });
         if (!deliveryReady) {
           this.scheduleDeliveryReadyRetry();
         } else {
@@ -1395,6 +1618,7 @@ export class WebSocketConnection {
     this.queue.scheduleFlush();
     this.startConnectivityWatchdog();
     this.heartbeat.start();
+    this.logConnectionDiagnostic('establish.complete');
   }
 
   // Redeem one unlinkable authorization token on the current socket.
@@ -1640,12 +1864,28 @@ export class WebSocketConnection {
   }
 
   private async connectNativeTransport(operationGeneration: number): Promise<void> {
+    const startedAt = Date.now();
+    this.logConnectionDiagnostic('native-dial.invoke');
     let result = await websocket.connect();
+    this.logConnectionDiagnostic('native-dial.result', {
+      durationMs: Date.now() - startedAt,
+      success: result?.success !== false,
+      alreadyConnected: result?.already_connected ?? null,
+      newConnection: result?.new_connection ?? null,
+      resultNativeToken: result?.connectionToken ?? null,
+      error: result?.error ?? null,
+    }, result?.success === false ? 'warn' : 'info');
     await this.rejectStaleConnectionOperation(operationGeneration, result?.connectionToken);
     if (result?.success === false && this.isNativeConnectionInProgress(result.error)) {
+      this.logConnectionDiagnostic('native-dial.connection-in-progress', {}, 'warn');
       await new Promise(resolve => setTimeout(resolve, 500));
       this.assertConnectionOperationCurrent(operationGeneration);
-      const nativeState = await websocket.getState().catch(() => null);
+      const nativeState = await websocket.getState();
+      this.logConnectionDiagnostic('native-dial.in-progress-state', {
+        nativeConnected: nativeState?.connected ?? false,
+        nativeConnecting: nativeState?.connecting ?? false,
+        nativeStateToken: nativeState?.connectionToken ?? null,
+      });
       await this.rejectStaleConnectionOperation(
         operationGeneration,
         nativeState?.connected ? nativeState.connectionToken : undefined
@@ -1655,15 +1895,24 @@ export class WebSocketConnection {
           throw new Error('Native WebSocket connection token unavailable');
         }
         this.adoptNativeConnectionToken(nativeState.connectionToken);
+        this.logConnectionDiagnostic('native-dial.in-progress-adopted');
         return;
       }
       if (nativeState?.connecting) {
+        this.logConnectionDiagnostic('native-dial.stuck-attempt-disconnect', {}, 'warn');
         await websocket.disconnect().catch(() => { });
         this.assertConnectionOperationCurrent(operationGeneration);
         await new Promise(resolve => setTimeout(resolve, 250));
         this.assertConnectionOperationCurrent(operationGeneration);
       }
+      this.logConnectionDiagnostic('native-dial.retry-invoke');
       result = await websocket.connect();
+      this.logConnectionDiagnostic('native-dial.retry-result', {
+        durationMs: Date.now() - startedAt,
+        success: result?.success !== false,
+        resultNativeToken: result?.connectionToken ?? null,
+        error: result?.error ?? null,
+      }, result?.success === false ? 'warn' : 'info');
       await this.rejectStaleConnectionOperation(operationGeneration, result?.connectionToken);
     }
 
@@ -1678,6 +1927,9 @@ export class WebSocketConnection {
     }
     this.adoptNativeConnectionToken(result.connectionToken);
     this.transportEventReceived = false;
+    this.logConnectionDiagnostic('native-dial.adopted', {
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   // Register session error handler
@@ -1691,10 +1943,7 @@ export class WebSocketConnection {
         return;
       }
       if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
-        this.resetSessionKeys(true);
-        void this.performHandshake(false)
-          .then(() => this.queue.flush())
-          .catch(() => { });
+        this.terminateCurrentConnection('server-pq-session-error');
       }
     });
 
@@ -1778,17 +2027,52 @@ export class WebSocketConnection {
   }
 
   // Handle connection error
-  handleConnectionError(options: { autoReconnect?: boolean } = {}): void {
+  handleConnectionError(options: {
+    autoReconnect?: boolean;
+    source?: string;
+    error?: unknown;
+    details?: Record<string, unknown>;
+  } = {}): void {
+    const connectionToken = this.nativeConnectionToken;
+    this.logConnectionDiagnostic('error.handle', {
+      affectedNativeToken: connectionToken,
+      autoReconnect: !this.isManualClose && options.autoReconnect !== false,
+      source: options.source ?? 'unspecified',
+      errorName: options.error instanceof Error ? options.error.name : null,
+      errorMessage: options.error instanceof Error
+        ? options.error.message
+        : options.error === undefined
+          ? null
+          : String(options.error),
+      ...options.details,
+    }, 'warn');
+    if (isNativeWsConnectionToken(connectionToken)) {
+      this.retiredNativeConnectionToken = Math.max(
+        this.retiredNativeConnectionToken,
+        connectionToken
+      );
+      this.nativeConnectionToken = null;
+      this.clearCurrentConnectionClock();
+      this.invalidateInboundMessages();
+      void websocket.disconnect(connectionToken)
+        .then(() => this.logConnectionDiagnostic('error.native-disconnect-complete', {
+          affectedNativeToken: connectionToken,
+        }))
+        .catch((error) => this.logConnectionDiagnostic('error.native-disconnect-failed', {
+          affectedNativeToken: connectionToken,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }, 'warn'));
+    }
     this.lifecycleState = SignalType.ERROR;
     this.resetSessionKeys(this.isManualClose);
     if (!this.isManualClose && options.autoReconnect !== false) this.attemptReconnect();
   }
 
-  terminateCurrentConnection(): void {
+  terminateCurrentConnection(source: string = 'external-terminate'): void {
     const connectionToken = this.nativeConnectionToken;
     if (!isNativeWsConnectionToken(connectionToken)) return;
-    this.handleConnectionError();
-    void websocket.disconnect(connectionToken).catch(() => { });
+    this.handleConnectionError({ source });
   }
 
   private ingestSecureChunk(chunk: any): any | null {
@@ -1818,7 +2102,7 @@ export class WebSocketConnection {
     if (typeof totalChunks !== 'number' || !Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > SECURE_CHUNK_MAX_TOTAL_CHUNKS) return null;
     if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) return null;
     if (typeof totalLength !== 'number' || !Number.isInteger(totalLength) || totalLength < 1 || totalLength > SECURE_CHUNK_MAX_TOTAL_LENGTH) return null;
-    if (payloadType !== SignalType.AUTH_OT_RESPONSE) return null;
+    if (payloadType !== SignalType.AUTH_PIR_RESPONSE) return null;
     if (typeof data !== 'string' || data.length === 0 || data.length > SECURE_CHUNK_MAX_DATA_LENGTH) return null;
 
     let buf = this.secureChunkBuffers.get(messageId);
@@ -1863,13 +2147,9 @@ export class WebSocketConnection {
       buf.receivedCount += 1;
       buf.receivedLength += data.length;
       
-      if (typeof window !== 'undefined') {
-        try {
-          window.dispatchEvent(new CustomEvent(EventType.SECURE_CHUNK_PROGRESS, {
-            detail: { payloadType: buf.payloadType, received: buf.receivedCount, total: buf.totalChunks }
-          }));
-        } catch { }
-      }
+      window.dispatchEvent(new CustomEvent(EventType.SECURE_CHUNK_PROGRESS, {
+        detail: { payloadType: buf.payloadType, received: buf.receivedCount, total: buf.totalChunks }
+      }));
     } else if (existing !== data) {
       this.discardSecureChunkBuffer(messageId);
       console.warn('[SECURE-CHUNK] Conflicting duplicate chunk. discarded', { payloadType });
@@ -1961,8 +2241,14 @@ export class WebSocketConnection {
 
   // Attempt reconnect
   private attemptReconnect(): void {
-    if (this.isManualClose) return;
-    if (this.reconnectTimeout) return;
+    if (this.isManualClose) {
+      this.logConnectionDiagnostic('reconnect.suppressed-manual-close');
+      return;
+    }
+    if (this.reconnectTimeout) {
+      this.logConnectionDiagnostic('reconnect.already-scheduled');
+      return;
+    }
 
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
 
@@ -1970,10 +2256,20 @@ export class WebSocketConnection {
     const jitterValue = ((jitterBytes[0]! << 24) >>> 0) ^ (jitterBytes[1]! << 16) ^ (jitterBytes[2]! << 8) ^ jitterBytes[3]!;
     const jitterMs = Math.floor((jitterValue / 0xffffffff) * 500);
     const delayWithJitter = this.reconnectDelayMs + jitterMs;
+    this.logConnectionDiagnostic('reconnect.scheduled', {
+      delayMs: delayWithJitter,
+    }, 'warn');
 
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
-      void this.connect().catch(() => this.handleConnectionError());
+      this.logConnectionDiagnostic('reconnect.timer-fired');
+      void this.connect().catch((error) => {
+        this.logConnectionDiagnostic('reconnect.attempt-rejected', {
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          errorMessage: error instanceof Error ? error.message : String(error),
+        }, 'error');
+        this.handleConnectionError({ source: 'reconnect-operation', error });
+      });
     }, delayWithJitter);
   }
 
@@ -2014,18 +2310,30 @@ export class WebSocketConnection {
     options: DispatchOptions = {}
   ): Promise<string | null | undefined> {
     throwIfOperationAborted(options.signal);
-    const msgObj = typeof data === 'string' ? ((): any => { try { return JSON.parse(data); } catch { return {}; } })() : (data as any);
+    let msgObj: any;
+    if (typeof data === 'string') {
+      try {
+        msgObj = JSON.parse(data);
+      } catch {
+        throw new Error('WebSocket payload is not valid JSON');
+      }
+    } else {
+      msgObj = data;
+    }
+    if (!isPlainObject(msgObj) || hasPrototypePollutionKeys(msgObj)) {
+      throw new Error('WebSocket payload must be a plain object');
+    }
     const payloadType = typeof msgObj?.type === 'string' ? msgObj.type : 'unknown';
     if (options.authBindingRequestId && allowQueue) {
       throw new Error('Channel-bound authentication requests cannot be queued');
     }
 
-    if (!this.isInUnlinkedMode && LINKED_FORBIDDEN_ANONYMOUS_TYPES.has(msgObj.type)) {
+    if (!this.isInUnlinkedMode && LINKED_FORBIDDEN_ANONYMOUS_TYPES.has(payloadType)) {
       throw new Error('Anonymous-only message rejected on linked socket');
     }
     if (this.isInUnlinkedMode) {
       if (
-        UNLINKED_FORBIDDEN_ACCOUNT_TYPES.has(msgObj.type) ||
+        UNLINKED_FORBIDDEN_ACCOUNT_TYPES.has(payloadType) ||
         msgObj.username
       ) {
         throw new Error('Account-linked message rejected on unlinked socket');
@@ -2047,25 +2355,23 @@ export class WebSocketConnection {
     if (this.isGloballyRateLimited()) {
       const remainingMs = this.globalRateLimitUntil - Date.now();
       const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
-      let msgType = '';
-      if (typeof data === 'string') { try { msgType = JSON.parse(data)?.type || ''; } catch { } }
-      else if (typeof data === 'object' && data !== null) { msgType = (data as any)?.type || ''; }
+      const msgType = typeof msgObj.type === 'string' ? msgObj.type : '';
 
       const isAuthMessage = [
         'account-sign-in',
         'account-sign-up',
         'server-entry-request',
-        SignalType.AUTH_OT_REGISTER_REQUEST,
-        SignalType.AUTH_OT_REGISTER_FINALIZE,
-        SignalType.AUTH_OT_REGISTER_CONFIRM,
-        SignalType.AUTH_OT_REQUEST,
-        SignalType.AUTH_OT_FINALIZE,
+        SignalType.AUTH_REGISTER_REQUEST,
+        SignalType.AUTH_REGISTER_FINALIZE,
+        SignalType.AUTH_REGISTER_CONFIRM,
+        SignalType.AUTH_PIR_REQUEST,
+        SignalType.AUTH_PIR_FINALIZE,
         SignalType.SERVER_ENTRY_REQUEST,
         SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
         SignalType.PRIVACY_PASS_REDEMPTION
       ].includes(msgType as SignalType);
       if (isAuthMessage) {
-        try { window.dispatchEvent(new CustomEvent(EventType.AUTH_RATE_LIMITED, { detail: { remainingSeconds, rateLimitUntil: this.globalRateLimitUntil } })); } catch { }
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_RATE_LIMITED, { detail: { remainingSeconds, rateLimitUntil: this.globalRateLimitUntil } }));
         if (!allowQueue) {
           throw new Error(`Authentication send rate limited for ${remainingSeconds}s`);
         }
@@ -2109,10 +2415,10 @@ export class WebSocketConnection {
     }
 
     if (options.isCoverTraffic) {
-      const state = await websocket.getState().catch(() => null);
+      const state = await websocket.getState();
       throwIfOperationAborted(options.signal);
       this.assertOutboundTransportContextCurrent(outboundContext);
-      if (state && Number(state.queue_size || 0) > 0) {
+      if (Number(state.queue_size || 0) > 0) {
         return;
       }
     }
@@ -2405,10 +2711,13 @@ export class WebSocketConnection {
       throwIfOperationAborted(abortSignal);
     }
     if (!this.unlinkedSessionReady) {
-      if (this.unlinkedAuthorizationResponse) {
+      if (
+        this.unlinkedAuthorizationResponse &&
+        (!this.unlinkedAuthorizationResponse.valid || this.unlinkedAuthorizationResponse.serverEntryRequired)
+      ) {
         throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
       }
-      throw new Error('Unlinked session not ready after reconnect');
+      throw new Error('Anonymous delivery activation failed after reconnect');
     }
     const response = this.unlinkedAuthorizationResponse;
     if (!response || !response.valid || response.serverEntryRequired) {
@@ -2447,10 +2756,13 @@ export class WebSocketConnection {
     await this.connectTransport({ autoReconnectOnFailure: false });
     throwIfOperationAborted(abortSignal);
     if (!this.unlinkedSessionReady) {
-      if (this.unlinkedAuthorizationResponse) {
+      if (
+        this.unlinkedAuthorizationResponse &&
+        (!this.unlinkedAuthorizationResponse.valid || this.unlinkedAuthorizationResponse.serverEntryRequired)
+      ) {
         throw new UnlinkedAuthorizationError(this.unlinkedAuthorizationResponse);
       }
-      throw new Error('Unlinked session not ready after switch');
+      throw new Error('Anonymous delivery activation failed after switch');
     }
     const response = this.unlinkedAuthorizationResponse;
     if (!response || !response.valid || response.serverEntryRequired) {
@@ -2461,6 +2773,14 @@ export class WebSocketConnection {
 
   async switchToLinkedAuthenticationMode(abortSignal?: AbortSignal): Promise<void> {
     throwIfOperationAborted(abortSignal);
+
+    if (
+      !this.privacyBoundaryTransition &&
+      this.lifecycleState === 'connected' &&
+      !this.isInUnlinkedMode
+    ) {
+      return;
+    }
 
     while (this.privacyBoundaryTransition) {
       const active = this.privacyBoundaryTransition;
@@ -2477,6 +2797,10 @@ export class WebSocketConnection {
       ) {
         return;
       }
+    }
+
+    if (this.lifecycleState === 'connected' && !this.isInUnlinkedMode) {
+      return;
     }
 
     const operation = this.performSwitchToLinkedAuthenticationMode(abortSignal);
@@ -2836,6 +3160,11 @@ export class WebSocketConnection {
       }
       const grantResult = await grantWaiter.promise;
       throwIfAborted();
+      if (grantResult === 'invalid-token') {
+        await gk.purgeStoredTokens();
+        console.warn('[GK-FLOW] Purged server-entry token store after issuer rejection');
+        return false;
+      }
       if (grantResult !== 'granted') {
         console.error('[GK-FLOW] server entry grant not received', { grantResult });
         try { await gk.commitPendingTokenUsage(); } catch { }
@@ -2877,10 +3206,11 @@ export class WebSocketConnection {
     const operationGeneration = this.connectionOperationGeneration;
     if (
       !isNativeWsConnectionToken(connectionToken) ||
-      this.accountAuthReplacementConnectionToken === connectionToken
+      this.accountAuthReplacementConnectionToken === connectionToken ||
+      this.accountAuthReplacementInFlightConnectionToken === connectionToken
     ) return;
 
-    this.accountAuthReplacementConnectionToken = connectionToken;
+    this.accountAuthReplacementInFlightConnectionToken = connectionToken;
     const assertConnectionCurrent = () => {
       if (
         this.nativeConnectionToken !== connectionToken ||
@@ -2891,19 +3221,32 @@ export class WebSocketConnection {
         throw operationAbortError();
       }
     };
-    await this.issueAccountAuthorizationReplacement(assertConnectionCurrent);
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (await this.issueAccountAuthorizationReplacement(assertConnectionCurrent)) {
+          this.accountAuthReplacementConnectionToken = connectionToken;
+          return;
+        }
+        if (attempt < 2) {
+          assertConnectionCurrent();
+          await waitForAbortableDelay(750 * (attempt + 1));
+        }
+      }
+    } finally {
+      if (this.accountAuthReplacementInFlightConnectionToken === connectionToken) {
+        this.accountAuthReplacementInFlightConnectionToken = null;
+      }
+    }
   }
 
   private async issueAccountAuthorizationReplacement(
     assertConnectionCurrent: () => void
-  ): Promise<void> {
+  ): Promise<boolean> {
     const requestId = crypto.randomUUID();
     let cancelResponseWait = () => {};
-    let refreshPrepared = false;
     let finalized = false;
     try {
       const request = await tokenVault.prepareAuthorizedRefresh(ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE);
-      refreshPrepared = true;
       assertConnectionCurrent();
 
       const timeoutMs = this.torIntegration.getAdaptedTimeout(
@@ -3014,6 +3357,7 @@ export class WebSocketConnection {
         }
         await replenishResumePool(account);
         assertConnectionCurrent();
+        return true;
       } finally {
         for (const token of signedBlindedTokens) token.fill(0);
         issuanceProof?.fill(0);
@@ -3023,11 +3367,9 @@ export class WebSocketConnection {
       console.warn('[WebSocket] Account-auth credential replacement failed', {
         error: error instanceof Error ? error.message : String(error)
       });
+      return finalized;
     } finally {
       cancelResponseWait();
-      if (refreshPrepared && !finalized) {
-        try { await tokenVault.discardPendingTokens(); } catch { }
-      }
     }
   }
 
@@ -3036,14 +3378,14 @@ export class WebSocketConnection {
     abortSignal?: AbortSignal,
     requestId?: string
   ): {
-    promise: Promise<'granted' | 'rejected' | 'timeout' | 'aborted'>;
+    promise: Promise<'granted' | 'invalid-token' | 'rejected' | 'timeout' | 'aborted'>;
     cancel: () => void;
   } {
     const connectionToken = this.nativeConnectionToken;
     const isCurrent = () =>
       isNativeWsConnectionToken(connectionToken) && this.nativeConnectionToken === connectionToken;
     let cancel = () => {};
-    const promise = new Promise<'granted' | 'rejected' | 'timeout' | 'aborted'>((resolve) => {
+    const promise = new Promise<'granted' | 'invalid-token' | 'rejected' | 'timeout' | 'aborted'>((resolve) => {
       let settled = false;
       let unregisterConnectionCancel = () => {};
       const cleanup = () => {
@@ -3053,7 +3395,7 @@ export class WebSocketConnection {
         unregisterConnectionCancel();
       };
 
-      const settle = (result: 'granted' | 'rejected' | 'timeout' | 'aborted') => {
+      const settle = (result: 'granted' | 'invalid-token' | 'rejected' | 'timeout' | 'aborted') => {
         if (settled) return;
         settled = true;
         cleanup();
@@ -3077,7 +3419,7 @@ export class WebSocketConnection {
           settle('granted');
         } else if (detail?.type === SignalType.AUTH_ERROR || detail?.type === SignalType.ERROR) {
           console.warn('[WebSocket] Server entry grant rejected:', detail.message || detail.code || 'unknown');
-          settle('rejected');
+          settle(detail?.code === SERVER_ENTRY_TOKEN_INVALID ? 'invalid-token' : 'rejected');
         }
       };
 

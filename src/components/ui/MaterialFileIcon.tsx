@@ -43,7 +43,7 @@ const resolveIconId = (
 
 export const resolveMaterialFileIcon = (rawFileName?: string | null): ResolvedMaterialFileIcon => {
   const normalizedPath = typeof rawFileName === 'string'
-    ? rawFileName.trim().replaceAll('\\', '/').toLowerCase()
+    ? rawFileName.trim().split('\\').join('/').toLowerCase()
     : '';
   const fileName = normalizedPath.split('/').pop() || '';
   const baseIconId = resolveIconId(fileName, MATERIAL_FILE_ICON_NAMES, MATERIAL_FILE_ICON_EXTENSIONS)
@@ -53,10 +53,12 @@ export const resolveMaterialFileIcon = (rawFileName?: string | null): ResolvedMa
     MATERIAL_FILE_ICON_LIGHT_NAMES,
     MATERIAL_FILE_ICON_LIGHT_EXTENSIONS,
   ) || baseIconId;
-  const fallbackUrl = MATERIAL_FILE_ICON_URLS[MATERIAL_FILE_ICON_DEFAULT];
+  const baseUrl = MATERIAL_FILE_ICON_URLS[baseIconId];
+  const lightUrl = MATERIAL_FILE_ICON_URLS[lightIconId];
+  if (!baseUrl || !lightUrl) throw new Error('Generated material file icon mapping is incomplete');
   return {
-    baseUrl: MATERIAL_FILE_ICON_URLS[baseIconId] || fallbackUrl,
-    lightUrl: MATERIAL_FILE_ICON_URLS[lightIconId] || MATERIAL_FILE_ICON_URLS[baseIconId] || fallbackUrl,
+    baseUrl,
+    lightUrl,
   };
 };
 

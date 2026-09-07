@@ -1,7 +1,3 @@
-/**
- * Unlinkable autologin using Privacy Pass resume tokens
- */
-
 import { account } from '../tauri-bindings';
 import {
   PrivacyPassClient,
@@ -104,9 +100,6 @@ async function savePool(tokens: AnonymousToken[], serverScope: string, lifecycle
   }
 }
 
-/**
- * Refill the machine bound resume pool from the unlocked vault
- */
 export async function replenishResumePool(username: string, replaceExisting = false): Promise<void> {
   const lifecycleToken = poolLifecycleToken;
   const serverScope = await resumePoolServerScope(username);
@@ -123,8 +116,7 @@ export async function replenishResumePool(username: string, replaceExisting = fa
     } else {
       existing = await loadPool(serverScope, lifecycleToken);
     }
-    const retained = existing;
-    const need = RESUME_POOL_TARGET - retained.length;
+    const need = RESUME_POOL_TARGET - existing.length;
     let reserved: AnonymousToken[] = [];
     try {
       if (need <= 0) return;
@@ -136,9 +128,7 @@ export async function replenishResumePool(username: string, replaceExisting = fa
         return;
       }
 
-      await savePool([...retained, ...reserved], serverScope, lifecycleToken);
-    } catch (error) {
-      throw error;
+      await savePool([...existing, ...reserved], serverScope, lifecycleToken);
     } finally {
       wipeTokens(existing);
       wipeTokens(reserved);
@@ -172,7 +162,7 @@ export async function takeResumeRedemption(username: string): Promise<Record<str
     const [token, ...rest] = tokens;
     let redemption: Awaited<ReturnType<PrivacyPassClient['prepareRedemption']>> | null = null;
     try {
-      const client = new PrivacyPassClient();
+      const client = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
       redemption = await client.prepareRedemption(token);
       await savePool(rest, serverScope, lifecycleToken);
       return PrivacyPassHelpers.formatResponse(redemption);

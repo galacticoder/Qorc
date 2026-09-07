@@ -46,7 +46,7 @@ if (!ADMIN_TOKEN) {
 async function apiRequest(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
   const headers = {
-    'X-Admin-Token': ADMIN_TOKEN,
+    'Authorization': `Bearer ${ADMIN_TOKEN}`,
     'Content-Type': 'application/json',
     ...options.headers,
   };
@@ -244,14 +244,7 @@ program
     try {
       console.log(chalk.blue('Fetching server public keys...\n'));
 
-      const response = await fetch(`${API_BASE_URL}/server-keys`, {
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch keys: ${response.status}`);
-      }
-
-      const { serverKeys } = await response.json();
+      const { serverKeys } = await apiRequest('/server-keys');
 
       if (serverKeys.length === 0) {
         console.log(chalk.yellow('No servers found'));

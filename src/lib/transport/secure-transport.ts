@@ -40,7 +40,7 @@ export interface PeerIdentity {
 
 // Connection options
 export interface ConnectOptions {
-    readonly timeout?: number;
+    readonly timeout: number;
     readonly onStateChange?: (state: ConnectionState) => void;
 }
 

@@ -6,7 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 interface ConversationOptionsPopoverProps {
   readonly username: string;
   readonly blocked: boolean;
-  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
   readonly ariaLabel?: string;
 }
 
@@ -30,7 +30,7 @@ export function ConversationOptionsPopover({
   }, [username]);
 
   const handleToggleBlock = useCallback(async () => {
-    if (!username || !onToggleBlock || operationRef.current) return;
+    if (!username || operationRef.current) return;
     const operation = {};
     operationRef.current = operation;
     setUpdating(true);
@@ -64,7 +64,7 @@ export function ConversationOptionsPopover({
           <button
             type="button"
             className="qorc-conversation-options-action"
-            disabled={!onToggleBlock || updating}
+            disabled={updating}
             onClick={() => void handleToggleBlock()}
           >
             {updating ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}

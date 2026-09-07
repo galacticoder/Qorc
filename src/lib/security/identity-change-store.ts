@@ -11,7 +11,11 @@ export interface PendingIdentityChange {
 }
 
 interface Entry extends PendingIdentityChange {
-  held: Array<HeldMessage & { estimatedBytes: number; dedupKey: string | null }>;
+  held: Array<HeldMessage & {
+    estimatedBytes: number;
+    dedupKey: string | null;
+    displayDedupKey: string | null;
+  }>;
 }
 
 const MAX_HELD_PER_PEER = 100;
@@ -35,11 +39,19 @@ function estimateHeldBytes(value: unknown): number | null {
   }
 }
 
-function releaseHeld(messages: Array<HeldMessage & { estimatedBytes: number; dedupKey: string | null }>): void {
+function releaseHeld(messages: Entry['held']): void {
   for (const message of messages) {
     heldGlobal = Math.max(0, heldGlobal - 1);
     heldBytes = Math.max(0, heldBytes - message.estimatedBytes);
   }
+}
+
+function updateHeldCount(entry: Entry): void {
+  entry.heldCount = new Set(
+    entry.held
+      .map(message => message.displayDedupKey)
+      .filter((key): key is string => key !== null),
+  ).size;
 }
 
 function emit() {
@@ -68,7 +80,12 @@ export const identityChangeStore = {
     return true;
   },
   
-  hold(peer: string, encryptedMessage: any, stableDedupKey?: string | null): boolean {
+  hold(
+    peer: string,
+    encryptedMessage: any,
+    stableDedupKey?: string | null,
+    displayDedupKey?: string | null,
+  ): boolean {
     const entry = pending.get(peer);
     if (!entry || entry.held.length >= MAX_HELD_PER_PEER || heldGlobal >= MAX_HELD_GLOBAL) return false;
     const suppliedKey = typeof stableDedupKey === 'string' && stableDedupKey.length <= 256
@@ -79,18 +96,35 @@ export const identityChangeStore = {
       : null;
     const dedupKey = suppliedKey || visibleMessageId;
     if (dedupKey && entry.held.some(held => held.dedupKey === dedupKey)) return true;
+    const suppliedDisplayKey = typeof displayDedupKey === 'string' && displayDedupKey.length <= 256
+      ? displayDedupKey
+      : null;
+    const resolvedDisplayKey = displayDedupKey === undefined
+      ? dedupKey
+      : suppliedDisplayKey;
     const estimatedBytes = estimateHeldBytes(encryptedMessage);
     if (
       estimatedBytes === null ||
       estimatedBytes > MAX_HELD_MESSAGE_BYTES ||
       heldBytes + estimatedBytes > MAX_HELD_BYTES
     ) return false;
-    entry.held.push({ encryptedMessage, estimatedBytes, dedupKey });
+    entry.held.push({
+      encryptedMessage,
+      estimatedBytes,
+      dedupKey,
+      displayDedupKey: resolvedDisplayKey,
+    });
     heldGlobal += 1;
     heldBytes += estimatedBytes;
-    entry.heldCount = entry.held.length;
+    updateHeldCount(entry);
     emit();
     return true;
+  },
+
+  peekHeld(peer: string): HeldMessage | null {
+    const entry = pending.get(peer);
+    const first = entry?.held[0];
+    return first ? { encryptedMessage: first.encryptedMessage } : null;
   },
 
   // Take and clear held messages for peer after verify

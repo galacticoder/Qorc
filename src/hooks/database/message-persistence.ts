@@ -3,7 +3,6 @@ import type { SecureDB } from '../../lib/database/secureDB';
 import {
   CONVERSATION_WARM_MESSAGE_COUNT,
   DB_MAX_PENDING_MESSAGES,
-  MAX_UI_MESSAGES_TOTAL,
 } from '../../lib/constants';
 import { mergeReceipts } from '../../lib/utils/database-utils';
 
@@ -70,18 +69,6 @@ export const mergeMessages = (
   const merged = Array.from(existingMap.values());
   merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return merged;
-};
-
-// Load recent messages by conversation
-export const loadRecentMessages = async (
-  secureDB: SecureDB,
-  currentUser: string
-): Promise<Message[]> => {
-  const savedMessages = await secureDB.loadRecentMessagesByConversation();
-  if (!savedMessages || savedMessages.length === 0) return [];
-  const retainedMessages = savedMessages.slice(0, MAX_UI_MESSAGES_TOTAL);
-
-  return retainedMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
 };
 
 export const loadConversationWarmPages = async (

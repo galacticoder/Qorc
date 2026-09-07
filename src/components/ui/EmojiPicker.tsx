@@ -40,7 +40,7 @@ interface EmojiPickerProps {
   className?: string;
   triggerId?: string;
   isCurrentUser?: boolean;
-  secureDB?: SecureDB;
+  secureDB: SecureDB;
   origin?: PickerPosition | null;
 }
 
@@ -290,11 +290,6 @@ export function EmojiPicker({
     const sentinel = sentinelRef.current;
     if (!root || !sentinel || visibleCount >= matchingEmojis.length) return;
 
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisibleCount(matchingEmojis.length);
-      return;
-    }
-
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -341,8 +336,6 @@ export function EmojiPicker({
     event.preventDefault();
     buttons[clamp(nextIndex, 0, buttons.length - 1)]?.focus();
   }, []);
-
-  if (typeof document === 'undefined') return null;
 
   const sectionLabel = isSearching ? 'Search results' : (selectedSection?.label ?? 'Emoji');
 

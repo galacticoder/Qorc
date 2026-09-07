@@ -45,23 +45,6 @@ pub fn audio_opus_encode(
 }
 
 #[tauri::command]
-pub fn audio_opus_decode(
-    state: State<'_, AppState>,
-    request: Request<'_>,
-) -> Result<Response, String> {
-    let session_id = session_id(&request)?;
-    let fec = request
-        .headers()
-        .get("x-qorc-opus-fec")
-        .and_then(|value| value.to_str().ok())
-        == Some("1");
-    let pcm = state
-        .audio_codec
-        .decode(&session_id, &raw_body(&request)?, fec)?;
-    Ok(Response::new(pcm))
-}
-
-#[tauri::command]
 pub fn audio_opus_decode_playback(
     state: State<'_, AppState>,
     request: Request<'_>,

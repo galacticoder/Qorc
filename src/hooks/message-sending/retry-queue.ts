@@ -101,7 +101,7 @@ export const recoverUnacknowledgedRetryEntry = (
   const { timestamp: _timestamp, ...entry } = value;
   const candidate = { ...entry, retryCount: 0, queuedAt: timestamp };
   return validateDurableRetryEntry(candidate, peer) &&
-    (candidate.retryId || candidate.originalMessageId) === expectedOperationId
+    candidate.retryId === expectedOperationId
     ? candidate
     : null;
 };
@@ -143,8 +143,7 @@ const cleanupExpiredRetries = async (
   const operationIdsByPeer = new Map<string, string[]>();
   for (const { peer, entry } of expired) {
     if (!isCurrent()) throw new Error('Account changed during retry expiry cleanup');
-    const operationId = entry.retryId || entry.originalMessageId;
-    if (!operationId) continue;
+    const operationId = entry.retryId;
     let ids = operationIdsByPeer.get(peer);
     if (!ids) {
       ids = [];
@@ -188,10 +187,8 @@ export const enqueueRetry = (
     queue = [];
     map.set(peer, queue);
   }
-  const entryKey = entry.retryId || entry.originalMessageId;
-  const existingIdx = entryKey
-    ? queue.findIndex(e => (e.retryId || e.originalMessageId) === entryKey)
-    : -1;
+  const entryKey = entry.retryId;
+  const existingIdx = queue.findIndex(e => e.retryId === entryKey);
   if (existingIdx !== -1) {
     const previous = queue[existingIdx];
     queue[existingIdx] = {
@@ -284,12 +281,12 @@ const persistRetrySnapshot = async (
 };
 
 export const persistRetryQueue = async (
-  secureDBRef: React.RefObject<SecureDB | null> | undefined,
+  secureDBRef: React.RefObject<SecureDB | null>,
   map: Map<string, PendingRetryMessage[]>,
   isCurrent: () => boolean,
   outgoingMessage?: StoredMessage,
 ): Promise<void> => {
-  const db = secureDBRef?.current;
+  const db = secureDBRef.current;
   if (!db || !isCurrent()) throw new Error('Secure database account is not current');
   const expired = pruneExpiredRetryEntries(map);
   if (expired.length > 0) await cleanupExpiredRetries(db, expired, isCurrent);
@@ -308,29 +305,23 @@ export const persistRetryQueue = async (
 
 // Load the durable metadata and verify every private operation
 export const loadRetryQueue = async (
-  secureDBRef: React.RefObject<SecureDB | null> | undefined,
+  secureDBRef: React.RefObject<SecureDB | null>,
   isCurrent: () => boolean
 ): Promise<Map<string, PendingRetryMessage[]>> => {
   const map = new Map<string, PendingRetryMessage[]>();
-  const db = secureDBRef?.current;
+  const db = secureDBRef.current;
   if (!isCurrent()) return map;
   if (!db) throw new Error('Secure database is not ready for retry restoration');
   const obj = (await db.retrieve(STORAGE_STORES.PENDING_RETRY, STORAGE_KEYS.PENDING_RETRY_ALL)) as Record<string, DurableEntry[]> | null;
   if (!isCurrent()) return map;
   if (obj === null || obj === undefined) return map;
-  const discardMalformed = async (): Promise<Map<string, PendingRetryMessage[]>> => {
-    if (!isCurrent()) return new Map();
-    await db.delete(STORAGE_STORES.PENDING_RETRY, STORAGE_KEYS.PENDING_RETRY_ALL);
-    if (!isCurrent()) return new Map();
-    return new Map();
-  };
   if (
     !isPlainObject(obj) ||
     hasPrototypePollutionKeys(obj) ||
     Object.keys(obj).length === 0 ||
     Object.keys(obj).length > MAX_PENDING_RETRY_PEERS ||
     new TextEncoder().encode(JSON.stringify(obj)).length > MAX_RETRY_QUEUE_BYTES
-  ) return discardMalformed();
+  ) throw new Error('Pending retry queue is invalid');
 
   const validated = new Map<string, DurableEntry[]>();
   const operationIds = new Set<string>();
@@ -341,16 +332,16 @@ export const loadRetryQueue = async (
       !Array.isArray(entries) ||
       entries.length === 0 ||
       entries.length > MAX_PENDING_RETRY_PER_PEER
-    ) return discardMalformed();
+    ) throw new Error('Pending retry queue is invalid');
     const peerEntries: DurableEntry[] = [];
     for (const e of entries) {
-      if (!validateDurableRetryEntry(e, peer)) return discardMalformed();
-      const contentKey = e.retryId || e.originalMessageId;
-      if (!contentKey || operationIds.has(contentKey)) return discardMalformed();
+      if (!validateDurableRetryEntry(e, peer)) throw new Error('Pending retry queue is invalid');
+      const contentKey = e.retryId;
+      if (operationIds.has(contentKey)) throw new Error('Pending retry queue contains duplicates');
       operationIds.add(contentKey);
       peerEntries.push(e);
       total += 1;
-      if (total > MAX_GLOBAL_PENDING_RETRIES) return discardMalformed();
+      if (total > MAX_GLOBAL_PENDING_RETRIES) throw new Error('Pending retry queue is invalid');
     }
     validated.set(peer, peerEntries);
   }
@@ -358,11 +349,11 @@ export const loadRetryQueue = async (
   for (const [peer, entries] of validated) {
     const arr: PendingRetryMessage[] = [];
     for (const e of entries) {
-      const contentKey = e.retryId!;
+      const contentKey = e.retryId;
       if (
         (e.messageSignalType === SignalType.MESSAGE || e.messageSignalType === SignalType.EDIT_MESSAGE) &&
         !await nativeMessageContent.has(contentKey)
-      ) return discardMalformed();
+      ) throw new Error('Pending retry queue references missing message content');
       if (!isCurrent()) return new Map();
       arr.push({ ...e });
     }

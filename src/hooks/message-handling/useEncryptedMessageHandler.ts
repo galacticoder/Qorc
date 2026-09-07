@@ -16,17 +16,15 @@ import { hasExactKeys, hasPrototypePollutionKeys, isPlainObject, sanitizeMessage
 import { processTextMessage, checkBlockingFilter, getMessageType } from "./message-processing";
 import type { ResetCounterEntry } from "../../lib/types/message-handling-types";
 import {
-  sanitizeRateLimitConfig,
-  type RateLimitConfig,
-} from "../../lib/utils/message-handler-utils";
-import {
   KEY_REQUEST_CACHE_DURATION,
   MAX_RESETS_PER_PEER,
   RESET_WINDOW_MS,
   MAX_INBOUND_PROCESSING_QUEUE,
   MAX_RECEIPT_BATCH_IDS,
   MAX_RETRANSMIT_CHUNKS_PER_REQUEST,
-  AUTH_USERNAME_REGEX
+  AUTH_USERNAME_REGEX,
+  MESSAGE_RATE_LIMIT_WINDOW_MS,
+  MESSAGE_RATE_LIMIT_MAX,
 } from "../../lib/constants";
 import {
   dispatchReadReceiptEvent,
@@ -169,19 +167,21 @@ export function useEncryptedMessageHandler(
   loginUsernameRef: React.RefObject<string>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>,
-  isAuthenticated?: boolean,
-  getKeysOnDemand?: () => Promise<import('../../lib/types/auth-types').HybridKeys | null>,
-  usersRef?: React.RefObject<User[]>,
-  options?: { rateLimit?: Partial<RateLimitConfig> },
-  handleFileMessageChunk?: (data: any, meta: any) => Promise<boolean | void>,
-  cancelIncomingFileTransfer?: (from: string, fileId: string) => boolean,
-  secureDBRef?: React.RefObject<any | null>,
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
-  isDatabaseReady: boolean = true,
-  activeConversationRef?: React.RefObject<string | null>,
+  isAuthenticated: boolean,
+  getKeysOnDemand: () => Promise<import('../../lib/types/auth-types').HybridKeys | null>,
+  usersRef: React.RefObject<User[]>,
+  handleFileMessageChunk: (data: any, meta: any) => Promise<boolean | void>,
+  cancelIncomingFileTransfer: (from: string, fileId: string) => boolean,
+  secureDBRef: React.RefObject<any | null>,
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
+  isDatabaseReady: boolean,
+  activeConversationRef: React.RefObject<string | null>,
 ) {
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
-  const rateConfigRef = useRef<RateLimitConfig>(sanitizeRateLimitConfig(options?.rateLimit));
+  const rateConfigRef = useRef({
+    windowMs: MESSAGE_RATE_LIMIT_WINDOW_MS,
+    max: MESSAGE_RATE_LIMIT_MAX,
+  });
   const keyRequestCacheRef = useRef<Map<string, number>>(new Map());
   const inFlightBundleRequestsRef = useRef<Map<string, Promise<void>>>(new Map());
 
@@ -190,10 +190,10 @@ export function useEncryptedMessageHandler(
     messageId: string,
     mutator: (message: Message) => Message | null
   ): Promise<Message | null> => {
-    const db = secureDBRef?.current;
+    const db = secureDBRef.current;
     if (!db || !isDatabaseReady) throw new Error('Secure database is not ready');
     const updated = await db.updateConversationMessage(peerUsername, messageId, mutator);
-    if (secureDBRef?.current !== db) throw new Error('Secure database account changed during mutation');
+    if (secureDBRef.current !== db) throw new Error('Secure database account changed during mutation');
     return updated as Message | null;
   }, [secureDBRef, isDatabaseReady]);
 
@@ -201,10 +201,10 @@ export function useEncryptedMessageHandler(
     peerUsername: string,
     messageId: string
   ): Promise<Message | null> => {
-    const db = secureDBRef?.current;
+    const db = secureDBRef.current;
     if (!db || !isDatabaseReady) throw new Error('Secure database is not ready');
     const stored = await db.loadConversationMessageById(peerUsername, messageId);
-    if (secureDBRef?.current !== db) throw new Error('Secure database account changed during lookup');
+    if (secureDBRef.current !== db) throw new Error('Secure database account changed during lookup');
     if (!stored) return null;
     return {
       ...stored,
@@ -216,13 +216,13 @@ export function useEncryptedMessageHandler(
     stored: boolean;
     existing: Message | null;
   }> => {
-    const db = secureDBRef?.current;
+    const db = secureDBRef.current;
     if (!db || !isDatabaseReady) throw new Error('Secure database is not ready');
     const result = await db.storeMessageIfAbsent({
       ...message,
       timestamp: message.timestamp.getTime(),
-    }, activeConversationRef?.current || undefined);
-    if (secureDBRef?.current !== db) throw new Error('Secure database account changed during insert');
+    }, activeConversationRef.current || undefined);
+    if (secureDBRef.current !== db) throw new Error('Secure database account changed during insert');
     return {
       stored: result.stored === true,
       existing: result.existing
@@ -647,7 +647,7 @@ export function useEncryptedMessageHandler(
 
       const isSealedEnvelope = encryptedMessage?.type === SignalType.SEALED_ENVELOPE;
       const candidateSealedEnvelope = isSealedEnvelope
-        ? (encryptedMessage?.envelope || encryptedMessage?.payload)
+        ? encryptedMessage?.envelope
         : null;
       if (candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION) {
         const expectedDetectionTag = await detectionTagForProbe(
@@ -908,7 +908,6 @@ export function useEncryptedMessageHandler(
 
         // Signal decryption advances ratchet state
         if (
-          secureDBRef &&
           (!secureDBRef.current || !isDatabaseReady) &&
           (isSealedEnvelope || isNativePendingReplay)
         ) {
@@ -920,7 +919,7 @@ export function useEncryptedMessageHandler(
           peerUsername: string,
           encryptedPayload: any,
         ): Promise<'allow' | 'pending' | 'reject'> => {
-          if (!peerUsername || !findUser) return 'pending';
+          if (!peerUsername) return 'pending';
           if (
             isKeyTransparencyPeerRevoked(currentUser, peerUsername) &&
             !await awaitPeerIdentityRevocation(currentUser, peerUsername)
@@ -943,11 +942,26 @@ export function useEncryptedMessageHandler(
           ) return 'reject';
 
           const deferVerification = (): 'pending' => {
+            const chunkMarker = ':chunk:';
+            const chunkMarkerAt = authenticatedTransportMessageId?.lastIndexOf(chunkMarker) ?? -1;
+            const fileTransferId = authenticatedApplicationType === SignalType.FILE_MESSAGE_CHUNK &&
+              authenticatedTransportMessageId &&
+              chunkMarkerAt > 0
+              ? sanitizeMessageId(authenticatedTransportMessageId.slice(0, chunkMarkerAt))
+              : null;
+            const displayDedupKey = authenticatedApplicationType === SignalType.FILE_MESSAGE_CHUNK
+              ? (fileTransferId ? `file:${fileTransferId}` : null)
+              : (authenticatedApplicationType &&
+                isAckTrackedSignalType(authenticatedApplicationType) &&
+                authenticatedTransportMessageId
+                ? `${authenticatedApplicationType}:${authenticatedTransportMessageId}`
+                : null);
             if (identityChangeStore.add(peerUsername, presentedIdentity!)) {
               identityChangeStore.hold(
                 peerUsername,
                 encryptedMessage,
                 authenticatedTransportMessageId || sealedEnvelopeCacheKey,
+                displayDedupKey,
               );
             }
             if (options.__status) options.__status.notReady = true;
@@ -1075,10 +1089,6 @@ export function useEncryptedMessageHandler(
             )
           ) {
             verifiedPendingIdentityRef.current.delete(pendingPeer);
-            if (!findUser) {
-              if (options.__status) options.__status.notReady = true;
-              return;
-            }
             const resolvePendingIdentity = async (forceRefresh: boolean) => {
               const material = await findUser(
                 pendingPeer,
@@ -1193,13 +1203,13 @@ export function useEncryptedMessageHandler(
               return;
             }
 
-            const sealedEnvelope: any = encryptedMessage.envelope || encryptedMessage.payload;
+            const sealedEnvelope: any = encryptedMessage.envelope;
             if (!sealedEnvelope) {
-              console.warn('[MSG-RECV] DROP: sealed branch but no envelope/payload', { keys: Object.keys(encryptedMessage || {}).slice(0, 10) });
+              console.warn('[MSG-RECV] DROP: sealed branch but no envelope', { keys: Object.keys(encryptedMessage || {}).slice(0, 10) });
               return;
             }
 
-            const localKeys = await getKeysOnDemand?.();
+            const localKeys = await getKeysOnDemand();
             if (abortIfStale()) return;
             let hybridEnvelope: any = sealedEnvelope;
             let senderUsernameFromBlind: string | undefined;
@@ -1288,7 +1298,7 @@ export function useEncryptedMessageHandler(
             ) {
               return;
             }
-            await keyTransparencyClient.restorePersistedAuthorizations(currentUser).catch(() => 0);
+            await keyTransparencyClient.restorePersistedAuthorizations(currentUser);
             if (abortIfStale()) return;
             const senderWasRevoked = isKeyTransparencyPeerRevoked(currentUser, senderUsernameHint);
             if (senderWasRevoked) {
@@ -1337,7 +1347,7 @@ export function useEncryptedMessageHandler(
                   usernameHint: senderUsernameHint,
                   expectedDilithium: senderDilithiumPublicKey,
                 };
-              } else if (senderUsernameHint && senderDilithiumPublicKey && findUser) {
+              } else if (senderUsernameHint && senderDilithiumPublicKey) {
                 let trustedMaterial: Awaited<ReturnType<typeof resolveTrustedPeerHybridPublicKeys>> | null = null;
                 if (parkForSenderVerification(
                   senderUsernameHint,
@@ -1826,7 +1836,7 @@ export function useEncryptedMessageHandler(
 
         // Do not perform discovery work for blocked senders
         if (payload.from && payload.from !== currentUser) {
-          const userExists = usersRef?.current?.find?.((u: any) => u.username === payload.from);
+          const userExists = usersRef.current.find((u: any) => u.username === payload.from);
           const needsKeys = !userExists || !userExists.hybridPublicKeys || !userExists.hybridPublicKeys.kyberPublicBase64;
           if (needsKeys) {
             const lastReq = keyRequestCacheRef.current.get(payload.from);
@@ -1887,30 +1897,27 @@ export function useEncryptedMessageHandler(
             (typeof encryptedMessage?.messageId === 'string' ? encryptedMessage.messageId : undefined) ||
             (typeof payload?.messageId === 'string' ? payload.messageId : undefined)
           );
-          if (handleFileMessageChunk) {
-            try {
-              const filePayload = { ...payload };
-              delete filePayload.encrypted;
-              delete filePayload.p2p;
-              delete filePayload.transport;
-              
-              delete filePayload.keyTransparencyHead;
-              const accepted = await handleFileMessageChunk(filePayload, {
-                from: payload.from,
-                to: currentUser,
-                transportMessageId,
-                transport: receiverObservedTransport,
-              });
-              if (abortIfStale()) return;
-              if (accepted === false) {
-                if (options.__status) options.__status.notReady = true;
-                return;
-              }
-            } catch {
-              console.error('[EncryptedMessageHandler] Failed to handle file chunk');
+          try {
+            const filePayload = { ...payload };
+            delete filePayload.encrypted;
+            delete filePayload.p2p;
+            delete filePayload.transport;
+            delete filePayload.keyTransparencyHead;
+            const accepted = await handleFileMessageChunk(filePayload, {
+              from: payload.from,
+              to: currentUser,
+              transportMessageId,
+              transport: receiverObservedTransport,
+            });
+            if (abortIfStale()) return;
+            if (accepted === false) {
               if (options.__status) options.__status.notReady = true;
               return;
             }
+          } catch {
+            console.error('[EncryptedMessageHandler] Failed to handle file chunk');
+            if (options.__status) options.__status.notReady = true;
+            return;
           }
           commitAuthenticatedMessage();
           return;
@@ -1933,7 +1940,7 @@ export function useEncryptedMessageHandler(
         if (payload.type === SignalType.FILE_TRANSFER_CANCEL) {
           const fileId = sanitizeMessageId(payload.fileId);
           if (fileId && payload.from && payload.from !== currentUser) {
-            cancelIncomingFileTransfer?.(payload.from, fileId);
+            cancelIncomingFileTransfer(payload.from, fileId);
           }
           commitAuthenticatedMessage();
           return;
@@ -2182,7 +2189,7 @@ export function useEncryptedMessageHandler(
             accountGeneration === accountGenerationRef.current
           ) {
             const envelope = encryptedMessage?.type === SignalType.SEALED_ENVELOPE
-              ? (encryptedMessage?.envelope || encryptedMessage?.payload)
+              ? encryptedMessage?.envelope
               : null;
             if (
               envelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION &&
@@ -2332,6 +2339,71 @@ export function useEncryptedMessageHandler(
     window.addEventListener(EventType.PEER_IDENTITY_REPLAY, onReplay as EventListener);
     return () => window.removeEventListener(EventType.PEER_IDENTITY_REPLAY, onReplay as EventListener);
   }, [loginUsernameRef, serializedEncryptedMessageHandler]);
+
+  // A lone PreKey message must not depend on a later message to trigger the
+  // next transparency check. Keep one bounded, account-scoped retry per peer
+  // until verification either releases or rejects the held ciphertext.
+  useEffect(() => {
+    const account = isAuthenticated && isDatabaseReady
+      ? (loginUsernameRef.current || '')
+      : '';
+    if (!account) return;
+    const generation = accountGenerationRef.current;
+    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    const inFlight = new Set<string>();
+    let cancelled = false;
+
+    const isCurrent = () => (
+      !cancelled &&
+      generation === accountGenerationRef.current &&
+      activeAccountRef.current === account &&
+      loginUsernameRef.current === account
+    );
+
+    const schedule = (): void => {
+      if (!isCurrent()) return;
+      const pendingEntries = identityChangeStore.list();
+      const pendingPeers = new Set(pendingEntries.map(entry => entry.peer));
+      for (const [peer, timer] of timers) {
+        if (!pendingPeers.has(peer)) {
+          clearTimeout(timer);
+          timers.delete(peer);
+        }
+      }
+      for (const { peer, newKey } of pendingEntries) {
+        if (timers.has(peer) || inFlight.has(peer)) continue;
+        const attemptedAt = preKeyIdentityVerifyAttemptsRef.current.get(`${peer}\0${newKey}`) || 0;
+        const delay = Math.max(
+          250,
+          PREKEY_IDENTITY_VERIFY_RETRY_MS - Math.max(0, Date.now() - attemptedAt),
+        );
+        const timer = setTimeout(() => {
+          timers.delete(peer);
+          if (!isCurrent() || !identityChangeStore.has(peer)) return;
+          const held = identityChangeStore.peekHeld(peer);
+          if (!held) return;
+          inFlight.add(peer);
+          void serializedEncryptedMessageHandler(held.encryptedMessage)
+            .catch(() => false)
+            .finally(() => {
+              inFlight.delete(peer);
+              schedule();
+            });
+        }, delay);
+        timers.set(peer, timer);
+      }
+    };
+
+    const unsubscribe = identityChangeStore.subscribe(schedule);
+    schedule();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+      inFlight.clear();
+    };
+  }, [isAuthenticated, isDatabaseReady, loginUsernameRef, serializedEncryptedMessageHandler]);
 
   return serializedEncryptedMessageHandler;
 }

@@ -20,24 +20,14 @@ export class WebSocketTorIntegration {
       this.onTorConnectionChange(connected);
     };
 
-    try {
-      torNetworkManager.onConnectionChange(listener);
-      this.torListener = listener;
-    } catch { }
+    torNetworkManager.onConnectionChange(listener);
+    this.torListener = listener;
   }
 
   checkTorReady(): boolean {
-    try {
-      if (!torNetworkManager.isSupported()) {
-        this.torReady = true;
-        return true;
-      }
-      const connected = torNetworkManager.isConnected();
-      this.torReady = connected;
-      return connected;
-    } catch {
-      return false;
-    }
+    const connected = torNetworkManager.isConnected();
+    this.torReady = connected;
+    return connected;
   }
 
   async checkTorReadyAsync(): Promise<boolean> {
@@ -45,82 +35,45 @@ export class WebSocketTorIntegration {
       return true;
     }
 
-    try {
-      const synced = await torNetworkManager.syncWithDaemon();
-      if (synced && this.checkTorReady()) {
-        return true;
-      }
-
-      const initialized = await torNetworkManager.initialize();
-      this.torReady = initialized && torNetworkManager.isConnected();
-      return this.torReady;
-    } catch {
-      this.torReady = false;
-      return false;
-    }
+    const synced = await torNetworkManager.syncWithDaemon();
+    this.torReady = synced && torNetworkManager.isConnected();
+    return this.torReady;
   }
 
   // Adapt timeouts for Tor network conditions
   getAdaptedTimeout(baseTimeout: number): number {
-    if (!torNetworkManager.isSupported() || !this.torReady) {
+    if (!this.torReady) {
       return baseTimeout;
     }
 
-    try {
-      const stats = torNetworkManager.getStats?.();
-      if (!stats) {
-        return baseTimeout;
-      }
-
-      let multiplier = 1.0;
-      switch (stats.circuitHealth) {
-        case 'poor':
-          multiplier = 3.0;
-          break;
-        case 'degraded':
-          multiplier = 2.0;
-          break;
-        case 'good':
-          multiplier = 1.5;
-          break;
-        default:
-          multiplier = 1.0;
-      }
-
-      if (stats.averageLatency > 2000) {
-        multiplier *= 2.0;
-      } else if (stats.averageLatency > 1000) {
-        multiplier *= 1.5;
-      }
-
-      const adapted = Math.floor(baseTimeout * multiplier);
-
-      return adapted;
-    } catch {
-      return baseTimeout;
+    const stats = torNetworkManager.getStats();
+    let multiplier = 1.0;
+    switch (stats.circuitHealth) {
+      case 'poor':
+        multiplier = 3.0;
+        break;
+      case 'degraded':
+        multiplier = 2.0;
+        break;
+      case 'good':
+        multiplier = 1.5;
+        break;
+      default:
+        multiplier = 1.0;
     }
+
+    if (stats.averageLatency > 2000) {
+      multiplier *= 2.0;
+    } else if (stats.averageLatency > 1000) {
+      multiplier *= 1.5;
+    }
+
+    return Math.floor(baseTimeout * multiplier);
   }
 
   // Check if Tor circuit is healthy for WebSocket
   isCircuitHealthy(): boolean {
-    if (!torNetworkManager.isSupported()) {
-      return true;
-    }
-
-    try {
-      const stats = torNetworkManager.getStats?.();
-      if (!stats) {
-        return false;
-      }
-
-      if (stats.circuitHealth === 'poor') {
-        return false;
-      }
-
-      return true;
-    } catch {
-      return false;
-    }
+    return torNetworkManager.getStats().circuitHealth !== 'poor';
   }
 
   // Check if Tor is ready
@@ -134,18 +87,13 @@ export class WebSocketTorIntegration {
 
   // Get current Tor circuit health
   getCircuitHealth(): string {
-    if (!torNetworkManager.isSupported()) {
-      return 'unknown';
-    }
-    return torNetworkManager.getStats?.()?.circuitHealth ?? 'unknown';
+    return torNetworkManager.getStats().circuitHealth;
   }
 
   // Cleanup resources
   cleanup(): void {
     if (this.torListener) {
-      try {
-        torNetworkManager.offConnectionChange(this.torListener);
-      } catch { }
+      torNetworkManager.offConnectionChange(this.torListener);
       this.torListener = undefined;
     }
     this.torReady = false;

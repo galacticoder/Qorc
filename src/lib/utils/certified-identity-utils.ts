@@ -281,9 +281,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
   }
   const cert = await validatePeerCertificateBundle(input.peerCertificate, username);
   if (!cert) throw new Error('Certified peer bundle requires a valid device certificate');
-  const peerCertificateFingerprint = (
-    input.peerCertificateFingerprint || computePeerCertificateFingerprint(cert)
-  ).trim().toLowerCase();
+  const peerCertificateFingerprint = computePeerCertificateFingerprint(cert);
   if (
     !isValidDilithiumPublicKeyBase64(input.accountRootPublicKey) ||
     typeof input.signAccountRoot !== 'function' ||
@@ -417,7 +415,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
 
 export async function validateCertifiedPeerBundleV3(
   candidate: unknown,
-  context: CertifiedPeerBundleValidationContext = {}
+  context: CertifiedPeerBundleValidationContext
 ): Promise<CertifiedPeerBundleValidationResult> {
   try {
     if (!candidate || typeof candidate !== 'object') {
@@ -458,9 +456,12 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_USERNAME_MISMATCH' };
     }
 
-    const peerCertificate = context.peerCertificate
-      ? await validatePeerCertificateBundle(context.peerCertificate, bundle.username, now, allowExpired)
-      : null;
+    const peerCertificate = await validatePeerCertificateBundle(
+      context.peerCertificate,
+      bundle.username,
+      now,
+      allowExpired
+    );
     if (!peerCertificate) {
       return { valid: false, reason: 'CERTIFIED_IDENTITY_CERTIFICATE_MISSING' };
     }
@@ -559,7 +560,7 @@ export async function validateCertifiedPeerBundleV3(
     }
 
     const expectedPeerCertificateFingerprint = computePeerCertificateFingerprint(peerCertificate);
-    const suppliedPeerCertificateFingerprint = (context.peerCertificateFingerprint || bundle.peerCertificateFingerprint || '').trim().toLowerCase();
+    const suppliedPeerCertificateFingerprint = bundle.peerCertificateFingerprint.trim().toLowerCase();
     if (!suppliedPeerCertificateFingerprint || suppliedPeerCertificateFingerprint !== expectedPeerCertificateFingerprint) {
       return { valid: false, reason: 'CERTIFIED_IDENTITY_CERTIFICATE_FINGERPRINT_MISMATCH' };
     }
@@ -592,14 +593,12 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_SUBKEY_BINDING_MISMATCH' };
     }
 
-    if (context.publicKeys) {
-      if (
-        binding.kyberPublicKey !== context.publicKeys.kyberPublicBase64 ||
-        binding.dilithiumPublicKey !== context.publicKeys.dilithiumPublicBase64 ||
-        binding.x25519PublicKey !== context.publicKeys.x25519PublicBase64
-      ) {
-        return { valid: false, reason: 'CERTIFIED_IDENTITY_DISCOVERY_KEY_MISMATCH' };
-      }
+    if (
+      binding.kyberPublicKey !== context.publicKeys.kyberPublicBase64 ||
+      binding.dilithiumPublicKey !== context.publicKeys.dilithiumPublicBase64 ||
+      binding.x25519PublicKey !== context.publicKeys.x25519PublicBase64
+    ) {
+      return { valid: false, reason: 'CERTIFIED_IDENTITY_DISCOVERY_KEY_MISMATCH' };
     }
 
     const signalBundleX25519 = extractX25519FromSignalBundle(context.fullBundle);

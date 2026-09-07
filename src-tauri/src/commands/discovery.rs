@@ -124,7 +124,8 @@ const REQUEST_LARGE_BYTES: usize = 512 * 1024;
 
 const REQUEST_PIR_BYTES: usize = 2 * 1024 * 1024;
 const RESPONSE_SMALL_BYTES: usize = 64 * 1024;
-const RESPONSE_KEY_TRANSPARENCY_BYTES: usize = 512 * 1024;
+const RESPONSE_TAG_INDEX_BYTES: usize = 512 * 1024;
+const RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES: usize = 2 * 1024 * 1024;
 const RESPONSE_PIR_BYTES: usize = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES: usize = 8912896;
@@ -162,7 +163,8 @@ fn valid_response_size(size: usize) -> bool {
     matches!(
         size,
         RESPONSE_SMALL_BYTES
-            | RESPONSE_KEY_TRANSPARENCY_BYTES
+            | RESPONSE_TAG_INDEX_BYTES
+            | RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES
             | RESPONSE_PIR_BYTES
             | RESPONSE_AVATAR_BYTES
             | RESPONSE_DISCOVERY_BYTES
@@ -226,7 +228,7 @@ pub async fn prewarm_anonymous_transport(state: State<'_, AppState>) -> Result<b
         return Ok(false);
     };
     let Some(server_url) = storage
-        .get("server_url")
+        .get_text("server_url")
         .await
         .map_err(|error| error.safe_message())?
     else {
@@ -290,7 +292,7 @@ pub async fn anonymous_api_fetch(
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
     let configured_server_url = storage
-        .get("server_url")
+        .get_text("server_url")
         .await
         .map_err(|error| error.safe_message())?
         .ok_or_else(|| "Server URL not configured".to_string())?;
@@ -392,7 +394,7 @@ pub async fn anonymous_api_fetch(
         return Err("invalid anonymous response".to_string());
     }
     let current_server_url = storage
-        .get("server_url")
+        .get_text("server_url")
         .await
         .map_err(|error| error.safe_message())?
         .ok_or_else(|| "Server URL not configured".to_string())?;
@@ -427,6 +429,7 @@ mod tests {
         assert!(!valid_request_size(64 * 1024 - 1));
         assert!(valid_response_size(512 * 1024));
         assert!(valid_response_size(1024 * 1024));
+        assert!(valid_response_size(2 * 1024 * 1024));
         assert!(valid_response_size(8912896));
         assert!(!valid_response_size(8912896 - 1));
     }

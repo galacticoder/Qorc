@@ -194,7 +194,7 @@ export const useWebSocket = (
           queue.items = [];
           queue.bytes = 0;
           setLoginError('Secure transport overloaded; reconnecting.');
-          websocketClient.terminateCurrentConnection();
+          websocketClient.terminateCurrentConnection('renderer-route-queue-overflow');
           return;
         }
         queue.items.push({ detail, isSecure, bytes, generation: queue.generation });

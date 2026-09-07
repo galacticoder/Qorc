@@ -46,9 +46,9 @@ export function useMessageSender(
   loginUsernameRef: React.RefObject<string>,
   currentUsername: string,
   onNewMessage: (message: Message) => void,
-  isLoggedIn?: boolean,
-  secureDBRef?: React.RefObject<SecureDB | null>,
-  findUser?: (handle: string) => Promise<any>
+  isLoggedIn: boolean,
+  secureDBRef: React.RefObject<SecureDB | null>,
+  findUser: (handle: string) => Promise<any>
 ) {
   const activeAccountRef = useRef<string | null>(null);
   const accountGenerationRef = useRef(0);
@@ -147,8 +147,7 @@ export function useMessageSender(
 
     const operationIds: string[] = [];
     for (const entry of entries) {
-      const operationId = entry.retryId || entry.originalMessageId;
-      if (!operationId) continue;
+      const operationId = entry.retryId;
       operationIds.push(operationId);
       if (entry.messageSignalType === SignalType.MESSAGE) {
         await nativeMessageContent.revokeSend(operationId).catch(() => false);
@@ -157,7 +156,7 @@ export function useMessageSender(
       }
     }
 
-    const db = secureDBRef?.current;
+    const db = secureDBRef.current;
     if (db && operationIds.length > 0) {
       await db.clearUnacknowledgedMessages(peer, operationIds);
       if (!isCurrent()) return;
@@ -235,7 +234,7 @@ export function useMessageSender(
         await existingFlight.done;
         if (!isCurrent()) return;
         const stillQueued = pendingRetryMessagesRef.current.get(recipientUsername)
-          ?.some((entry) => (entry.retryId || entry.originalMessageId) === operationId);
+          ?.some((entry) => entry.retryId === operationId);
         if (stillQueued) {
           setTimeout(() => {
             if (isCurrent()) {
@@ -265,6 +264,7 @@ export function useMessageSender(
       };
 
       try {
+        unifiedSignalTransport.preparePeer(recipientUsername);
         if (messageType === SignalType.MESSAGE && !targetMessageId) {
           localMessage = await createLocalMessage(
             messageId,
@@ -275,7 +275,7 @@ export function useMessageSender(
             replyToData,
           );
           assertCurrent();
-          if (!secureDBRef?.current) {
+          if (!secureDBRef.current) {
             await nativeMessageContent.delete(messageId).catch(() => false);
             throw new Error('Secure database is not ready');
           }
@@ -305,7 +305,7 @@ export function useMessageSender(
         }
 
         const prior = pendingRetryMessagesRef.current.get(recipientUsername)
-          ?.find((entry) => (entry.retryId || entry.originalMessageId) === operationId);
+          ?.find((entry) => entry.retryId === operationId);
         const retryEntry: PendingRetryMessage = {
           user: retryUser,
           content: isPrivateText ? '' : (sanitizedContent ?? ''),
@@ -344,7 +344,7 @@ export function useMessageSender(
         assertCurrent();
 
         if (isMutation) {
-          const db = secureDBRef?.current;
+          const db = secureDBRef.current;
           if (!db || !targetMessageId) throw new Error('Secure database is not ready for message control');
           let acceptedControl = false;
           const persisted = await db.updateConversationMessage(
@@ -376,7 +376,7 @@ export function useMessageSender(
             },
           );
           assertCurrent();
-          if (secureDBRef?.current !== db || !persisted || !acceptedControl) {
+          if (secureDBRef.current !== db || !persisted || !acceptedControl) {
             throw new Error('Message control target is unavailable or unauthorized');
           }
 
@@ -419,10 +419,10 @@ export function useMessageSender(
 
         const queue = pendingRetryMessagesRef.current.get(recipientUsername) || [];
         const removed = queue.filter(
-          (entry) => (entry.retryId || entry.originalMessageId) === operationId
+          (entry) => entry.retryId === operationId
         );
         const remaining = queue.filter(
-          (entry) => (entry.retryId || entry.originalMessageId) !== operationId
+          (entry) => entry.retryId !== operationId
         );
         if (remaining.length) pendingRetryMessagesRef.current.set(recipientUsername, remaining);
         else pendingRetryMessagesRef.current.delete(recipientUsername);
@@ -476,7 +476,7 @@ export function useMessageSender(
           return;
         }
         const prior = pendingRetryMessagesRef.current.get(recipientUsername)
-          ?.find((entry) => (entry.retryId || entry.originalMessageId) === operationId);
+          ?.find((entry) => entry.retryId === operationId);
         const retryCount = Math.min((prior?.retryCount || 0) + 1, MAX_DURABLE_SEND_RETRY_ATTEMPTS);
         const retryEntry: PendingRetryMessage = {
           user: retryUser,
@@ -549,13 +549,12 @@ export function useMessageSender(
     if (now - (lastSessionBundleReqTsRef.current.get(peer) || 0) < 3000) return;
     recordSessionRequest(lastSessionBundleReqTsRef.current, peer, now);
 
-    if (sessionPrefetchMap.current.has(peer)) { await sessionPrefetchMap.current.get(peer)!.catch(() => { }); return; }
+    if (sessionPrefetchMap.current.has(peer)) {
+      await sessionPrefetchMap.current.get(peer)!;
+      return;
+    }
     if (sessionPrefetchMap.current.size >= MAX_CONCURRENT_SESSION_PREFETCHES) return;
     const operation = async () => {
-      if (!findUser) {
-        console.warn('[MessageSender] findUser not available for session prefetch');
-        return;
-      }
       if (!shouldAttemptDiscovery(peer)) {
         return;
       }
@@ -584,7 +583,7 @@ export function useMessageSender(
       if (sessionPrefetchMap.current.get(peer) === p) sessionPrefetchMap.current.delete(peer);
     });
     sessionPrefetchMap.current.set(peer, p);
-    await p.catch(() => { });
+    await p;
   }, [findUser, isLoggedIn, loginUsernameRef, users]);
 
   // Rehydrate durable send retry queue on login
@@ -627,8 +626,7 @@ export function useMessageSender(
             restored.delete(peer);
             const operationIds: string[] = [];
             for (const entry of entries) {
-              const operationId = entry.retryId || entry.originalMessageId;
-              if (!operationId) continue;
+              const operationId = entry.retryId;
               operationIds.push(operationId);
               if (entry.messageSignalType === SignalType.MESSAGE) {
                 await nativeMessageContent.revokeSend(operationId).catch(() => false);
@@ -636,7 +634,7 @@ export function useMessageSender(
                 await nativeMessageContent.delete(operationId).catch(() => false);
               }
             }
-            if (operationIds.length > 0 && secureDBRef?.current) {
+            if (operationIds.length > 0 && secureDBRef.current) {
               await secureDBRef.current.clearUnacknowledgedMessages(peer, operationIds);
               if (!isCurrent()) return;
             }
@@ -644,9 +642,9 @@ export function useMessageSender(
           }
           for (const entry of entries) {
             if (!isCurrent()) return;
-            const key = entry.retryId || entry.originalMessageId;
-            const alreadyQueued = key && pendingRetryMessagesRef.current.get(peer)
-              ?.some((candidate) => (candidate.retryId || candidate.originalMessageId) === key);
+            const key = entry.retryId;
+            const alreadyQueued = pendingRetryMessagesRef.current.get(peer)
+              ?.some((candidate) => candidate.retryId === key);
             if (alreadyQueued) continue;
             if (enqueueRetry(pendingRetryMessagesRef.current, peer, entry)) pinRetryEntry(entry);
           }
@@ -728,7 +726,7 @@ export function useMessageSender(
       const operationKey = retryOperationKey(peer, operationId);
       const queue = pendingRetryMessagesRef.current.get(peer);
       const removed = queue?.filter(
-        (entry) => (entry.retryId || entry.originalMessageId) === operationId
+        (entry) => entry.retryId === operationId
       ) || [];
       if (removed.length === 0 && !inFlightOperationsRef.current.has(operationKey)) return;
 
@@ -742,7 +740,7 @@ export function useMessageSender(
 
       if (queue && removed.length > 0) {
         const remaining = queue.filter(
-          (entry) => (entry.retryId || entry.originalMessageId) !== operationId
+          (entry) => entry.retryId !== operationId
         );
         if (remaining.length > 0) pendingRetryMessagesRef.current.set(peer, remaining);
         else pendingRetryMessagesRef.current.delete(peer);

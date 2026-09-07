@@ -5,8 +5,7 @@ import { TorConnectionStats } from '@/lib/types/tor-types';
 
 export function TorIndicator() {
   const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());
-  const isSupported = torNetworkManager.isSupported();
-  const isConnected = isSupported && stats.isConnected;
+  const isConnected = stats.isConnected;
 
   useEffect(() => {
     let mounted = true;
@@ -18,7 +17,9 @@ export function TorIndicator() {
 
     void torNetworkManager.syncWithDaemon().then(() => {
       if (mounted) setStats(torNetworkManager.getStats());
-    }).catch(() => { });
+    }).catch((error) => {
+      console.error('[TOR] Failed to refresh daemon status:', error);
+    });
 
     torNetworkManager.onStatsChange(handleStatsChange);
     return () => {
@@ -27,17 +28,11 @@ export function TorIndicator() {
     };
   }, []);
 
-  if (!isSupported) {
-    return null;
-  }
-
-  const statusLabel = !isSupported
-    ? 'Unavailable'
-    : isConnected
-      ? 'Connected'
-      : stats.bootstrapProgress && stats.bootstrapProgress < 100
-        ? `Bootstrapping ${stats.bootstrapProgress}%`
-        : 'Disconnected';
+  const statusLabel = isConnected
+    ? 'Connected'
+    : stats.bootstrapProgress && stats.bootstrapProgress < 100
+      ? `Bootstrapping ${stats.bootstrapProgress}%`
+      : 'Disconnected';
 
   return (
     <span

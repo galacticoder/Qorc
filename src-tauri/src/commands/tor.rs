@@ -6,7 +6,7 @@ use tauri::State;
 use tracing::warn;
 
 use crate::state::AppState;
-use crate::tor::{TorConfig, TorInfo, TorStartResult, TorStatus, TorVerifyResult};
+use crate::tor::{TorConfig, TorStartResult, TorStatus, TorVerifyResult};
 
 /// Configure Tor
 #[tauri::command]
@@ -81,24 +81,6 @@ pub async fn tor_status(state: State<'_, AppState>) -> Result<TorStatus, String>
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
 
     Ok(tor.status())
-}
-
-/// Get Tor info
-#[tauri::command]
-pub async fn tor_info(state: State<'_, AppState>) -> Result<TorInfo, String> {
-    let tor = state
-        .inner()
-        .tor_manager()
-        .ok_or_else(|| "Tor manager not initialized".to_string())?;
-
-    let info = tor.get_info().await.map_err(|e| e.safe_message())?;
-    if let Some(ws) = state.inner().websocket() {
-        ws.set_tor_ready(info.bootstrapped);
-        if info.bootstrapped {
-            ws.update_tor_config(info.socks_port);
-        }
-    }
-    Ok(info)
 }
 
 /// Verify Tor connection

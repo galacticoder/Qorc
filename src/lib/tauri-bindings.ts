@@ -15,12 +15,6 @@ function serializeJsonForNative(value: unknown): string {
     return encoded;
 }
 
-export interface NativeScreenSource {
-    id: string;
-    name: string;
-    source_type: string;
-}
-
 export interface NativeCameraDevice {
     device_id: string;
     label: string;
@@ -120,14 +114,6 @@ export interface TorStatus {
     bootstrap_progress: number;
 }
 
-export interface TorInfo {
-    version: string;
-    socks_port: number;
-    control_port: number;
-    bootstrapped: boolean;
-    bootstrap_progress: number;
-}
-
 export interface SignedPreKeyInfo {
     keyId: number;
     publicKeyBase64: string;
@@ -213,7 +199,6 @@ export interface NativeMessageLinkTarget {
 }
 
 export interface NativeLinkPreview extends NativeMessageLinkTarget {
-    metadataFetched: boolean;
     title: string | null;
     description: string | null;
     imageDataUrl: string | null;
@@ -309,8 +294,8 @@ export const account = {
     ) => invoke<boolean>('account_token_vault_store', { serverScope, vaultKind, plaintextJson }),
     tokenVaultRemove: (serverScope: string, vaultKind: 'working' | 'resume') =>
         invoke<boolean>('account_token_vault_remove', { serverScope, vaultKind }),
-    lock: (accountOwner: string) =>
-        invoke<boolean>('account_lock', { accountOwner }),
+    lock: (accountOwner: string, options?: { purgeTokens: boolean; serverScope: string | null }) =>
+        invoke<boolean>('account_lock', { accountOwner, ...options }),
 };
 
 export const storage = {
@@ -339,7 +324,6 @@ export const tor = {
     start: () => invoke<{ success: boolean; starting?: boolean; error?: string }>('tor_start'),
     stop: () => invoke<boolean>('tor_stop'),
     status: () => invoke<TorStatus>('tor_status'),
-    info: () => invoke<TorInfo>('tor_info'),
     verifyConnection: () => invoke<{ success: boolean; ip_address?: string; error?: string }>('tor_verify_connection'),
 };
 
@@ -516,13 +500,6 @@ export const audioCodec = {
         invoke<ArrayBuffer>('audio_opus_encode', pcm, {
             headers: { 'x-qorc-audio-session': sessionId },
         }).then(value => new Uint8Array(value)),
-    decode: (sessionId: string, packet: Uint8Array, fec = false) =>
-        invoke<ArrayBuffer>('audio_opus_decode', packet, {
-            headers: {
-                'x-qorc-audio-session': sessionId,
-                'x-qorc-opus-fec': fec ? '1' : '0',
-            },
-        }).then(value => new Uint8Array(value)),
     decodeToPlayback: (sessionId: string, packet: Uint8Array, fec = false) =>
         invoke<boolean>('audio_opus_decode_playback', packet, {
             headers: {
@@ -632,7 +609,6 @@ export const system = {
     openExternal: (url: string) => invoke<boolean>('open_external', { url }),
     requestMediaAccess: (kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'microphone' | 'microphone-camera' | 'enumerate') =>
         invoke<boolean>('request_media_access', { kind }),
-    getScreenSources: () => invoke<NativeScreenSource[]>('get_screen_sources'),
 };
 
 export const power = {
@@ -729,19 +705,9 @@ export const events = {
     },
 };
 
-export function isTauri(): boolean {
-    if (typeof window === 'undefined') return false;
-    return (
-        '__TAURI__' in window ||
-        '__TAURI_INTERNALS__' in window ||
-        '__TAURI_IPC__' in window
-    );
-}
-
 export async function requireNativeMediaAccess(
     kind: 'audio' | 'video' | 'audio-video' | 'camera' | 'microphone' | 'microphone-camera'
 ): Promise<void> {
-    if (!isTauri()) return;
     const granted = await system.requestMediaAccess(kind);
     if (!granted) {
         throw new DOMException('Native media access was denied', 'NotAllowedError');

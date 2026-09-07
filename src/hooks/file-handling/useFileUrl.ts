@@ -43,12 +43,6 @@ export function useFileUrl({
       return () => { canceled = true; };
     }
 
-    if (!secureDB) {
-      setError('Database not initialized');
-      setLoading(false);
-      return () => { canceled = true; };
-    }
-
     const loadFile = async () => {
       try {
         setLoading(true);

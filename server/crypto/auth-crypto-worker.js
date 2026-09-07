@@ -1,18 +1,12 @@
 import { parentPort } from 'node:worker_threads';
-import { blake3 } from '@noble/hashes/blake3.js';
-import { ml_kem1024 as mlKem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 as mlDsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_DSA_87_SIGNATURE_BYTES,
-  ML_KEM_1024_CIPHERTEXT_BYTES,
-  ML_KEM_1024_PUBLIC_KEY_BYTES,
-  ML_KEM_1024_SHARED_SECRET_BYTES,
 } from '../../shared/crypto-sizes.js';
 import {
   PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-  PRIVATE_AUTH_OT_RECORD_BYTES,
   PRIVATE_AUTH_TRANSCRIPT_BYTES,
 } from '../../shared/private-auth-protocol.js';
 import { UUID_V4_RE } from '../../shared/patterns.js';
@@ -52,7 +46,6 @@ function validateEnvelope(data) {
   }
   if (
     data.type !== AUTH_CRYPTO_OPERATION.VERIFY_ANONYMITY_SET &&
-    data.type !== AUTH_CRYPTO_OPERATION.ENCRYPT_OT_RECORDS &&
     data.type !== AUTH_CRYPTO_OPERATION.ISSUE_PRIVACY_PASS
   ) {
     throw new Error('Invalid auth worker operation');
@@ -136,62 +129,6 @@ function verifyAnonymitySet(payload, cancelState) {
   return matched === 1;
 }
 
-function encryptOtRecords(payload, cancelState) {
-  const publicKeySlabBytes = PRIVATE_AUTH_ANONYMITY_SET_SIZE * ML_KEM_1024_PUBLIC_KEY_BYTES;
-  const paddedRecordSlabBytes = PRIVATE_AUTH_ANONYMITY_SET_SIZE * PRIVATE_AUTH_OT_RECORD_BYTES;
-  const keys = Object.keys(payload).sort().join(',');
-  if (
-    keys !== 'clientPublicKeys,paddedRecords' ||
-    !exactBytes(payload.clientPublicKeys, publicKeySlabBytes) ||
-    !exactBytes(payload.paddedRecords, paddedRecordSlabBytes)
-  ) {
-    throw new Error('Invalid private-auth OT payload');
-  }
-
-  const ciphertexts = new Uint8Array(PRIVATE_AUTH_ANONYMITY_SET_SIZE * ML_KEM_1024_CIPHERTEXT_BYTES);
-  const maskedRecords = new Uint8Array(paddedRecordSlabBytes);
-  let completed = false;
-  try {
-    for (let slot = 0; slot < PRIVATE_AUTH_ANONYMITY_SET_SIZE; slot += 1) {
-      throwIfCancelled(cancelState);
-      const publicKeyOffset = slot * ML_KEM_1024_PUBLIC_KEY_BYTES;
-      const recordOffset = slot * PRIVATE_AUTH_OT_RECORD_BYTES;
-      const publicKey = payload.clientPublicKeys.subarray(
-        publicKeyOffset,
-        publicKeyOffset + ML_KEM_1024_PUBLIC_KEY_BYTES
-      );
-      const paddedRecord = payload.paddedRecords.subarray(recordOffset, recordOffset + PRIVATE_AUTH_OT_RECORD_BYTES);
-      let ciphertext = null;
-      let sharedSecret = null;
-      let mask = null;
-      try {
-        const encapsulated = mlKem1024.encapsulate(publicKey);
-        ciphertext = encapsulated.cipherText;
-        sharedSecret = encapsulated.sharedSecret;
-        if (!exactBytes(ciphertext, ML_KEM_1024_CIPHERTEXT_BYTES) || !exactBytes(sharedSecret, ML_KEM_1024_SHARED_SECRET_BYTES)) {
-          throw new Error('ML-KEM returned an invalid private-auth result');
-        }
-        mask = blake3(sharedSecret, { dkLen: PRIVATE_AUTH_OT_RECORD_BYTES });
-        ciphertexts.set(ciphertext, slot * ML_KEM_1024_CIPHERTEXT_BYTES);
-        for (let index = 0; index < PRIVATE_AUTH_OT_RECORD_BYTES; index += 1) {
-          maskedRecords[recordOffset + index] = paddedRecord[index] ^ mask[index];
-        }
-      } finally {
-        wipe(ciphertext);
-        wipe(sharedSecret);
-        wipe(mask);
-      }
-    }
-    completed = true;
-    return { ciphertexts, maskedRecords };
-  } finally {
-    if (!completed) {
-      wipe(ciphertexts);
-      wipe(maskedRecords);
-    }
-  }
-}
-
 if (!parentPort) throw new Error('Auth crypto worker requires a parent port');
 
 parentPort.on('message', (data) => {
@@ -221,17 +158,7 @@ parentPort.on('message', (data) => {
       return;
     }
 
-    result = encryptOtRecords(data.payload, data.cancelState);
-    parentPort.postMessage(
-      {
-        id: responseId,
-        success: true,
-        ciphertexts: result.ciphertexts,
-        maskedRecords: result.maskedRecords,
-      },
-      [result.ciphertexts.buffer, result.maskedRecords.buffer]
-    );
-    result = null;
+    throw new Error('Invalid auth worker operation');
   } catch (error) {
     parentPort.postMessage({
       id: responseId,
@@ -244,13 +171,9 @@ parentPort.on('message', (data) => {
     wipe(data?.payload?.authPublicKeys);
     wipe(data?.payload?.signature);
     wipe(data?.payload?.transcript);
-    wipe(data?.payload?.clientPublicKeys);
-    wipe(data?.payload?.paddedRecords);
     wipe(data?.payload?.blindedTokens);
     wipe(data?.payload?.secretKey);
     wipe(data?.payload?.publicKey);
-    wipe(result?.ciphertexts);
-    wipe(result?.maskedRecords);
     wipe(result?.evaluatedTokens);
     wipe(result?.proof);
   }

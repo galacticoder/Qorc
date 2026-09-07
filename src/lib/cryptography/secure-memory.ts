@@ -3,14 +3,6 @@
  * Controlled creation, zeroing, and tracking of sensitive memory
  */
 
-const globalScope = (() => {
-  if (typeof globalThis !== 'undefined') return globalThis;
-  if (typeof self !== 'undefined') return self as unknown as typeof globalThis;
-  if (typeof window !== 'undefined') return window as unknown as typeof globalThis;
-  if (typeof global !== 'undefined') return global as unknown as typeof globalThis;
-  throw new Error('Unable to locate global execution context');
-})();
-
 let cachedCrypto: Crypto | null = null;
 
 function resolveCrypto(): Crypto {
@@ -18,22 +10,10 @@ function resolveCrypto(): Crypto {
     return cachedCrypto;
   }
 
-  const candidate = (globalScope as unknown as Partial<Window> & { crypto?: Crypto }).crypto;
+  const candidate = globalThis.crypto;
   if (candidate && typeof candidate.getRandomValues === 'function') {
     cachedCrypto = candidate;
     return cachedCrypto;
-  }
-
-  const maybeRequire = (globalScope as Record<string, unknown>).require as undefined | ((module: string) => any);
-  if (typeof maybeRequire === 'function') {
-    try {
-      const nodeCrypto = maybeRequire('crypto')?.webcrypto as Crypto | undefined;
-      if (nodeCrypto && typeof nodeCrypto.getRandomValues === 'function') {
-        cachedCrypto = nodeCrypto;
-        return cachedCrypto;
-      }
-    } catch {
-    }
   }
 
   throw new Error('Secure environment missing required crypto implementation');

@@ -1,7 +1,10 @@
 //! Application state management
 
 use parking_lot::RwLock;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    fs::File,
+    sync::{Arc, atomic::AtomicBool},
+};
 use tokio::sync::mpsc;
 
 use crate::account_vault::AccountSession;
@@ -19,12 +22,14 @@ use crate::system::notification::NotificationHandler;
 use crate::tor::TorManager;
 
 pub struct AppState {
+    pub instance_lock: RwLock<Option<File>>,
     pub audio_codec: AudioCodecState,
     pub audio_playback: Arc<AudioPlaybackState>,
     pub camera_capture: Arc<CameraCaptureState>,
     pub microphone_capture: Arc<MicrophoneCaptureState>,
     pub screen_capture: Arc<ScreenCaptureState>,
     pub account_session: RwLock<Option<Arc<AccountSession>>>,
+    pub account_lifecycle: crate::account_lifecycle::AccountLifecycle,
     pub storage: RwLock<Option<Arc<SecureStorage>>>,
     pub signal_handler: RwLock<Option<Arc<SignalHandler>>>,
     pub tor_manager: RwLock<Option<Arc<TorManager>>>,
@@ -47,12 +52,14 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            instance_lock: RwLock::new(None),
             audio_codec: AudioCodecState::new(),
             audio_playback: Arc::new(AudioPlaybackState::new()),
             camera_capture: Arc::new(CameraCaptureState::new()),
             microphone_capture: Arc::new(MicrophoneCaptureState::new()),
             screen_capture: Arc::new(ScreenCaptureState::new()),
             account_session: RwLock::new(None),
+            account_lifecycle: crate::account_lifecycle::AccountLifecycle::default(),
             storage: RwLock::new(None),
             signal_handler: RwLock::new(None),
             tor_manager: RwLock::new(None),

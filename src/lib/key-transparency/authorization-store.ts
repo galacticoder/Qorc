@@ -85,13 +85,13 @@ function authorizationStorageKey(accountScope: string): string {
   );
 }
 
-function parseAuthorized(value: unknown): StoredPeerAuthorization | null {
+function parseAuthorized(value: unknown): StoredPeerAuthorization {
   const entry = value as StoredPeerAuthorization;
   let peer: string;
   try {
     peer = normalizePeer(entry?.peer);
   } catch {
-    return null;
+    throw new Error('Invalid stored key-transparency authorization');
   }
   if (
     !exactPlainObject(entry, AUTHORIZED_KEYS) ||
@@ -106,23 +106,23 @@ function parseAuthorized(value: unknown): StoredPeerAuthorization | null {
     !isFingerprint(entry.peerCertificateFingerprint) ||
     !isFingerprint(entry.identityRootFingerprint) ||
     !isFingerprint(entry.identityBundleFingerprint)
-  ) return null;
+  ) throw new Error('Invalid stored key-transparency authorization');
   return { ...entry };
 }
 
-function parseRevoked(value: unknown): StoredPeerRevocation | null {
+function parseRevoked(value: unknown): StoredPeerRevocation {
   const entry = value as StoredPeerRevocation;
   let peer: string;
   try {
     peer = normalizePeer(entry?.peer);
   } catch {
-    return null;
+    throw new Error('Invalid stored key-transparency revocation');
   }
   if (
     !exactPlainObject(entry, REVOKED_KEYS) ||
     peer !== entry.peer ||
     !isContactState(entry.rootCommitment, entry.version)
-  ) return null;
+  ) throw new Error('Invalid stored key-transparency revocation');
   return { ...entry };
 }
 
@@ -133,7 +133,7 @@ function parseStore(raw: string | null): KeyTransparencyAuthorizationSnapshot {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return empty;
+    throw new Error('Invalid stored key-transparency authorizations');
   }
   const value = parsed as { protocol?: unknown; authorized?: unknown; revoked?: unknown };
   if (
@@ -143,24 +143,28 @@ function parseStore(raw: string | null): KeyTransparencyAuthorizationSnapshot {
     !Array.isArray(value.revoked) ||
     value.authorized.length > MAX_STORED_AUTHORIZATIONS ||
     value.revoked.length > MAX_STORED_AUTHORIZATIONS
-  ) return empty;
+  ) throw new Error('Invalid stored key-transparency authorizations');
 
   const revoked: StoredPeerRevocation[] = [];
   for (const candidate of value.revoked as unknown[]) {
     const entry = parseRevoked(candidate);
-    if (!entry) return empty;
     revoked.push(entry);
   }
   const revokedPeers = new Set(revoked.map((entry) => entry.peer));
-  if (revokedPeers.size !== revoked.length) return empty;
+  if (revokedPeers.size !== revoked.length) {
+    throw new Error('Stored key-transparency revocations contain duplicate peers');
+  }
 
   const authorized: StoredPeerAuthorization[] = [];
   const seen = new Set<string>();
   for (const candidate of value.authorized as unknown[]) {
     const entry = parseAuthorized(candidate);
-    if (!entry) continue;
-    
-    if (revokedPeers.has(entry.peer) || seen.has(entry.peer)) continue;
+    if (revokedPeers.has(entry.peer)) {
+      throw new Error('Stored key-transparency peer is both authorized and revoked');
+    }
+    if (seen.has(entry.peer)) {
+      throw new Error('Stored key-transparency authorizations contain duplicate peers');
+    }
     seen.add(entry.peer);
     authorized.push(entry);
   }
@@ -191,11 +195,15 @@ export async function writeKeyTransparencyAuthorizations(
   return enqueue(async () => {
     const accountScope = deriveLocalAccountScope(context, normalizePeer(ownerUsername));
     const key = authorizationStorageKey(accountScope);
+    if (
+      snapshot.authorized.length > MAX_STORED_AUTHORIZATIONS ||
+      snapshot.revoked.length > MAX_STORED_AUTHORIZATIONS
+    ) throw new Error('Key-transparency authorization snapshot exceeds its fixed capacity');
     const authorized = snapshot.authorized
-      .slice(0, MAX_STORED_AUTHORIZATIONS)
+      .slice()
       .sort((left, right) => left.peer.localeCompare(right.peer));
     const revoked = snapshot.revoked
-      .slice(0, MAX_STORED_AUTHORIZATIONS)
+      .slice()
       .sort((left, right) => left.peer.localeCompare(right.peer));
     const serialized = JSON.stringify({
       protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_AUTHORIZATION_STORE,
@@ -206,6 +214,9 @@ export async function writeKeyTransparencyAuthorizations(
     if (!await storage.set(key, serialized)) {
       throw new Error('Key-transparency authorizations could not be persisted');
     }
+    if (await storage.get(key) !== serialized) {
+      throw new Error('Key-transparency authorization update could not be verified');
+    }
   });
 }
 
@@ -215,6 +226,9 @@ export async function clearKeyTransparencyAuthorizations(
 ): Promise<void> {
   return enqueue(async () => {
     const accountScope = deriveLocalAccountScope(context, normalizePeer(ownerUsername));
-    await storage.remove(authorizationStorageKey(accountScope));
+    const key = authorizationStorageKey(accountScope);
+    if (!await storage.remove(key) || await storage.has(key)) {
+      throw new Error('Key-transparency authorizations could not be removed');
+    }
   });
 }

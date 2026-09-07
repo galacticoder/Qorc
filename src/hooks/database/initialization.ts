@@ -29,15 +29,8 @@ export const initializeSecureDB = async (
 export const initializeBlockingSystem = async (
   secureDB: SecureDB
 ): Promise<void> => {
-  try {
-    blockingSystem.setSecureDB(secureDB);
-  } catch { }
-
-  try {
-    await blockingSystem.getBlockedUsers();
-  } catch (err) {
-    console.error('[initializeBlockingSystem] Failed to load block list:', err);
-  }
+  blockingSystem.setSecureDB(secureDB);
+  await blockingSystem.getBlockedUsers();
 };
 
 // Store authenticated user metadata
@@ -46,14 +39,9 @@ export const storeAuthMetadata = async (
   hashedUsername: string,
   originalUsername?: string | null
 ): Promise<void> => {
-  try {
-    await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_USERNAME, hashedUsername);
-    if (originalUsername) {
-      await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_ORIGINAL_USERNAME, originalUsername);
-    }
-  } catch (err) {
-    console.error('[storeAuthMetadata] Failed:', err);
-    throw err;
+  await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_USERNAME, hashedUsername);
+  if (originalUsername) {
+    await secureDB.store(STORAGE_STORES.AUTH_METADATA, STORAGE_KEYS.AUTH_ORIGINAL_USERNAME, originalUsername);
   }
 };
 

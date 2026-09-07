@@ -4,7 +4,7 @@ import { UserAvatar } from '../../ui/UserAvatar';
 import { BannerMessagePreview } from './BannerMessagePreview';
 
 interface EditingBannerProps {
-  readonly onCancelEdit?: () => void;
+  readonly onCancelEdit: () => void;
   readonly editingMessage: Message;
 }
 

@@ -12,9 +12,9 @@ export async function handleServerPublicKey(data: any, auth: AuthRefs): Promise<
   const serverId = data?.serverId;
 
   const rejectServerIdentity = async (): Promise<void> => {
-    auth.setServerHybridPublic?.(null);
-    if (auth.serverHybridPublicRef) auth.serverHybridPublicRef.current = null;
-    auth.setLoginError?.('Server identity verification failed. Connection blocked.');
+    auth.setServerHybridPublic(null);
+    auth.serverHybridPublicRef.current = null;
+    auth.setLoginError('Server identity verification failed. Connection blocked.');
     await websocketClient.close({ killSession: true }).catch(() => { });
   };
 
@@ -38,8 +38,11 @@ export async function handleServerPublicKey(data: any, auth: AuthRefs): Promise<
     return;
   }
 
-  auth.setServerHybridPublic?.(hybridKeys);
-  if (auth.serverHybridPublicRef) {
-    auth.serverHybridPublicRef.current = hybridKeys;
-  }
+  const validatedKeys = {
+    kyberPublicBase64: hybridKeys.kyberPublicBase64,
+    dilithiumPublicBase64: hybridKeys.dilithiumPublicBase64,
+    x25519PublicBase64: hybridKeys.x25519PublicBase64,
+  };
+  auth.setServerHybridPublic(validatedKeys);
+  auth.serverHybridPublicRef.current = validatedKeys;
 }

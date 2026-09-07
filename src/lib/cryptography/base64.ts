@@ -31,23 +31,13 @@ export class Base64 {
       if (!base64 || typeof base64 !== 'string') {
         throw new Error('Invalid base64 input: must be a non-empty string');
       }
-      let normalized = base64.trim();
-      normalized = normalized.replace(/-/g, '+').replace(/_/g, '/');
-      normalized = normalized.replace(/\s+/g, '');
-
-      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+      if (
+        base64.length % 4 !== 0 ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)
+      ) {
         throw new Error('Invalid base64 format: contains invalid characters');
       }
-
-      const padLen = normalized.length % 4;
-      if (padLen === 1) {
-        throw new Error('Invalid base64 length');
-      } else if (padLen === 2) {
-        normalized += '==';
-      } else if (padLen === 3) {
-        normalized += '=';
-      }
-      const binary = atob(normalized);
+      const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i);

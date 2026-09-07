@@ -70,7 +70,7 @@ interface EncryptionProviderProps {
   loginUsernameRef: React.RefObject<string | null>;
   getPeerHybridKeys: (peer: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string } | null>;
   getKeysOnDemand: () => Promise<any>;
-  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
+  findUser: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
 }
 
 export function useEncryptionProvider({
@@ -94,8 +94,10 @@ export function useEncryptionProvider({
   const activeAccountRef = useRef<string | null>(null);
 
   const rememberDiscoveryMaterial = (peer: string, material: any): void => {
+    const owner = activeAccountRef.current;
+    if (owner === null) throw new Error('Discovery material owner is unavailable');
+    rememberPeerDetectionKey(owner, String(peer), material.spoolDetectionKey);
     setBoundedPeerEntry(discoveryCacheRef.current, peer, material);
-    rememberPeerDetectionKey(String(peer), material.spoolDetectionKey);
   };
 
   useEffect(() => {
@@ -227,7 +229,6 @@ export function useEncryptionProvider({
       _reason: string,
       options?: { force?: boolean }
     ): Promise<any | null> => {
-      if (!findUser) return null;
       if (!peer) return null;
       const normalizedPeer = peer.trim().toLowerCase();
       if (!normalizedPeer) return null;
@@ -345,7 +346,7 @@ export function useEncryptionProvider({
         account,
         peerUsername,
         signalIdentity,
-      ).catch(() => false);
+      );
       if (!installed) {
         return null;
       }
@@ -368,7 +369,7 @@ export function useEncryptionProvider({
           identityBundleFingerprint: trusted.identityBundleFingerprint,
         });
       if (!remainsAuthorized) {
-        await signal.revokeTransparencyPeerIdentity(account, peerUsername).catch(() => false);
+        await signal.revokeTransparencyPeerIdentity(account, peerUsername);
         return null;
       }
       return {
@@ -413,7 +414,7 @@ export function useEncryptionProvider({
         if (!isCurrentOperation() || to === 'SERVER') {
           return to === 'SERVER' ? null : deny('stale-operation:entry');
         }
-        await keyTransparencyClient.restorePersistedAuthorizations(currentUser).catch(() => 0);
+        await keyTransparencyClient.restorePersistedAuthorizations(currentUser);
         if (!isCurrentOperation()) return deny('stale-operation:authorization-restore');
         let forceDiscoveryRefresh = false;
         const peerWasRevoked = isKeyTransparencyPeerRevoked(currentUser, to);
@@ -427,7 +428,7 @@ export function useEncryptionProvider({
             await clearPersistedDiscoveryMaterial(
               activeAccountRef.current,
               String(to).trim().toLowerCase()
-            ).catch(() => { });
+            );
           }
         }
 
@@ -445,14 +446,14 @@ export function useEncryptionProvider({
             cachedMaterial = await loadTrustedPersistedDiscoveryMaterial(
               activeAccountRef.current,
               normalizedTo
-            ).catch(() => null);
+            );
             if (!isCurrentOperation()) return deny('stale-operation');
             if (cachedMaterial) {
               rememberDiscoveryMaterial(resolvedUsername, cachedMaterial);
             }
           }
           if (cachedMaterial) {
-            const trustedCached = await resolveTrustedDiscoveryKeys(resolvedUsername, cachedMaterial).catch(() => null);
+            const trustedCached = await resolveTrustedDiscoveryKeys(resolvedUsername, cachedMaterial);
             if (!isCurrentOperation()) return deny('stale-operation');
             if (trustedCached) {
               peerKeys = {
@@ -462,7 +463,7 @@ export function useEncryptionProvider({
                 x25519PublicBase64: trustedCached.hybridKeys.x25519PublicBase64
               };
               if (cachedMaterial.fullBundle) {
-                const hasSession = await signal.hasSession(currentUser, resolvedUsername).catch(() => false);
+                const hasSession = await signal.hasSession(currentUser, resolvedUsername);
                 if (!isCurrentOperation()) return deny('stale-operation');
                 if (!hasSession) {
                   await processPeerBundle(resolvedUsername, cachedMaterial.fullBundle, 'early-hydration');
@@ -564,7 +565,7 @@ export function useEncryptionProvider({
 
             if (previousKyber && refreshedKyber && previousKyber !== refreshedKyber) {
               peerBundleInstalledRef.current.delete(`${currentUser}:${refreshPeer}`);
-              await signal.deleteAllSessions(currentUser, refreshPeer).catch(() => { });
+              await signal.deleteAllSessions(currentUser, refreshPeer);
               if (!isCurrentOperation()) return deny('stale-operation');
               preKeyPendingRef.current.delete(refreshPeer);
               if (refreshedMaterial.fullBundle) {
@@ -609,10 +610,10 @@ export function useEncryptionProvider({
               peerKeys = trustedCached.hybridKeys;
             }
             if (peerKeys && cached.fullBundle) {
-              const hasSession = await signal.hasSession(currentUser, resolvedUsername).catch(() => false);
+              const hasSession = await signal.hasSession(currentUser, resolvedUsername);
               if (!isCurrentOperation()) return deny('stale-operation');
               if (!hasSession) {
-                await processPeerBundle(resolvedUsername, cached.fullBundle, 'cache-fallback');
+                await processPeerBundle(resolvedUsername, cached.fullBundle, 'cache-hit');
                 if (!isCurrentOperation()) return deny('stale-operation');
               }
             }
@@ -636,7 +637,7 @@ export function useEncryptionProvider({
                 x25519PublicBase64: trustedDiscovery.hybridKeys.x25519PublicBase64
               };
               if (material.fullBundle) {
-                const hasSession = await signal.hasSession(currentUser, resolvedUsername).catch(() => false);
+                const hasSession = await signal.hasSession(currentUser, resolvedUsername);
                 if (!isCurrentOperation()) return deny('stale-operation');
                 if (!hasSession) {
                   await signal.processVerifiedPreKeyBundle(currentUser, resolvedUsername, material.fullBundle);
@@ -672,7 +673,7 @@ export function useEncryptionProvider({
               const restoredNativeKey = await signal.hasPeerStaticMlkemKey(
                 currentUser,
                 peer,
-              ).catch(() => false);
+              );
               if (!isCurrentOperation()) return { hasSession: false, isOwner: false };
               if (restoredNativeKey) {
                 setBoundedPeerEntry(peerBundleInstalledRef.current, installKey, true);
@@ -746,7 +747,7 @@ export function useEncryptionProvider({
                 const trustedCached = await resolveTrustedDiscoveryKeys(peer, cached);
                 if (!isCurrentOperation()) return false;
                 if (trustedCached) {
-                  const hasExistingSession = await signal.hasSession(currentUser, peer).catch(() => false);
+                  const hasExistingSession = await signal.hasSession(currentUser, peer);
                   if (!isCurrentOperation()) return false;
                   if (!hasExistingSession) {
                     await processPeerBundle(peer, cached.fullBundle, 'cached');
@@ -773,7 +774,7 @@ export function useEncryptionProvider({
                 return false;
               }
               rememberDiscoveryMaterial(peer, material);
-              const hasExistingSession = await signal.hasSession(currentUser, peer).catch(() => false);
+              const hasExistingSession = await signal.hasSession(currentUser, peer);
               if (!isCurrentOperation()) return false;
               if (!hasExistingSession) {
                 await signal.processVerifiedPreKeyBundle(currentUser, peer, material.fullBundle);
@@ -908,7 +909,7 @@ export function useEncryptionProvider({
           if (msg.includes('session') && msg.includes('not found')) {
             console.warn('[UnifiedTransport] Signal session lost, re-establishing');
             peerBundleInstalledRef.current.delete(`${currentUser}:${resolvedUsername}`);
-            await signal.deleteAllSessions(currentUser, resolvedUsername).catch(() => { });
+            await signal.deleteAllSessions(currentUser, resolvedUsername);
             return deny('signal-session-lost-during-encrypt');
           }
           throw err;

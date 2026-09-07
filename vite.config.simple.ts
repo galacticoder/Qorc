@@ -48,8 +48,6 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
       'lucide-react$': 'lucide-react/dist/esm/icons/index.js',
-      fs: path.resolve(__dirname, './src/lib/cryptography/browser-node-shim.ts'),
-      path: path.resolve(__dirname, './src/lib/cryptography/browser-node-shim.ts'),
     },
   },
   build: {

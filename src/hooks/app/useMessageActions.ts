@@ -16,17 +16,12 @@ interface MessageActionsProps {
       originalMessageId?: string,
     ) => Promise<void>;
   };
-  p2pMessaging: {
-    isPeerConnected: (peer: string) => boolean;
-    connectToPeer: (peer: string) => Promise<void>;
-  };
 }
 
 export function useMessageActions({
   selectedConversation,
   getOrCreateUser,
   messageSender,
-  p2pMessaging,
 }: MessageActionsProps) {
   const onSendMessage = useCallback(async (
     messageId: string,
@@ -46,10 +41,6 @@ export function useMessageActions({
       isCurrentUser: false,
     } as Message : undefined;
 
-    if (!p2pMessaging.isPeerConnected(selectedConversation)) {
-      void p2pMessaging.connectToPeer(selectedConversation).catch(() => {});
-    }
-
     try {
       await messageSender.handleSendMessage(
         targetUser,
@@ -63,7 +54,7 @@ export function useMessageActions({
       const retryable = /not ready|not connected|no p2p|connecting|establish|transport|not confirmed|session|encryption|account changed/i.test(detail);
       if (!retryable) toast.error(detail || 'Failed to send message', { duration: 5000 });
     }
-  }, [selectedConversation, getOrCreateUser, messageSender, p2pMessaging]);
+  }, [selectedConversation, getOrCreateUser, messageSender]);
 
   return { onSendMessage };
 }

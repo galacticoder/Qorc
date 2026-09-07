@@ -638,12 +638,14 @@ fn run_capture(
             return;
         }
     };
-    let actual_frame_rate = fraction_frame_rate(
+    let Some(actual_frame_rate) = fraction_frame_rate(
         parameters.interval.numerator,
         parameters.interval.denominator,
     )
-    .filter(|actual| (1..=60).contains(actual))
-    .unwrap_or(frame_rate.clamp(1, 60));
+    .filter(|actual| (1..=60).contains(actual)) else {
+        let _ = started.send(Err("camera returned an invalid frame rate".to_string()));
+        return;
+    };
     tracing::info!(
         width = format.width,
         height = format.height,
@@ -875,11 +877,9 @@ fn linux_frame_rate(
     height: u32,
     requested: u32,
 ) -> Option<u32> {
-    let intervals = device
-        .enum_frameintervals(fourcc, width, height)
-        .unwrap_or_default();
+    let intervals = device.enum_frameintervals(fourcc, width, height).ok()?;
     if intervals.is_empty() {
-        return Some(requested);
+        return None;
     }
     let mut frame_rates = Vec::new();
     for interval in intervals {
@@ -1039,12 +1039,13 @@ fn run_capture(
     }
     let mut stream_open = true;
     let mut sequence = 0u64;
-    let black = encode_black_frame(selected_resolution.width_x, selected_resolution.height_y);
-    if black.is_err() {
-        let _ = started.send(Err("camera frame encoder unavailable".to_string()));
-        return;
-    }
-    let black = black.unwrap_or_default();
+    let black = match encode_black_frame(selected_resolution.width_x, selected_resolution.height_y) {
+        Ok(black) => black,
+        Err(_) => {
+            let _ = started.send(Err("camera frame encoder unavailable".to_string()));
+            return;
+        }
+    };
     let _ = started.send(Ok(()));
     while !session.stop.load(Ordering::Acquire) {
         let enabled = session.enabled.load(Ordering::Acquire);

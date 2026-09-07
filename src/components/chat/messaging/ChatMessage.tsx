@@ -18,13 +18,9 @@ import { EventType } from "../../../lib/types/event-types.ts";
 import { SignalType } from "../../../lib/types/signal-types.ts";
 import { SecureCanvasText } from "./SecureCanvasText";
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
-import { createDownloadLink } from "../../../lib/utils/file-utils";
+import { createDownloadLink, parseCurrentVoiceNoteFilename } from "../../../lib/utils/file-utils";
 import { nativeMessageContent } from "../../../lib/tauri-bindings";
 import { MessageLinkPreviews } from "./MessageLinkPreview";
-
-interface ExtendedChatMessageProps extends ChatMessageProps {
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
-}
 
 interface SystemAction {
   readonly label: string;
@@ -85,7 +81,7 @@ const parseSystemMessage = (content: string, message: any, currentUsername?: str
   }
 };
 
-export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, getDisplayUsername: _getDisplayUsername, currentUsername, secureDB }) => {
+export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
   const effectiveReceipt = smartReceipt;
 
@@ -135,18 +131,15 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   const isVoiceNote = useMemo(() => {
     if (!isFileMessageType) return false;
-    const name = (message.filename || '').toLowerCase();
-    return name.includes('voice-note');
-  }, [isFileMessageType, message.filename]);
+    const metadata = parseCurrentVoiceNoteFilename(message.filename);
+    return metadata !== null && metadata.mimeType === message.mimeType;
+  }, [isFileMessageType, message.filename, message.mimeType]);
 
   const [loadFile, setLoadFile] = useState(false);
   useEffect(() => {
     if (!isFileMessageType) return;
     const node = bubbleRef.current;
-    if (!node || typeof IntersectionObserver === 'undefined') {
-      setLoadFile(true);
-      return;
-    }
+    if (!node) return;
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       setLoadFile(true);
@@ -403,8 +396,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                   <VoiceMessage
                     timestamp={timestamp}
                     isCurrentUser={safeIsCurrentUser}
-                    filename={message.filename}
-                    mimeType={message.mimeType}
+                    filename={message.filename!}
+                    mimeType={message.mimeType!}
                     messageId={message.id}
                     secureDB={secureDB}
                     onRendered={() => setIsContentRendered(true)}

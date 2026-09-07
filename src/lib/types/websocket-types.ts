@@ -23,10 +23,12 @@ export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   SignalType.ERROR,
   SignalType.SERVER_PUBLIC_KEY,
   SignalType.AUTH_FULL_SUCCESS,
+  SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED,
   SignalType.SEALED_ENVELOPE,
 ]);
 
 export const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
+  SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED,
   SignalType.SEALED_ENVELOPE,
 ]);
 
@@ -75,9 +77,14 @@ export interface HandshakeCallbacks {
   getTorAdaptedTimeout: (baseTimeout: number) => number;
   onSessionEstablished: (session: SessionKeyMaterial) => void;
   onHandshakeError: (error: Error) => void;
+  onDiagnostic: (
+    phase: string,
+    details?: Record<string, unknown>,
+    level?: 'info' | 'warn' | 'error'
+  ) => void;
   onAuthenticatedServerTime: (serverTime: number) => void;
   isConnected: () => boolean | Promise<boolean>;
-  getTrustedNow?: () => number;
+  getTrustedNow: () => number;
 }
 
 export interface HeartbeatCallbacks {

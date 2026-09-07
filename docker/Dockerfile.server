@@ -32,7 +32,7 @@ COPY server/package*.json ./
 
 RUN node scripts/install-deps.cjs --server
 
-RUN npm install
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY server/ ./server/
 COPY shared/ ./shared/

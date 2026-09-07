@@ -23,7 +23,7 @@ export interface RoutingHeaderInput {
   to: string;
   from: string;
   type: string;
-  timestamp?: number;
+  timestamp: number;
 }
 
 export interface RoutingHeaderBuildInput extends RoutingHeaderInput {
@@ -101,8 +101,6 @@ export type WorkerRequestType =
   | 'opaque.finishRegistration'
   | 'opaque.startLogin'
   | 'opaque.finishLogin'
-  | 'opaque.startOTLogin'
-  | 'opaque.finishOTLogin'
   | 'argon2.hash'
   | 'argon2.verify'
   | 'aead.encrypt'
@@ -127,10 +125,6 @@ export interface WorkerRequestMessage {
   passwordBytes?: Uint8Array;
   blindingFactor?: Uint8Array;
   serverResponse?: any;
-  anonymitySetSize?: number;
-  myIndex?: number;
-  myPrivKey?: Uint8Array;
-  otRecord?: { ct: Uint8Array; masked: Uint8Array };
   evaluatedElement?: Uint8Array;
   serverNonce?: Uint8Array;
   authChannelBinding?: Uint8Array;

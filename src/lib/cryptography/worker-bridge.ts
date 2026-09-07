@@ -23,7 +23,6 @@ import { SignalType } from '../types/signal-types';
 import { constantTimeBytesEqual } from '../utils/byte-utils';
 import { ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE } from '../config/audiences';
 import {
-  PRIVATE_AUTH_ANONYMITY_SET_SIZE,
   WORKER_AEAD_MAX_AAD_BYTES,
   WORKER_AEAD_MAX_INPUT_BYTES,
   validateArgon2HashParams,
@@ -43,7 +42,7 @@ import PQWorkerUrl from './post-quantum-worker?worker&url';
 const EXPECTED_AUTH_TOKEN_BYTES = 32;
 
 function spawnPostQuantumWorker(): Worker {
-  const trustedTypesAvailable = typeof window !== 'undefined' && !!(window as any).trustedTypes;
+  const trustedTypesAvailable = !!(window as any).trustedTypes;
   if (!trustedTypesAvailable) return new PQWorker();
 
   const workerPolicy = (window as any)._workerPolicy;
@@ -266,28 +265,6 @@ const isOpaqueFinishLoginResult = (result: unknown): result is { success: boolea
     ));
 };
 
-const isOpaqueFinishOTLoginResult = (result: unknown): result is {
-  success: boolean;
-  exportKey?: Uint8Array;
-  authMessage?: Uint8Array;
-} => {
-  return isOpaqueFinishLoginResult(result);
-};
-
-const isOpaqueStartOTLoginResult = (result: unknown): result is { pubKeys: Uint8Array[]; blindedElement: Uint8Array; blindingFactor: Uint8Array; myPrivKey: Uint8Array } => {
-  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
-  return hasExactKeys(result, ['pubKeys', 'blindedElement', 'blindingFactor', 'myPrivKey'])
-    && Array.isArray(result.pubKeys)
-    && result.pubKeys.length === PRIVATE_AUTH_ANONYMITY_SET_SIZE
-    && result.pubKeys.every((key) => key instanceof Uint8Array && key.length === PQ_KEM_PUBLIC_KEY_SIZE)
-    && result.blindedElement instanceof Uint8Array
-    && result.blindedElement.length === 32
-    && result.blindingFactor instanceof Uint8Array
-    && result.blindingFactor.length === 32
-    && result.myPrivKey instanceof Uint8Array
-    && result.myPrivKey.length === PQ_KEM_SECRET_KEY_SIZE;
-};
-
 const isArgon2HashResult = (result: unknown): result is Argon2HashResult => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   if (!hasExactKeys(result, ['hash', 'encoded'])) return false;
@@ -346,10 +323,6 @@ const validateWorkerResult = (expectedType: WorkerRequestMessage['type'], result
       return isOpaqueStartLoginResult(result);
     case 'opaque.finishLogin':
       return isOpaqueFinishLoginResult(result);
-    case 'opaque.startOTLogin':
-      return isOpaqueStartOTLoginResult(result);
-    case 'opaque.finishOTLogin':
-      return isOpaqueFinishOTLoginResult(result);
     case 'argon2.hash':
       return isArgon2HashResult(result);
     case 'argon2.verify':
@@ -370,9 +343,6 @@ function operationTimeoutMs(type: WorkerRequestMessage['type']): number {
     case 'argon2.hash':
     case 'argon2.verify':
       return 300_000;
-    case 'opaque.startOTLogin':
-    case 'opaque.finishOTLogin':
-      return 180_000;
     case 'pp.generateTokenBatch':
     case 'pp.unblindTokens':
     case 'aead.encrypt':
@@ -406,7 +376,7 @@ class WorkerChannel {
   ) {}
 
   private validateWorker(): void {
-    if (this.worker || typeof Worker === 'undefined' || this.restarting || this.disabled) {
+    if (this.worker || this.restarting || this.disabled) {
       return;
     }
     try {
@@ -550,7 +520,7 @@ class WorkerChannel {
 
   private async getAuthToken(): Promise<string> {
     if (!this.authToken) {
-      if (typeof Worker === 'undefined' || this.restarting) {
+      if (this.restarting) {
         throw new PostQuantumWorkerInfrastructureError('Worker not available or restarting');
       }
       const start = Date.now();
@@ -629,12 +599,8 @@ export class PostQuantumWorker {
   private static authToken: Uint8Array | null = null;
   private static stabilityTimer: ReturnType<typeof setTimeout> | null = null;
 
-  static supportsWorkers(): boolean {
-    return typeof Worker !== 'undefined';
-  }
-
   private static validateWorker(): void {
-    if (PostQuantumWorker.worker || typeof Worker === 'undefined' || PostQuantumWorker.restarting || PostQuantumWorker.disabled) {
+    if (PostQuantumWorker.worker || PostQuantumWorker.restarting || PostQuantumWorker.disabled) {
       return;
     }
 
@@ -834,7 +800,7 @@ export class PostQuantumWorker {
 
   private static async getAuthToken(): Promise<string> {
     if (!PostQuantumWorker.authToken) {
-      if (!PostQuantumWorker.supportsWorkers() || PostQuantumWorker.restarting) {
+      if (PostQuantumWorker.restarting) {
         throw new PostQuantumWorkerInfrastructureError('Worker not available or restarting');
       }
 
@@ -855,46 +821,34 @@ export class PostQuantumWorker {
   }
 
   static async generateKemKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
+    PostQuantumWorker.validateWorker();
+
+    if (!PostQuantumWorker.worker) {
+      throw new PostQuantumWorkerInfrastructureError('Worker not available');
     }
 
-    try {
-      PostQuantumWorker.validateWorker();
+    const id = PostQuantumRandom.randomUUID();
+    const auth = await PostQuantumWorker.getAuthToken();
+    const request: WorkerRequestMessage = {
+      id,
+      type: 'kem.generateKeyPair',
+      auth
+    };
 
-      if (!PostQuantumWorker.worker) {
-        throw new PostQuantumWorkerInfrastructureError('Worker not available');
+    return await new Promise((resolve, reject) => {
+      PostQuantumWorker.setPendingWithTimeout(id, resolve, reject, request.type);
+      try {
+        PostQuantumWorker.postRequest(request);
+      } catch (error) {
+        const entry = PostQuantumWorker.pending.get(id);
+        if (entry) clearTimeout(entry.timeoutId);
+        PostQuantumWorker.pending.delete(id);
+        reject(error);
       }
-
-      const id = PostQuantumRandom.randomUUID();
-      const auth = await PostQuantumWorker.getAuthToken();
-      const request: WorkerRequestMessage = {
-        id,
-        type: 'kem.generateKeyPair',
-        auth
-      };
-
-      return await new Promise((resolve, reject) => {
-        PostQuantumWorker.setPendingWithTimeout(id, resolve, reject, request.type);
-        try {
-          PostQuantumWorker.postRequest(request);
-        } catch (error) {
-          const entry = PostQuantumWorker.pending.get(id);
-          if (entry) clearTimeout(entry.timeoutId);
-          PostQuantumWorker.pending.delete(id);
-          reject(error);
-        }
-      });
-    } catch (err) {
-      throw err;
-    }
+    });
   }
 
   static async kemEncapsulate(publicKey: Uint8Array): Promise<{ ciphertext: Uint8Array; sharedSecret: Uint8Array }> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
-    }
-
     PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
@@ -921,10 +875,6 @@ export class PostQuantumWorker {
   }
 
   static async kemDecapsulate(ciphertext: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
-    }
-
     PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
@@ -953,10 +903,6 @@ export class PostQuantumWorker {
   }
 
   static async generateSigKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
-    }
-
     PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
@@ -982,9 +928,6 @@ export class PostQuantumWorker {
   }
 
   static async sigSign(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
-    }
     const response = await PostQuantumWorker.sigChannel.request<{ signature: Uint8Array }>(
       'sig.sign',
       { message, secretKey },
@@ -994,9 +937,6 @@ export class PostQuantumWorker {
   }
 
   static async sigVerify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
-    if (!PostQuantumWorker.supportsWorkers()) {
-      throw new PostQuantumWorkerInfrastructureError('Web Workers not supported');
-    }
     const response = await PostQuantumWorker.sigChannel.request<{ verified: boolean }>(
       'sig.verify',
       { message, publicKey, signature },
@@ -1005,7 +945,7 @@ export class PostQuantumWorker {
     return response.verified;
   }
 
-  static async ppGenerateTokenBatch(count: number, purpose: string = ACCOUNT_AUTH_PURPOSE): Promise<{ blindedTokens: Uint8Array[]; tokenSecrets: any[] }> {
+  static async ppGenerateTokenBatch(count: number, purpose: string): Promise<{ blindedTokens: Uint8Array[]; tokenSecrets: any[] }> {
     PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
       throw new Error('Worker not available');
@@ -1181,91 +1121,6 @@ export class PostQuantumWorker {
       passwordBytes: password,
       blindingFactor,
       serverResponse: boundedServerResponse,
-      authChannelBinding,
-      auth
-    };
-
-    return await new Promise((resolve, reject) => {
-      PostQuantumWorker.setPendingWithTimeout(id, resolve, reject, request.type);
-      try {
-        PostQuantumWorker.postRequest(request);
-      } catch (error) {
-        const entry = PostQuantumWorker.pending.get(id);
-        if (entry) clearTimeout(entry.timeoutId);
-        PostQuantumWorker.pending.delete(id);
-        reject(error);
-      }
-    });
-  }
-
-  static async opaqueStartOTLogin(password: Uint8Array, anonymitySetSize: number, myIndex: number): Promise<{ pubKeys: Uint8Array[]; blindedElement: Uint8Array; blindingFactor: Uint8Array; myPrivKey: Uint8Array }> {
-    validateOpaquePassword(password);
-    if (
-      anonymitySetSize !== PRIVATE_AUTH_ANONYMITY_SET_SIZE ||
-      !Number.isInteger(myIndex) ||
-      myIndex < 0 ||
-      myIndex >= PRIVATE_AUTH_ANONYMITY_SET_SIZE
-    ) {
-      throw new Error('Invalid private-auth slot');
-    }
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
-
-    const id = PostQuantumRandom.randomUUID();
-    const auth = await PostQuantumWorker.getAuthToken();
-    const request: WorkerRequestMessage = {
-      id,
-      type: 'opaque.startOTLogin',
-      passwordBytes: password,
-      anonymitySetSize,
-      myIndex,
-      auth
-    };
-
-    return await new Promise((resolve, reject) => {
-      PostQuantumWorker.setPendingWithTimeout(id, resolve, reject, request.type);
-      try {
-        PostQuantumWorker.postRequest(request);
-      } catch (error) {
-        const entry = PostQuantumWorker.pending.get(id);
-        if (entry) clearTimeout(entry.timeoutId);
-        PostQuantumWorker.pending.delete(id);
-        reject(error);
-      }
-    });
-  }
-
-  static async opaqueFinishOTLogin(
-    password: Uint8Array,
-    blindingFactor: Uint8Array,
-    myPrivKey: Uint8Array,
-    otRecord: { ct: Uint8Array; masked: Uint8Array },
-    evaluatedElement: Uint8Array,
-    serverNonce: Uint8Array,
-    authChannelBinding: Uint8Array
-  ): Promise<{
-    success: boolean;
-    exportKey?: Uint8Array;
-    authMessage?: Uint8Array;
-  }> {
-    validateOpaquePassword(password);
-    if (!(authChannelBinding instanceof Uint8Array) || authChannelBinding.length !== 64) {
-      throw new Error('Invalid authentication channel binding');
-    }
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
-
-    const id = PostQuantumRandom.randomUUID();
-    const auth = await PostQuantumWorker.getAuthToken();
-    const request: WorkerRequestMessage = {
-      id,
-      type: 'opaque.finishOTLogin',
-      passwordBytes: password,
-      blindingFactor,
-      myPrivKey,
-      otRecord,
-      evaluatedElement,
-      serverNonce,
       authChannelBinding,
       auth
     };

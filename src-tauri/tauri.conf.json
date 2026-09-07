@@ -29,7 +29,7 @@
         "decorations": true,
         "transparent": false,
         "focus": true,
-        "devtools": true,
+        "devtools": false,
         "shadow": true,
         "backgroundThrottling": "disabled"
       }

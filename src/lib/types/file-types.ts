@@ -1,4 +1,5 @@
 import type { SecureDB } from '../database/secureDB';
+import type { HybridEnvelope } from './crypto-types';
 
 // Extended file state for incoming transfers
 export interface ExtendedFileState {
@@ -17,6 +18,7 @@ export interface ExtendedFileState {
   transportAckedIndices?: Set<number>;
   transportAckInFlight?: { chunkIndex: number; ackFor: string };
   transportAckPending?: Map<number, string>;
+  transportAckCheckpoint?: { receivedCount: number; queuedAt: number };
   transportAckCanceled?: boolean;
   transportAckDurablyCommitted?: boolean;
   persistenceFailureCount?: number;
@@ -28,7 +30,7 @@ export interface FileChunkPayload {
   chunkIndex: number;
   totalChunks: number;
   chunkData: string;
-  envelope: Record<string, unknown>;
+  envelope: HybridEnvelope;
   filename: string;
   fileSize: number;
   chunkSize: number;
@@ -48,7 +50,7 @@ export type FilePreviewKind = 'image' | 'audio' | 'video' | 'voice';
 
 // useFileUrl hook options
 export interface UseFileUrlOptions {
-  secureDB: SecureDB | null;
+  secureDB: SecureDB;
   fileId: string | undefined;
   mimeType?: string;
   enabled?: boolean;

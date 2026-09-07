@@ -339,18 +339,13 @@ export function revokeKeyTransparencyPeerAuthorization(
   peer: string,
   contact: { rootCommitment: string; version: number },
 ): void {
-  let key: string;
-  try {
-    key = authorizationKey(account, peer);
-  } catch {
-    return;
-  }
+  const key = authorizationKey(account, peer);
   if (
     !isKeyTransparencyHash(contact?.rootCommitment) ||
     !Number.isSafeInteger(contact?.version) ||
     contact.version < 1 ||
     contact.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
-  ) return;
+  ) throw new Error('Invalid revoked key-transparency contact state');
   authorizedPeerKeys.delete(key);
   revokedPeers.delete(key);
   revokedPeers.set(key, {
@@ -387,12 +382,7 @@ export function exportKeyTransparencyAuthorizations(account: string): {
   }>;
   revoked: Array<{ peer: string; rootCommitment: string; version: number }>;
 } {
-  let normalizedAccount: string;
-  try {
-    normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
-  } catch {
-    return { authorized: [], revoked: [] };
-  }
+  const normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
   const prefix = `${normalizedAccount}\0`;
   const authorized: any[] = [];
   for (const [key, entry] of authorizedPeerKeys) {
@@ -440,78 +430,95 @@ export function importKeyTransparencyAuthorizations(
     revoked: ReadonlyArray<{ peer: string; rootCommitment: string; version: number }>;
   },
 ): number {
-  let normalizedAccount: string;
-  try {
-    normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
-  } catch {
-    return 0;
-  }
+  const normalizedAccount = canonicalAuthUsername(account, 'verified key-transparency account');
+  if (
+    !snapshot ||
+    !Array.isArray(snapshot.authorized) ||
+    !Array.isArray(snapshot.revoked) ||
+    snapshot.authorized.length > MAX_AUTHORIZED_PEERS ||
+    snapshot.revoked.length > MAX_AUTHORIZED_PEERS
+  ) throw new Error('Invalid key-transparency authorization snapshot');
   const now = Date.now();
-
+  const validatedRevoked: Array<{ peer: string; rootCommitment: string; version: number }> = [];
   const revokedNow = new Set<string>();
-  for (const entry of snapshot?.revoked || []) {
-    try {
-      const peer = canonicalAuthUsername(entry.peer, 'verified key-transparency peer');
-      if (
-        !isKeyTransparencyHash(entry.rootCommitment) ||
-        !Number.isSafeInteger(entry.version) ||
-        entry.version < 1 ||
-        entry.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
-      ) continue;
-      const key = authorizationKey(normalizedAccount, peer);
-      revokedNow.add(peer);
-      authorizedPeerKeys.delete(key);
-      revokedPeers.set(key, {
-        rootCommitment: entry.rootCommitment,
-        version: entry.version,
-      });
-    } catch {
-      continue;
-    }
+  for (const entry of snapshot.revoked) {
+    const peer = canonicalAuthUsername(entry.peer, 'verified key-transparency peer');
+    if (
+      peer !== entry.peer ||
+      revokedNow.has(peer) ||
+      !isKeyTransparencyHash(entry.rootCommitment) ||
+      !Number.isSafeInteger(entry.version) ||
+      entry.version < 1 ||
+      entry.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
+    ) throw new Error('Invalid key-transparency revocation snapshot');
+    revokedNow.add(peer);
+    validatedRevoked.push({
+      peer,
+      rootCommitment: entry.rootCommitment,
+      version: entry.version,
+    });
+  }
+
+  const validatedAuthorized: Array<typeof snapshot.authorized[number]> = [];
+  const authorizedNow = new Set<string>();
+  for (const entry of snapshot.authorized) {
+    const peer = canonicalAuthUsername(entry.peer, 'verified key-transparency peer');
+    if (
+      peer !== entry.peer ||
+      authorizedNow.has(peer) ||
+      revokedNow.has(peer) ||
+      !Number.isSafeInteger(entry.verifiedAt) ||
+      entry.verifiedAt <= 0 ||
+      entry.verifiedAt > now ||
+      !isValidKyberPublicKeyBase64(entry.kyberPublicBase64) ||
+      !isValidDilithiumPublicKeyBase64(entry.dilithiumPublicBase64) ||
+      !isValidX25519PublicKeyBase64(entry.x25519PublicBase64) ||
+      !isKeyTransparencyHash(entry.rootCommitment) ||
+      !Number.isSafeInteger(entry.version) ||
+      entry.version < 1 ||
+      entry.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
+    ) throw new Error('Invalid key-transparency authorization snapshot');
+    validatedAuthorized.push({
+      ...entry,
+      peer,
+      peerCertificateFingerprint: fingerprint(entry.peerCertificateFingerprint, true),
+      identityRootFingerprint: fingerprint(entry.identityRootFingerprint, true),
+      identityBundleFingerprint: fingerprint(entry.identityBundleFingerprint, true),
+    });
+    authorizedNow.add(peer);
+  }
+
+  for (const entry of validatedRevoked) {
+    const key = authorizationKey(normalizedAccount, entry.peer);
+    authorizedPeerKeys.delete(key);
+    revokedPeers.set(key, {
+      rootCommitment: entry.rootCommitment,
+      version: entry.version,
+    });
   }
 
   let restored = 0;
-  for (const entry of snapshot?.authorized || []) {
-    try {
-      const peer = canonicalAuthUsername(entry.peer, 'verified key-transparency peer');
-      if (revokedNow.has(peer)) continue;
-      if (
-        !Number.isSafeInteger(entry.verifiedAt) ||
-        entry.verifiedAt <= 0 ||
-        entry.verifiedAt > now
-      ) continue;
-      if (
-        !isValidKyberPublicKeyBase64(entry.kyberPublicBase64) ||
-        !isValidDilithiumPublicKeyBase64(entry.dilithiumPublicBase64) ||
-        !isValidX25519PublicKeyBase64(entry.x25519PublicBase64) ||
-        !isKeyTransparencyHash(entry.rootCommitment) ||
-        !Number.isSafeInteger(entry.version) ||
-        entry.version < 1 ||
-        entry.version > KEY_TRANSPARENCY_MAX_LOG_SIZE
-      ) continue;
-      const key = authorizationKey(normalizedAccount, peer);
-      if (revokedPeers.has(key)) continue;
-      const authorizationGeneration = nextAuthorizationGeneration;
-      nextAuthorizationGeneration = nextAuthorizationGeneration >= Number.MAX_SAFE_INTEGER
-        ? 1
-        : nextAuthorizationGeneration + 1;
-      authorizedPeerKeys.delete(key);
-      authorizedPeerKeys.set(key, {
-        verifiedAt: entry.verifiedAt,
-        authorizationGeneration,
-        rootCommitment: entry.rootCommitment,
-        version: entry.version,
-        kyberPublicBase64: entry.kyberPublicBase64,
-        dilithiumPublicBase64: entry.dilithiumPublicBase64,
-        x25519PublicBase64: entry.x25519PublicBase64,
-        peerCertificateFingerprint: fingerprint(entry.peerCertificateFingerprint, true),
-        identityRootFingerprint: fingerprint(entry.identityRootFingerprint, true),
-        identityBundleFingerprint: fingerprint(entry.identityBundleFingerprint, true),
-      });
-      restored += 1;
-    } catch {
-      continue;
-    }
+  for (const entry of validatedAuthorized) {
+    const key = authorizationKey(normalizedAccount, entry.peer);
+    if (revokedPeers.has(key)) continue;
+    const authorizationGeneration = nextAuthorizationGeneration;
+    nextAuthorizationGeneration = nextAuthorizationGeneration >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : nextAuthorizationGeneration + 1;
+    authorizedPeerKeys.delete(key);
+    authorizedPeerKeys.set(key, {
+      verifiedAt: entry.verifiedAt,
+      authorizationGeneration,
+      rootCommitment: entry.rootCommitment,
+      version: entry.version,
+      kyberPublicBase64: entry.kyberPublicBase64,
+      dilithiumPublicBase64: entry.dilithiumPublicBase64,
+      x25519PublicBase64: entry.x25519PublicBase64,
+      peerCertificateFingerprint: entry.peerCertificateFingerprint,
+      identityRootFingerprint: entry.identityRootFingerprint,
+      identityBundleFingerprint: entry.identityBundleFingerprint,
+    });
+    restored += 1;
   }
   while (authorizedPeerKeys.size > MAX_AUTHORIZED_PEERS) {
     const oldest = authorizedPeerKeys.keys().next().value as string | undefined;

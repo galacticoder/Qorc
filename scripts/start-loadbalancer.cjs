@@ -2,14 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { parseActiveServers } = require('./loadbalancer-tui-state.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
-const serverDir = path.join(repoRoot, 'server');
 const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
 const edgeRuntimeRoot = '/opt/qorc-edge';
 const edgeRuntimeLibDir = path.join(edgeRuntimeRoot, 'lib');
@@ -21,7 +18,6 @@ const redisClientModuleUrl = pathToFileURL(
 const redisKeysModuleUrl = pathToFileURL(
   path.join(repoRoot, 'server', 'config', 'redis-keys.js')
 ).href;
-
 if (process.platform !== 'linux') {
   console.error('[LB] Native load-balancer deployment supports only Linux.');
   process.exit(1);
@@ -31,32 +27,28 @@ delete process.env.LD_PRELOAD;
 process.env.LD_LIBRARY_PATH = edgeRuntimeLibDir;
 
 function loadDotEnv(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) return;
-    const text = fs.readFileSync(filePath, 'utf8');
-    for (const rawLine of text.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
-      const eq = line.indexOf('=');
-      if (eq === -1) continue;
-      const key = line.slice(0, eq).trim();
-      let val = line.slice(eq + 1);
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      if (!(key in process.env)) process.env[key] = val;
+  if (!fs.existsSync(filePath)) throw new Error(`Environment file not found: ${filePath}`);
+  const text = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1);
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
     }
-  } catch { }
+    if (!(key in process.env)) process.env[key] = val;
+  }
 }
 
 loadDotEnv(path.join(repoRoot, '.env'));
 
-if (!process.env.REDIS_URL) process.env.REDIS_URL = 'rediss://127.0.0.1:6379';
-
 const CONFIG = {
   NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true',
-  HAPROXY_HTTPS_PORT: process.env.HAPROXY_HTTPS_PORT || '8443',
-  HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT || '8404',
+  HAPROXY_HTTPS_PORT: process.env.HAPROXY_HTTPS_PORT,
+  HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT,
   SERVER_ACTIVE_TIMEOUT_MS: Math.min(
     Math.max(parseInt(process.env.LB_SERVER_ACTIVE_TIMEOUT_MS || '45000', 10) || 45000, 10000),
     300000
@@ -70,24 +62,26 @@ if (!process.env.REDIS_QUIET_ERRORS) {
 function log(...args) { console.log('[LB]', ...args); }
 function logErr(...args) { console.error('[LB]', ...args); }
 
-async function validateTuiDependencies() {
-  const hasRezi = ['@rezi-ui/core', '@rezi-ui/node'].every((packageName) => {
-    try {
-      require.resolve(packageName, { paths: [serverDir] });
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  if (hasRezi) return;
+function wipeByteBuffers(...values) {
+  for (const value of values) {
+    try { value?.fill?.(0); } catch { }
+  }
+}
 
-  log('Installing terminal UI dependencies ...');
-  await new Promise((resolve, reject) => {
-    const child = spawn('npm', ['install', '--omit=dev'], { cwd: serverDir, stdio: 'inherit' });
-    child.on('exit', (code) => code === 0
-      ? resolve()
-      : reject(new Error(`npm install failed: ${code}`)));
-  });
+function wipeCommandKeypair(keypair) {
+  for (const family of Object.values(keypair || {})) {
+    wipeByteBuffers(family?.publicKey, family?.secretKey);
+  }
+}
+
+async function validateTuiDependencies() {
+  for (const packageName of ['@rezi-ui/core', '@rezi-ui/node']) {
+    try {
+      require.resolve(packageName, { paths: [path.join(repoRoot, 'server')] });
+    } catch {
+      throw new Error(`Missing terminal UI dependency: ${packageName}`);
+    }
+  }
 }
 
 class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } }
@@ -128,26 +122,12 @@ function readProcessMetrics(pid) {
   });
 }
 
-async function runNodeScript(scriptPath, args = [], env = process.env) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, [scriptPath, ...args], { stdio: 'inherit', env });
-    p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`${path.basename(scriptPath)} failed: ${code}`)));
-  });
-}
-
 async function hasOqsProvider(env) {
   return new Promise((resolve) => {
     const p = spawn('openssl', ['list', '-providers'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
     p.stdout.on('data', (d) => out += String(d));
     p.on('exit', () => resolve(/oqs/i.test(out)));
-  });
-}
-
-async function testHaproxyConfig(haproxyBin, cfgPath, env) {
-  return new Promise((resolve) => {
-    const p = spawn(haproxyBin, ['-c', '-f', cfgPath], { env, stdio: ['ignore', 'ignore', 'ignore'] });
-    p.on('exit', (code) => resolve(code === 0));
   });
 }
 
@@ -169,13 +149,30 @@ async function isPinnedHaproxyVersion(haproxyBin) {
 
 async function checkQuantumReady() {
   const localConf = path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
-  const hapCfgPath = path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
   const oqsModule = bundledOqsModule;
   if (!fs.existsSync(oqsModule)) {
     throw new Error(`Bundled OQS provider is unavailable: ${oqsModule}`);
   }
   process.env.OQS_PROVIDER_MODULE = oqsModule;
   process.env.OPENSSL_MODULES = path.dirname(oqsModule);
+  fs.writeFileSync(localConf, [
+    'openssl_conf = openssl_init',
+    '',
+    '[openssl_init]',
+    'providers = provider_sect',
+    '',
+    '[provider_sect]',
+    'default = default_sect',
+    'oqsprovider = oqs_sect',
+    '',
+    '[default_sect]',
+    'activate = 1',
+    '',
+    '[oqs_sect]',
+    'module = ${ENV::OQS_PROVIDER_MODULE}',
+    'activate = 1',
+    ''
+  ].join('\n'), { encoding: 'utf8', mode: 0o600 });
   const env = {
     ...process.env,
     OPENSSL_CONF: localConf,
@@ -183,40 +180,20 @@ async function checkQuantumReady() {
     OPENSSL_MODULES: path.dirname(oqsModule)
   };
 
-  let needSetup = !fs.existsSync(localConf) || !fs.existsSync(hapCfgPath);
-  if (!needSetup) {
-    const ok = await hasOqsProvider(env);
-    if (!ok) needSetup = true;
-  }
-  if (needSetup) {
-    log('Generating edge TLS configuration from the bundled crypto runtime...');
-    await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
-  }
-
   if (!await hasOqsProvider(env)) {
     throw new Error('Bundled OQS provider failed to load');
   }
 
   process.env.OPENSSL_CONF = localConf;
-  process.env.LB_OPENSSL_CONF = localConf;
-  process.env.LB_HAPROXY_CFG = hapCfgPath;
 }
 
 async function checkHaproxyBuiltOrReady() {
-  const localConf = process.env.LB_OPENSSL_CONF || path.join(repoRoot, 'server', 'config', 'openssl-oqs.cnf');
-  const hapCfgPath = process.env.LB_HAPROXY_CFG || path.join(repoRoot, 'server', 'config', 'haproxy-quantum.cfg');
-  const env = { ...process.env, OPENSSL_CONF: localConf };
   const bundledBin = bundledHaproxyBin;
   if (!fs.existsSync(bundledBin)) {
     throw new Error(`Bundled HAProxy executable is unavailable: ${bundledBin}`);
   }
-  const [versionOk, configOk] = await Promise.all([
-    isPinnedHaproxyVersion(bundledBin),
-    testHaproxyConfig(bundledBin, hapCfgPath, env),
-  ]);
+  const versionOk = await isPinnedHaproxyVersion(bundledBin);
   if (!versionOk) throw new Error('Bundled HAProxy version does not match 3.2.21');
-  if (!configOk) throw new Error('Bundled HAProxy rejected the required PQ TLS configuration');
-  process.env.LB_HAPROXY_BIN = bundledBin;
 }
 
 class ReziLBTUI {
@@ -319,41 +296,50 @@ class ReziLBTUI {
   async sendEncryptedCommand(commandObj) {
     const crypto = require('crypto');
     const path = require('path');
+    const temporaryBytes = [];
 
     try {
       const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
       const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
       const { x25519 } = await import('@noble/curves/ed25519.js');
-      const cryptoModule = await import(path.join(repoRoot, 'server', 'crypto', 'unified-crypto.js'));
-      const { CryptoUtils } = cryptoModule;
+      const [{ CryptoUtils }, { deriveQuantumAeadKey }, { PROTOCOL_KEYS }] = await Promise.all([
+        import(path.join(repoRoot, 'server', 'crypto', 'unified-crypto.js')),
+        import(path.join(repoRoot, 'server', 'crypto', 'aead-key-derivation.js')),
+        import(path.join(repoRoot, 'server', 'config', 'protocol-keys.js')),
+      ]);
 
+      if (commandObj?.cmd !== 'reload') throw new Error('Unsupported load-balancer command');
       const keypair = await this.getKeypair();
-      const payloadBytes = Buffer.from(JSON.stringify(commandObj), 'utf8');
+      const command = {
+        cmd: 'reload',
+        commandId: crypto.randomUUID(),
+        issuedAt: Date.now(),
+      };
+      const payloadBytes = Buffer.from(JSON.stringify(command), 'utf8');
+      temporaryBytes.push(payloadBytes);
 
       const ephemeralX25519Secret = crypto.randomBytes(32);
       const ephemeralX25519Public = x25519.getPublicKey(ephemeralX25519Secret);
       const x25519SharedSecret = x25519.getSharedSecret(ephemeralX25519Secret, keypair.x25519.publicKey);
+      temporaryBytes.push(ephemeralX25519Secret, ephemeralX25519Public, x25519SharedSecret);
 
       const kemEnc = ml_kem1024.encapsulate(keypair.kyber.publicKey);
       const kyberSharedSecret = kemEnc.sharedSecret;
-      const kyberCiphertext = kemEnc.ciphertext || kemEnc.cipherText;
+      const kyberCiphertext = kemEnc.cipherText;
+      temporaryBytes.push(kyberSharedSecret, kyberCiphertext);
 
       const rawSecret = Buffer.concat([
         Buffer.from(kyberSharedSecret),
         Buffer.from(x25519SharedSecret),
       ]);
-      const info = new TextEncoder().encode('lb-command-encryption-v2');
-      const aeadKey = await CryptoUtils.KDF.quantumHKDF(
-        new Uint8Array(rawSecret),
-        CryptoUtils.Hash.shake256(rawSecret, 64),
-        info,
-        32
-      );
+      const aeadKey = await deriveQuantumAeadKey(rawSecret, PROTOCOL_KEYS.LB_COMMAND_ENCRYPTION);
+      temporaryBytes.push(rawSecret, aeadKey);
 
       const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
       const nonce = CryptoUtils.Random.generateRandomBytes(36);
-      const aad = new TextEncoder().encode('lb-command-v2');
+      const aad = new TextEncoder().encode(PROTOCOL_KEYS.LB_COMMAND_AAD);
       const { ciphertext, tag } = aead.encrypt(payloadBytes, nonce, aad);
+      temporaryBytes.push(nonce, aad, ciphertext, tag);
 
       const encryptedPackage = {
         kyberCiphertext: Buffer.from(kyberCiphertext).toString('base64'),
@@ -365,6 +351,7 @@ class ReziLBTUI {
 
       const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
       const signature = ml_dsa87.sign(packageBytes, keypair.dilithium.secretKey);
+      temporaryBytes.push(packageBytes, signature);
 
       const payload = {
         version: 2,
@@ -379,6 +366,8 @@ class ReziLBTUI {
       });
     } catch (error) {
       throw new Error(`Failed to send encrypted command: ${error.message}`);
+    } finally {
+      wipeByteBuffers(...temporaryBytes);
     }
   }
 
@@ -542,7 +531,7 @@ class ReziLBTUI {
       servers: this.stats.servers,
       serverList: [...this.stats.serverList],
       onionUrl: this.stats.onionUrl,
-      httpsPort: this.stats.lbPort || CONFIG.HAPROXY_HTTPS_PORT,
+      httpsPort: CONFIG.HAPROXY_HTTPS_PORT,
       statsPort: CONFIG.HAPROXY_STATS_PORT,
       heartbeatWindow: `${Math.round(CONFIG.SERVER_ACTIVE_TIMEOUT_MS / 1000)} seconds`,
       dataState: this.stats.dataState,
@@ -561,6 +550,8 @@ class ReziLBTUI {
   }
 
   stop() {
+    wipeCommandKeypair(this._keypair);
+    this._keypair = null;
     if (this.stopPromise) return this.stopPromise;
     this.run = false;
     if (this.interval) clearInterval(this.interval);
@@ -601,31 +592,26 @@ async function checkHaproxyCertFile() {
   const certPath = process.env.TLS_CERT_PATH;
   const keyPath = process.env.TLS_KEY_PATH;
   const haproxyCertPath = path.join(repoRoot, 'server', 'config', 'certs', 'cert.pem');
+  const backendCaPath = path.join(repoRoot, 'server', 'config', 'certs', 'backend-ca.pem');
 
-  if (certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    try {
-      const certContent = fs.readFileSync(certPath, 'utf8');
-      const keyContent = fs.readFileSync(keyPath, 'utf8');
-      const combined = certContent + '\n' + keyContent;
-
-      const certDir = path.dirname(haproxyCertPath);
-      if (!fs.existsSync(certDir)) {
-        fs.mkdirSync(certDir, { recursive: true });
-      }
-
-      fs.writeFileSync(haproxyCertPath, combined, 'utf8');
-      log(`[CERT] Updated HAProxy cert.pem from ${path.basename(certPath)}`);
-    } catch (e) {
-      logErr(`[CERT] Failed to update HAProxy cert.pem: ${e.message}`);
-    }
-  } else {
-    log(`[CERT] TLS_CERT_PATH/TLS_KEY_PATH not set or missing, skipping cert.pem update`);
-  }
+  if (!certPath || !keyPath) throw new Error('TLS_CERT_PATH and TLS_KEY_PATH are required');
+  const resolvedCertPath = path.resolve(repoRoot, certPath);
+  const resolvedKeyPath = path.resolve(repoRoot, keyPath);
+  const certContent = fs.readFileSync(resolvedCertPath, 'utf8');
+  const keyContent = fs.readFileSync(resolvedKeyPath, 'utf8');
+  const combined = certContent + '\n' + keyContent;
+  const certDir = path.dirname(haproxyCertPath);
+  fs.mkdirSync(certDir, { recursive: true });
+  fs.writeFileSync(haproxyCertPath, combined, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(haproxyCertPath, 0o600);
+  fs.writeFileSync(backendCaPath, certContent, { encoding: 'utf8', mode: 0o644 });
+  fs.chmodSync(backendCaPath, 0o644);
+  log(`[CERT] Updated HAProxy cert.pem from ${path.basename(resolvedCertPath)}`);
 }
 
 async function checkHaproxyCerts() {
-  await checkHaproxyCertFile();
   await checkQuantumReady();
+  await checkHaproxyCertFile();
   await checkHaproxyBuiltOrReady();
 }
 
@@ -634,173 +620,57 @@ async function checkStatsCredentials() {
   const keysFile = path.join(repoRoot, 'server', 'config', '.haproxy-keys.enc');
   const secureCredentialsPath = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
   const loadSecureCredentials = () => import(pathToFileURL(secureCredentialsPath).href);
+  const username = typeof process.env.HAPROXY_STATS_USERNAME === 'string'
+    ? process.env.HAPROXY_STATS_USERNAME.trim()
+    : '';
+  const password = typeof process.env.HAPROXY_STATS_PASSWORD === 'string'
+    ? process.env.HAPROXY_STATS_PASSWORD
+    : '';
 
-  const hasEnv = process.env.HAPROXY_STATS_USERNAME && process.env.HAPROXY_STATS_PASSWORD;
-  const hasKeys = fs.existsSync(keysFile);
+  if (!username || !password) {
+    throw new Error('HAPROXY_STATS_USERNAME and HAPROXY_STATS_PASSWORD must be set in .env.');
+  }
 
-  if (hasEnv && hasKeys) return;
+  process.env.HAPROXY_STATS_USERNAME = username;
 
-  if (hasEnv && !hasKeys) {
+  const { saveCredentials, verifyCredentials } = await loadSecureCredentials();
+  const credentialsExist = fs.existsSync(credsFile);
+  const keysExist = fs.existsSync(keysFile);
+  if (credentialsExist !== keysExist) {
+    throw new Error('HAProxy credential material is incomplete');
+  }
+  if (credentialsExist) {
     try {
-      log('[SECURE-CREDS] Generating missing command encryption keys...');
-      const { saveCredentials } = await loadSecureCredentials();
-      await saveCredentials(
-        process.env.HAPROXY_STATS_USERNAME,
-        process.env.HAPROXY_STATS_PASSWORD
-      );
-      if (fs.existsSync(keysFile)) return;
-    } catch (e) {
-      logErr('[SECURE-CREDS] Failed to generate keys: ' + e.message);
-    }
-  }
-  const canPrompt = process.stdin.isTTY;
-
-  // Unlock existing creds
-  if (fs.existsSync(credsFile) && fs.existsSync(keysFile)) {
-    if (!canPrompt) {
-      logErr('HAProxy stats credentials exist but cannot prompt to unlock in non-interactive mode.');
-      logErr('Provide HAPROXY_STATS_USERNAME and HAPROXY_STATS_PASSWORD in env.');
-      logErr('Example: export HAPROXY_STATS_USERNAME=your_username');
-      logErr('         export HAPROXY_STATS_PASSWORD=your_password');
-      process.exit(1);
-    }
-
-    if (CONFIG.NO_GUI && !process.stdin.isTTY) {
-      logErr('Cannot prompt for credentials in NO_GUI mode without a TTY.');
-      logErr('Run in foreground or provide credentials via environment variables.');
-      process.exit(1);
-    }
-
-    const readline = require('readline');
-    const askLine = (q) => new Promise((resolve) => { const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (ans) => { rl.close(); resolve(ans); }); });
-    const askPassword = (prompt) => new Promise((resolve) => {
-      process.stdout.write(prompt);
-      const wasRaw = process.stdin.isRaw;
-      process.stdin.setRawMode(true);
-      process.stdin.setEncoding('utf8');
-      process.stdin.resume();
-      let buf = '';
-      const onData = (c) => {
-        c = String(c);
-        if (c === '\n' || c === '\r' || c === '\u0004') {
-          process.stdout.write('\n');
-          process.stdin.removeListener('data', onData);
-          process.stdin.setRawMode(wasRaw);
-          resolve(buf);
-          return;
-        }
-        buf += c;
-      };
-      process.stdin.on('data', onData);
-    });
-
-    const user = await askLine('Enter HAProxy stats username: ');
-    const pass = await askPassword('Password: ');
-    try {
-      const { loadCredentials } = await loadSecureCredentials();
-      const credentials = await loadCredentials({ username: user, password: pass });
-      if (credentials?.username && credentials?.password) {
-        process.env.HAPROXY_STATS_USERNAME = credentials.username;
-        process.env.HAPROXY_STATS_PASSWORD = credentials.password;
-        return;
+      if (!await verifyCredentials(username, password)) {
+        throw new Error('Stored credentials do not match the configured environment');
       }
-      logErr('Failed to unlock HAProxy stats credentials.');
-      process.exit(1);
-    } catch (e) {
-      const stderr = String(e?.stderr || '');
-      if (/Username does not match encrypted keyset/i.test(stderr)) {
-        logErr('Username does not match stored credentials.');
-      } else if (/decipher|decrypt|auth|decrypt/i.test(stderr)) {
-        logErr('Incorrect password.');
-      } else {
-        logErr('Failed to unlock credentials.');
-      }
-      process.exit(1);
+      return;
+    } catch (error) {
+      throw new Error(`HAProxy stats credentials in .env cannot unlock the stored credential material: ${error.message}`);
     }
   }
 
-  // Create new creds
-  if (!canPrompt) {
-    const user = 'admin';
-    const pass = crypto.randomBytes(32).toString('base64');
-    process.env.HAPROXY_STATS_USERNAME = user;
-    process.env.HAPROXY_STATS_PASSWORD = pass;
-    try {
-      const { saveCredentials } = await loadSecureCredentials();
-      await saveCredentials(user, pass);
-    } catch { }
-    return;
+  log('[SECURE-CREDS] Generating command encryption keys from .env credentials...');
+  await saveCredentials(username, password);
+  if (!fs.existsSync(credsFile) || !fs.existsSync(keysFile)) {
+    throw new Error('HAProxy credential material was not created');
   }
-
-  const rl2 = require('readline').createInterface({ input: process.stdin, output: process.stdout });
-  const ask2 = (q) => new Promise((res) => rl2.question(q, (ans) => res(ans)));
-  let user = await ask2('Enter HAProxy stats username (default: admin): ');
-  if (!user) user = 'admin';
-
-  process.stdout.write('Enter a strong password (leave empty to generate): ');
-  const pass1 = await new Promise((resolve) => {
-    const wasRaw = process.stdin.isRaw;
-    process.stdin.setRawMode(true);
-    process.stdin.setEncoding('utf8');
-    process.stdin.resume();
-    let buf = '';
-    const onData = (c) => {
-      c = String(c);
-      if (c === '\n' || c === '\r' || c === '\u0004') {
-        process.stdout.write('\n');
-        process.stdin.removeListener('data', onData);
-        process.stdin.setRawMode(wasRaw);
-        resolve(buf);
-        return;
-      }
-      buf += c;
-    };
-    process.stdin.on('data', onData);
-  });
-  let password = pass1;
-  if (!password) {
-    password = crypto.randomBytes(32).toString('base64');
-    console.log(`Generated password: ${password}`);
-  } else {
-    process.stdout.write('Confirm password: ');
-    const pass2 = await new Promise((resolve) => {
-      const wasRaw = process.stdin.isRaw;
-      process.stdin.setRawMode(true);
-      process.stdin.setEncoding('utf8');
-      process.stdin.resume();
-      let buf = '';
-      const onData = (c) => {
-        c = String(c);
-        if (c === '\n' || c === '\r' || c === '\u0004') {
-          process.stdout.write('\n');
-          process.stdin.removeListener('data', onData);
-          process.stdin.setRawMode(wasRaw);
-          resolve(buf);
-          return;
-        }
-        buf += c;
-      };
-      process.stdin.on('data', onData);
-    });
-    if (password !== pass2) {
-      logErr('Passwords do not match. Aborting.');
-      process.exit(1);
-    }
-  }
-
-  process.env.HAPROXY_STATS_USERNAME = user;
-  process.env.HAPROXY_STATS_PASSWORD = password;
-  try {
-    const { saveCredentials } = await loadSecureCredentials();
-    await saveCredentials(user, password);
-  } catch (e) {
-    logErr('Failed to encrypt credentials');
-    process.exit(1);
-  }
-  rl2.close();
 }
 
 (async () => {
+  if (!process.env.REDIS_URL) throw new Error('REDIS_URL is required');
+  const redisPassword = process.env.REDIS_PASSWORD;
+  if (typeof redisPassword !== 'string' || redisPassword.length < 32 || !/^[A-Za-z0-9_-]+$/.test(redisPassword)) {
+    throw new Error('REDIS_PASSWORD must contain at least 32 base64url characters');
+  }
+  for (const [name, value] of [
+    ['HAPROXY_HTTPS_PORT', CONFIG.HAPROXY_HTTPS_PORT],
+    ['HAPROXY_STATS_PORT', CONFIG.HAPROXY_STATS_PORT],
+  ]) {
+    if (!/^\d{1,5}$/.test(value || '') || Number(value) < 1 || Number(value) > 65535) {
+      throw new Error(`${name} must be an integer from 1 through 65535`);
+    }
+  }
   if (!fs.existsSync(lbScript)) {
     logErr('auto-loadbalancer not found at server/load-balancer/auto-loadbalancer.js');
     process.exit(1);
@@ -811,16 +681,11 @@ async function checkStatsCredentials() {
   await checkHaproxyCerts();
   await checkStatsCredentials();
 
-  const hapBin = process.env.LB_HAPROXY_BIN;
-  if (!hapBin) throw new Error('Bundled HAProxy runtime was not selected');
-
-  if (!process.env.HAPROXY_CERT_PATH) {
-    process.env.HAPROXY_CERT_PATH = path.join(repoRoot, 'server', 'config', 'certs');
+  if (!['127.0.0.1', '0.0.0.0'].includes(process.env.HAPROXY_STATS_BIND_ADDRESS)) {
+    throw new Error('HAPROXY_STATS_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0');
   }
-  const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
-  process.env.HAPROXY_STATS_SOCKET = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
 
-  const env = { ...process.env, REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT), HAPROXY_STATS_SOCKET: process.env.HAPROXY_STATS_SOCKET };
+  const env = { ...process.env, REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT) };
 
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: 'inherit' });
@@ -839,19 +704,13 @@ async function checkStatsCredentials() {
 
     child.on('exit', (code) => {
       setTimeout(() => {
-        process.exit(code || 0);
+        process.exit(Number.isInteger(code) ? code : 1);
       }, 100);
     });
     return;
   }
 
   const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-
-  let exitedImmediately = false;
-  let capturedOutput = [];
-  const immediateCheck = setTimeout(() => {
-    exitedImmediately = false;
-  }, 1000);
 
   const ui = new ReziLBTUI(child.pid);
 
@@ -860,90 +719,23 @@ async function checkStatsCredentials() {
     if (!line.trim()) return;
     ui.add(line);
     push(line);
-    if (exitedImmediately) capturedOutput.push(line);
   };
   const stdoutLines = createLineCollector(collectLine);
   const stderrLines = createLineCollector(collectLine);
   child.stdout.on('data', (chunk) => stdoutLines.push(chunk));
   child.stderr.on('data', (chunk) => stderrLines.push(chunk));
   child.on('exit', async (code) => {
-    clearTimeout(immediateCheck);
     stdoutLines.flush();
     stderrLines.flush();
     await ui.stop();
 
-    if (code === 0 && exitedImmediately !== false) {
-      const hasExistingMsg = capturedOutput.some(l => /already running/i.test(l));
-      if (hasExistingMsg) {
-        // Extract existing PID
-        const pidMatch = capturedOutput.join('\n').match(/PID:\s*(\d+)/);
-        const existingPid = pidMatch ? parseInt(pidMatch[1], 10) : null;
-
-        if (existingPid) {
-          console.log(`\n[INFO] Stopping existing load balancer (PID: ${existingPid})...`);
-          try {
-            process.kill(existingPid, 'SIGTERM');
-            setTimeout(async () => {
-              console.log('[INFO] Restarting with TUI...\n');
-              const restartChild = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-              const restartUi = new ReziLBTUI(restartChild.pid);
-              const restartLast = [];
-              const collectRestartLine = (line) => {
-                if (!line.trim()) return;
-                restartUi.add(line);
-                restartLast.push(line);
-                if (restartLast.length > MAX) restartLast.shift();
-              };
-              const restartStdoutLines = createLineCollector(collectRestartLine);
-              const restartStderrLines = createLineCollector(collectRestartLine);
-              restartChild.stdout.on('data', (chunk) => restartStdoutLines.push(chunk));
-              restartChild.stderr.on('data', (chunk) => restartStderrLines.push(chunk));
-              restartChild.on('exit', async (c) => {
-                restartStdoutLines.flush();
-                restartStderrLines.flush();
-                await restartUi.stop();
-                if (c !== 0) {
-                  console.error(`\n[ERROR] Load balancer exited with code ${c}`);
-                  if (restartLast.length) {
-                    console.error('[ERROR] Last output:');
-                    for (const l of restartLast) console.error('  ' + l);
-                  }
-                }
-                process.exit(c || 0);
-              });
-              await restartUi.start();
-            }, 500);
-            return;
-          } catch (e) {
-            console.error('[ERROR] Failed to stop existing instance:', e.message);
-          }
-        }
-      }
-
-      if (capturedOutput.length) {
-        console.log();
-        for (const l of capturedOutput) console.log(l);
-        console.log();
-      }
-      console.log('[INFO] Press Ctrl+C to exit');
-      if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(false); } catch { }
-        process.stdin.pause();
-      }
-      const exitHandler = () => { console.log('\n'); process.exit(0); };
-      process.on('SIGINT', exitHandler);
-      process.on('SIGTERM', exitHandler);
-      setInterval(() => { }, 1000);
-      return;
-    }
-
-    if (code !== 0) {
-      console.error(`\n[ERROR] Load balancer exited with code ${code}`);
+    const exitCode = Number.isInteger(code) ? code : 1;
+    if (exitCode !== 0) {
+      console.error(`\n[ERROR] Load balancer exited with code ${exitCode}`);
       if (last.length) { console.error('[ERROR] Last output:'); for (const l of last) console.error('  ' + l); }
     }
-    process.exit(code || 0);
+    process.exit(exitCode);
   });
 
-  exitedImmediately = true;
   await ui.start();
 })();

@@ -122,7 +122,7 @@ type VisualRendererState = {
 const mediaKinds: CallTelemetryMediaKind[] = ['audio', 'video', 'screen'];
 
 function monotonicNow(): number {
-    return typeof performance !== 'undefined' ? performance.now() : Date.now();
+    return performance.now();
 }
 
 function round(value: number): number {
@@ -306,23 +306,21 @@ export class CallTelemetry {
         private readonly direction: CallState['direction'],
         private readonly callType: CallState['type'],
         private readonly connection: SecureConnection,
-        private readonly stream: SecureStream | null,
-        private readonly onKeyFrameRequest?: (kind: 'video' | 'screen') => void
+        private readonly stream: SecureStream,
+        private readonly onKeyFrameRequest: (kind: 'video' | 'screen') => void
     ) {
         for (const kind of mediaKinds) {
             this.interval.set(kind, createMediaInterval());
             this.totals.set(kind, createMediaTotals());
         }
-        if (stream) void this.receiveLoop();
+        void this.receiveLoop();
     }
 
     start(): void {
         if (this.reporting || this.stopped) return;
         this.reporting = true;
         void this.sendProbe();
-        if (this.stream) {
-            this.probeTimer = setInterval(() => { void this.sendProbe(); }, PROBE_INTERVAL_MS);
-        }
+        this.probeTimer = setInterval(() => { void this.sendProbe(); }, PROBE_INTERVAL_MS);
         this.nextEventLoopSampleAt = monotonicNow() + EVENT_LOOP_SAMPLE_INTERVAL_MS;
         this.eventLoopTimer = setInterval(() => {
             const now = monotonicNow();
@@ -433,7 +431,7 @@ export class CallTelemetry {
             kind,
             side,
             ...event,
-            visualLanes: this.connection.getAudioLaneTelemetry?.() ?? null,
+            visualLanes: this.connection.getAudioLaneTelemetry(),
         })}`);
     }
 
@@ -499,7 +497,7 @@ export class CallTelemetry {
 
     requestKeyFrame(kind: 'video' | 'screen'): void {
         this.noteDiscontinuity(kind);
-        if (!this.stream || !this.stream.writable || this.stopped) return;
+        if (!this.stream.writable || this.stopped) return;
         const now = monotonicNow();
         const previous = this.lastKeyFrameRequestAt.get(kind);
         if (previous !== undefined && now - previous < 2_000) return;
@@ -601,11 +599,11 @@ export class CallTelemetry {
             sampleWindowMs: Math.round(windowMs),
             runtime: {
                 eventLoopLagMs: summarize(this.eventLoopLagSamples),
-                visibilityState: typeof document === 'undefined' ? null : document.visibilityState,
+                visibilityState: document.visibilityState,
             },
             transport: {
                 state: this.connection.state,
-                telemetryStreamAvailable: Boolean(this.stream),
+                telemetryStreamAvailable: true,
                 rttMs: {
                     ...rtt,
                     latest: this.latestRttMs === null ? null : round(this.latestRttMs),
@@ -619,7 +617,7 @@ export class CallTelemetry {
                 probeFailures: this.probeFailures,
                 totalProbeFailures: this.totalProbeFailures,
                 telemetryProtocolErrors: this.protocolErrors,
-                audioLanes: this.connection.getAudioLaneTelemetry?.() ?? null,
+                audioLanes: this.connection.getAudioLaneTelemetry(),
                 connectionAgeMs: this.connection.connectedAt === null
                     ? null
                     : Math.max(0, Date.now() - this.connection.connectedAt),
@@ -647,7 +645,6 @@ export class CallTelemetry {
     }
 
     private async receiveLoop(): Promise<void> {
-        if (!this.stream) return;
         try {
             for await (const frame of this.stream) {
                 try {
@@ -656,7 +653,7 @@ export class CallTelemetry {
                     if (probe.type === 'key-frame-request') {
                         this.interval.get(probe.kind)!.keyFrameRequestsReceived += 1;
                         this.totals.get(probe.kind)!.keyFrameRequestsReceived += 1;
-                        this.onKeyFrameRequest?.(probe.kind);
+                        this.onKeyFrameRequest(probe.kind);
                     } else if (probe.type === 'request') {
                         const receivedAt = Date.now();
                         const response = encodeCallTelemetryProbe({
@@ -686,7 +683,7 @@ export class CallTelemetry {
     }
 
     private async sendProbe(): Promise<void> {
-        if (!this.reporting || this.stopped || !this.stream || this.stream.closed) return;
+        if (!this.reporting || this.stopped || this.stream.closed) return;
         if (this.pendingProbe) return;
 
         const randomId = PostQuantumRandom.randomBytes(PROBE_ID_BYTES);

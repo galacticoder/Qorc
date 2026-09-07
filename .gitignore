@@ -114,10 +114,17 @@ workers/ypir/tests/
 scripts/test-*.cjs
 **/__tests__/
 
-# Rust executable sources are not generated build output.
 !workers/ypir/src/bin/
 !workers/ypir/src/bin/qorc-pir-client.rs
 !workers/ypir/src/bin/qorc-pir-worker.rs
 **/*.test.*
 **/*.spec.*
 commit-message.txt
+
+!server/test/
+server/test/*
+!server/test/account-auth-handler-adversarial.test.js
+!server/test/account-credential-encoding.test.js
+!server/test/docker-build-context.test.js
+!server/test/native-context-menu-policy.test.js
+!server/test/user-registration-database.test.js
