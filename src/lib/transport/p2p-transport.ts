@@ -95,7 +95,7 @@ const isRetryableInitialBridgeError = (error: unknown): boolean => {
 };
 
 interface P2PKeyConfirmation {
-    version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION;
+    version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL;
     type: 'confirm';
     from: string;
     to: string;
@@ -1310,7 +1310,7 @@ class P2PConnection implements SecureConnection {
     // Normalize handshake message
     private normalizeHandshakeMessage(json: any): any {
         if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
-        if (json.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION || (json.type !== 'init' && json.type !== 'response')) return null;
+        if (json.version !== PROTOCOL_KEYS.NOISE_PROTOCOL || (json.type !== 'init' && json.type !== 'response')) return null;
         const expectedKeys = (json.type === 'init'
             ? ['ephemeralKyberPublic', 'ephemeralX25519Public', 'from', 'kemCiphertext', 'sessionId', 'signature', 'signerPublicKey', 'timestamp', 'to', 'type', 'version']
             : ['ephemeralX25519Public', 'from', 'kemCiphertext', 'sessionId', 'signature', 'signerPublicKey', 'timestamp', 'to', 'type', 'version'])
@@ -1353,7 +1353,7 @@ class P2PConnection implements SecureConnection {
         return {
             from: json.from,
             to: json.to,
-            version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+            version: PROTOCOL_KEYS.NOISE_PROTOCOL,
             type: json.type,
             sessionId: json.sessionId,
             timestamp: json.timestamp,
@@ -1370,7 +1370,7 @@ class P2PConnection implements SecureConnection {
             throw new Error('Invalid P2P key confirmation frame');
         }
         return {
-            version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+            version: PROTOCOL_KEYS.NOISE_PROTOCOL,
             type: 'confirm',
             from: this.localPeerId,
             to: this.peerId,
@@ -1384,7 +1384,7 @@ class P2PConnection implements SecureConnection {
         const json = value as Record<string, unknown>;
         if (Object.keys(json).sort().join(',') !== 'frame,from,sessionId,to,type,version') return null;
         if (
-            json.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION ||
+            json.version !== PROTOCOL_KEYS.NOISE_PROTOCOL ||
             json.type !== 'confirm' ||
             json.from !== this.peerId ||
             json.to !== this.localPeerId ||
@@ -1395,7 +1395,7 @@ class P2PConnection implements SecureConnection {
         if (json.frame instanceof Uint8Array) {
             if (json.frame.byteLength < 44 || json.frame.byteLength > 512) return null;
             return {
-                version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+                version: PROTOCOL_KEYS.NOISE_PROTOCOL,
                 type: 'confirm',
                 from: json.from,
                 to: json.to,
@@ -1421,7 +1421,7 @@ class P2PConnection implements SecureConnection {
                 return null;
             }
             return {
-                version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+                version: PROTOCOL_KEYS.NOISE_PROTOCOL,
                 type: 'confirm',
                 from: json.from,
                 to: json.to,
@@ -2956,7 +2956,7 @@ export class P2PTransport implements SecureTransport {
                 'version'
             ].sort().join(',');
             if (Object.keys(candidate).sort().join(',') !== expectedKeys) return null;
-            if (candidate.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION) return null;
+            if (candidate.version !== PROTOCOL_KEYS.NOISE_PROTOCOL) return null;
             if (typeof candidate.sessionId !== 'string' || !/^[a-f0-9]{32}$/.test(candidate.sessionId)) return null;
             if (!Number.isSafeInteger(candidate.timestamp)) return null;
             const from = candidate.from.trim();

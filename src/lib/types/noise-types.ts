@@ -33,7 +33,7 @@ export interface OwnKeys {
 
 // Handshake Message
 export interface HandshakeMessage {
-    version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION;
+    version: typeof PROTOCOL_KEYS.NOISE_PROTOCOL;
     type: 'init' | 'response';
     from: string;
     to: string;

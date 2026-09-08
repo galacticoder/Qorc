@@ -17,8 +17,6 @@ const ONION_AUDIO_VIRTUAL_PORT: u16 = 9_736;
 const ONION_DIAL_TIMEOUT_SECS: u64 = 45;
 const ONION_PUBLISH_RETRY_SECS: u64 = 5;
 const ONION_PUBLISH_RETRY_MAX_SECS: u64 = 120;
-const AUDIO_LANE_OFFER_PREFIX: &[u8] = b"QORC-AUDIO-LANE-OFFER-v2\0";
-const AUDIO_LANE_PREAMBLE_PREFIX: &[u8] = b"QORC-AUDIO-LANE-v2\0";
 const AUDIO_LANE_TOKEN_BYTES: usize = 32;
 const AUDIO_LANE_TARGET_COUNT: usize = 4;
 const AUDIO_LANE_ACTIVE_COUNT: usize = 1;
@@ -247,17 +245,17 @@ impl OnionEndpoint {
             accepted = self.audio_listener.accept() => {
                 let (mut stream, _peer) = accepted.ok()?;
                 let _ = stream.set_nodelay(true);
-                let preamble_len = AUDIO_LANE_PREAMBLE_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES;
+                let preamble_len = crate::protocol_keys::AUDIO_LANE_PREAMBLE_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES;
                 let mut preamble = vec![0u8; preamble_len];
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     stream.read_exact(&mut preamble),
                 ).await.ok()?.ok()?;
-                if !preamble.starts_with(AUDIO_LANE_PREAMBLE_PREFIX) {
+                if !preamble.starts_with(crate::protocol_keys::AUDIO_LANE_PREAMBLE_PREFIX) {
                     return None;
                 }
                 let mut token = [0u8; AUDIO_LANE_TOKEN_BYTES];
-                token.copy_from_slice(&preamble[AUDIO_LANE_PREAMBLE_PREFIX.len()..]);
+                token.copy_from_slice(&preamble[crate::protocol_keys::AUDIO_LANE_PREAMBLE_PREFIX.len()..]);
                 let sequence = INBOUND_CONNECTION_SEQ.fetch_add(1, Ordering::Relaxed);
                 Some(IncomingConnection::AudioLane(
                     token,
@@ -717,13 +715,13 @@ fn is_realtime_visual_frame(buf: &[u8]) -> bool {
 }
 
 fn parse_audio_lane_offer(buf: &[u8]) -> Option<[u8; AUDIO_LANE_TOKEN_BYTES]> {
-    if buf.len() != AUDIO_LANE_OFFER_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES
-        || !buf.starts_with(AUDIO_LANE_OFFER_PREFIX)
+    if buf.len() != crate::protocol_keys::AUDIO_LANE_OFFER_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES
+        || !buf.starts_with(crate::protocol_keys::AUDIO_LANE_OFFER_PREFIX)
     {
         return None;
     }
     let mut token = [0u8; AUDIO_LANE_TOKEN_BYTES];
-    token.copy_from_slice(&buf[AUDIO_LANE_OFFER_PREFIX.len()..]);
+    token.copy_from_slice(&buf[crate::protocol_keys::AUDIO_LANE_OFFER_PREFIX.len()..]);
     Some(token)
 }
 
@@ -773,7 +771,7 @@ fn is_allowed_preauth_frame(value: &serde_json::Value) -> bool {
     }
     debug_assert!(COMMON.iter().all(|key| expected.contains(key)));
 
-    if string_field("version") != Some(crate::protocol_keys::NOISE_PROTOCOL_VERSION) {
+    if string_field("version") != Some(crate::protocol_keys::NOISE_PROTOCOL) {
         return false;
     }
 
@@ -2132,17 +2130,20 @@ impl IrohWorker {
                             }
                         })?;
                     let mut preamble = Vec::with_capacity(
-                        AUDIO_LANE_PREAMBLE_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES,
+                        crate::protocol_keys::AUDIO_LANE_PREAMBLE_PREFIX.len()
+                            + AUDIO_LANE_TOKEN_BYTES,
                     );
-                    preamble.extend_from_slice(AUDIO_LANE_PREAMBLE_PREFIX);
+                    preamble.extend_from_slice(crate::protocol_keys::AUDIO_LANE_PREAMBLE_PREFIX);
                     preamble.extend_from_slice(&token);
                     connection
                         .send_preamble(&preamble)
                         .await
                         .map_err(|_| "preamble-send".to_string())?;
-                    let mut offer =
-                        Vec::with_capacity(AUDIO_LANE_OFFER_PREFIX.len() + AUDIO_LANE_TOKEN_BYTES);
-                    offer.extend_from_slice(AUDIO_LANE_OFFER_PREFIX);
+                    let mut offer = Vec::with_capacity(
+                        crate::protocol_keys::AUDIO_LANE_OFFER_PREFIX.len()
+                            + AUDIO_LANE_TOKEN_BYTES,
+                    );
+                    offer.extend_from_slice(crate::protocol_keys::AUDIO_LANE_OFFER_PREFIX);
                     offer.extend_from_slice(&token);
                     primary
                         .send_frame(&offer)
@@ -3892,7 +3893,9 @@ impl P2PTransportHandler {
                 Ok(endpoint_url)
             }
             Ok(Ok(Err(error))) => Err(QorcError::Network(error)),
-            Ok(Err(_)) | Err(_) => Err(QorcError::Network("P2P worker did not respond".to_string())),
+            Ok(Err(_)) | Err(_) => {
+                Err(QorcError::Network("P2P worker did not respond".to_string()))
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 import { shouldAttemptDiscovery } from './discovery-utils';
 import { extractX25519FromSignalBundle } from './peer-certificate-utils';
-import { validateCertifiedPeerBundleV3 } from './certified-identity-utils';
+import { validateCertifiedPeerBundle } from './certified-identity-utils';
 import {
   captureKeyTransparencyPeerAuthorization,
   getKeyTransparencyAuthorizedPeerState,
@@ -134,7 +134,7 @@ async function validateCertifiedDiscoveryMaterial(
   if (!isKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername)) {
     return { valid: false, reason: 'KEY_TRANSPARENCY_NOT_VERIFIED' };
   }
-  const certified = await validateCertifiedPeerBundleV3(material?.certifiedPeerBundle, {
+  const certified = await validateCertifiedPeerBundle(material?.certifiedPeerBundle, {
     targetHandle: peerUsername,
     publicKeys: material?.publicKeys,
     fullBundle: observedFullBundle ?? material?.fullBundle,

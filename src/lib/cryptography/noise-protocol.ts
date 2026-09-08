@@ -192,7 +192,7 @@ export class PQSession {
                 throw new Error('Native P2P signer returned an invalid signature');
             }
             const message: HandshakeMessage = {
-                version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+                version: PROTOCOL_KEYS.NOISE_PROTOCOL,
                 type: 'init',
                 from: localPeerId,
                 to: peerId,
@@ -239,7 +239,7 @@ export class PQSession {
             message = messageSnapshot;
             expectedSignerPublicKey = expectedSignerSnapshot;
             const replayGeneration = acceptedInitiatorHandshakeGeneration;
-            if (message.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION || message.type !== 'init') {
+            if (message.version !== PROTOCOL_KEYS.NOISE_PROTOCOL || message.type !== 'init') {
                 throw new Error('Invalid handshake message');
             }
             if (message.from !== peerId || message.to !== localPeerId) {
@@ -351,7 +351,7 @@ export class PQSession {
                     throw new Error('Native P2P signer returned an invalid signature');
                 }
                 const response: HandshakeMessage = {
-                    version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+                    version: PROTOCOL_KEYS.NOISE_PROTOCOL,
                     type: 'response',
                     from: localPeerId,
                     to: peerId,
@@ -421,7 +421,7 @@ export class PQSession {
             response = responseSnapshot;
             expectedSignerPublicKey = expectedSignerSnapshot;
 
-            if (response.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION || response.type !== 'response') {
+            if (response.version !== PROTOCOL_KEYS.NOISE_PROTOCOL || response.type !== 'response') {
                 throw new Error('Invalid handshake response');
             }
 
@@ -574,7 +574,7 @@ export class PQSession {
             keyMaterial = PostQuantumHash.deriveKey(
                 combined,
                 transcriptSalt,
-                `${PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION}:directional-session-keys`,
+                `${PROTOCOL_KEYS.NOISE_PROTOCOL}:directional-session-keys`,
                 64
             );
 
@@ -763,7 +763,7 @@ export class PQSession {
         const prior = priorHandshakeHash || new Uint8Array(0);
         if (prior.length !== 0 && prior.length !== 32) throw new Error('Invalid prior handshake hash');
         const header = new TextEncoder().encode(
-            `${PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION}:${type}:${from}:${to}:${sessionId}:${timestamp}`
+            `${PROTOCOL_KEYS.NOISE_PROTOCOL}:${type}:${from}:${to}:${sessionId}:${timestamp}`
         );
         const result = new Uint8Array(
             header.length + prior.length + ephemeralKyberKey.length + kemCiphertext.length + ephemeralX25519Key.length
@@ -820,7 +820,7 @@ export class PQSession {
         )
             throw new Error('Invalid Noise transcript context');
         const responseHash = this.hashHandshakeMessage(response, initiatorHash);
-        const domain = new TextEncoder().encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION}${PROTOCOL_KEYS.NOISE_COMPLETE_TRANSCRIPT_SUFFIX}`);
+        const domain = new TextEncoder().encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL}${PROTOCOL_KEYS.NOISE_COMPLETE_TRANSCRIPT_SUFFIX}`);
         const material = new Uint8Array(
             domain.length +
                 initiatorHash.length +
@@ -887,7 +887,7 @@ export class PQSession {
     private static validateHandshakeMessage(message: HandshakeMessage, expectedType: 'init' | 'response'): void {
         if (
             !message ||
-            message.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION ||
+            message.version !== PROTOCOL_KEYS.NOISE_PROTOCOL ||
             message.type !== expectedType ||
             typeof message.from !== 'string' ||
             !AUTH_USERNAME_REGEX.test(message.from) ||

@@ -31,6 +31,8 @@ import {
 } from '../server/utils/crypto-consts.js';
 import { hasExactPlainObjectKeys, isSafeJsonTree } from '../server/utils/validation.js';
 import { envInt } from '../server/utils/env.js';
+import { PROTOCOL_KEYS } from '../server/config/protocol-keys.js';
+import { REDIS_KEYS } from '../server/config/redis-keys.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,15 +59,6 @@ const ED25519_KEY_BYTES = 32;
 const ADMIN_VERIFY_MAX_INFLIGHT = 2;
 const ADMIN_VERIFY_MAX_PER_MINUTE = envInt('ADMIN_VERIFY_MAX_PER_MINUTE', 120, 10, 10_000);
 let adminVerificationsInflight = 0;
-
-// Redis keys
-const REDIS_KEYS = {
-  ADMIN_TOKENS: 'cluster:admin:tokens:v3',
-  ADMIN_RATE_LIMIT: 'cluster:admin:ratelimit',
-  ADMIN_VERIFY_ADMISSION: 'cluster:admin:verify-admission',
-  ADMIN_FAILURES: 'cluster:admin:failures',
-  ADMIN_AUDIT: 'cluster:admin:audit',
-};
 
 function adminAuthStoreUnavailable() {
   return Object.assign(new Error('Admin authentication store unavailable'), {
@@ -331,7 +324,7 @@ async function protectKeypair(keypair, username, password) {
 
     const aead = new CryptoUtils.PostQuantumAEAD(derived.kek);
     nonce = CryptoUtils.Random.generateRandomBytes(POST_QUANTUM_AEAD_NONCE_BYTES);
-    const aad = new TextEncoder().encode('cluster-admin-keys-v3');
+    const aad = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_KEYS_AAD);
     ({ ciphertext, tag } = aead.encrypt(keysBlob, nonce, aad));
 
     return validateEncryptedAdminPackage({
@@ -407,7 +400,7 @@ async function unlockKeypair(username, password, encryptedPackage) {
     );
 
     const aead = new CryptoUtils.PostQuantumAEAD(derived.kek);
-    const aad = new TextEncoder().encode('cluster-admin-keys-v3');
+    const aad = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_KEYS_AAD);
     try {
       decrypted = aead.decrypt(ciphertext, nonce, tag, aad);
     } catch (_error) {
@@ -560,7 +553,7 @@ class AdminAuth {
         Buffer.from(kyberSharedSecret),
         Buffer.from(x25519SharedSecret),
       ]);
-      info = new TextEncoder().encode('admin-token-encryption-v3');
+      info = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_TOKEN_ENCRYPTION);
       kdfSalt = CryptoUtils.Hash.shake256(rawSecret, 64);
       aeadKey = await CryptoUtils.KDF.quantumHKDF(
         new Uint8Array(rawSecret),
@@ -571,7 +564,7 @@ class AdminAuth {
 
       const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
       nonce = CryptoUtils.Random.generateRandomBytes(36);
-      aad = new TextEncoder().encode('admin-token-v3');
+      aad = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_TOKEN_AAD);
       ({ ciphertext, tag } = aead.encrypt(payloadBytes, nonce, aad));
 
       // Prepare token structure
@@ -725,7 +718,7 @@ class AdminAuth {
         Buffer.from(x25519SharedSecret),
       ]);
 
-      info = new TextEncoder().encode('admin-token-encryption-v3');
+      info = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_TOKEN_ENCRYPTION);
       kdfSalt = CryptoUtils.Hash.shake256(rawSecret, 64);
       aeadKey = await CryptoUtils.KDF.quantumHKDF(
         new Uint8Array(rawSecret),
@@ -738,7 +731,7 @@ class AdminAuth {
       ciphertext = Buffer.from(token.ciphertext, 'base64');
       tag = Buffer.from(token.tag, 'base64');
       const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
-      aad = new TextEncoder().encode('admin-token-v3');
+      aad = new TextEncoder().encode(PROTOCOL_KEYS.ADMIN_TOKEN_AAD);
       try {
         payloadBytes = aead.decrypt(ciphertext, nonce, tag, aad);
       } catch (_error) {

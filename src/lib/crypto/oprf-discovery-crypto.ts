@@ -8,7 +8,7 @@ import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import type { PeerCertificateBundle } from '../types/p2p-types';
 import type { AvatarRef } from './avatar-blob-crypto';
-import type { CertifiedPeerBundleV3 } from '../types/identity-types';
+import type { CertifiedPeerBundle } from '../types/identity-types';
 import { SPOOL_DETECTION_KEY_BYTES } from '../../../shared/spool-tag-protocol.js';
 import { DISCOVERY_BLOB_BASE64_CHARS } from '../constants';
 import {
@@ -44,7 +44,7 @@ export interface OPRFDiscoveryMaterial {
     fullBundle?: unknown;
     peerCertificate?: PeerCertificateBundle;
     peerCertificateFingerprint?: string;
-    certifiedPeerBundle?: CertifiedPeerBundleV3;
+    certifiedPeerBundle?: CertifiedPeerBundle;
     identityRootFingerprint?: string;
     identityBundleFingerprint?: string;
     avatarRef?: AvatarRef | null;
@@ -53,7 +53,7 @@ export interface OPRFDiscoveryMaterial {
 export interface OPRFDiscoveryBlob {
     spoolDetectionKey: string;
     fullBundle: unknown;
-    certifiedPeerBundle: CertifiedPeerBundleV3;
+    certifiedPeerBundle: CertifiedPeerBundle;
     avatarRef?: AvatarRef;
     keyTransparencyTransition: {
         signedUpdate: unknown;

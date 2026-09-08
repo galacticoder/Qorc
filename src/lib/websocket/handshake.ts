@@ -285,7 +285,7 @@ export class WebSocketHandshake {
         durationMs: Date.now() - startedAt,
       });
       handshakePayload = {
-        version: PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION,
+        version: PROTOCOL_KEYS.WS_PQ_PROTOCOL,
         algorithms: {
           kem: 'ML-KEM-1024',
           signature: 'ML-DSA-87',
@@ -304,7 +304,7 @@ export class WebSocketHandshake {
       requestDigest = computeHandshakeRequestDigest(handshakePayload);
 
       const encoder = new TextEncoder();
-      handshakeBaseInfo = `${PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION}:${serverMaterial.fingerprint}:${sessionId}:${handshakeNonceBase64}:${timestamp}:${requestDigest}`;
+      handshakeBaseInfo = `${PROTOCOL_KEYS.WS_PQ_PROTOCOL}:${serverMaterial.fingerprint}:${sessionId}:${handshakeNonceBase64}:${timestamp}:${requestDigest}`;
       const baseSalt = encoder.encode(`${handshakeBaseInfo}${PROTOCOL_KEYS.WS_PQ_BASE_SALT_SUFFIX}`);
 
       const combined = new Uint8Array(pqSharedSecret.length + classicalShared.length);
@@ -438,7 +438,7 @@ export class WebSocketHandshake {
           if (
             Object.keys(ack).sort().join(',') !== 'clientNonce,fingerprint,requestDigest,requestTimestamp,responseKemCiphertext,serverTime,sessionId,signature,timestamp,type,version' ||
             ack.type !== SignalType.PQ_HANDSHAKE_ACK ||
-            ack.version !== PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION ||
+            ack.version !== PROTOCOL_KEYS.WS_PQ_PROTOCOL ||
             ack.sessionId !== sessionId ||
             ack.fingerprint !== serverMaterial.fingerprint ||
             ack.clientNonce !== handshakeNonceBase64 ||
@@ -552,7 +552,7 @@ export class WebSocketHandshake {
               if (
                 Object.keys(value).sort().join(',') !== 'requestDigest,sessionId,type,version' ||
                 value.type !== SignalType.PQ_HANDSHAKE_CONFIRMED ||
-                value.version !== PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION ||
+                value.version !== PROTOCOL_KEYS.WS_PQ_PROTOCOL ||
                 value.sessionId !== sessionId ||
                 value.requestDigest !== requestDigest
               ) {
@@ -570,7 +570,7 @@ export class WebSocketHandshake {
           void confirmationPromise.catch(() => { });
           await this.callbacks.transmitHandshake({
             type: SignalType.PQ_HANDSHAKE_CONFIRM,
-            version: PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION,
+            version: PROTOCOL_KEYS.WS_PQ_PROTOCOL,
             sessionId,
             requestDigest
           });

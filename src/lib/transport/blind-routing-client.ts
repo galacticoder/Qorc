@@ -167,7 +167,7 @@ export class BlindRoutingClient {
       encryptedData = await this.encryptWithKey(frame.data, encryptionKey, nonce, additionalData);
 
       return {
-        version: PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION,
+        version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
         ciphertext: PostQuantumUtils.uint8ArrayToBase64(encryptedData),
         ephemeralKey: PostQuantumUtils.uint8ArrayToBase64(kemCiphertext),
         nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),
@@ -192,7 +192,7 @@ export class BlindRoutingClient {
     const nonce = PostQuantumRandom.randomBytes(COVER_NONCE_BYTES);
     try {
       return {
-        version: PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION,
+        version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
         ciphertext: PostQuantumUtils.uint8ArrayToBase64(ciphertext),
         ephemeralKey: PostQuantumUtils.uint8ArrayToBase64(ephemeralKey),
         nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),

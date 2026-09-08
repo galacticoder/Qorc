@@ -1013,7 +1013,9 @@ impl SignalHandler {
 
         if existing_session {
             let record = session_store.load_session(&peer_address).ok_or_else(|| {
-                QorcError::SignalProtocol("Signal session disappeared during validation".to_string())
+                QorcError::SignalProtocol(
+                    "Signal session disappeared during validation".to_string(),
+                )
             })?;
             validate_pq_ratchet_state(&record).map_err(QorcError::SignalProtocol)?;
             self.set_authenticated_peer_ml_kem_key(
@@ -1195,7 +1197,7 @@ impl SignalHandler {
         )?;
 
         Ok(PQEnvelope {
-            version: crate::protocol_keys::SIGNAL_PQ_ENVELOPE_VERSION.to_string(),
+            version: crate::protocol_keys::SIGNAL_PQ_ENVELOPE_PROTOCOL.to_string(),
             algorithms: PQEnvelopeAlgorithms {
                 kem: SIGNAL_PQ_KEM_ALGORITHM.to_string(),
                 kdf: SIGNAL_PQ_KDF_ALGORITHM.to_string(),
@@ -1278,7 +1280,7 @@ impl SignalHandler {
         from_username: &str,
         to_username: &str,
     ) -> QorcResult<SignalEncryptedMessage> {
-        if envelope.version != crate::protocol_keys::SIGNAL_PQ_ENVELOPE_VERSION {
+        if envelope.version != crate::protocol_keys::SIGNAL_PQ_ENVELOPE_PROTOCOL {
             return Err(QorcError::DecryptionFailed(
                 "Unsupported Signal PQ envelope version".to_string(),
             ));
@@ -1563,22 +1565,22 @@ impl SignalHandler {
         drop(sessions);
         if let Err(error) = db.set_secure_batch(&[
             (
-                "signal_session_store_v1",
+                crate::storage_keys::SIGNAL_SESSION_STORE,
                 self_username,
                 session_blob.as_slice(),
             ),
             (
-                "signal_identity_store_v1",
+                crate::storage_keys::SIGNAL_IDENTITY_STORE,
                 self_username,
                 identity_blob.as_slice(),
             ),
             (
-                "signal_peer_mlkem_store_v1",
+                crate::storage_keys::SIGNAL_PEER_MLKEM_STORE,
                 self_username,
                 peer_ml_kem_blob.as_slice(),
             ),
             (
-                "signal_pending_decrypt_store_v4",
+                crate::storage_keys::SIGNAL_PENDING_DECRYPT_STORE,
                 self_username,
                 pending_decrypt_blob.as_slice(),
             ),
@@ -1879,8 +1881,12 @@ impl SignalHandler {
         username: &str,
     ) -> QorcResult<Vec<PendingDecryptedMessage>> {
         Self::validate_username(username)?;
-        let pending: Vec<PendingDecryptedMessage> =
-            read_signal_store(db, "signal_pending_decrypt_store_v4", username)?.unwrap_or_default();
+        let pending: Vec<PendingDecryptedMessage> = read_signal_store(
+            db,
+            crate::storage_keys::SIGNAL_PENDING_DECRYPT_STORE,
+            username,
+        )?
+        .unwrap_or_default();
         if pending.len() > MAX_PENDING_DECRYPTS {
             return Err(QorcError::SignalProtocol(
                 "Pending decrypt store record limit exceeded".to_string(),
@@ -2011,41 +2017,49 @@ impl SignalHandler {
 
         let mut entries = vec![
             (
-                "signal_session_store_v1",
+                crate::storage_keys::SIGNAL_SESSION_STORE,
                 username,
                 sessions_blob.as_slice(),
             ),
             (
-                "signal_signed_prekey_store_v1",
+                crate::storage_keys::SIGNAL_SIGNED_PREKEY_STORE,
                 username,
                 signed_prekeys_blob.as_slice(),
             ),
             (
-                "signal_mlkem_prekey_store_v1",
+                crate::storage_keys::SIGNAL_MLKEM_PREKEY_STORE,
                 username,
                 kyber_prekeys_blob.as_slice(),
             ),
             (
-                "signal_mlkem_replay_store_v1",
+                crate::storage_keys::SIGNAL_MLKEM_REPLAY_STORE,
                 username,
                 kyber_replay_blob.as_slice(),
             ),
             (
-                "signal_peer_mlkem_store_v1",
+                crate::storage_keys::SIGNAL_PEER_MLKEM_STORE,
                 username,
                 peer_ml_kem_blob.as_slice(),
             ),
         ];
         let mut deletions = Vec::new();
         if let Some(blob) = identity_blob.as_ref() {
-            entries.push(("signal_identity_store_v1", username, blob.as_slice()));
+            entries.push((
+                crate::storage_keys::SIGNAL_IDENTITY_STORE,
+                username,
+                blob.as_slice(),
+            ));
         } else {
-            deletions.push(("signal_identity_store_v1", username));
+            deletions.push((crate::storage_keys::SIGNAL_IDENTITY_STORE, username));
         }
         if let Some(blob) = static_keys_blob.as_ref() {
-            entries.push(("signal_static_mlkem_store_v1", username, blob.as_slice()));
+            entries.push((
+                crate::storage_keys::SIGNAL_STATIC_MLKEM_STORE,
+                username,
+                blob.as_slice(),
+            ));
         } else {
-            deletions.push(("signal_static_mlkem_store_v1", username));
+            deletions.push((crate::storage_keys::SIGNAL_STATIC_MLKEM_STORE, username));
         }
         db.mutate_secure_batch(&entries, &deletions)
     }
@@ -2112,34 +2126,42 @@ impl SignalHandler {
             let peer_ml_kem_blob = self.serialize_peer_ml_kem_keys(username)?;
             let mut entries = vec![
                 (
-                    "signal_session_store_v1",
+                    crate::storage_keys::SIGNAL_SESSION_STORE,
                     username,
                     sessions_blob.as_slice(),
                 ),
                 (
-                    "signal_mlkem_replay_store_v1",
+                    crate::storage_keys::SIGNAL_MLKEM_REPLAY_STORE,
                     username,
                     kyber_replay_blob.as_slice(),
                 ),
                 (
-                    "signal_peer_mlkem_store_v1",
+                    crate::storage_keys::SIGNAL_PEER_MLKEM_STORE,
                     username,
                     peer_ml_kem_blob.as_slice(),
                 ),
             ];
             let mut deletions = Vec::new();
             if let Some(blob) = identity_blob.as_ref() {
-                entries.push(("signal_identity_store_v1", username, blob.as_slice()));
+                entries.push((
+                    crate::storage_keys::SIGNAL_IDENTITY_STORE,
+                    username,
+                    blob.as_slice(),
+                ));
             } else {
-                deletions.push(("signal_identity_store_v1", username));
+                deletions.push((crate::storage_keys::SIGNAL_IDENTITY_STORE, username));
             }
             if let Some(blob) = pending_decrypt_blob {
-                entries.push(("signal_pending_decrypt_store_v4", username, blob));
+                entries.push((
+                    crate::storage_keys::SIGNAL_PENDING_DECRYPT_STORE,
+                    username,
+                    blob,
+                ));
             }
             db.mutate_secure_batch(&entries, &deletions)
         } else {
             db.set_secure_batch(&[(
-                "signal_session_store_v1",
+                crate::storage_keys::SIGNAL_SESSION_STORE,
                 username,
                 sessions_blob.as_slice(),
             )])
@@ -2156,7 +2178,8 @@ impl SignalHandler {
 
         let session_store = InMemorySessionStore::new();
         let sessions: Vec<(String, Vec<u8>)> =
-            read_signal_store(db, "signal_session_store_v1", username)?.unwrap_or_default();
+            read_signal_store(db, crate::storage_keys::SIGNAL_SESSION_STORE, username)?
+                .unwrap_or_default();
         session_store
             .load(sessions)
             .map_err(QorcError::SignalProtocol)?;
@@ -2165,7 +2188,7 @@ impl SignalHandler {
         if let Some((reg_id, identity_key, private_key, known_identities)) =
             read_signal_store::<(u32, Vec<u8>, Vec<u8>, Vec<(String, Vec<u8>)>)>(
                 db,
-                "signal_identity_store_v1",
+                crate::storage_keys::SIGNAL_IDENTITY_STORE,
                 username,
             )?
         {
@@ -2177,15 +2200,20 @@ impl SignalHandler {
         let prekey_store = InMemoryPreKeyStore::new();
 
         let signed_prekey_store = InMemorySignedPreKeyStore::new();
-        let signed_prekeys: Vec<(u32, Vec<u8>)> =
-            read_signal_store(db, "signal_signed_prekey_store_v1", username)?.unwrap_or_default();
+        let signed_prekeys: Vec<(u32, Vec<u8>)> = read_signal_store(
+            db,
+            crate::storage_keys::SIGNAL_SIGNED_PREKEY_STORE,
+            username,
+        )?
+        .unwrap_or_default();
         signed_prekey_store
             .load(signed_prekeys)
             .map_err(QorcError::SignalProtocol)?;
 
         let kyber_prekey_store = InMemoryKyberPreKeyStore::new();
         let kyber_prekeys: Vec<(u32, Vec<u8>)> =
-            read_signal_store(db, "signal_mlkem_prekey_store_v1", username)?.unwrap_or_default();
+            read_signal_store(db, crate::storage_keys::SIGNAL_MLKEM_PREKEY_STORE, username)?
+                .unwrap_or_default();
         kyber_prekey_store
             .load(kyber_prekeys)
             .map_err(QorcError::SignalProtocol)?;
@@ -2205,13 +2233,15 @@ impl SignalHandler {
                 .map_err(QorcError::SignalProtocol)?;
         }
         let replay_state: Vec<(u32, u32, Vec<Vec<u8>>)> =
-            read_signal_store(db, "signal_mlkem_replay_store_v1", username)?.unwrap_or_default();
+            read_signal_store(db, crate::storage_keys::SIGNAL_MLKEM_REPLAY_STORE, username)?
+                .unwrap_or_default();
         kyber_prekey_store
             .load_replay_state(replay_state)
             .map_err(QorcError::SignalProtocol)?;
 
         let peer_ml_kem_entries: Vec<(String, Vec<u8>)> =
-            read_signal_store(db, "signal_peer_mlkem_store_v1", username)?.unwrap_or_default();
+            read_signal_store(db, crate::storage_keys::SIGNAL_PEER_MLKEM_STORE, username)?
+                .unwrap_or_default();
         if peer_ml_kem_entries.len() > MAX_PEER_ML_KEM_KEYS {
             return Err(QorcError::SignalProtocol(
                 "Peer ML-KEM key store record limit exceeded".to_string(),
@@ -2230,27 +2260,26 @@ impl SignalHandler {
             }
         }
 
-        let static_key =
-            read_signal_store::<(Vec<u8>, Vec<u8>)>(db, "signal_static_mlkem_store_v1", username)?
-                .map(|(public_key, secret_key)| {
-                    let secret_key = Zeroizing::new(secret_key);
-                    if public_key.len() != post_quantum::ML_KEM_PUBLIC_KEY_SIZE
-                        || secret_key.len() != post_quantum::ML_KEM_SECRET_KEY_SIZE
-                    {
-                        return Err(QorcError::SignalProtocol(
-                            "Invalid static ML-KEM keypair store".to_string(),
-                        ));
-                    }
-                    post_quantum::validate_ml_kem_keypair(&public_key, &secret_key).map_err(
-                        |_| {
-                            QorcError::SignalProtocol(
-                                "Invalid static ML-KEM keypair store".to_string(),
-                            )
-                        },
-                    )?;
-                    Ok((public_key, secret_key))
-                })
-                .transpose()?;
+        let static_key = read_signal_store::<(Vec<u8>, Vec<u8>)>(
+            db,
+            crate::storage_keys::SIGNAL_STATIC_MLKEM_STORE,
+            username,
+        )?
+        .map(|(public_key, secret_key)| {
+            let secret_key = Zeroizing::new(secret_key);
+            if public_key.len() != post_quantum::ML_KEM_PUBLIC_KEY_SIZE
+                || secret_key.len() != post_quantum::ML_KEM_SECRET_KEY_SIZE
+            {
+                return Err(QorcError::SignalProtocol(
+                    "Invalid static ML-KEM keypair store".to_string(),
+                ));
+            }
+            post_quantum::validate_ml_kem_keypair(&public_key, &secret_key).map_err(|_| {
+                QorcError::SignalProtocol("Invalid static ML-KEM keypair store".to_string())
+            })?;
+            Ok((public_key, secret_key))
+        })
+        .transpose()?;
 
         self.session_stores
             .write()

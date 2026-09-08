@@ -1,0 +1,12 @@
+export const AUTH_CHANNEL_BINDING_CONTEXT = 'qorc-Authentication-Channel-Binding';
+export const KEY_TRANSPARENCY_PROTOCOL = 'qorc-key-transparency';
+export const KEY_TRANSPARENCY_APPEND_POW_DOMAIN = 'qorc-key-transparency-append-pow';
+export const KEY_TRANSPARENCY_SYNC_POW_DOMAIN = 'qorc-key-transparency-sync-pow';
+export const KEY_TRANSPARENCY_SIGNATURE_CONTEXT = 'qorc-Key-Transparency-Signature';
+export const KEY_TRANSPARENCY_LOG_ROOT_DOMAIN = 'qorc-key-transparency-log-root';
+export const KEY_TRANSPARENCY_LOG_GENESIS_DOMAIN = 'qorc-key-transparency-log-genesis';
+export const KEY_TRANSPARENCY_RECORD_HASH_DOMAIN = 'qorc-key-transparency-record';
+export const OPAQUE_AUTH_SIGNATURE_CONTEXT = 'OPAQUE-Auth-Sig';
+export const PRIVATE_AUTH_PIR_RECORD_MAGIC = 'QORCAPIR';
+export const SPOOL_PIR_LAYOUT = 'qorc-spool-pir';
+export const SPOOL_TAG_PROTOCOL = 'qorc-spool-tag';

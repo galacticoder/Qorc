@@ -39,7 +39,7 @@ it protects.
 
 ## Native Account Vault
 
-Persistent account vaults use the `native-account-vault-v1` format.
+Persistent account vaults use the `native-account-vault` format.
 
 When an account vault is first created, Rust generates independent random
 material for:
@@ -138,12 +138,12 @@ inside Rust.
 
 The database has independent native layers:
 
-- SQLCipher page encryption with a key derived under `QDBv3/DISK`,
+- SQLCipher page encryption with a key derived under `QDB/DISK`,
 - XChaCha20-Poly1305 authenticated row encryption with a key derived under
-  `QDBv3/SYM`,
-- an independent SHAKE256 row-masking key derived under `QDBv3/QUANT`,
+  `QDB/SYM`,
+- an independent SHAKE256 row-masking key derived under `QDB/QUANT`,
 - row associated data bound to the account namespace, store, and key under
-  `QDBv3/ROW`,
+  `QDB/ROW`,
 - a secret-keyed database filename that does not expose the account handle.
 
 The native database validates file type, ownership, permissions, size quotas,
@@ -155,7 +155,7 @@ Application metadata still crosses IPC. Private message records contain a blank
 the target ID, optional sender, a blank content field, and—when the referenced
 message is locally available—its opaque content identifier. Quoted message
 bodies are neither persisted in renderer retry/history rows nor copied onto the
-wire. The corresponding text is stored in a versioned native-only database
+wire. The corresponding text is stored in a native-only database
 store. Generic renderer get, set, mutate, enumerate, scan, and delete commands
 reject that store even when its name is guessed.
 

@@ -228,13 +228,13 @@ Every boundary below has a named wire form with a required algorithm binding. Th
 
 | Boundary | Wire form | Primitives |
 | --- | --- | --- |
-| Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq-v2` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
-| End-to-end outer envelope | `hybrid-envelope-v2` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
-| Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
-| Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and per-call-stream subkeys |
-| Client to server WebSocket | `pq-ws-8` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
-| Anonymous HTTP tunnel | `qorc-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM contribution, ML-DSA-87, padded AEAD |
-| Account-root transparency | `qorc-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+| Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
+| End-to-end outer envelope | `hybrid-envelope` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
+| Server sealed sender | `sealed-sender` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
+| Direct P2P session | `hybrid-mlkem1024-mldsa87-session` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and per-call-stream subkeys |
+| Client to server WebSocket | `pq-ws` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
+| Anonymous HTTP tunnel | `qorc-pq-anonymous-http` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM contribution, ML-DSA-87, padded AEAD |
+| Account-root transparency | `qorc-key-transparency` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
 | Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 |
 
 - **Authentication.** Signup and login run an OPAQUE-style password envelope
@@ -252,7 +252,7 @@ Every boundary below has a named wire form with a required algorithm binding. Th
   rejected outright, and every Signal ciphertext is additionally sealed in a
   required ML-KEM envelope, including messages on an already established
   session.
-- **Outer envelope.** `hybrid-envelope-v2` encapsulates to the recipient's
+- **Outer envelope.** `hybrid-envelope` encapsulates to the recipient's
   certified ML-KEM-1024 key and performs X25519 against a separate certified
   Hybrid subkey. The two secrets are domain-separated into the AEAD key, and the
   sender signs the routing header with ML-DSA-87. The receiver requires the

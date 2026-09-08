@@ -675,7 +675,7 @@ pub async fn signal_ack_pending_decrypts(
     let pending_blob = crate::signal_protocol::SignalHandler::serialize_pending_decrypts(&pending)
         .map_err(|error| error.safe_message())?;
     db.set_secure(
-        "signal_pending_decrypt_store_v4",
+        crate::storage_keys::SIGNAL_PENDING_DECRYPT_STORE,
         &username,
         pending_blob.as_slice(),
     )

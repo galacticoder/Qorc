@@ -27,8 +27,8 @@ import {
     validatePeerCertificateBundle
 } from '@/lib/utils/peer-certificate-utils';
 import {
-    buildCertifiedPeerBundleV3,
-    validateCertifiedPeerBundleV3
+    buildCertifiedPeerBundle,
+    validateCertifiedPeerBundle
 } from '@/lib/utils/certified-identity-utils';
 import type { AvatarData } from '@/lib/types/avatar-types';
 import { publishAvatarToStore, fetchAvatarFromStore, validateAvatarCoverBlobs as validateAvatarCoverBlobs, isValidAvatarRef } from '@/lib/avatar/avatar-store-client';
@@ -1056,7 +1056,7 @@ export const useDiscovery = (
         }
 
         const peerCertificateFingerprint = computePeerCertificateFingerprint(cert);
-        const certifiedIdentity = await validateCertifiedPeerBundleV3(material.certifiedPeerBundle, {
+        const certifiedIdentity = await validateCertifiedPeerBundle(material.certifiedPeerBundle, {
             targetHandle,
             publicKeys: validated.publicKeys,
             fullBundle: material.fullBundle,
@@ -1583,7 +1583,7 @@ export const useDiscovery = (
 
                 const peerCertificateFingerprint = computePeerCertificateFingerprint(peerCertificate);
 
-                const certifiedPeerBundle = await buildCertifiedPeerBundleV3({
+                const certifiedPeerBundle = await buildCertifiedPeerBundle({
                     username: String(bundleUsername),
                     publicKeys: {
                         kyberPublicBase64: kyberKey,

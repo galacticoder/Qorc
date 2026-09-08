@@ -19,7 +19,7 @@ export function isHybridEnvelopeWireShape(
   expectedRoutingType: 'libsignal-message' | SignalType.FILE_MESSAGE_CHUNK,
 ): value is HybridEnvelope {
   if (!hasExactObjectKeys(value, ['version', 'routing', 'routingSignature', 'algorithms', 'kemCiphertext', 'outer'])) return false;
-  if (value.version !== PROTOCOL_KEYS.HYBRID_ENVELOPE_VERSION) return false;
+  if (value.version !== PROTOCOL_KEYS.HYBRID_ENVELOPE_PROTOCOL) return false;
   if (!hasExactObjectKeys(value.routing, ['to', 'from', 'type', 'timestamp', 'size'])) return false;
   if (
     !canonicalBase64Shape(value.routing.to, { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }) ||

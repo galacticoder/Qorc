@@ -41,7 +41,7 @@ mod tests {
     use super::*;
     use crate::params::params_for_scenario_simplepir;
 
-    // KEM ciphertext + nonce + ss-v2 STANDARD ciphertext.
+    // KEM ciphertext + nonce + sealed-sender STANDARD ciphertext.
     const SPOOL_ENTRY_BYTES: usize = 1_568 + 12 + 131_072 + 16;
 
     fn record(seed: u64, len: usize) -> Vec<u8> {

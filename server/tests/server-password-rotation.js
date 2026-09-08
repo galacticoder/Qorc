@@ -14,8 +14,8 @@ process.env.REDIS_URL ||= 'rediss://127.0.0.1:6379';
 process.env.REDIS_QUIET_ERRORS = 'true';
 
 const DAY_MS = 86_400_000;
-const NULLIFIER_LABEL = new TextEncoder().encode('PrivacyPass-Nullifier-v1');
-const MAC_LABEL = new TextEncoder().encode('PrivacyPass-Redemption-MAC-v1');
+const NULLIFIER_LABEL = new TextEncoder().encode('PrivacyPass-Nullifier');
+const MAC_LABEL = new TextEncoder().encode('PrivacyPass-Redemption-MAC');
 const PASSWORD_A = 'rotation-test-password-a';
 const PASSWORD_B = 'rotation-test-password-b';
 
@@ -28,7 +28,7 @@ function createTokenSecret(epoch) {
 
 async function issueTokens(PrivacyPassServer, purpose, count) {
   const epoch = Math.floor(Date.now() / DAY_MS);
-  const label = new TextEncoder().encode(`PrivacyPass-OPRF-Input-v3:${purpose}`);
+  const label = new TextEncoder().encode(`PrivacyPass-OPRF-Input:${purpose}`);
   const states = [];
   let issuance = null;
   try {

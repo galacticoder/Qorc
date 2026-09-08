@@ -23,7 +23,7 @@ import { recordDeliveryExpired, recordDeliveryRetry, withoutStorageTelemetry } f
 
 import { SignalType } from '../signals.js';
 import {
-  SEALED_ENVELOPE_VERSION,
+  SEALED_ENVELOPE_PROTOCOL,
   SEALED_STANDARD_CIPHERTEXT_BYTES,
   SEALED_KEM_CIPHERTEXT_BYTES,
   SEALED_NONCE_BYTES,
@@ -103,7 +103,7 @@ const SEALED_NONCE_BASE64_CHARS = Math.ceil(SEALED_NONCE_BYTES / 3) * 4;
 const GLOBAL_MIX_SPOOL_MEMBER_BYTES = Buffer.byteLength(JSON.stringify({
   id: 'A'.repeat(43),
   envelope: {
-    version: SEALED_ENVELOPE_VERSION,
+    version: SEALED_ENVELOPE_PROTOCOL,
     ciphertext: 'A'.repeat(SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS),
     ephemeralKey: 'A'.repeat(SEALED_KEM_CIPHERTEXT_BASE64_CHARS),
     nonce: 'A'.repeat(SEALED_NONCE_BASE64_CHARS),
@@ -263,7 +263,7 @@ function getEnvelopeHash(sealedEnvelope) {
 
 function createCoverSealedEnvelope() {
   return {
-    version: SEALED_ENVELOPE_VERSION,
+    version: SEALED_ENVELOPE_PROTOCOL,
     ciphertext: crypto.randomBytes(SEALED_STANDARD_CIPHERTEXT_BYTES).toString('base64'),
     ephemeralKey: crypto.randomBytes(SEALED_KEM_CIPHERTEXT_BYTES).toString('base64'),
     nonce: crypto.randomBytes(SEALED_NONCE_BYTES).toString('base64'),

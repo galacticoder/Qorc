@@ -28,8 +28,6 @@ const PP_LABELS = {
 };
 
 const ALLOWED_PURPOSES = new Set([ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE]);
-const SERVER_ENTRY_BINDING_LABEL = 'qorc-PrivacyPass-Server-Entry-Password-Binding-v1';
-const SERVER_ENTRY_ROOT_PURPOSE = 'privacy-pass-voprf:server-entry-bound-v1';
 
 function normalizePurpose(purpose) {
     const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
@@ -142,14 +140,14 @@ export class PrivacyPassServer {
             throw new Error('Invalid server-entry password secret');
         }
 
-        const root = deriveAuthRootKey(SERVER_ENTRY_ROOT_PURPOSE);
+        const root = deriveAuthRootKey(PROTOCOL_KEYS.PRIVACY_PASS_SERVER_ENTRY_ROOT);
         let nextSeed = null;
         try {
             nextSeed = hkdf(
                 blake3,
                 passwordSecret,
                 root,
-                UTF8_ENCODER.encode(SERVER_ENTRY_BINDING_LABEL),
+                UTF8_ENCODER.encode(PROTOCOL_KEYS.PRIVACY_PASS_SERVER_ENTRY_BINDING),
                 HASH_OUTPUT_BYTES
             );
         } finally {

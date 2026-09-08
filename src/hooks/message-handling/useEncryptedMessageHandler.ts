@@ -123,7 +123,7 @@ function rememberTerminalSealedEnvelope(cache: Set<string>, key: string): void {
 }
 
 function computeSealedEnvelopeCacheKey(env: any): string | null {
-  const version = env?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION ? env.version : '';
+  const version = env?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL ? env.version : '';
   const eph = typeof env?.ephemeralKey === 'string' ? env.ephemeralKey : '';
   const nonce = typeof env?.nonce === 'string' ? env.nonce : '';
   const ciphertext = typeof env?.ciphertext === 'string' ? env.ciphertext : '';
@@ -649,7 +649,7 @@ export function useEncryptedMessageHandler(
       const candidateSealedEnvelope = isSealedEnvelope
         ? encryptedMessage?.envelope
         : null;
-      if (candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION) {
+      if (candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL) {
         const expectedDetectionTag = await detectionTagForProbe(
           currentUser,
           candidateSealedEnvelope.probe,
@@ -661,7 +661,7 @@ export function useEncryptedMessageHandler(
         }
         if (expectedDetectionTag !== candidateSealedEnvelope.tag) return;
       }
-      const sealedEnvelopeCacheKey = candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION
+      const sealedEnvelopeCacheKey = candidateSealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL
         ? computeSealedEnvelopeCacheKey(candidateSealedEnvelope)
         : null;
 
@@ -1226,7 +1226,7 @@ export function useEncryptedMessageHandler(
             }
 
 
-            if (sealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION) {
+            if (sealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL) {
               try {
                 if (localKeys?.native === true && localKeys?.kyber?.publicKeyBase64) {
                   const blindClient = getBlindRoutingClient();
@@ -2192,7 +2192,7 @@ export function useEncryptedMessageHandler(
               ? encryptedMessage?.envelope
               : null;
             if (
-              envelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION &&
+              envelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL &&
               typeof envelope.probe === 'string'
             ) {
               try {

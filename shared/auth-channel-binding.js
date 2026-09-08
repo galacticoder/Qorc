@@ -1,4 +1,5 @@
 import { sha3_512 } from '@noble/hashes/sha3.js';
+import { AUTH_CHANNEL_BINDING_CONTEXT } from './protocol-keys.js';
 import {
   REQUEST_ID_RE,
   SESSION_FINGERPRINT_RE,
@@ -12,7 +13,6 @@ export {
 } from './patterns.js';
 
 export const AUTH_CHANNEL_BINDING_BYTES = 64;
-const AUTH_CHANNEL_BINDING_CONTEXT = 'qorc-Authentication-Channel-Binding-v1';
 
 const encoder = new TextEncoder();
 

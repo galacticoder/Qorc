@@ -28,7 +28,7 @@ Code:
 ## Delayed Global Mix
 
 Accepted envelopes first enter the Redis delay and processing sets under the
-current `mixnet:{global-v3}` namespace. Each entry receives a randomized release
+current `mixnet:{global}` namespace. Each entry receives a randomized release
 time. A single-flight relay:
 
 1. Recovers stale processing claims.

@@ -8,7 +8,7 @@ export type CertifiedIdentityKemAlgorithm = 'ML-KEM-1024';
 export type CertifiedIdentityClassicalKeyAgreementAlgorithm = 'X25519';
 export type CertifiedIdentitySignalIdentityAlgorithm = 'Signal-X25519';
 
-export interface AccountRootCertV3 {
+export interface AccountRootCert {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   authorityModel: CertifiedIdentityAuthorityModel;
   username: string;
@@ -21,7 +21,7 @@ export interface AccountRootCertV3 {
   rootFingerprint: string;
 }
 
-export interface DeviceCertV3 {
+export interface DeviceCert {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   username: string;
   deviceId: string;
@@ -41,7 +41,7 @@ export interface DeviceCertV3 {
   deviceCertificateFingerprint: string;
 }
 
-export interface DeviceSubkeyBindingV3 {
+export interface DeviceSubkeyBinding {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   username: string;
   deviceId: string;
@@ -65,13 +65,13 @@ export interface DeviceSubkeyBindingV3 {
   bindingFingerprint: string;
 }
 
-export interface CertifiedPeerBundleV3 {
+export interface CertifiedPeerBundle {
   version: typeof CERTIFIED_IDENTITY_BUNDLE_VERSION;
   authorityModel: CertifiedIdentityAuthorityModel;
   username: string;
-  accountRoot: AccountRootCertV3;
-  deviceCert: DeviceCertV3;
-  subkeyBinding: DeviceSubkeyBindingV3;
+  accountRoot: AccountRootCert;
+  deviceCert: DeviceCert;
+  subkeyBinding: DeviceSubkeyBinding;
   peerCertificateFingerprint: string;
   identityRootFingerprint: string;
   bundleFingerprint: string;
@@ -107,7 +107,7 @@ export interface CertifiedPeerBundleValidationContext {
 export type CertifiedPeerBundleValidationResult =
   | {
     valid: true;
-    bundle: CertifiedPeerBundleV3;
+    bundle: CertifiedPeerBundle;
     identityRootFingerprint: string;
     bundleFingerprint: string;
     peerCertificateFingerprint: string;

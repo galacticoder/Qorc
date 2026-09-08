@@ -2,7 +2,7 @@ import { ML_KEM_1024_ALGORITHM } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 
 export const REQUIRED_WS_PQ_HANDSHAKE = Object.freeze({
-  version: PROTOCOL_KEYS.WS_PQ_PROTOCOL_VERSION,
+  version: PROTOCOL_KEYS.WS_PQ_PROTOCOL,
   kem: ML_KEM_1024_ALGORITHM,
   signature: 'ML-DSA-87',
   classicalKeyAgreement: 'X25519',

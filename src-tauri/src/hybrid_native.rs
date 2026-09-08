@@ -279,7 +279,7 @@ fn validate_header(
     expected_sender: &str,
     recipient: &str,
 ) -> QorcResult<()> {
-    if envelope.version != crate::protocol_keys::HYBRID_ENVELOPE_VERSION
+    if envelope.version != crate::protocol_keys::HYBRID_ENVELOPE_PROTOCOL
         || envelope.routing_signature.algorithm != "ML-DSA-87"
         || envelope.algorithms.outer != "ML-KEM-1024"
         || envelope.algorithms.inner != "X25519"
@@ -371,7 +371,7 @@ pub fn decrypt(
         );
         let inner: InnerEnvelope =
             serde_json::from_slice(inner_json.as_slice()).map_err(|_| invalid_envelope())?;
-        if inner.version != crate::protocol_keys::HYBRID_INNER_VERSION
+        if inner.version != crate::protocol_keys::INNER_ENVELOPE_PROTOCOL
             || inner.metadata.content_length != envelope.routing.size
             || !matches!(inner.payload_type.as_str(), "text" | "json" | "binary")
         {
@@ -440,7 +440,7 @@ pub fn decrypt_sealed(
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    if envelope.version != "ss-v2" {
+    if envelope.version != crate::protocol_keys::SEALED_ENVELOPE_PROTOCOL {
         return Ok(None);
     }
     let kem =
@@ -538,7 +538,7 @@ mod tests {
         .expect("HKDF vector");
         assert_eq!(
             hex::encode(output.as_slice()),
-            "23b4f3ec4b6bce6e54b507a8bf62ab85f731ad795dbd05674100b4641d7ef005aba22e843cab081ab3ceebcda098fb879c79300379287654de6d41f7ae927365"
+            "a0e32cd57bfcbd34f74c79447fa0b4ed35a1ab90201ebee55e17255a4c402dea40493a00d786136d48106086bcac174834c115e7ee9dc720d5fc3c2e0e8d5da6"
         );
     }
 }

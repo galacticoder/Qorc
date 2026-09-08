@@ -367,7 +367,7 @@ export class PQNoiseSession {
 
     async createKeyConfirmation(from: string, to: string): Promise<Uint8Array> {
         const sessionId = this.getBindingId();
-        const aad = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION}${PROTOCOL_KEYS.NOISE_CONFIRMATION_SEPARATOR}${sessionId}:${from}:${to}`);
+        const aad = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL}${PROTOCOL_KEYS.NOISE_CONFIRMATION_SEPARATOR}${sessionId}:${from}:${to}`);
         const plaintext = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_KEY_CONFIRMATION}:${sessionId}`);
         try {
             return await this.encrypt(plaintext, aad);
@@ -379,7 +379,7 @@ export class PQNoiseSession {
 
     async verifyKeyConfirmation(frame: Uint8Array, from: string, to: string): Promise<void> {
         const sessionId = this.getBindingId();
-        const aad = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION}${PROTOCOL_KEYS.NOISE_CONFIRMATION_SEPARATOR}${sessionId}:${from}:${to}`);
+        const aad = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_PROTOCOL}${PROTOCOL_KEYS.NOISE_CONFIRMATION_SEPARATOR}${sessionId}:${from}:${to}`);
         const expected = confirmationEncoder.encode(`${PROTOCOL_KEYS.NOISE_KEY_CONFIRMATION}:${sessionId}`);
         let plaintext: Uint8Array | null = null;
         try {
@@ -491,7 +491,7 @@ function deserializeHandshake(msg: PQNoiseHandshakeMessage | HandshakeMessage): 
     if (prototype !== Object.prototype && prototype !== null) {
         throw new Error('Invalid Noise handshake object');
     }
-    if (msg.version !== PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION || (msg.type !== 'init' && msg.type !== 'response')) {
+    if (msg.version !== PROTOCOL_KEYS.NOISE_PROTOCOL || (msg.type !== 'init' && msg.type !== 'response')) {
         throw new Error('Invalid Noise handshake header');
     }
     const expectedKeys = (
@@ -560,7 +560,7 @@ function deserializeHandshake(msg: PQNoiseHandshakeMessage | HandshakeMessage): 
         }
 
         return {
-            version: PROTOCOL_KEYS.NOISE_PROTOCOL_VERSION,
+            version: PROTOCOL_KEYS.NOISE_PROTOCOL,
             type: msg.type,
             from: msg.from,
             to: msg.to,

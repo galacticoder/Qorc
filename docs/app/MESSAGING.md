@@ -10,11 +10,11 @@ Application payloads include text messages, edits, deletes, receipts, typing
 state, Signal session control, and file chunks. The sender applies these layers:
 
 1. Native libsignal encryption and ratchet state update.
-2. The required `signal-pq-v2` ML-KEM-1024 envelope around the Signal
+2. The required `signal-pq` ML-KEM-1024 envelope around the Signal
    ciphertext.
-3. `hybrid-envelope-v2`: ML-KEM-1024 plus X25519 key agreement, AEAD, and an
+3. `hybrid-envelope`: ML-KEM-1024 plus X25519 key agreement, AEAD, and an
    ML-DSA-87 signature bound to the certified sender keys.
-4. Either the authenticated P2P transport or an `ss-v2` sealed-sender envelope
+4. Either the authenticated P2P transport or an `sealed-sender` sealed-sender envelope
    for the server path.
 
 The recipient validates the certified key binding, outer signature, replay
@@ -40,7 +40,7 @@ The native store atomically commits ratchet changes and staged inbound
 plaintext; if durable storage fails, the previous ratchet snapshot remains
 retryable.
 
-Signal ciphertexts must use the `signal-pq-v2` wire form. Bare classical Signal
+Signal ciphertexts must use the `signal-pq` wire form. Bare classical Signal
 ciphertexts are rejected, and session reset or replacement does not negotiate
 an alternate envelope form.
 
@@ -89,7 +89,7 @@ route keeps media setup from depending on a dedicated lane becoming ready,
 but media still has Tor rendezvous latency. See `docs/app/CALLING.md`.
 
 Before application data is accepted, peers complete
-`hybrid-mlkem1024-mldsa87-session-v5`:
+`hybrid-mlkem1024-mldsa87-session`:
 
 - ML-KEM-1024 and X25519 both contribute to directional session keys.
 - ML-DSA-87 authenticates the transcript against certified peer keys.
@@ -151,11 +151,11 @@ Code references:
 
 ## Server Path
 
-When P2P is unavailable or unconfirmed, the client creates an `ss-v2` envelope:
+When P2P is unavailable or unconfirmed, the client creates an `sealed-sender` envelope:
 
 ```json
 {
-  "version": "ss-v2",
+  "version": "sealed-sender",
   "ciphertext": "...",
   "ephemeralKey": "...",
   "nonce": "...",
@@ -180,7 +180,7 @@ The active request has this exact shape:
 {
   "type": "blind-route",
   "requestId": "random request UUID",
-  "sealedEnvelope": { "version": "ss-v2", "ciphertext": "...", "ephemeralKey": "...", "nonce": "...", "tag": "...", "probe": "..." }
+  "sealedEnvelope": { "version": "sealed-sender", "ciphertext": "...", "ephemeralKey": "...", "nonce": "...", "tag": "...", "probe": "..." }
 }
 ```
 
@@ -310,7 +310,7 @@ Code references:
 ## WebSocket Transport
 
 Server traffic runs through Tor and a pinned TLS endpoint. After bootstrap, the
-WebSocket uses `pq-ws-8`. Session establishment combines an initiator
+WebSocket uses `pq-ws`. Session establishment combines an initiator
 ML-KEM-1024 secret, X25519, and a responder ML-KEM-1024 secret. An
 ML-DSA-87-signed server acknowledgement binds the complete exchange, followed by
 encrypted confirmation in both directions. Rekeys remain staged until that

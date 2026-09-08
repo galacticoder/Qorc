@@ -3,7 +3,7 @@ import type { NativeLinkPreview } from '../tauri-bindings';
 import { bytesToHex } from '../utils/byte-utils';
 import { hasExactObjectKeys } from '../sanitizers';
 import type { SecureDB } from './secureDB';
-import { STORAGE_KEYS, STORAGE_STORES } from './storage-keys';
+import { STORAGE_KEYS, STORAGE_KEY_DOMAINS, STORAGE_STORES } from './storage-keys';
 
 interface LinkPreviewCacheRecord {
   version: 1;
@@ -28,12 +28,11 @@ const MAX_CACHE_ENTRIES = 48;
 const MAX_CACHE_BYTES = 24 * 1024 * 1024;
 const MAX_RECORD_BYTES = 3 * 1024 * 1024;
 const MAX_IMAGE_DATA_URL_LENGTH = 2_100_000;
-const CACHE_KEY_DOMAIN = 'qorc-link-preview-cache-v1';
 const writeChains = new WeakMap<SecureDB, Promise<void>>();
 const encoder = new TextEncoder();
 
 const cacheKey = (url: string): string => {
-  const input = encoder.encode(`${CACHE_KEY_DOMAIN}\0${url}`);
+  const input = encoder.encode(`${STORAGE_KEY_DOMAINS.LINK_PREVIEW_CACHE}\0${url}`);
   const digest = blake3(input, { dkLen: 32 });
   try {
     return bytesToHex(digest);

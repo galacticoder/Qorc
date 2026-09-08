@@ -1,13 +1,13 @@
 import { blake3 } from '@noble/hashes/blake3.js';
 import { AUTH_USERNAME_REGEX, CERT_CLOCK_SKEW_MS } from '../constants';
 import type {
-  AccountRootCertV3,
+  AccountRootCert,
   CertifiedPeerBundleBuildInput,
-  CertifiedPeerBundleV3,
+  CertifiedPeerBundle,
   CertifiedPeerBundleValidationContext,
   CertifiedPeerBundleValidationResult,
-  DeviceCertV3,
-  DeviceSubkeyBindingV3
+  DeviceCert,
+  DeviceSubkeyBinding
 } from '../types/identity-types';
 import { CERTIFIED_IDENTITY_BUNDLE_VERSION } from '../types/identity-types';
 import type { PeerCertificateBundle } from '../types/p2p-types';
@@ -182,7 +182,7 @@ function requireValidTimeWindow(
 export function computeIdentityRootFingerprint(
   username: string,
   accountRootPublicKey: string,
-  authorityModel: CertifiedPeerBundleV3['authorityModel'] = 'account-device-chain'
+  authorityModel: CertifiedPeerBundle['authorityModel'] = 'account-device-chain'
 ): string {
   return fingerprintIdentityObject(PROTOCOL_KEYS.IDENTITY_ROOT, {
     version: CERTIFIED_IDENTITY_BUNDLE_VERSION,
@@ -193,7 +193,7 @@ export function computeIdentityRootFingerprint(
   });
 }
 
-function accountRootSignedPayload(root: Omit<AccountRootCertV3, 'signedPayloadDigest' | 'rootSelfSignature' | 'rootFingerprint'>) {
+function accountRootSignedPayload(root: Omit<AccountRootCert, 'signedPayloadDigest' | 'rootSelfSignature' | 'rootFingerprint'>) {
   return root;
 }
 
@@ -208,12 +208,12 @@ function computeDeviceId(username: string, cert: PeerCertificateBundle): string 
 }
 
 function deviceCertSignedPayload(
-  deviceCert: Omit<DeviceCertV3, 'accountRootSignature' | 'signedPayloadDigest' | 'deviceCertificateFingerprint'>
+  deviceCert: Omit<DeviceCert, 'accountRootSignature' | 'signedPayloadDigest' | 'deviceCertificateFingerprint'>
 ) {
   return deviceCert;
 }
 
-function deviceCertFingerprintSeed(deviceCert: Omit<DeviceCertV3, 'deviceCertificateFingerprint'>) {
+function deviceCertFingerprintSeed(deviceCert: Omit<DeviceCert, 'deviceCertificateFingerprint'>) {
   return {
     ...deviceCert,
     deviceCertificateFingerprint: undefined
@@ -221,12 +221,12 @@ function deviceCertFingerprintSeed(deviceCert: Omit<DeviceCertV3, 'deviceCertifi
 }
 
 function subkeyBindingSignedPayload(
-  binding: Omit<DeviceSubkeyBindingV3, 'signedPayloadDigest' | 'deviceSignature' | 'bindingFingerprint'>
+  binding: Omit<DeviceSubkeyBinding, 'signedPayloadDigest' | 'deviceSignature' | 'bindingFingerprint'>
 ) {
   return binding;
 }
 
-function subkeyBindingFingerprintSeed(binding: Omit<DeviceSubkeyBindingV3, 'bindingFingerprint'>) {
+function subkeyBindingFingerprintSeed(binding: Omit<DeviceSubkeyBinding, 'bindingFingerprint'>) {
   return {
     ...binding,
     bindingFingerprint: undefined
@@ -251,14 +251,14 @@ async function verifyIdentityPayload(signatureBase64: string, value: unknown, pu
   return CryptoUtils.Dilithium.verify(signature, textEncoder.encode(canonicalIdentityJson(value)), publicKey);
 }
 
-function bundleFingerprintSeed(bundle: Omit<CertifiedPeerBundleV3, 'bundleFingerprint'>) {
+function bundleFingerprintSeed(bundle: Omit<CertifiedPeerBundle, 'bundleFingerprint'>) {
   return {
     ...bundle,
     bundleFingerprint: undefined
   };
 }
 
-export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuildInput): Promise<CertifiedPeerBundleV3> {
+export async function buildCertifiedPeerBundle(input: CertifiedPeerBundleBuildInput): Promise<CertifiedPeerBundle> {
   const username = normalizeHandle(input.username);
   const signalIdentityX25519PublicKey = extractX25519FromSignalBundle(input.fullBundle);
   const staticMlKemPublicKey = extractStaticMlKemFromSignalBundle(input.fullBundle);
@@ -310,7 +310,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     encodePeerCertificateSigningPayload(cert)
   );
 
-  const accountRootPayload: Omit<AccountRootCertV3, 'signedPayloadDigest' | 'rootSelfSignature' | 'rootFingerprint'> = {
+  const accountRootPayload: Omit<AccountRootCert, 'signedPayloadDigest' | 'rootSelfSignature' | 'rootFingerprint'> = {
     version: CERTIFIED_IDENTITY_BUNDLE_VERSION,
     authorityModel,
     username,
@@ -320,14 +320,14 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     expiresAt: cert.expiresAt
   };
   const accountRootSigned = accountRootSignedPayload(accountRootPayload);
-  const accountRoot: AccountRootCertV3 = {
+  const accountRoot: AccountRootCert = {
     ...accountRootPayload,
     signedPayloadDigest: fingerprintIdentityObject(PROTOCOL_KEYS.ACCOUNT_ROOT_PAYLOAD, accountRootSigned),
     rootSelfSignature: await signIdentityPayload(input.signAccountRoot, accountRootSigned),
     rootFingerprint: identityRootFingerprint
   };
 
-  const unsignedDeviceCert: Omit<DeviceCertV3, 'accountRootSignature' | 'signedPayloadDigest' | 'deviceCertificateFingerprint'> = {
+  const unsignedDeviceCert: Omit<DeviceCert, 'accountRootSignature' | 'signedPayloadDigest' | 'deviceCertificateFingerprint'> = {
     version: CERTIFIED_IDENTITY_BUNDLE_VERSION,
     username,
     deviceId,
@@ -344,13 +344,13 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     expiresAt: cert.expiresAt
   };
   const signedDevicePayload = deviceCertSignedPayload(unsignedDeviceCert);
-  const deviceCertSeed: Omit<DeviceCertV3, 'deviceCertificateFingerprint'> = {
+  const deviceCertSeed: Omit<DeviceCert, 'deviceCertificateFingerprint'> = {
     ...unsignedDeviceCert,
     signedPayloadDigest: fingerprintIdentityObject(PROTOCOL_KEYS.DEVICE_CERTIFICATE_PAYLOAD, signedDevicePayload),
     accountRootSignature: await signIdentityPayload(input.signAccountRoot, signedDevicePayload)
   };
 
-  const deviceCert: DeviceCertV3 = {
+  const deviceCert: DeviceCert = {
     ...deviceCertSeed,
     deviceCertificateFingerprint: fingerprintIdentityObject(
       PROTOCOL_KEYS.DEVICE_CERTIFICATE,
@@ -358,7 +358,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     )
   };
 
-  const unsignedBinding: Omit<DeviceSubkeyBindingV3, 'signedPayloadDigest' | 'deviceSignature' | 'bindingFingerprint'> = {
+  const unsignedBinding: Omit<DeviceSubkeyBinding, 'signedPayloadDigest' | 'deviceSignature' | 'bindingFingerprint'> = {
     version: CERTIFIED_IDENTITY_BUNDLE_VERSION,
     username,
     deviceId,
@@ -382,13 +382,13 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     expiresAt: cert.expiresAt
   };
   const signedBindingPayload = subkeyBindingSignedPayload(unsignedBinding);
-  const bindingSeed: Omit<DeviceSubkeyBindingV3, 'bindingFingerprint'> = {
+  const bindingSeed: Omit<DeviceSubkeyBinding, 'bindingFingerprint'> = {
     ...unsignedBinding,
     signedPayloadDigest: fingerprintIdentityObject(PROTOCOL_KEYS.DEVICE_SUBKEY_BINDING_PAYLOAD, signedBindingPayload),
     deviceSignature: await signIdentityPayload(input.signDevice, signedBindingPayload)
   };
 
-  const subkeyBinding: DeviceSubkeyBindingV3 = {
+  const subkeyBinding: DeviceSubkeyBinding = {
     ...bindingSeed,
     bindingFingerprint: fingerprintIdentityObject(
       PROTOCOL_KEYS.DEVICE_SUBKEY_BINDING,
@@ -396,7 +396,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
     )
   };
 
-  const bundleSeed: Omit<CertifiedPeerBundleV3, 'bundleFingerprint'> = {
+  const bundleSeed: Omit<CertifiedPeerBundle, 'bundleFingerprint'> = {
     version: CERTIFIED_IDENTITY_BUNDLE_VERSION,
     authorityModel,
     username,
@@ -413,7 +413,7 @@ export async function buildCertifiedPeerBundleV3(input: CertifiedPeerBundleBuild
   };
 }
 
-export async function validateCertifiedPeerBundleV3(
+export async function validateCertifiedPeerBundle(
   candidate: unknown,
   context: CertifiedPeerBundleValidationContext
 ): Promise<CertifiedPeerBundleValidationResult> {
@@ -422,7 +422,7 @@ export async function validateCertifiedPeerBundleV3(
       return { valid: false, reason: 'CERTIFIED_IDENTITY_BUNDLE_MISSING' };
     }
 
-    const bundle = candidate as CertifiedPeerBundleV3;
+    const bundle = candidate as CertifiedPeerBundle;
     if (
       !hasExactObjectKeys(bundle, CERTIFIED_BUNDLE_KEYS) ||
       !hasExactObjectKeys(bundle.accountRoot, ACCOUNT_ROOT_KEYS) ||

@@ -1,6 +1,9 @@
 import { x25519 } from '@noble/curves/ed25519.js';
 import { bytesToHex, isHex } from './bytes.js';
 import { PostQuantumHash } from './post-quantum-hash.js';
+import { SPOOL_TAG_PROTOCOL } from './protocol-keys.js';
+
+export { SPOOL_TAG_PROTOCOL } from './protocol-keys.js';
 
 /**
  * Spool tag protocol
@@ -19,8 +22,6 @@ import { PostQuantumHash } from './post-quantum-hash.js';
  * long lived material. A stable per recipient tag would be a permanent
  * pseudonym, which at least yields 1-of-N/B.
  */
-
-export const SPOOL_TAG_PROTOCOL = 'qorc-spool-tag-v1';
 
 export const SPOOL_TAG_BYTES = 8;
 export const SPOOL_TAG_HEX_CHARS = SPOOL_TAG_BYTES * 2;

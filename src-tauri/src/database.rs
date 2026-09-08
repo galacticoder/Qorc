@@ -103,17 +103,17 @@ impl DatabaseManager {
         // Derive triple keys from master key
         let k_disk = Zeroizing::new(hkdf_sha3_derive_32(
             master_key,
-            b"native_db_salt_disk_v1",
+            crate::storage_keys::NATIVE_DATABASE_SALT_DISK,
             crate::protocol_keys::DATABASE_DISK,
         )?);
         let k_sym_raw = Zeroizing::new(hkdf_sha3_derive_32(
             master_key,
-            b"native_db_salt_sym_v1",
+            crate::storage_keys::NATIVE_DATABASE_SALT_SYMMETRIC,
             crate::protocol_keys::DATABASE_SYMMETRIC,
         )?);
         let k_quant_raw = Zeroizing::new(hkdf_sha3_derive_32(
             master_key,
-            b"native_db_salt_quant_v1",
+            crate::storage_keys::NATIVE_DATABASE_SALT_QUANTUM,
             crate::protocol_keys::DATABASE_QUANTUM,
         )?);
 
@@ -1237,7 +1237,7 @@ mod tests {
     fn account_namespace_matches_frontend_and_avoids_aliases() {
         assert_eq!(
             account_namespace("alice"),
-            "f840a452f174289620fda26da1d64df764f6ca179c9150ef78727feb65d444d9"
+            "5738b3aedc7fc4c825a57be637a50c72e8a51ba3b600ff16312cfaea5d225704"
         );
         assert_ne!(account_namespace("a.b"), account_namespace("a_b"));
         assert_ne!(account_namespace("a-b"), account_namespace("a_b"));
@@ -1307,8 +1307,10 @@ mod tests {
 
     #[test]
     fn renderer_batch_is_atomic_and_key_enumeration_is_bounded() {
-        let path =
-            std::env::temp_dir().join(format!("qorc-db-renderer-batch-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "qorc-db-renderer-batch-{}.db",
+            uuid::Uuid::new_v4()
+        ));
         let mut manager =
             DatabaseManager::new(path.clone(), &[11u8; 32]).expect("test database opens");
         manager.set_account_context("scope_".to_string(), "owner".to_string());

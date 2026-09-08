@@ -271,7 +271,7 @@ async function createInnerLayer(
     mac = await HashingService.generateBlake3Mac(macInput, macKey);
 
     return {
-      version: PROTOCOL_KEYS.INNER_ENVELOPE_VERSION,
+      version: PROTOCOL_KEYS.INNER_ENVELOPE_PROTOCOL,
       salt: Base64.arrayBufferToBase64(innerSalt),
       ephemeralX25519: Base64.arrayBufferToBase64(ephemeral.publicKey),
       nonce: Base64.arrayBufferToBase64(innerNonce),
@@ -365,7 +365,7 @@ export class Hybrid {
       kemCiphertext = encapsulated.ciphertext;
       pqSharedSecret = encapsulated.sharedSecret;
       const publicHeader: HybridPublicHeader = {
-        version: PROTOCOL_KEYS.HYBRID_ENVELOPE_VERSION,
+        version: PROTOCOL_KEYS.HYBRID_ENVELOPE_PROTOCOL,
         routing: header,
         algorithms: { ...HYBRID_ALGORITHMS },
         kemCiphertext: Base64.arrayBufferToBase64(kemCiphertext)

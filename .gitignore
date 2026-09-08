@@ -25,6 +25,8 @@ server/config/*
 !server/config/config.js
 !server/config/constants.js
 !server/config/secure-credentials.js
+!server/config/protocol-keys.js
+!server/config/redis-keys.js
 
 .config/
 
@@ -128,3 +130,7 @@ server/test/*
 !server/test/docker-build-context.test.js
 !server/test/native-context-menu-policy.test.js
 !server/test/user-registration-database.test.js
+!server/test/protocol-keys.test.js
+!server/test/client-key-centralization.test.js
+!server/test/hybrid-recipient-binding.test.js
+!server/test/unversioned-protocols.test.js

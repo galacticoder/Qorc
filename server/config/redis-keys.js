@@ -1,0 +1,25 @@
+export const REDIS_KEYS = Object.freeze({
+  ADMIN_AUDIT: 'cluster:admin:audit',
+  ADMIN_FAILURES: 'cluster:admin:failures',
+  ADMIN_RATE_LIMIT: 'cluster:admin:ratelimit',
+  ADMIN_TOKENS: 'cluster:admin:tokens',
+  ADMIN_VERIFY_ADMISSION: 'cluster:admin:verify-admission',
+  AUTH_FAILURE_PREFIX: 'auth:fail:global:',
+  AUTH_PIR_REQUEST_PREFIX: 'auth:pirreq:global:',
+  CLUSTER_CONFIG: 'cluster:config',
+  CLUSTER_HEALTH: 'cluster:health',
+  CLUSTER_KEYS: 'cluster:keys',
+  CLUSTER_MASTER: 'cluster:master',
+  CLUSTER_MESSAGES: 'cluster:messages',
+  CLUSTER_MESSAGE_REPLAY_PREFIX: 'cluster:message:seen:',
+  CLUSTER_PENDING: 'cluster:pending',
+  CLUSTER_SERVERS: 'cluster:servers',
+  CLUSTER_TOKENS: 'cluster:tokens',
+  LB_ENCRYPTED_COMMAND_CHANNEL: 'lb:command:encrypted',
+  LB_COMMAND_REPLAY_PREFIX: 'lb:command:seen:',
+  LB_HTTPS_PORT: 'cluster:lb:httpsPort',
+  LB_ONION_ADDRESS: 'cluster:lb:onionAddress',
+});
+
+export const CLUSTER_MASTER_KEY = REDIS_KEYS.CLUSTER_MASTER;
+export const CLUSTER_SERVERS_KEY = REDIS_KEYS.CLUSTER_SERVERS;

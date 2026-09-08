@@ -7,13 +7,14 @@ P2P protocols. `docs/app/MESSAGING.md` describes delivery and durability.
 
 | Boundary | Current wire form | Main primitives |
 |---|---|---|
-| Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq-v2` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
-| End-to-end outer envelope | `hybrid-envelope-v2` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
-| Server sealed sender | `ss-v2` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
-| Direct P2P session | `hybrid-mlkem1024-mldsa87-session-v5` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and call-stream subkeys |
-| WebSocket session | `pq-ws-8` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
-| Anonymous HTTP tunnel | `qorc-pq-anonymous-http-v1` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
-| Account-root transparency | `qorc-key-transparency-v2` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+| Signal storage and ratchet | libsignal PQXDH/SPQR v1 plus `signal-pq` | Double Ratchet, X25519, ML-KEM-1024, SPQR, XChaCha20-Poly1305 |
+| End-to-end outer envelope | `hybrid-envelope` | ML-KEM-1024 + X25519, HKDF, AEAD, ML-DSA-87 |
+| Server sealed sender | `sealed-sender` | ML-KEM-1024, BLAKE3 KDF, AES-256-GCM |
+| Direct P2P session | `hybrid-mlkem1024-mldsa87-session` | ML-KEM-1024 + X25519, ML-DSA-87, directional AEAD and call-stream subkeys |
+| WebSocket session | `pq-ws` | two ML-KEM-1024 contributions + X25519, ML-DSA-87 server authentication, directional AEAD in authenticated 64 KiB binary cells |
+| Anonymous HTTP tunnel | `qorc-pq-anonymous-http` | ML-KEM-1024 + X25519 request KEX, responder ML-KEM, ML-DSA-87, padded AEAD |
+| Account-root transparency | `qorc-key-transparency` | SHA3-512 rolling hash chain, ML-DSA-87 heads and root/recovery authorization, XChaCha20-Poly1305 events |
+
 | Client-facing TLS KEX | TLS 1.3 with `X25519MLKEM768` only | hybrid ML-KEM-768 + X25519 key establishment, no classical KEX fallback |
 
 These wire forms and algorithm bindings are required. Classical-only message
@@ -25,7 +26,7 @@ The native Signal store supplies identity keys, signed prekeys, one-time prekeys
 and ML-KEM prekeys. Session establishment combines the Signal/X25519 agreements
 with the advertised ML-KEM prekey. Every session must negotiate or use SPQR
 version 1, and non-PQ ratchet state is rejected. Each encrypted message is then
-placed inside the required `signal-pq-v2` envelope.
+placed inside the required `signal-pq` envelope.
 Native decryption checks exact algorithm bindings and atomically commits ratchet
 state with staged plaintext.
 
@@ -44,7 +45,7 @@ Code:
 
 ## Hybrid Envelope
 
-`hybrid-envelope-v2` encapsulates to the recipient's certified ML-KEM-1024 key
+`hybrid-envelope` encapsulates to the recipient's certified ML-KEM-1024 key
 and performs X25519 with the recipient's certified Hybrid key. The two secrets
 are domain-separated into the AEAD key. The sender signs the current routing
 header with ML-DSA-87. The recipient requires agreement between the certificate,
@@ -75,7 +76,7 @@ Code:
 
 ## Server Sealed Sender
 
-For server delivery, the client wraps the Hybrid payload in `ss-v2`. A fresh
+For server delivery, the client wraps the Hybrid payload in `sealed-sender`. A fresh
 ML-KEM encapsulation derives an AES-256-GCM key, and the KEM ciphertext is bound
 as additional authenticated data. The plaintext contains the sender identity but
 is padded to a 128 KiB or 256 KiB frame before encryption. The server sees only
@@ -90,7 +91,7 @@ memoized so the same envelope is never decapsulated twice. Catch-up for entries
 missed while disconnected is not broadcast — it is retrieved by PIR over the tag
 index, described in `docs/app/OFFLINE_MESSAGING.md`.
 
-Sealed-envelope opening is native. The renderer submits one exact `ss-v2`
+Sealed-envelope opening is native. The renderer submits one exact `sealed-sender`
 envelope, Rust performs ML-KEM decapsulation, fixed-frame authentication and
 parsing, exact JSON validation, and canonical sender-handle validation. The
 account ML-KEM secret remains inside the native account boundary.
@@ -103,7 +104,7 @@ Code:
 
 ## P2P Session
 
-`hybrid-mlkem1024-mldsa87-session-v5` combines both endpoints' ML-KEM-1024 and
+`hybrid-mlkem1024-mldsa87-session` combines both endpoints' ML-KEM-1024 and
 X25519 shared-secret contributions with the authenticated handshake transcript.
 HKDF-BLAKE3 produces 64 bytes and assigns independent 32-byte send and receive
 keys according to the initiator or responder role. ML-DSA-87 signatures
@@ -112,7 +113,7 @@ verify encrypted key-confirmation frames before marking the connection ready.
 
 The enclosing network transport is a Tor onion-service stream. Tor's circuit
 cryptography is classical and contributes no post-quantum key exchange. The
-required `hybrid-mlkem1024-mldsa87-session-v5` application P2P session is the
+required `hybrid-mlkem1024-mldsa87-session` application P2P session is the
 source of PQ confidentiality and peer authentication on this path. There is no
 application relay, ambient discovery, port mapping, or gateway probing. Every
 peer connection is dialled through Tor.
@@ -131,8 +132,8 @@ connection, or transport objects.
 
 Message streams use the directional session key. Each call stream derives a
 32-byte subkey with HKDF-BLAKE3, the salt
-`qorc-call-stream-key-salt-v1`, and the info value
-`qorc-call-stream-key-v1:<completeStreamId>`. Accepted contexts are
+`qorc-call-stream-key-salt`, and the info value
+`qorc-call-stream-key:<completeStreamId>`. Accepted contexts are
 `call-audio`, `call-video`, `call-telemetry`, and `call-screen` followed by a
 16–64 character lowercase hexadecimal identifier. The complete stream ID is
 also AEAD additional data, so changing the media kind, call ID, or screen stream
@@ -176,7 +177,7 @@ Code:
 
 ## WebSocket Session
 
-`pq-ws-8` derives each connection from an initiator encapsulation to the server's
+`pq-ws` derives each connection from an initiator encapsulation to the server's
 ML-KEM-1024 key, an ephemeral-client/static-server X25519 agreement, and a second
 server encapsulation to the client's fresh ML-KEM-1024 key. The server's
 ML-DSA-87-signed acknowledgement binds the request digest and responder KEM

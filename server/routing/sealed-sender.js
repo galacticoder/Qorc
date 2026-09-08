@@ -8,7 +8,7 @@ import { BASE64_ALPHABET, SEALED_NONCE_BYTES } from '../utils/crypto-consts.js';
 import { CANONICAL_BASE64_RE } from '../utils/patterns.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 
-export const SEALED_ENVELOPE_VERSION = PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION;
+export const SEALED_ENVELOPE_PROTOCOL = PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL;
 export const SEALED_STANDARD_CIPHERTEXT_BYTES = 131072 + 16;
 export const SEALED_LARGE_CIPHERTEXT_BYTES = 262144 + 16;
 export const SEALED_KEM_CIPHERTEXT_BYTES = ML_KEM_1024_CIPHERTEXT_BYTES;
@@ -57,7 +57,7 @@ export function validateSealedEnvelope(envelope) {
   }
 
   // Check version
-  if (envelope.version !== SEALED_ENVELOPE_VERSION) {
+  if (envelope.version !== SEALED_ENVELOPE_PROTOCOL) {
     return { valid: false, error: 'unsupported_version' };
   }
 

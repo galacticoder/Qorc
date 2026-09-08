@@ -134,7 +134,7 @@ export function sealedEnvelopeFromRecord(
   const nonce = record.subarray(KEM_CIPHERTEXT_BYTES, KEM_CIPHERTEXT_BYTES + NONCE_BYTES);
   const ciphertext = record.subarray(KEM_CIPHERTEXT_BYTES + NONCE_BYTES);
   return {
-    version: PROTOCOL_KEYS.SEALED_ENVELOPE_VERSION,
+    version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
     ciphertext: Base64.arrayBufferToBase64(ciphertext),
     ephemeralKey: Base64.arrayBufferToBase64(ephemeralKey),
     nonce: Base64.arrayBufferToBase64(nonce),

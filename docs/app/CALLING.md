@@ -77,7 +77,7 @@ exists, session prefetch establishes one before call signaling, the calling
 service itself waits at most ten seconds for that session to become available.
 
 The P2P connection then completes
-`hybrid-mlkem1024-mldsa87-session-v5`. ML-KEM-1024 and X25519 contribute to
+`hybrid-mlkem1024-mldsa87-session`. ML-KEM-1024 and X25519 contribute to
 directional session keys, ML-DSA-87 authenticates the transcript against the
 peer's certified keys, key confirmation completes before application streams
 are accepted. The direct route is a Tor onion connection, so neither endpoint
@@ -202,7 +202,7 @@ bounded to 16 KiB before JSON parsing.
 
 The inner object is serialized into the `content` of a `CALL_SIGNAL` application
 payload. It then receives the same native libsignal encryption, required
-`signal-pq-v2` wrapper, signed `hybrid-envelope-v2`, and P2P or `ss-v2` transport
+`signal-pq` wrapper, signed `hybrid-envelope`, and P2P or `sealed-sender` transport
 protection described in `docs/app/MESSAGING.md` and
 `docs/app/MESSAGING_CRYPTOGRAPHY.md`. A call signal is not plaintext WebSocket
 control traffic.
@@ -467,8 +467,8 @@ the transport derives another 32-byte directional key as:
 ```text
 HKDF-BLAKE3(
   inputKey = directionalSessionKey,
-  salt = UTF8("qorc-call-stream-key-salt-v1"),
-  info = UTF8("qorc-call-stream-key-v1:" + completeStreamId),
+  salt = UTF8("qorc-call-stream-key-salt"),
+  info = UTF8("qorc-call-stream-key:" + completeStreamId),
   length = 32
 )
 ```
