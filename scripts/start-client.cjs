@@ -46,7 +46,7 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
     console.log('For x86-to-ARM64 builds, run `node scripts/install-deps.cjs --client-arm64`.');
-    console.log('QORC_ARM64_BUILDER must select a native ARM64 Buildx builder .');
+    console.log('Set QORC_ARM64_BUILDER only to select a different existing Buildx builder.');
     console.log('Native bundles are written to src-tauri/target/release/bundle.');
     console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
     console.log('Logs are saved to logs/instance-<QORC_INSTANCE_ID>-logs.txt');
@@ -736,12 +736,12 @@ function stageGStreamerPlugins() {
     }
 }
 
-function buildAppImage() {
+function buildAppImage(checkTools = false) {
     if (process.platform !== 'linux') return;
     const buildScript = path.join(repoRoot, 'scripts', 'build-appimage.cjs');
-    console.log('[CLIENT] Building cached AppImage...');
+    console.log(checkTools ? '[CLIENT] Checking AppImage packaging tools...' : '[CLIENT] Building cached AppImage...');
     try {
-        execFileSync(process.execPath, [buildScript], {
+        execFileSync(process.execPath, [buildScript, ...(checkTools ? ['--check-tools'] : [])], {
             cwd: repoRoot,
             stdio: 'inherit',
             env: clientRuntimeEnv(),
@@ -749,7 +749,7 @@ function buildAppImage() {
         });
     } catch (error) {
         const code = Number.isInteger(error?.status) ? error.status : 1;
-        logErr(`AppImage build failed with code ${code}`);
+        logErr(`AppImage ${checkTools ? 'tool check' : 'build'} failed with code ${code}`);
         process.exit(code || 1);
     }
 }
@@ -803,6 +803,7 @@ if (runOnly) {
     pruneClientTargetCache();
     checkProtocEnv();
     checkWindowsPerlEnv();
+    buildAppImage(true);
     stageWebKitGtkRuntime();
     stageGStreamerPlugins();
     buildPirSidecars();

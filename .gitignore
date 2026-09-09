@@ -128,6 +128,9 @@ server/test/*
 !server/test/account-auth-handler-adversarial.test.js
 !server/test/account-credential-encoding.test.js
 !server/test/docker-build-context.test.js
+!server/test/client-arm64-builder.test.js
+!server/test/runtime-package-download.test.js
+!server/test/appimage-tool-runtime.test.js
 !server/test/native-context-menu-policy.test.js
 !server/test/user-registration-database.test.js
 !server/test/protocol-keys.test.js

@@ -329,6 +329,11 @@ async function installComponent(name) {
     case 'docker-buildx': {
       return await installDockerBuildx();
     }
+    case 'arm64-builder': {
+      const { ensureArm64Builder } = require('./client-arm64-builder.cjs');
+      ensureArm64Builder();
+      return true;
+    }
     case 'rust': {
       if (findInPath('cargo')) return true;
 
@@ -373,12 +378,12 @@ async function installComponent(name) {
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --client-arm64');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: jq, redis, postgres, docker, docker-buildx, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, pnpm, tauri, libevent, rust');
+    console.log('Components: jq, redis, postgres, docker, docker-buildx, arm64-builder, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, pnpm, tauri, libevent, rust');
     console.log('Presets:');
     console.log('  all      - Server build and runtime dependencies');
     console.log('  server   - Server runtime dependencies');
     console.log('  client   - Client runtime dependencies');
-    console.log('  client-arm64 - Client dependencies plus Buildx for a native ARM64 builder');
+    console.log('  client-arm64 - Client dependencies, Docker Buildx, and an ARM64 execution check');
     process.exit(args.length === 0 ? 1 : 0);
   }
 
@@ -386,7 +391,7 @@ async function installComponent(name) {
     all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'jq', 'docker'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri'],
-    'client-arm64': ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri', 'docker', 'docker-buildx']
+    'client-arm64': ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri', 'docker', 'docker-buildx', 'arm64-builder']
   };
 
   const expanded = [];
@@ -409,7 +414,7 @@ async function installComponent(name) {
       console.log(res ? 'OK' : 'SKIPPED/FAILED');
       if (!res) ok = false;
     } catch (e) {
-      console.log('ERROR');
+      console.log(`ERROR: ${e.message}`);
       ok = false;
     }
   }

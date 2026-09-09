@@ -4,8 +4,8 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pipeline } = require('node:stream/promises');
 const { execFileSync } = require('node:child_process');
+const { downloadRuntimePackage } = require('./download-runtime-package.cjs');
 
 if (process.platform !== 'linux') process.exit(0);
 
@@ -87,23 +87,11 @@ function packageIsValid(entry, packagePath) {
 }
 
 async function downloadPackage(entry, packagePath) {
-  fs.mkdirSync(cacheDir, { recursive: true });
-  const temporaryPath = `${packagePath}.${process.pid}.tmp`;
-  fs.rmSync(temporaryPath, { force: true });
-  const response = await fetch(`${packageBaseUrl}/${entry.file}`, { redirect: 'follow' });
-  if (!response.ok || !response.body) {
-    throw new Error(`download failed for ${entry.file}: HTTP ${response.status}`);
-  }
-  try {
-    await pipeline(response.body, fs.createWriteStream(temporaryPath, { mode: 0o644 }));
-    if (!packageIsValid(entry, temporaryPath)) {
-      throw new Error(`downloaded package failed validation: ${entry.file}`);
-    }
-    fs.renameSync(temporaryPath, packagePath);
-  } catch (error) {
-    fs.rmSync(temporaryPath, { force: true });
-    throw error;
-  }
+  await downloadRuntimePackage({
+    url: `${packageBaseUrl}/${entry.file}`,
+    destination: packagePath,
+    validate: temporaryPath => packageIsValid(entry, temporaryPath)
+  });
 }
 
 function runtimeIsCurrent() {

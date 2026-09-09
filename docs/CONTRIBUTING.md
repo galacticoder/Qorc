@@ -46,16 +46,39 @@ launching. Both commands build the host architecture. On x86_64 Linux, use
 `node scripts/start-client.cjs --bundle-only --target arm64` for ARM64-only
 installers or add `--all-architectures` to build native x86_64 and ARM64
 installers sequentially. Native artifacts are written beneath
-`src-tauri/target/release/bundle`; cross-built ARM64 artifacts are written
+`src-tauri/target/release/bundle`, cross-built ARM64 artifacts are written
 beneath `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`.
 
 The ARM64 cross-build uses a secret-free source snapshot and an ARM64-capable
 Docker Buildx builder. It keeps persistent pnpm, Cargo, downloaded-runtime, and
 BuildKit layer caches, and the frontend has a separate stage so UI edits retain
-compiled Rust dependencies. Linux Docker Engine users can run
-`node scripts/install-deps.cjs --client-arm64` to install Buildx. ARM64 builds
-must run on a native ARM64 host or through a native remote builder selected by
-`QORC_ARM64_BUILDER`; QEMU and binfmt emulation are intentionally unsupported.
+compiled Rust dependencies. On an x86_64 Linux laptop, run:
+
+```bash
+node scripts/install-deps.cjs --client-arm64
+node scripts/start-client.cjs --target arm64 --bundle-only
+```
+
+Docker must be running and accessible to your user. The installer adds Buildx,
+creates a `qorc-client-arm64` builder using Docker's `docker-container`
+driver, and checks that it can execute ARM64 programs. Official BuildKit images
+include QEMU emulators. The build repeats
+the uncached execution check before copying sources or compiling. Emulation is slower for compilation and compression, especially on the first
+build, keep the builder to retain its compilation caches.
+
+The builder uses the current Docker endpoint without changing your selected
+builder. Leave `QORC_ARM64_BUILDER` unset for local builds, set it only to use a
+different existing builder, including a native remote ARM64 builder. A selected
+builder that fails the execution check stops the build rather than switching
+builders.
+
+If the execution check reports an executable-format or QEMU error, verify your
+Docker installation's ARM64 emulation. Some installations require host QEMU
+registration with the `fix_binary` flag, follow Docker's
+[QEMU setup instructions](https://docs.docker.com/build/building/multi-platform/#install-qemu-manually).
+Qorc does not silently install privileged host binfmt handlers. Image-download
+failures are separate from emulation failures and are shown in the Docker log.
+
 On a native ARM64 host,
 `node scripts/start-client.cjs --bundle-only --target arm64` builds directly.
 
@@ -63,6 +86,11 @@ Linux AppImages are prepared from the Debian payload, populated by linuxdeploy,
 then compressed once after Qorc's private WebKitGTK and GStreamer runtimes are
 installed. The old intermediate compressed AppImage pass is not part of the
 build path.
+
+The client build checks linuxdeploy and its GTK, GStreamer, and AppImage plugins
+before compiling. AppImage build-tool ELF headers are prepared for QEMU binfmt
+execution, including tools already in the cache. Generated installers retain
+their AppImage identification bytes, runtime inspection uses a temporary copy.
 
 On Linux, the build downloads and SHA-256-validates the release-pinned WebKitGTK
 packages, stages a curated GStreamer/PipeWire capture runtime from the build
@@ -75,7 +103,7 @@ permissions, and base system libraries remain platform requirements.
 
 `node scripts/start-client.cjs --run-only` skips all building and runtime
 staging. It launches the existing AppDir when available, otherwise the existing
-release executable. Use it only after a completed build; it does not include
+release executable. Use it only after a completed build, it does not include
 later source changes.
 
 ## Development Workflow

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { ensureArm64Builder } = require('./client-arm64-builder.cjs');
 const {
     createClientDockerBuildContext,
     removeClientDockerBuildContext
@@ -30,52 +31,6 @@ function docker(args, options = {}) {
         windowsHide: true,
         ...options
     });
-}
-
-function checkDocker() {
-    let runtime;
-    try {
-        runtime = execFileSync('docker', ['version', '--format', '{{.Server.Os}}'], {
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe']
-        }).trim().toLowerCase();
-    } catch (error) {
-        throw new Error(`Docker is unavailable or is not running: ${error.message}`);
-    }
-    if (runtime !== 'linux') {
-        throw new Error('ARM64 client bundles require Docker running Linux containers');
-    }
-
-    const configuredBuilderName = (process.env.QORC_ARM64_BUILDER || '').trim();
-    if (!configuredBuilderName) {
-        throw new Error(
-            'ARM64 cross-builds require a native ARM64 Buildx builder. Set QORC_ARM64_BUILDER, or run the build directly on an ARM64 machine.'
-        );
-    }
-    const builderName = configuredBuilderName;
-    try {
-        execFileSync('docker', ['buildx', 'version'], {
-            stdio: ['ignore', 'ignore', 'pipe']
-        });
-    } catch {
-        throw new Error('Docker Buildx is required for persistent ARM64 build caches. Run `node scripts/install-deps.cjs --client-arm64`.');
-    }
-
-    try {
-        const inspectArguments = ['buildx', 'inspect'];
-        inspectArguments.push(builderName);
-        inspectArguments.push('--bootstrap');
-        const inspection = execFileSync('docker', inspectArguments, {
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe']
-        });
-        if (!inspection.includes('linux/arm64')) {
-            throw new Error('selected builder does not advertise linux/arm64');
-        }
-    } catch {
-        throw new Error('QORC_ARM64_BUILDER must select a reachable native ARM64 Buildx builder that advertises linux/arm64. Emulated ARM64 builders are unsupported.');
-    }
-    return builderName;
 }
 
 function collectArtifacts(root) {
@@ -133,9 +88,10 @@ function main() {
     if (process.platform !== 'linux') {
         throw new Error('Cross-building Linux ARM64 client bundles is supported only from Linux');
     }
-    const builderName = checkDocker();
+    const builderName = ensureArm64Builder();
 
-    console.log(`[CLIENT] Using native ARM64 Buildx builder '${builderName}'.`);
+    console.log(`[CLIENT] Using ARM64 Buildx builder '${builderName}'.`);
+    console.log('[CLIENT] QEMU builds on x86-64 can be much slower than native builds, especially the first build.');
 
     let contextRoot;
     let containerId;
@@ -144,7 +100,7 @@ function main() {
     try {
         console.log('[CLIENT] Preparing a secret-free ARM64 client build context...');
         contextRoot = createClientDockerBuildContext(repoRoot);
-        console.log('[CLIENT] Building native Linux ARM64 installers in Docker...');
+        console.log('[CLIENT] Building Linux ARM64 installers in Docker...');
         nextCacheDirectory = `${buildCacheDirectory}.next-${process.pid}`;
         fs.rmSync(nextCacheDirectory, { recursive: true, force: true });
         fs.mkdirSync(path.dirname(buildCacheDirectory), { recursive: true });

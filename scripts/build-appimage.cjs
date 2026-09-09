@@ -5,6 +5,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+const { prepareAppImageTool, readAppImageRuntimeOffset } = require('./appimage-tool-runtime.cjs');
 
 const repoRoot = path.resolve(__dirname, '..');
 const tauriDir = path.join(repoRoot, 'src-tauri');
@@ -289,19 +290,11 @@ function ensureAppImageTools() {
         appRunToolPath,
         `https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-${arch.appImage}`
     );
-    const linuxDeployExisted = fs.statSync(linuxDeployPath, { throwIfNoEntry: false })?.isFile();
     downloadTool(
         linuxDeployPath,
         `https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-${arch.appImage}.AppImage`
     );
-    if (!linuxDeployExisted) {
-        const descriptor = fs.openSync(linuxDeployPath, 'r+');
-        try {
-            fs.writeSync(descriptor, Buffer.alloc(3), 0, 3, 8);
-        } finally {
-            fs.closeSync(descriptor);
-        }
-    }
+    prepareAppImageTool(linuxDeployPath);
     downloadTool(
         gtkPluginPath,
         'https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh'
@@ -314,6 +307,7 @@ function ensureAppImageTools() {
         appImagePluginPath,
         `https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-${arch.appImage}.AppImage`
     );
+    prepareAppImageTool(appImagePluginPath);
 }
 
 function filesAreIdentical(leftPath, rightPath) {
@@ -349,6 +343,7 @@ function computeFingerprint() {
         path.join(tauriDir, 'linux'),
         path.join(repoRoot, 'LICENSE'),
         __filename,
+        path.join(repoRoot, 'scripts', 'appimage-tool-runtime.cjs'),
         path.join(repoRoot, 'scripts', 'stage-gstreamer-plugins.cjs'),
         path.join(repoRoot, 'scripts', 'stage-webkitgtk-runtime.cjs'),
         pluginsDir,
@@ -629,15 +624,7 @@ function writeCachedFingerprint(fingerprint) {
 }
 
 function cacheRuntimeFromAppImage() {
-    const options = {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore']
-    };
-    const offsetOutput = execFileSync(outputPath, ['--appimage-offset'], options);
-    const offset = Number.parseInt(offsetOutput.trim(), 10);
-    if (!Number.isInteger(offset) || offset < 65536 || offset > 4 * 1024 * 1024) {
-        throw new Error(`unexpected AppImage runtime size: ${offset}`);
-    }
+    const offset = readAppImageRuntimeOffset(outputPath);
     const descriptor = fs.openSync(outputPath, 'r');
     const runtime = Buffer.alloc(offset);
     try {
@@ -707,7 +694,6 @@ function replaceRootSymlink(linkPath, target) {
 }
 
 function populatePreparedAppDir() {
-    ensureAppImageTools();
     const debBundle = findDebBundle();
     fs.rmSync(appDir, { recursive: true, force: true });
     fs.mkdirSync(appDir, { recursive: true });
@@ -787,15 +773,43 @@ function packCachedAppDir() {
     packPreparedAppDir('[appimage] reusing prepared AppDir, packing updated application...');
 }
 
+if (process.argv.includes('--check-tools')) {
+    try {
+        ensureAppImageTools();
+        const plugins = execFileSync(linuxDeployPath, ['--appimage-extract-and-run', '--list-plugins'], {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'inherit'],
+            env: {
+                ...process.env,
+                APPIMAGE_EXTRACT_AND_RUN: '1',
+                ARCH: arch.appImage,
+                PATH: `${tauriToolsDir}${path.delimiter}${process.env.PATH || ''}`
+            }
+        });
+        process.stdout.write(plugins);
+        for (const name of ['appimage', 'gtk', 'gstreamer']) {
+            if (!new RegExp(`^\\s*${name}:`, 'm').test(plugins)) {
+                throw new Error(`Required linuxdeploy plugin is unavailable: ${name}`);
+            }
+        }
+        console.log('[appimage] packaging tools are ready');
+        process.exit(0);
+    } catch (error) {
+        console.error(`[appimage] packaging tool check failed: ${error.message}`);
+        process.exit(1);
+    }
+}
+
 if (!fs.existsSync(binaryPath)) {
     console.error(`[appimage] release binary not found: ${binaryPath}`);
     process.exit(1);
 }
 
-const fingerprint = computeFingerprint();
-const canReuse = appDirIsComplete() && (readCachedFingerprint() === fingerprint || adoptCurrent);
-
 try {
+    ensureAppImageTools();
+    const fingerprint = computeFingerprint();
+    const canReuse = appDirIsComplete() && (readCachedFingerprint() === fingerprint || adoptCurrent);
     if (!canReuse) {
         rebuildPreparedAppDir();
     } else {
