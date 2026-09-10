@@ -1,9 +1,8 @@
 # Qorc
 
-Qorc is a Tauri desktop chat app for messaging, files, and audio/video/screen
-calls. Every network path the client uses runs over Tor, and every application
+Qorc is a Tauri desktop communications app. Every network path the client uses runs over Tor, and every application
 payload is protected by a hybrid post-quantum layer on top of the Signal Double
-Ratchet.
+Ratchet. This is a very simplified explanation. To understand everything in detail read the docs.
 
 Current architecture docs:
 - [Authentication](docs/app/AUTHENTICATION.md)
@@ -19,7 +18,7 @@ Current architecture docs:
 - [Local data security](docs/app/LOCAL_DATA_SECURITY.md)
 - [Environment variables](docs/ENVIRONMENT_VARIABLES.md)
 
-## What this project is for
+## What this project is for and includes
 
 - Messaging app aimed to be the most secure and private in the world for anyone looking for serious self hosted messaging.
 - Anonymous account entry and resume flows using an OPAQUE-style password
@@ -46,7 +45,7 @@ cover-traffic protocol artifacts.
 
 ## Run a Qorc server with Docker
 
-This is the source and terminal setup. It works with Docker Linux containers on
+This works with Docker Linux containers on
 64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
 
 You need only:
@@ -57,9 +56,7 @@ You need only:
 - Node.js 18 or newer to run the small deployment helper.
 - This repository, downloaded as an archive or cloned with Git.
 
-You do **NOT** install pnpm, Rust, Cargo, PostgreSQL, Redis, HAProxy, Tor,
-OpenSSL/OQS, or their build toolchains on the host. Docker carries the server
-runtime. The edge image contains authenticated, architecture matched copies of
+The edge image contains authenticated, architecture matched copies of
 HAProxy, patched Tor, liboqs, the OQS provider, and their private libraries.
 
 From the repository root, run:
@@ -84,7 +81,7 @@ When you run it, the helper:
    onion-service edge. TLS certificates are generated inside the stack.
 
 The first build pulls the Docker base images and installs the Node server
-dependencies inside the images, it does not install them on the host. Later
+dependencies inside the images. Later
 starts reuse the built images:
 
 ```bash
@@ -105,7 +102,7 @@ node scripts/start-docker.cjs stop all
 node scripts/start-docker.cjs --help
 ```
 
-Existing `.env` values are preserved, except for an invalid Redis password that
+Existing `.env` values are saved, except for an invalid Redis password that
 cannot start the service. The launcher never prompts for missing server or
 HAProxy credentials. The load-balancer logs print the onion service address
 clients connect to. Keep `.env` and the Docker volumes backed up, they contain
@@ -131,10 +128,7 @@ needed for a Docker server or for an installed Qorc app:
 
 Desktop source builds are supported on x86_64 and ARM64 Linux, and x86_64
 Windows. A normal Linux build selects native PIR, Tor, WebKitGTK, GStreamer,
-PipeWire, and AppImage assets for its host architecture. An x86_64 Linux host
-can also produce real ARM64 installers through the Docker ARM64 build path. An
-installed `.deb`, `.rpm`, `.AppImage`, `.msi`, or `.exe` is self-contained from
-the repository and does not need Node.js, pnpm, Rust, Cargo, or the build cache.
+PipeWire, and AppImage assets for its host architecture.
 
 ### Install client build dependencies
 
@@ -181,9 +175,9 @@ node scripts/start-client.cjs --bundle-only --all-architectures
 ```
 
 Native installers are written beneath `src-tauri/target/release/bundle`.
-Cross-built ARM64 installers are written beneath
+Cross built ARM64 installers are written beneath
 `src-tauri/target/aarch64-unknown-linux-gnu/release/bundle`. Docker must be able
-to build `linux/arm64` images. The ARM build keeps persistent BuildKit layers
+to build `linux/arm64` images. The ARM build keeps BuildKit layers
 and named Cargo, pnpm, Tauri-tool, and runtime-download caches, exported layer
 metadata is kept in `.cache/buildkit/client-linux-arm64`.
 
@@ -202,12 +196,6 @@ client tooling and Buildx with:
 ```bash
 node scripts/install-deps.cjs --client-arm64
 ```
-
-The frontend is built in its own Docker stage. UI-only edits reuse the pnpm
-dependency layer and all previously compiled Rust dependencies, only the final
-application crate/link and package assembly are invalidated. AppImage assembly
-also reuses the already-built Debian payload and compresses the prepared AppDir
-once instead of first creating and then recompressing an intermediate AppImage.
 
 To launch an already built AppDir or release executable without rebuilding or
 restaging anything:
