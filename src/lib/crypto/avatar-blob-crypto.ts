@@ -6,15 +6,16 @@ import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { PQ_AEAD_NONCE_SIZE, PQ_AEAD_MAC_SIZE, MAX_AVATAR_DATA_URL_CHARS } from '../constants';
+import { MAX_AVATAR_DATA_URL_CHARS } from '../constants';
 import type { AvatarData } from '../types/avatar-types';
-import { bytesToHex } from '../utils/byte-utils';
+import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
+import { Base64 } from '../cryptography/base64';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export const AVATAR_PURB_CAPACITY = 256 * 1024;
-export const AVATAR_PURB_WIRE_BYTES = PQ_AEAD_NONCE_SIZE + PQ_AEAD_MAC_SIZE + (AVATAR_PURB_CAPACITY + 32);
+export const AVATAR_PURB_WIRE_BYTES = POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES + (AVATAR_PURB_CAPACITY + 32);
 
 const LEN_PREFIX = 4;
-const MAX_AVATAR_DATA_CHARS = MAX_AVATAR_DATA_URL_CHARS;
 
 export interface AvatarRef {
     blobId: string;
@@ -35,7 +36,7 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
     if (typeof avatar?.data !== 'string' || avatar.data.length === 0) {
         throw new Error('avatar has no data');
     }
-    if (avatar.data.length > MAX_AVATAR_DATA_CHARS) {
+    if (avatar.data.length > MAX_AVATAR_DATA_URL_CHARS) {
         throw new Error('avatar exceeds maximum size');
     }
     const content = new TextEncoder().encode(JSON.stringify({
@@ -75,7 +76,7 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
             const decoded = PostQuantumUtils.base64ToUint8Array(existingRef.keyB64);
             if (
                 decoded.length === 32 &&
-                PostQuantumUtils.uint8ArrayToBase64(decoded) === existingRef.keyB64
+                Base64.arrayBufferToBase64(decoded) === existingRef.keyB64
             ) {
                 key = decoded;
             } else {
@@ -95,11 +96,11 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
         return {
             ref: {
                 blobId: bytesToHex(blobIdBytes),
-                keyB64: PostQuantumUtils.uint8ArrayToBase64(key),
+                keyB64: Base64.arrayBufferToBase64(key),
                 hash: avatar.hash,
                 mimeType: avatar.mimeType
             },
-            purbBase64: PostQuantumUtils.uint8ArrayToBase64(combined)
+            purbBase64: Base64.arrayBufferToBase64(combined)
         };
     } finally {
         content.fill(0);
@@ -130,13 +131,13 @@ export function decryptAvatarPurb(purbBase64: string, ref: AvatarRef): AvatarDat
         data = PostQuantumUtils.base64ToUint8Array(purbBase64);
         if (
             data.length !== AVATAR_PURB_WIRE_BYTES ||
-            PostQuantumUtils.uint8ArrayToBase64(data) !== purbBase64
+            Base64.arrayBufferToBase64(data) !== purbBase64
         ) return null;
-        nonce = data.slice(0, PQ_AEAD_NONCE_SIZE);
-        tag = data.slice(PQ_AEAD_NONCE_SIZE, PQ_AEAD_NONCE_SIZE + PQ_AEAD_MAC_SIZE);
-        ciphertext = data.slice(PQ_AEAD_NONCE_SIZE + PQ_AEAD_MAC_SIZE);
+        nonce = data.slice(0, POST_QUANTUM_AEAD_NONCE_BYTES);
+        tag = data.slice(POST_QUANTUM_AEAD_NONCE_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES);
+        ciphertext = data.slice(POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES);
         key = PostQuantumUtils.base64ToUint8Array(ref.keyB64);
-        if (key.length !== 32 || PostQuantumUtils.uint8ArrayToBase64(key) !== ref.keyB64) return null;
+        if (key.length !== 32 || Base64.arrayBufferToBase64(key) !== ref.keyB64) return null;
         aad = new TextEncoder().encode(PROTOCOL_KEYS.AVATAR_BLOB_AAD);
 
         plaintext = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, aad);
@@ -153,7 +154,7 @@ export function decryptAvatarPurb(purbBase64: string, ref: AvatarRef): AvatarDat
             Object.keys(obj).sort().join(',') !== 'data,hash,isDefault,mimeType' ||
             typeof obj.data !== 'string' ||
             obj.data.length === 0 ||
-            obj.data.length > MAX_AVATAR_DATA_CHARS ||
+            obj.data.length > MAX_AVATAR_DATA_URL_CHARS ||
             typeof obj.hash !== 'string' ||
             obj.hash !== ref.hash ||
             typeof obj.mimeType !== 'string' ||

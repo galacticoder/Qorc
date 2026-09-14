@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { SignInForm } from "./Login/SignIn.tsx";
-import { SignUpForm } from "./Login/SignUp.tsx";
-import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 import { toast } from "sonner";
 import { system } from "../../lib/tauri-bindings";
-import { EventType } from "../../lib/types/event-types.ts";
 import { QorcBrandLogo } from "../ui/QorcBrandLogo";
 import { ThemeToggleButton } from "../ui/ThemeToggleButton";
+import { SignInForm } from './Login/SignIn';
+import { SignUpForm } from './Login/SignUp';
+import { ServerPasswordForm } from './Login/ServerPassword';
+import { EventType } from '../../lib/types/event-types';
 
 interface LoginProps {
   readonly isGeneratingKeys: boolean;

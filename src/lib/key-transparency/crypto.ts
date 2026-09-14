@@ -3,9 +3,6 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
 import {
   KEY_TRANSPARENCY_EPOCH_MS,
-  KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES,
-  KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES,
-  KEY_TRANSPARENCY_PROTOCOL,
   encodeKeyTransparencySignaturePayload,
   exactPlainObject,
   isKeyTransparencyHash,
@@ -15,8 +12,10 @@ import {
   keyTransparencySignedUpdate,
 } from '../../../shared/key-transparency-protocol.js';
 import { Base64, decodeCanonicalBase64 } from '../cryptography/base64';
-import { bytesToHex, concatUint8Arrays } from '../utils/byte-utils';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
+import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
+import { bytesToHex, concatUint8Arrays } from '../../../shared/bytes.js';
 
 const LABEL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_LABEL);
 const EPOCH_LABEL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_EPOCH_LABEL);
@@ -135,14 +134,14 @@ export function deriveKeyTransparencyLabel(discoveryEncryptionKey: Uint8Array): 
 }
 
 export function keyTransparencyPublicKeyCommitment(publicKey: Uint8Array): string {
-  if (!(publicKey instanceof Uint8Array) || publicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES) {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES) {
     throw new Error('Invalid key-transparency public key');
   }
   return hashHex(KEY_COMMITMENT_DOMAIN, publicKey);
 }
 
 export function keyTransparencySignerKeyId(publicKey: Uint8Array): string {
-  if (!(publicKey instanceof Uint8Array) || publicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES) {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES) {
     throw new Error('Invalid key-transparency signer key');
   }
   return hashHex(SIGNER_KEY_ID_DOMAIN, publicKey);
@@ -162,14 +161,14 @@ export async function createKeyTransparencyAuthorizationWithSigners(
     key: { publicKey: Uint8Array; sign: (payload: Uint8Array) => Promise<string> } | undefined,
   ): Promise<string | null> => {
     if (!key) return null;
-    if (key.publicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES) {
+    if (key.publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES) {
       throw new Error('Invalid key-transparency public key');
     }
     const signature = await key.sign(payload);
     const decoded = decodeCanonicalBase64(
       signature,
       'key-transparency base64 value',
-      { exactBytes: KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES },
+      { exactBytes: ML_DSA_87_SIGNATURE_BYTES },
     );
     decoded.fill(0);
     return signature;
@@ -217,12 +216,12 @@ export function verifyKeyTransparencyAuthorization(
     keyTransparencySignedUpdate(signedUpdate),
   );
   try {
-    previousRootPublicKey = decodeOptional(authorization.previousRootPublicKey, KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES);
-    previousRootSignature = decodeOptional(authorization.previousRootSignature, KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES);
-    recoveryPublicKey = decodeOptional(authorization.recoveryPublicKey, KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES);
-    recoverySignature = decodeOptional(authorization.recoverySignature, KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES);
-    rootPublicKey = decodeOptional(authorization.rootPublicKey, KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES);
-    rootSignature = decodeOptional(authorization.rootSignature, KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES);
+    previousRootPublicKey = decodeOptional(authorization.previousRootPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
+    previousRootSignature = decodeOptional(authorization.previousRootSignature, ML_DSA_87_SIGNATURE_BYTES);
+    recoveryPublicKey = decodeOptional(authorization.recoveryPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
+    recoverySignature = decodeOptional(authorization.recoverySignature, ML_DSA_87_SIGNATURE_BYTES);
+    rootPublicKey = decodeOptional(authorization.rootPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
+    rootSignature = decodeOptional(authorization.rootSignature, ML_DSA_87_SIGNATURE_BYTES);
 
     if (
       previousRootPublicKey &&

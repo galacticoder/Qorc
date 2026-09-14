@@ -5,22 +5,19 @@
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { withRedisClient, createSubscriber } from '../session/redis-client.js';
-import {
-  CLUSTER_MASTER_KEY,
-  CLUSTER_SERVERS_KEY,
-  REDIS_KEYS
-} from '../config/redis-keys.js';
+import { REDIS_KEYS } from '../config/redis-keys.js';
 import {
   CLUSTER_APPROVED_EVENT,
   CLUSTER_JOIN_REQUEST_EVENT,
   CLUSTER_KEYS_ROTATED_EVENT,
   CLUSTER_PROMOTED_EVENT
 } from './protocol.js';
-import { SHA_256_ALGORITHM, X25519_KEY_BYTES } from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES,
+  X25519_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import {
@@ -42,11 +39,11 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
 // Redis keys for cluster coordination
 const CLUSTER_KEYS = {
-  SERVERS: CLUSTER_SERVERS_KEY,                  // Hash of active servers
+  SERVERS: REDIS_KEYS.CLUSTER_SERVERS,                  // Hash of active servers
   PENDING: REDIS_KEYS.CLUSTER_PENDING,           // Set of servers awaiting approval
   KEYS: REDIS_KEYS.CLUSTER_KEYS,                 // Hash of server public keys
   HEALTH: REDIS_KEYS.CLUSTER_HEALTH,             // Hash of server health status
-  MASTER: CLUSTER_MASTER_KEY,                    // Current master server ID
+  MASTER: REDIS_KEYS.CLUSTER_MASTER,                    // Current master server ID
   TOKENS: REDIS_KEYS.CLUSTER_TOKENS,             // Hash of cluster authentication tokens
   MESSAGES: REDIS_KEYS.CLUSTER_MESSAGES,         // Pub/sub channel for inter-server messages
   SHARED_CONFIG: REDIS_KEYS.CLUSTER_CONFIG,      // Shared configuration

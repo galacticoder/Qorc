@@ -4,13 +4,6 @@ import {
   getDiscoveryBucketIndex,
   publicDiscoveryManifest
 } from '../discovery/bucket-index.js';
-import {
-  DISCOVERY_BLOB_BASE64_CHARS,
-  DISCOVERY_BUCKET_QUERY_COUNT,
-  DISCOVERY_BUCKET_TARGET_SIZE,
-  DISCOVERY_DATABASE_KIND,
-  DISCOVERY_FIXED_BUCKET_COUNT
-} from '../discovery/bucket-layout.js';
 import { OPRF_DISCOVERY_POW_DIFFICULTY, oprfDiscoveryServer } from '../crypto/oprf-discovery.js';
 import crypto from 'crypto';
 import { PrivacyPassHelpers, PrivacyPassServer } from '../authentication/privacy-pass-server.js';
@@ -29,13 +22,19 @@ import {
 import { getDiscoveryEpochInfo } from '../discovery/epoch.js';
 import { deriveAuthRootKey } from '../crypto/auth-root.js';
 import { SERVER_CONSTANTS } from '../config/constants.js';
-import { SPOOL_TAG_PROTOCOL } from '../../shared/spool-tag-protocol.js';
 import { answerPirQuery, readReadyPirTagIndex } from '../pir/pir-service.js';
+import { SPOOL_PIR_EPOCH_UNAVAILABLE } from '../../shared/spool-pir-layout.js';
 import {
-  SPOOL_PIR_EPOCH_UNAVAILABLE,
-  SPOOL_PIR_LAYOUT
-} from '../../shared/spool-pir-layout.js';
-import { KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY, KEY_TRANSPARENCY_APPEND_POW_DOMAIN, KEY_TRANSPARENCY_DELTA_MAX_EPOCHS, KEY_TRANSPARENCY_MAX_LOG_SIZE, KEY_TRANSPARENCY_POW_EPOCH_MS, KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY, KEY_TRANSPARENCY_SYNC_POW_DOMAIN, exactPlainObject, isKeyTransparencyHash, isKeyTransparencyLabel, keyTransparencyPowEpoch } from '../../shared/key-transparency-protocol.js';
+  KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY,
+  KEY_TRANSPARENCY_DELTA_MAX_EPOCHS,
+  KEY_TRANSPARENCY_MAX_LOG_SIZE,
+  KEY_TRANSPARENCY_POW_EPOCH_MS,
+  KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
+  exactPlainObject,
+  isKeyTransparencyHash,
+  isKeyTransparencyLabel,
+  keyTransparencyPowEpoch,
+} from '../../shared/key-transparency-protocol.js';
 import {
   appendKeyTransparency,
   syncKeyTransparency
@@ -59,19 +58,26 @@ import { isCanonicalBase64Bytes } from '../utils/encoding.js';
 import { setNoStoreHeaders } from '../utils/http.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
-import {
-  DISCOVERY_EPOCH_ID_RE,
-  HEX_64_RE
-} from '../utils/patterns.js';
-import { hasExactPlainObjectKeys as hasExactObjectKeys } from '../utils/validation.js';
+import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { POW_SEED_BYTES, SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { SESSION_FINGERPRINT_RE, DISCOVERY_EPOCH_ID_RE } from '../../shared/patterns.js';
+import { POW_SEED_BYTES } from '../../shared/crypto-sizes.js';
+import {
+  DISCOVERY_BLOB_BASE64_CHARS,
+  DISCOVERY_BUCKET_QUERY_COUNT,
+  DISCOVERY_BUCKET_TARGET_SIZE,
+  DISCOVERY_DATABASE_KIND,
+  DISCOVERY_FIXED_BUCKET_COUNT,
+} from '../../shared/discovery-constants.js';
+import {
+  SPOOL_TAG_PROTOCOL,
+  SPOOL_PIR_LAYOUT,
+  KEY_TRANSPARENCY_APPEND_POW_DOMAIN,
+  KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
+} from '../../shared/protocol-keys.js';
 
 let oprfHttpInflight = 0;
-const OPRF_POW_DOMAIN = PROTOCOL_KEYS.DISCOVERY_OPRF_POW;
-const DISCOVERY_BUCKET_POW_DOMAIN = PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW;
-const AVATAR_GET_POW_DOMAIN = PROTOCOL_KEYS.AVATAR_GET_HTTP_POW;
-const AVATAR_PUT_POW_DOMAIN = PROTOCOL_KEYS.AVATAR_PUT_HTTP_POW;
 const DISCOVERY_BUCKET_POW_DIFFICULTY = 18;
 const AVATAR_GET_POW_DIFFICULTY = 16;
 const AVATAR_PUT_POW_DIFFICULTY = 18;
@@ -119,7 +125,7 @@ router.use(pqAnonymousOperationPaths, (req, res, next) => {
 
 function deriveOprfPowSeed(blindedPoint, epoch, publicKey) {
   return crypto.createHash(SHA_256_ALGORITHM)
-    .update(OPRF_POW_DOMAIN)
+    .update(PROTOCOL_KEYS.DISCOVERY_OPRF_POW)
     .update('\0')
     .update(publicKey)
     .update('\0')
@@ -193,7 +199,7 @@ function keyTransparencyPowExpiresAt(epoch) {
 
 // whole tag index identical for every caller
 router.get('/spool/tag-index', async (req, res) => {
-  if (!hasExactObjectKeys(req.body, [])) {
+  if (!hasExactPlainObjectKeys(req.body, [])) {
     fail(res, 400, 'invalid_spool_tag_index_request');
     return;
   }
@@ -298,7 +304,6 @@ export async function destroyApiRoutes() {
   if (pending.length > 0) await Promise.allSettled(pending);
   AVATAR_MISS_SECRET.fill(0);
 }
-const AVATAR_BLOB_MAX_COUNT = SERVER_CONSTANTS.AVATAR_BLOB_MAX_COUNT;
 const AVATAR_ENFORCE_EVERY = envInt('AVATAR_ENFORCE_EVERY', 100, 1, 1_000);
 let avatarPutsSinceEnforce = 0;
 let avatarGetInflight = 0;
@@ -308,7 +313,7 @@ let avatarCapEnforcePromise = null;
 
 function scheduleAvatarCapEnforcement() {
   if (avatarCapEnforcePromise) return;
-  const pending = AvatarBlobDB.enforceCap(AVATAR_BLOB_MAX_COUNT);
+  const pending = AvatarBlobDB.enforceCap(SERVER_CONSTANTS.AVATAR_BLOB_MAX_COUNT);
   avatarCapEnforcePromise = pending;
   void pending.finally(() => {
     if (avatarCapEnforcePromise === pending) avatarCapEnforcePromise = null;
@@ -354,8 +359,8 @@ router.post('/avatar/blob/put', async (req, res) => {
       typeof req.body !== 'object' ||
       Array.isArray(req.body) ||
       Object.keys(req.body).sort().join(',') !== 'authorization,blobId,data,powEpoch,powNonce,powSolution,serverEntryAuthorization' ||
-      !hasExactObjectKeys(req.body.authorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
-      !hasExactObjectKeys(req.body.serverEntryAuthorization, ['mac', 'nullifier', 'token', 'tokenSecret'])
+      !hasExactPlainObjectKeys(req.body.authorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
+      !hasExactPlainObjectKeys(req.body.serverEntryAuthorization, ['mac', 'nullifier', 'token', 'tokenSecret'])
     ) {
       fail(res, 400, 'invalid_avatar_blob');
       return;
@@ -379,7 +384,7 @@ router.post('/avatar/blob/put', async (req, res) => {
       return;
     }
     const powSeed = deriveAnonymousRequestPowSeed(
-      AVATAR_PUT_POW_DOMAIN,
+      PROTOCOL_KEYS.AVATAR_PUT_HTTP_POW,
       req.body.powEpoch,
       req.body.powNonce,
       [blobId, data]
@@ -395,7 +400,7 @@ router.post('/avatar/blob/put', async (req, res) => {
     avatarPutInflight += 1;
     admitted = true;
     const powClaim = await claimAnonymousRequestPow(
-      AVATAR_PUT_POW_DOMAIN,
+      PROTOCOL_KEYS.AVATAR_PUT_HTTP_POW,
       powSeed,
       req.body.powSolution,
       epochInfo.rotatesAt
@@ -479,7 +484,7 @@ router.post('/avatar/blob/get', async (req, res) => {
       return;
     }
     const powSeed = deriveAnonymousRequestPowSeed(
-      AVATAR_GET_POW_DOMAIN,
+      PROTOCOL_KEYS.AVATAR_GET_HTTP_POW,
       req.body.powEpoch,
       req.body.powNonce,
       ids
@@ -495,7 +500,7 @@ router.post('/avatar/blob/get', async (req, res) => {
     avatarGetInflight += 1;
     admitted = true;
     const powClaim = await claimAnonymousRequestPow(
-      AVATAR_GET_POW_DOMAIN,
+      PROTOCOL_KEYS.AVATAR_GET_HTTP_POW,
       powSeed,
       req.body.powSolution,
       epochInfo.rotatesAt
@@ -606,7 +611,7 @@ router.post('/discovery/bucket', async (req, res) => {
       return;
     }
     const powSeed = deriveAnonymousRequestPowSeed(
-      DISCOVERY_BUCKET_POW_DOMAIN,
+      PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
       req.body.epochId,
       req.body.powNonce,
       bucketIds.map(String)
@@ -622,7 +627,7 @@ router.post('/discovery/bucket', async (req, res) => {
     discoveryBucketInflight += 1;
     admitted = true;
     const powClaim = await claimAnonymousRequestPow(
-      DISCOVERY_BUCKET_POW_DOMAIN,
+      PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
       powSeed,
       req.body.powSolution,
       epochInfo.rotatesAt
@@ -715,7 +720,7 @@ router.post('/oprf/evaluate', async (req, res) => {
     const powSolution = req.body?.powSolution;
     const epochInfo = getDiscoveryEpochInfo();
     if (
-      !HEX_64_RE.test(blindedPoint) ||
+      !SESSION_FINGERPRINT_RE.test(blindedPoint) ||
       !Number.isSafeInteger(powEpoch) ||
       powEpoch !== epochInfo.current ||
       typeof powSolution !== 'string'
@@ -766,7 +771,7 @@ router.post('/oprf/evaluate', async (req, res) => {
 router.post('/discovery/manifest', async (req, res) => {
   try {
     if (
-      !hasExactObjectKeys(req.body, ['kind']) ||
+      !hasExactPlainObjectKeys(req.body, ['kind']) ||
       req.body.kind !== DISCOVERY_DATABASE_KIND
     ) {
       fail(res, 400, 'invalid_discovery_manifest_request');
@@ -805,7 +810,7 @@ router.post('/key-transparency/sync', async (req, res) => {
       return;
     }
     if (
-      !hasExactObjectKeys(req.body, [
+      !hasExactPlainObjectKeys(req.body, [
         'fromEpoch', 'powEpoch', 'powNonce', 'powSolution', 'toEpoch'
       ]) ||
       !Number.isSafeInteger(req.body.fromEpoch) ||
@@ -873,7 +878,7 @@ router.post('/key-transparency/append', async (req, res) => {
       return;
     }
     if (
-      !hasExactObjectKeys(req.body, [
+      !hasExactPlainObjectKeys(req.body, [
         'authorization',
         'epochLabel',
         'powEpoch',
@@ -883,8 +888,8 @@ router.post('/key-transparency/append', async (req, res) => {
         'serverEntryAuthorization',
         'version'
       ]) ||
-      !hasExactObjectKeys(req.body.authorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
-      !hasExactObjectKeys(req.body.serverEntryAuthorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
+      !hasExactPlainObjectKeys(req.body.authorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
+      !hasExactPlainObjectKeys(req.body.serverEntryAuthorization, ['mac', 'nullifier', 'token', 'tokenSecret']) ||
       !isKeyTransparencyLabel(req.body.epochLabel) ||
       !isKeyTransparencyHash(req.body.recordHash) ||
       !Number.isSafeInteger(req.body.version) ||

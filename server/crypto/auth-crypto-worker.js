@@ -18,7 +18,7 @@ import {
   AUTH_OPERATION_CANCELLED_MESSAGE,
   AUTH_OPERATION_FAILED_MESSAGE,
 } from '../config/error-codes.js';
-import { wipeBytes as wipe } from '../utils/wipe.js';
+import { wipeBytes } from '../utils/wipe.js';
 
 function exactBytes(value, expectedLength) {
   return value instanceof Uint8Array && value.length === expectedLength;
@@ -92,12 +92,12 @@ function issuePrivacyPass(payload, cancelState) {
     }
     return { evaluatedTokens, proof };
   } catch (error) {
-    wipe(evaluatedTokens);
-    wipe(proof);
+    wipeBytes(evaluatedTokens);
+    wipeBytes(proof);
     throw error;
   } finally {
-    for (const token of evaluated.evaluated || []) wipe(token);
-    wipe(evaluated.proof);
+    for (const token of evaluated.evaluated || []) wipeBytes(token);
+    wipeBytes(evaluated.proof);
   }
 }
 
@@ -168,13 +168,13 @@ parentPort.on('message', (data) => {
         : AUTH_OPERATION_FAILED_MESSAGE
     });
   } finally {
-    wipe(data?.payload?.authPublicKeys);
-    wipe(data?.payload?.signature);
-    wipe(data?.payload?.transcript);
-    wipe(data?.payload?.blindedTokens);
-    wipe(data?.payload?.secretKey);
-    wipe(data?.payload?.publicKey);
-    wipe(result?.evaluatedTokens);
-    wipe(result?.proof);
+    wipeBytes(data?.payload?.authPublicKeys);
+    wipeBytes(data?.payload?.signature);
+    wipeBytes(data?.payload?.transcript);
+    wipeBytes(data?.payload?.blindedTokens);
+    wipeBytes(data?.payload?.secretKey);
+    wipeBytes(data?.payload?.publicKey);
+    wipeBytes(result?.evaluatedTokens);
+    wipeBytes(result?.proof);
   }
 });

@@ -1308,13 +1308,10 @@ html.light .qorc-profile-stack,
   cursor: pointer;
 }
 
-.dark .qorc-call-log-header .qorc-icon-btn {
-  background: #0e0e11 !important;
-}
-
-.dark .qorc-call-log-header .qorc-icon-btn:hover,
-.dark .qorc-call-log-header .qorc-icon-btn:focus-visible {
-  background: var(--qorc-conversation-card-hover-bg) !important;
+.qorc-call-log-header .qorc-icon-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+  background: var(--qorc-control-bg) !important;
 }
 
 .qorc-call-log-header-actions {
@@ -1642,14 +1639,14 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   color: #e3616a;
 }
 
-.qorc-call-log-popover-action:hover,
-.qorc-call-log-popover-action:focus-visible {
+.qorc-call-log-popover-action:hover:not(:disabled),
+.qorc-call-log-popover-action:focus-visible:not(:disabled) {
   outline: none;
   background: #e5e5e9;
 }
 
-.dark .qorc-call-log-popover-action:hover,
-.dark .qorc-call-log-popover-action:focus-visible {
+.dark .qorc-call-log-popover-action:hover:not(:disabled),
+.dark .qorc-call-log-popover-action:focus-visible:not(:disabled) {
   background: var(--qorc-conversation-card-hover-bg);
 }
 
@@ -2093,9 +2090,18 @@ html.light .qorc-conversation-empty-lines span,
   color: rgba(255, 255, 255, .7);
 }
 
+.qorc-conversation-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 22px;
+}
+
 .qorc-conversation-preview {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  padding-right: 22px;
   color: var(--qorc-muted-text);
   font-size: 12px;
   text-overflow: ellipsis;
@@ -2115,35 +2121,65 @@ html.light .qorc-conversation-empty-lines span,
 .qorc-conversation-preview-typing {
   display: flex;
   align-items: center;
-  gap: 5px;
-  color: var(--color-accent-primary);
-  font-weight: 600;
+  color: var(--qorc-conversation-preview-text);
 }
 
-.qorc-conversation-typing-dots {
+.qorc-typing-bubble {
+  display: inline-flex;
+  padding: 12px 16px;
+  border-radius: 4px 16px 16px;
+  background: var(--color-typing-bubble);
+  color: var(--color-typing-dot);
+  user-select: none;
+}
+
+.qorc-typing-bubble.is-compact {
+  padding: 5px 9px;
+  border-radius: 3px 10px 10px;
+  background: var(--qorc-control-bg);
+  color: inherit;
+}
+
+.qorc-typing-bubble-dots {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  height: 12px;
+  gap: 4px;
+  height: 16px;
 }
 
-.qorc-conversation-typing-dots span {
-  width: 4px;
-  height: 4px;
+.qorc-typing-bubble-dots span {
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
   background: currentColor;
-  animation: qorc-conversation-typing-bounce 1.2s infinite ease-in-out;
+  animation: qorc-typing-bounce 1.4s infinite ease-in-out;
 }
 
-.qorc-conversation-typing-dots span:nth-child(2) {
-  animation-delay: 150ms;
+.qorc-typing-bubble.is-compact .qorc-typing-bubble-dots {
+  gap: 3px;
+  height: 10px;
 }
 
-.qorc-conversation-typing-dots span:nth-child(3) {
-  animation-delay: 300ms;
+.qorc-typing-bubble.is-compact .qorc-typing-bubble-dots span {
+  width: 4px;
+  height: 4px;
 }
 
-@keyframes qorc-conversation-typing-bounce {
+.qorc-typing-bubble-dots span:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.qorc-typing-bubble-dots span:nth-child(3) {
+  animation-delay: 400ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qorc-typing-bubble-dots span {
+    animation: none;
+  }
+}
+
+@keyframes qorc-typing-bounce {
   0%, 60%, 100% {
     transform: translateY(0);
     opacity: .45;
@@ -2155,12 +2191,26 @@ html.light .qorc-conversation-empty-lines span,
 }
 
 .qorc-conversation-controls {
-  position: absolute;
-  right: 6px;
-  bottom: 5px;
+  flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.qorc-conversation-unread-badge {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--qorc-accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .qorc-conversation-action-pill {
@@ -2338,6 +2388,7 @@ html.light .qorc-conversation-empty-lines span,
   place-items: center;
   color: var(--qorc-cm-muted);
   pointer-events: none;
+  z-index: 2;
 }
 
 .qorc-cm-dialog .qorc-cm-search-icon svg {
@@ -2364,6 +2415,55 @@ html.light .qorc-conversation-empty-lines span,
   padding-right: 44px;
 }
 
+.qorc-cm-dialog .qorc-cm-search.has-progress input.qorc-cm-search-input {
+  position: relative;
+  z-index: 1;
+  padding-right: 124px;
+  background: transparent;
+}
+
+.qorc-cm-search-progress {
+  position: absolute;
+  inset: 0 8px 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--qorc-cm-surface);
+  pointer-events: none;
+}
+
+.qorc-cm-search-progress-fill {
+  display: block;
+  height: 100%;
+  width: var(--qorc-discovery-progress, 0%);
+  background: rgba(59, 130, 246, .24);
+  transition: width .2s ease;
+}
+
+.dark .qorc-cm-search-progress-fill {
+  background: rgba(59, 130, 246, .3);
+}
+
+.qorc-cm-search-progress-label {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 50px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--qorc-cm-text);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qorc-cm-search-progress-fill {
+    transition: none;
+  }
+}
+
 .qorc-cm-dialog input.qorc-cm-search-input::placeholder {
   color: var(--qorc-cm-muted);
 }
@@ -2385,6 +2485,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-cm-dialog .qorc-cm-search-cancel {
   position: absolute;
+  z-index: 2;
   top: 4px;
   right: 12px;
   width: 32px;
@@ -2997,7 +3098,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-empty-preview-message {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 8px;
 }
 
@@ -3015,14 +3116,6 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .dark .qorc-empty-preview-person {
   background: #29252f;
-}
-
-.qorc-empty-preview-person.is-alt {
-  background: #c8d5ce;
-}
-
-.dark .qorc-empty-preview-person.is-alt {
-  background: #203029;
 }
 
 .qorc-empty-preview-bubble {

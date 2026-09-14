@@ -4,12 +4,7 @@
 
 import { storage } from '../tauri-bindings';
 import { getCurrentLocalAccountScope } from '../security/local-account-scope';
-import {
-  canonicalAuthUsername,
-  hasExactKeys,
-  hasPrototypePollutionKeys,
-  isPlainRecord as plainObject,
-} from '../sanitizers';
+import { canonicalAuthUsername, hasExactKeys, hasPrototypePollutionKeys, isPlainRecord } from '../sanitizers';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
@@ -45,7 +40,7 @@ const DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_BYTES * 2}}
 function parseTransparency(value: unknown): PersistedDiscoveryTransparency | null {
   if (value === null) return null;
   if (
-    !plainObject(value) ||
+    !isPlainRecord(value) ||
     hasPrototypePollutionKeys(value) ||
     !hasExactKeys(value, ['rootCommitment', 'version']) ||
     !isKeyTransparencyHash(value.rootCommitment) ||
@@ -66,13 +61,13 @@ export async function loadPersistedDiscoveryMaterial(
   }
   const parsed = JSON.parse(raw);
   if (
-    !plainObject(parsed) ||
+    !isPlainRecord(parsed) ||
     hasPrototypePollutionKeys(parsed) ||
     !hasExactKeys(parsed, ['material', 'protocol', 'transparency']) ||
     parsed.protocol !== PROTOCOL_KEYS.DISCOVERY_MATERIAL_STORE ||
-    !plainObject(parsed.material) ||
+    !isPlainRecord(parsed.material) ||
     hasPrototypePollutionKeys(parsed.material) ||
-    !plainObject(parsed.material.publicKeys) ||
+    !isPlainRecord(parsed.material.publicKeys) ||
     hasPrototypePollutionKeys(parsed.material.publicKeys) ||
     typeof parsed.material.publicKeys.kyberPublicBase64 !== 'string' ||
     typeof parsed.material.spoolDetectionKey !== 'string' ||
@@ -87,7 +82,7 @@ export async function savePersistedDiscoveryMaterial(
   material: unknown,
   transparency: PersistedDiscoveryTransparency | null
 ): Promise<void> {
-  if (!plainObject(material) || hasPrototypePollutionKeys(material)) {
+  if (!isPlainRecord(material) || hasPrototypePollutionKeys(material)) {
     throw new Error('Invalid discovery material');
   }
   const validatedTransparency = parseTransparency(transparency);

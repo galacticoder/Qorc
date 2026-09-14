@@ -1,9 +1,8 @@
 import { SignalType } from '../signals.js';
 import { validateSealedEnvelope } from './sealed-sender.js';
 import { LIVE_ONLY_DELIVERY_POLICY } from '../config/audiences.js';
-import { UUID_V4_RE } from '../utils/patterns.js';
+import { UUID_V4_RE } from '../../shared/patterns.js';
 
-export const BLIND_ROUTE_REQUEST_ID_RE = UUID_V4_RE;
 
 export function validateBlindRouteRequest(message) {
   if (
@@ -24,7 +23,7 @@ export function validateBlindRouteRequest(message) {
   if (
     message.type !== SignalType.BLIND_ROUTE ||
     typeof message.requestId !== 'string' ||
-    !BLIND_ROUTE_REQUEST_ID_RE.test(message.requestId) ||
+    !UUID_V4_RE.test(message.requestId) ||
     !message.sealedEnvelope ||
     typeof message.sealedEnvelope !== 'object' ||
     Array.isArray(message.sealedEnvelope) ||

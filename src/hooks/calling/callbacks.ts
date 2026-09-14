@@ -1,9 +1,10 @@
 import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
-import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
+import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
 import { clearCallMediaState, releaseVisualCanvas, EventDebouncer } from '../../lib/utils/calling-utils';
 import { notifications, power, tray } from '../../lib/tauri-bindings';
+import { CallState } from '../../lib/types/calling-types';
 
 export interface CallbackRefs {
   localMediaActiveRef: React.RefObject<boolean>;

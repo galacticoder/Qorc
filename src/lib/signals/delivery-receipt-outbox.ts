@@ -1,4 +1,4 @@
-import { isCanonicalAuthUsername as isCanonicalUsername, sanitizeMessageId } from '../sanitizers';
+import { isCanonicalAuthUsername, sanitizeMessageId } from '../sanitizers';
 import { receiptBatcher } from '../../hooks/message-handling/receipt-batcher';
 import { EventType } from '../types/event-types';
 
@@ -33,7 +33,7 @@ function isValidEntry(value: unknown, now = Date.now()): value is DeliveryReceip
     return false;
   }
   if (
-    !isCanonicalUsername(candidate.peerUsername) ||
+    !isCanonicalAuthUsername(candidate.peerUsername) ||
     sanitizeMessageId(candidate.messageId) !== candidate.messageId ||
     !Number.isSafeInteger(candidate.createdAt) ||
     candidate.createdAt! <= 0 ||
@@ -67,7 +67,7 @@ class DeliveryReceiptOutbox {
   }
 
   setActiveAccount(account: string | null): void {
-    const canonical = account && isCanonicalUsername(account) ? account : null;
+    const canonical = account && isCanonicalAuthUsername(account) ? account : null;
     if (this.activeAccount === canonical) return;
     this.generation += 1;
     this.activeAccount = canonical;
@@ -87,7 +87,7 @@ class DeliveryReceiptOutbox {
   }
 
   setPersistence(account: string | null, persistence: DeliveryReceiptPersistence | null): void {
-    if (!account || !isCanonicalUsername(account) || !persistence) {
+    if (!account || !isCanonicalAuthUsername(account) || !persistence) {
       this.generation += 1;
       this.persistenceOwner = null;
       this.persistence = null;
@@ -243,7 +243,7 @@ class DeliveryReceiptOutbox {
   }
 
   private async checkReady(account: string): Promise<void> {
-    if (!isCanonicalUsername(account) || account !== this.activeAccount || account !== this.persistenceOwner) {
+    if (!isCanonicalAuthUsername(account) || account !== this.activeAccount || account !== this.persistenceOwner) {
       throw new Error('Delivery receipt account is not current');
     }
     await this.restorePromise;
@@ -253,7 +253,7 @@ class DeliveryReceiptOutbox {
   }
 
   async queueDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
-    if (!isCanonicalUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
+    if (!isCanonicalAuthUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
     await this.checkReady(account);
     this.pruneExpired();
     const key = entryKey(peerUsername, messageId);
@@ -273,7 +273,7 @@ class DeliveryReceiptOutbox {
   }
 
   async requeueKnownDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
-    if (!isCanonicalUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
+    if (!isCanonicalAuthUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
     await this.checkReady(account);
     this.pruneExpired();
     const key = entryKey(peerUsername, messageId);
@@ -290,7 +290,7 @@ class DeliveryReceiptOutbox {
   }
 
   private async markSent(account: string, peerUsername: string, messageIds: string[]): Promise<void> {
-    if (account !== this.activeAccount || !isCanonicalUsername(peerUsername)) return;
+    if (account !== this.activeAccount || !isCanonicalAuthUsername(peerUsername)) return;
     await this.restorePromise;
     if (account !== this.activeAccount || this.restoreState !== 'ready') return;
     const now = Date.now();

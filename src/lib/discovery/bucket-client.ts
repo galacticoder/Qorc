@@ -1,6 +1,9 @@
 /** Fixed-shape k-anonymous discovery bucket client. */
 
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
+import { runAnonymousRequestBatch } from '../transport/anonymous-request-lane';
+import { createBucketProgress, type DiscoveryProgressObserver } from './progress';
+import { ANONYMOUS_DISCOVERY_RESPONSE_BYTES } from '../../../shared/anonymous-transfer-policy.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import {
   assertCurrentServerContext,
@@ -8,10 +11,6 @@ import {
   type CurrentServerContext,
 } from '../security/local-account-scope';
 import { createAnonymousHttpPow } from '../cryptography/anonymous-http-pow';
-import {
-  DISCOVERY_BLOB_BASE64_CHARS,
-  DISCOVERY_EPOCH_DURATION_MS,
-} from '../constants';
 import { hasExactPlainRecordKeys } from '../sanitizers';
 import { PostQuantumRandom } from '../cryptography/random';
 import { Base64 } from '../cryptography/base64';
@@ -21,6 +20,8 @@ import {
   DISCOVERY_DATABASE_KIND,
   DISCOVERY_FIXED_BUCKET_COUNT,
   DISCOVERY_PUBLICATION_BUCKET_COUNT,
+  DISCOVERY_BLOB_BASE64_CHARS,
+  DISCOVERY_EPOCH_DURATION_MS,
 } from '../../../shared/discovery-constants.js';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
@@ -111,8 +112,9 @@ function clearManifestCache(serverScope?: string): void {
 }
 
 export async function requestDiscoveryManifest(
-  options: { forceFresh?: boolean } = {}
+  options: { forceFresh?: boolean; signal?: AbortSignal } = {}
 ): Promise<ManifestResponse> {
+  options.signal?.throwIfAborted();
   const context = await captureCurrentServerContext();
   const cacheKey = `${context.serverScope}:${DISCOVERY_DATABASE_KIND}`;
   if (!options.forceFresh) {
@@ -127,7 +129,8 @@ export async function requestDiscoveryManifest(
     const response: unknown = await anonymousHttpFetch(
       DISCOVERY_MANIFEST_AUDIENCE,
       { kind: DISCOVERY_DATABASE_KIND },
-      context.serverUrl
+      context.serverUrl,
+      { signal: options.signal },
     );
     await assertCurrentServerContext(context);
     if (!hasExactPlainRecordKeys(response, ['ok', 'manifest']) || response.ok !== true) {
@@ -235,8 +238,10 @@ async function fetchDiscoveryBlobsOnce(
   tokens: string[],
   forceFresh: boolean,
   queryScope: string,
+  signal?: AbortSignal,
+  onProgress?: DiscoveryProgressObserver,
 ): Promise<DiscoveryBucketFetchResult> {
-  const manifestResponse = await requestDiscoveryManifest({ forceFresh });
+  const manifestResponse = await requestDiscoveryManifest({ forceFresh, signal });
   const manifest = manifestResponse.success ? manifestResponse.manifest : null;
   if (!manifest) throw new Error(manifestResponse.error || 'discovery_manifest_unavailable');
   const context = manifestContexts.get(manifest);
@@ -271,18 +276,26 @@ async function fetchDiscoveryBlobsOnce(
   }
   const ids = PostQuantumRandom.shuffleInPlace(Array.from(bucketIds));
   
-  const perBucket = await Promise.all(ids.map(async (id) => {
+  console.log('[DISCOVERY] bucket download started', {
+    buckets: ids.length,
+    responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+    totalBytes: ids.length * ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+  });
+  const reportProgress = createBucketProgress(ids.length, ANONYMOUS_DISCOVERY_RESPONSE_BYTES, onProgress);
+  const perBucket = await runAnonymousRequestBatch(ids.map((id, index) => async (signal: AbortSignal) => {
     const work = await createAnonymousHttpPow(
       PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
       manifest.epochId,
       [String(id)],
       DISCOVERY_BUCKET_POW_DIFFICULTY,
+      signal,
     );
     await assertCurrentServerContext(context);
     const response: unknown = await anonymousHttpFetch(
       DISCOVERY_BUCKET_AUDIENCE,
       { epochId: manifest.epochId, bucketIds: [id], ...work },
-      context.serverUrl
+      context.serverUrl,
+      { signal, onProgress: (receivedBytes) => reportProgress(index, receivedBytes) },
     );
     await assertCurrentServerContext(context);
     if (!hasExactPlainRecordKeys(response, ['ok', 'epochId', 'bucketCount', 'buckets'])) {
@@ -307,7 +320,13 @@ async function fetchDiscoveryBlobsOnce(
       throw new Error('discovery_bucket_response_invalid');
     }
     return { id, entries: bucketMap[String(id)] };
-  }));
+  }), signal);
+
+  onProgress?.({
+    phase: 'verifying',
+    receivedBytes: ids.length * ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+    totalBytes: ids.length * ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+  });
 
   const buckets: Record<string, unknown> = {};
   for (const { id, entries } of perBucket) buckets[String(id)] = entries;
@@ -333,6 +352,8 @@ async function fetchDiscoveryBlobsOnce(
 export async function fetchDiscoveryBlobsForTokens(
   tokens: string[],
   queryScope: string,
+  signal?: AbortSignal,
+  onProgress?: DiscoveryProgressObserver,
 ): Promise<DiscoveryBucketFetchResult> {
   const normalized = Array.from(new Set(tokens.map((token) => (
     typeof token === 'string' ? token.trim().toLowerCase() : ''
@@ -347,10 +368,10 @@ export async function fetchDiscoveryBlobsForTokens(
   }
 
   try {
-    return await fetchDiscoveryBlobsOnce(normalized, false, queryScope);
+    return await fetchDiscoveryBlobsOnce(normalized, false, queryScope, signal, onProgress);
   } catch (error) {
     if (!String(error instanceof Error ? error.message : error).includes('discovery_epoch_expired')) throw error;
     clearManifestCache();
-    return fetchDiscoveryBlobsOnce(normalized, true, queryScope);
+    return fetchDiscoveryBlobsOnce(normalized, true, queryScope, signal, onProgress);
   }
 }

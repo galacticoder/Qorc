@@ -15,21 +15,17 @@ import {
   ML_KEM_1024_PUBLIC_KEY_BYTES,
   ML_KEM_1024_SECRET_KEY_BYTES,
   ML_KEM_1024_SHARED_SECRET_BYTES,
-} from '../../shared/crypto-sizes.js';
-import {
   AES_GCM_NONCE_BYTES,
   HASH_OUTPUT_BYTES,
-  ML_KEM_1024_ALGORITHM,
-  POST_QUANTUM_AEAD_KEY_BYTES,
   POST_QUANTUM_AEAD_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES,
   WIDE_HASH_OUTPUT_BYTES,
   X25519_KEY_BYTES,
-  XCHACHA20_NONCE_BYTES
-} from '../utils/crypto-consts.js';
+  XCHACHA20_NONCE_BYTES,
+} from '../../shared/crypto-sizes.js';
+import { ML_KEM_1024_ALGORITHM } from '../utils/crypto-consts.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { PostQuantumHash } from './post-quantum-hash.js';
+import { PostQuantumHash } from '../../shared/post-quantum-hash.js';
 
 const UNIFIED_CRYPTO_MAC_BYTES = UTF8_ENCODER.encode(PROTOCOL_KEYS.UNIFIED_CRYPTO_MAC);
 
@@ -62,7 +58,7 @@ class SecureMemory {
 
 class PostQuantumAEAD {
   constructor(key) {
-    if (!key || key.length !== POST_QUANTUM_AEAD_KEY_BYTES) {
+    if (!key || key.length !== HASH_OUTPUT_BYTES) {
       throw new Error('PostQuantumAEAD requires a 32-byte key');
     }
     this.key = key;
@@ -76,8 +72,8 @@ class PostQuantumAEAD {
       macInput.set(UNIFIED_CRYPTO_MAC_BYTES, 0);
       macInput.set(inputKey, UNIFIED_CRYPTO_MAC_BYTES.length);
       return {
-        k1: expanded.slice(0, POST_QUANTUM_AEAD_KEY_BYTES),
-        k2: expanded.slice(POST_QUANTUM_AEAD_KEY_BYTES, WIDE_HASH_OUTPUT_BYTES),
+        k1: expanded.slice(0, HASH_OUTPUT_BYTES),
+        k2: expanded.slice(HASH_OUTPUT_BYTES, WIDE_HASH_OUTPUT_BYTES),
         macKey: blake3(macInput, { dkLen: HASH_OUTPUT_BYTES })
       };
     } finally {
@@ -139,7 +135,7 @@ class PostQuantumAEAD {
     if (nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {
       throw new Error('Nonce must be 36 bytes for PostQuantumAEAD (12 AES-GCM + 24 XChaCha20)');
     }
-    if (tag.length !== POST_QUANTUM_AEAD_TAG_BYTES) {
+    if (tag.length !== HASH_OUTPUT_BYTES) {
       throw new Error('Tag must be 32 bytes (BLAKE3 MAC)');
     }
 

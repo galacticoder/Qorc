@@ -40,7 +40,7 @@ import {
     DISCOVERY_EPOCH_DURATION_MS,
     P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS,
     P2P_PEER_CERT_TTL_MS,
-    P2P_PEER_TRUST_REFRESH_INTERVAL_MS,
+    P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS,
 } from '@/lib/constants';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { shouldAttemptDiscovery } from '@/lib/utils/discovery-utils';
@@ -59,7 +59,7 @@ import { createAnonymousHttpPow } from '@/lib/cryptography/anonymous-http-pow';
 import { keyTransparencyClient } from '@/lib/key-transparency/client';
 import { markKeyTransparencyVerifiedMaterial } from '@/lib/key-transparency/verified-material';
 import { createBoundedMapSetter } from '@/lib/utils/message-state-limits';
-import { bytesToHex } from '@/lib/utils/byte-utils';
+import { bytesToHex } from '../../../shared/bytes.js';
 import { savePersistedDiscoveryMaterial } from '@/lib/discovery/persisted-discovery-material';
 import { loadTrustedPersistedDiscoveryMaterial } from '@/lib/utils/signal-bundle-utils';
 import {
@@ -68,6 +68,22 @@ import {
 } from '../../lib/spool/detection-key';
 import { PROTOCOL_KEYS } from '@/lib/config/protocol-keys';
 import { OPRF_EVALUATE_AUDIENCE } from '@/lib/config/audiences';
+import { DISCOVERY_PUBLICATION_RETRY_TTL_MS } from '../../../shared/discovery-constants.js';
+import { DISCOVERY_LOOKUP_TIMEOUT_MS } from '../../../shared/anonymous-transfer-policy.js';
+import {
+    DiscoveryProgressStream,
+    observeDiscoveryProgress,
+    trackDiscoveryProgress,
+    type DiscoveryLookupOptions,
+    type DiscoveryProgressObserver,
+} from '@/lib/discovery/progress';
+import { DiscoveryRequestError, parsePublicationAck, requestDiscoveryResponse } from '@/lib/discovery/request';
+import {
+    canReuseDiscoveryPublication,
+    canRetryPreparedPublication,
+    type PreparedDiscoveryPublication,
+} from '@/lib/discovery/publication-retry';
+import { WS_CONTROL_RESPONSE_TIMEOUT_MS, WS_CONTROL_SEND_TIMEOUT_MS } from '../../lib/constants';
 
 type DiscoveryTokenMaterial = { token: string; encryptionKey: Uint8Array };
 
@@ -131,7 +147,7 @@ function scheduleDiscoveryTokenCacheExpiry(
         if (discoveryTokenCache.get(key) === entry) {
             deleteDiscoveryTokenCacheEntry(key);
         }
-    }, DISCOVERY_TOKEN_CACHE_TTL_MS);
+    }, DISCOVERY_PUBLICATION_RETRY_TTL_MS);
 }
 
 async function readDiscoveryTokenCacheEntry(key: string): Promise<DiscoveryTokenMaterial | null> {
@@ -266,7 +282,6 @@ const findUserInFlightLock = new Map<string, Promise<OPRFDiscoveryMaterial | nul
 const discoveryResultCache = new Map<string, { value: OPRFDiscoveryMaterial | null; expiresAt: number }>();
 const DISCOVERY_RESULT_CACHE_MAX_ENTRIES = 1024;
 const DISCOVERY_LOOKUP_MAX_IN_FLIGHT = 2;
-const FIND_USER_HARD_TIMEOUT_MS = 4 * 60 * 1000;
 const LIFECYCLE_PUBLISH_COALESCE_MS = 3000;
 const FORCED_REFETCH_MIN_INTERVAL_MS = 60 * 1000;
 const discoveryNetworkFetchAt = new Map<string, number>();
@@ -295,13 +310,9 @@ const scopedDiscoveryCacheKey = (
 const DISCOVERY_POSITIVE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCOVERY_NEGATIVE_CACHE_TTL_MS = 30 * 1000;
 const DISCOVERY_TIMEOUT_CACHE_TTL_MS = 25 * 1000;
-const DISCOVERY_TOKEN_CACHE_TTL_MS = 30 * 1000;
-const OPRF_WAIT_TIMEOUT_MS = 10000;
 const OPRF_EPOCH_OPERATION_SAFETY_MS = 15000;
 const OPRF_EPOCH_REFRESH_DELAY_MS = 250;
-const PUBLISH_ACK_TIMEOUT_MS = 15000;
 const DISCOVERY_PUBLISH_POW_DIFFICULTY = 18;
-const PREKEY_BUNDLE_CACHE_TTL_MS = 2 * 60 * 1000;
 const DISCOVERY_FORWARD_PUBLISH_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_FORWARD_PUBLISH_EPOCHS = Math.max(
     0,
@@ -445,13 +456,13 @@ async function cachePeerAvatarFromRef(
 function publishForceAttemptDelayMs(lastFailure: string | null): number {
     if (!lastFailure) return 10_000;
     if (lastFailure === 'oprf-token-missing') return 60_000;
-    if (lastFailure === 'publish-ack-failed') return 45_000;
+    if (lastFailure && canRetryPreparedPublication(lastFailure)) return 15_000;
     return isPreReadyPublishFailure(lastFailure) ? 5_000 : 15_000;
 }
 
 function publishRetryDelayMs(reason: string, preReadyReason: boolean): number {
     if (reason === 'oprf-token-missing') return 60_000 + Math.floor(secureRandomUnit() * 15_000);
-    if (reason === 'publish-ack-failed') return 45_000 + Math.floor(secureRandomUnit() * 15_000);
+    if (canRetryPreparedPublication(reason)) return 15_000 + Math.floor(secureRandomUnit() * 15_000);
     if (preReadyReason) return 5_000 + Math.floor(secureRandomUnit() * 10_000);
     return 15_000 + Math.floor(secureRandomUnit() * 15_000);
 }
@@ -576,6 +587,7 @@ export const useDiscovery = (
     const lastPublishFailureRef = useRef<string | null>(null);
     const publishingRef = useRef<boolean>(false);
     const publishPromiseRef = useRef<Promise<boolean> | null>(null);
+    const preparedPublicationRef = useRef<PreparedDiscoveryPublication | null>(null);
     const lastPublishedFingerprintRef = useRef<string | null>(null);
     const lastPublishedContextFingerprintRef = useRef<string | null>(null);
     const lifecyclePublishTimerRef = useRef<number | null>(null);
@@ -622,6 +634,7 @@ export const useDiscovery = (
         lastPublishFailureRef.current = null;
         publishingRef.current = false;
         publishPromiseRef.current = null;
+        preparedPublicationRef.current = null;
         lastPublishedFingerprintRef.current = null;
         lastPublishedContextFingerprintRef.current = null;
         if (lifecyclePublishTimerRef.current !== null) {
@@ -643,6 +656,7 @@ export const useDiscovery = (
             if (activeOwnerScopeRef.current === ownerScope) {
                 ownerAbortControllerRef.current.abort();
                 activeOwnerScopeRef.current = null;
+                preparedPublicationRef.current = null;
                 coverPublicationStateRef.current?.publishKey.fill(0);
                 coverPublicationStateRef.current = null;
             }
@@ -674,33 +688,19 @@ export const useDiscovery = (
         setDiscoveryTransportReadyVersion((version) => (version + 1) % Number.MAX_SAFE_INTEGER);
     }, [isDiscoveryTransportReady]);
 
-    const requestOprfKey = useCallback((_reason: string | Event = 'auto', force = false) => {
-        if (!ownerScope || activeOwnerScopeRef.current !== ownerScope) return;
-        const now = Date.now();
-
-        if (!force && now - lastOprfKeyRequestRef.current < 5000) {
-
-            return;
-        }
-        if (!isDiscoveryTransportReady()) {
-
-            return;
-        }
-        lastOprfKeyRequestRef.current = now;
-        websocketClient.send({ type: SignalType.OPRF_DISCOVERY_PUBLIC_KEY });
-
-    }, [isDiscoveryTransportReady, ownerScope]);
 
     const waitForOprfState = useCallback(async (
         reason: string,
-        timeoutMs: number = OPRF_WAIT_TIMEOUT_MS
+        timeoutMs: number = WS_CONTROL_RESPONSE_TIMEOUT_MS
     ): Promise<DiscoveryOprfState | null> => {
         const operationOwnerScope = ownerScope;
         const operationAbortSignal = ownerAbortControllerRef.current.signal;
+        const operationIdentity = websocketClient.captureAnonymousHttpIdentity();
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
             !operationAbortSignal.aborted &&
-            activeOwnerScopeRef.current === operationOwnerScope
+            activeOwnerScopeRef.current === operationOwnerScope &&
+            websocketClient.isAnonymousHttpIdentityCurrent(operationIdentity)
         );
         if (!isCurrentOwner()) return null;
         const current = oprfStateRef.current;
@@ -755,54 +755,47 @@ export const useDiscovery = (
         }
 
         let readyPromise!: Promise<DiscoveryOprfState | null>;
-        readyPromise = new Promise((resolve) => {
-            let settled = false;
-            const cleanup = () => {
-                if (settled) return;
-                settled = true;
-                window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-                if (timeoutId) clearTimeout(timeoutId);
-                operationAbortSignal.removeEventListener('abort', onAbort);
-                if (oprfReadyPromiseRef.current === readyPromise) {
-                    oprfReadyPromiseRef.current = null;
-                }
-            };
-
-            const handler = (ev: Event) => {
-                if (!isCurrentOwner()) {
-                    cleanup();
-                    resolve(null);
-                    return;
-                }
-                const state = parseDiscoveryOprfState((ev as CustomEvent).detail);
-                if (state) {
-                    cleanup();
-                    resolve(state);
-                }
-            };
-
-            const onAbort = () => {
-                cleanup();
-                resolve(null);
-            };
-
-            const timeoutId = window.setTimeout(() => {
-                console.warn('[DISCOVERY] oprf: WAIT TIMEOUT — server never sent OPRF public key/epoch', { reason, timeoutMs });
-                cleanup();
-                resolve(null);
-            }, timeoutMs);
-
-            window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-            operationAbortSignal.addEventListener('abort', onAbort, { once: true });
-            if (operationAbortSignal.aborted) onAbort();
+        const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
+        readyPromise = requestDiscoveryResponse<DiscoveryOprfState>({
+            operation: 'oprf',
+            registerConnectionCancel: (cancel) => websocketClient.registerConnectionWaiterCancel(cancel),
+            events: window,
+            signal: operationAbortSignal,
+            isCurrent: () => isCurrentOwner() &&
+                websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch),
+            responseTimeoutMs: timeoutMs,
+            send: async (signal) => {
+                await websocketClient.sendSecureControlMessage(
+                    { type: SignalType.OPRF_DISCOVERY_PUBLIC_KEY },
+                    { failIfQueued: true, signal }
+                );
+            },
+            parse: (detail) => parseDiscoveryOprfState(detail) ?? undefined,
+        }).catch((error) => {
+            console.warn('[DISCOVERY] OPRF state request failed', {
+                reason,
+                error: error instanceof Error ? error.message : String(error),
+                detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
+            });
+            return null;
+        }).finally(() => {
+            if (oprfReadyPromiseRef.current === readyPromise) oprfReadyPromiseRef.current = null;
         });
         if (!isCurrentOwner()) return null;
         oprfReadyPromiseRef.current = readyPromise;
         
-        requestOprfKey(reason, true);
-
         return readyPromise;
-    }, [requestOprfKey, ownerScope]);
+    }, [ownerScope]);
+
+    const requestOprfKey = useCallback((reason: string | Event = 'auto', force = false) => {
+        if (!ownerScope || activeOwnerScopeRef.current !== ownerScope) return;
+        const now = Date.now();
+        if (!force && now - lastOprfKeyRequestRef.current < 5000) return;
+        if (!isDiscoveryTransportReady()) return;
+        lastOprfKeyRequestRef.current = now;
+        if (force) oprfStateRef.current = {};
+        void waitForOprfState(typeof reason === 'string' ? reason : reason.type);
+    }, [isDiscoveryTransportReady, ownerScope, waitForOprfState]);
 
     const pruneDiscoveryTokenCache = useCallback((epoch?: number) => {
         const allowed = new Set<number>();
@@ -861,39 +854,6 @@ export const useDiscovery = (
         });
     }, []);
 
-    const sendSecureDiscoveryMessage = useCallback(async (
-        payload: Record<string, unknown>,
-        _reason: string,
-        readyTimeoutMs: number = 15000
-    ): Promise<boolean> => {
-        const operationOwnerScope = ownerScope;
-        const operationAbortSignal = ownerAbortControllerRef.current.signal;
-        const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
-        const isCurrentOwner = () => (
-            operationOwnerScope !== null &&
-            !operationAbortSignal.aborted &&
-            activeOwnerScopeRef.current === operationOwnerScope &&
-            websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch)
-        );
-
-        if (!isCurrentOwner() || !isDiscoveryTransportReady()) {
-
-            return false;
-        }
-        const ready = await waitForPqSession(readyTimeoutMs, operationAbortSignal);
-        if (!isCurrentOwner() || !ready || !isDiscoveryTransportReady()) {
-
-            return false;
-        }
-        try {
-
-            await websocketClient.sendSecureControlMessage(payload, { failIfQueued: true });
-
-            return isCurrentOwner() && isDiscoveryTransportReady();
-        } catch {
-            return false;
-        }
-    }, [isDiscoveryTransportReady, waitForPqSession, ownerScope]);
 
     const buildSelfPeerCertificate = async (
         username: string,
@@ -1117,14 +1077,16 @@ export const useDiscovery = (
         encryptedBlobs: string[],
         encryptionKeys: Uint8Array[],
         cacheNegative = true,
-        monitorContact = true
+        monitorContact = true,
+        isLookupCurrent: () => boolean
     ): Promise<OPRFDiscoveryMaterial | null> => {
         const operationOwnerScope = ownerScope;
         const accountOwner = effectiveHandle?.toLowerCase() || null;
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
             accountOwner !== null &&
-            activeOwnerScopeRef.current === operationOwnerScope
+            activeOwnerScopeRef.current === operationOwnerScope &&
+            isLookupCurrent()
         );
         if (!isCurrentOwner()) return null;
         let transparencyCheckFailed = false;
@@ -1194,12 +1156,15 @@ export const useDiscovery = (
                         version: transparencyContact.version,
                     }
                 );
+                if (!isCurrentOwner()) return null;
                 await keyTransparencyClient.persistAuthorizations(accountOwner!);
+                if (!isCurrentOwner()) return null;
                 await persistPeerDetectionKey(
                     accountOwner!,
                     targetHandle,
                     validated.spoolDetectionKey,
                 );
+                if (!isCurrentOwner()) return null;
 
                 const cacheUsername = validated.peerCertificate?.username || String(targetHandle);
                 void cachePeerAvatarFromRef(
@@ -1241,7 +1206,9 @@ export const useDiscovery = (
     }, [validateDiscoveryMaterial, effectiveHandle, ownerScope]);
 
     const findDiscoveryBlobsInBuckets = useCallback(async (
-        tokens: string[]
+        tokens: string[],
+        signal?: AbortSignal,
+        onProgress?: DiscoveryProgressObserver,
     ): Promise<DiscoveryBucketFetchResult | null> => {
         const normalizedTokens = Array.from(new Set(
             tokens
@@ -1254,7 +1221,7 @@ export const useDiscovery = (
         }
 
         if (!ownerScope) return null;
-        const result = await fetchDiscoveryBlobsForTokens(normalizedTokens, ownerScope);
+        const result = await fetchDiscoveryBlobsForTokens(normalizedTokens, ownerScope, signal, onProgress);
         const seen = new Set<string>();
         const results: string[] = [];
         for (const blob of result.blobs) {
@@ -1272,11 +1239,11 @@ export const useDiscovery = (
         epochs: number[]
     ): Promise<Map<number, { token: string; encryptionKey: Uint8Array }> | null> => {
         const operationOwnerScope = ownerScope;
-        const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
+        const operationIdentity = websocketClient.captureAnonymousHttpIdentity();
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
             activeOwnerScopeRef.current === operationOwnerScope &&
-            websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch)
+            websocketClient.isAnonymousHttpIdentityCurrent(operationIdentity)
         );
         if (!isCurrentOwner()) return null;
         const normalizedHandle = getDiscoveryHandle(targetHandle);
@@ -1385,12 +1352,12 @@ export const useDiscovery = (
     ): Promise<{ blindResult: OPRFBlindResult; response: OPRFServerResponse } | null> => {
         const operationOwnerScope = ownerScope;
         const operationAbortSignal = ownerAbortControllerRef.current.signal;
-        const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
+        const operationIdentity = websocketClient.captureAnonymousHttpIdentity();
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
             !operationAbortSignal.aborted &&
             activeOwnerScopeRef.current === operationOwnerScope &&
-            websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch)
+            websocketClient.isAnonymousHttpIdentityCurrent(operationIdentity)
         );
         if (!isCurrentOwner()) return null;
         if (!normalizedHandle) {
@@ -1441,7 +1408,8 @@ export const useDiscovery = (
                     powEpoch: oprfState.epoch,
                     powSolution
                 },
-                context.serverUrl
+                context.serverUrl,
+                { signal: operationAbortSignal }
             );
             await assertCurrentServerContext(context);
             if (!isCurrentOwner()) return null;
@@ -1480,9 +1448,11 @@ export const useDiscovery = (
         const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
         const accountHandle = effectiveHandle;
         const bundleUsername = accountUsername;
+        const operationAbortSignal = ownerAbortControllerRef.current.signal;
         let accountKeys: HybridKeys | null = null;
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
+            !operationAbortSignal.aborted &&
             activeOwnerScopeRef.current === operationOwnerScope &&
             websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch) &&
             (accountKeys === null || hasSameDiscoveryPublicKeys(hybridKeysRef?.current, accountKeys))
@@ -1491,6 +1461,63 @@ export const useDiscovery = (
         const fail = (reason: string) => {
             if (isCurrentOwner()) lastPublishFailureRef.current = reason;
             return false;
+        };
+
+        const sendPreparedPublication = async (
+            prepared: PreparedDiscoveryPublication,
+            reused: boolean,
+        ): Promise<boolean> => {
+            const requestId = prepared.requestId;
+            const startedAt = performance.now();
+            console.log('[DISCOVERY] publication request', { requestId, phase: 'sending', reused });
+            try {
+                await requestDiscoveryResponse({
+                    operation: 'publish',
+                    registerConnectionCancel: (cancel) => websocketClient.registerConnectionWaiterCancel(cancel),
+                    events: window,
+                    signal: operationAbortSignal,
+                    isCurrent: () => isCurrentOwner() && isDiscoveryTransportReady(),
+                    send: async (signal) => {
+                        await websocketClient.sendSecureControlMessage({
+                            type: SignalType.PUBLISH_DISCOVERY,
+                            requestId,
+                            publication: prepared.publication,
+                            encryptedBlob: prepared.encryptedBlob,
+                            powNonce: prepared.powNonce,
+                            powSolution: prepared.powSolution,
+                        }, { failIfQueued: true, signal });
+                    },
+                    parse: (detail) => parsePublicationAck(detail, requestId),
+                    onSent: (durationMs) => {
+                        console.log('[DISCOVERY] publication request', {
+                            requestId, phase: 'awaiting-ack', durationMs,
+                        });
+                    },
+                });
+                if (!isCurrentOwner()) return false;
+                lastPublishedRef.current = Date.now();
+                lastPublishedContextFingerprintRef.current = prepared.contextFingerprint;
+                lastPublishedFingerprintRef.current = prepared.fingerprint;
+                lastPublishedAvatarStateVersionRef.current = prepared.avatarStateVersion;
+                lastPublishFailureRef.current = null;
+                if (preparedPublicationRef.current === prepared) preparedPublicationRef.current = null;
+                console.log('[DISCOVERY] publication request', {
+                    requestId, phase: 'accepted', durationMs: Math.round(performance.now() - startedAt),
+                });
+                return true;
+            } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error);
+                if (!canRetryPreparedPublication(reason) && preparedPublicationRef.current === prepared) {
+                    preparedPublicationRef.current = null;
+                }
+                console.warn('[DISCOVERY] publication request failed', {
+                    requestId,
+                    error: reason,
+                    detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
+                    durationMs: Math.round(performance.now() - startedAt),
+                });
+                return fail(reason);
+            }
         };
 
         if (!isCurrentOwner() || !accountHandle || !bundleUsername) {
@@ -1552,7 +1579,7 @@ export const useDiscovery = (
                         cachedBundleRef.current = {
                             cacheKey: bundleCacheKey,
                             bundle,
-                            expiresAt: now + PREKEY_BUNDLE_CACHE_TTL_MS
+                            expiresAt: now + DISCOVERY_PUBLICATION_RETRY_TTL_MS
                         };
                     }
 
@@ -1646,6 +1673,18 @@ export const useDiscovery = (
                 const preflightContextFingerprint = preflightPublishInputFingerprint
                     ? `${publicKey || 'no-key'}:${publicationWindow}:${preflightPublishInputFingerprint}`
                     : null;
+
+                const prepared = preparedPublicationRef.current;
+                if (canReuseDiscoveryPublication(prepared, {
+                    inputFingerprint: preflightPublishInputFingerprint,
+                    epochId: String(epoch * DISCOVERY_EPOCH_DURATION_MS),
+                    publicKey,
+                    connectionEpoch: operationConnectionEpoch,
+                    avatarStateVersion: publishedAvatarStateVersion,
+                })) {
+                    return await sendPreparedPublication(prepared, true);
+                }
+                preparedPublicationRef.current = null;
                     
                 if (
                     preflightContextFingerprint !== null &&
@@ -1831,109 +1870,31 @@ export const useDiscovery = (
                         ...publication.bucketIds.map(String),
                         encryptedBlob
                     ],
-                    DISCOVERY_PUBLISH_POW_DIFFICULTY
+                    DISCOVERY_PUBLISH_POW_DIFFICULTY,
+                    operationAbortSignal
                 );
                 if (!isCurrentOwner()) return false;
-                const publishRequestId = `pub-${crypto.randomUUID()}`;
-                const ackSuccess = await new Promise<boolean>((resolve) => {
-                    let settled = false;
-                    const cleanup = () => {
-                        if (settled) return;
-                        settled = true;
-                        window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, ackHandler as EventListener);
-                        if (timeoutId) clearTimeout(timeoutId);
-                    };
-
-	                    const ackHandler = (ev: Event) => {
-	                        if (!isCurrentOwner()) {
-	                            cleanup();
-	                            resolve(false);
-	                            return;
-	                        }
-	                        const detail = (ev as CustomEvent).detail;
-	                        const requestMatches = detail?.requestId === publishRequestId;
-	                        const isExactSuccess =
-	                            detail &&
-	                            typeof detail === 'object' &&
-	                            !Array.isArray(detail) &&
-	                            Object.getPrototypeOf(detail) === Object.prototype &&
-	                            Object.keys(detail).sort().join(',') === 'op,requestId,success,type' &&
-	                            detail.type === SignalType.OK &&
-	                            requestMatches &&
-	                            detail.op === 'publish-discovery' &&
-	                            detail.success === true;
-	                        const isExactFailure =
-	                            detail &&
-	                            typeof detail === 'object' &&
-	                            !Array.isArray(detail) &&
-	                            Object.getPrototypeOf(detail) === Object.prototype &&
-	                            Object.keys(detail).sort().join(',') === 'error,op,requestId,success,type' &&
-	                            detail.type === SignalType.OK &&
-	                            requestMatches &&
-	                            detail.op === 'publish-discovery' &&
-	                            detail.success === false &&
-	                            typeof detail.error === 'string' &&
-	                            /^[a-z0-9_]{1,64}$/.test(detail.error);
-	                        if (isExactSuccess || isExactFailure) {
-	                            cleanup();
-	                            resolve(isExactSuccess);
-	                            return;
-	                        }
-	                        if (
-	                            requestMatches &&
-	                            (detail?.type === SignalType.OK || detail?.type === SignalType.ERROR)
-	                        ) {
-
-	                        }
-	                    };
-
-                    const timeoutId = window.setTimeout(() => {
-                        cleanup();
-                        resolve(false);
-                    }, PUBLISH_ACK_TIMEOUT_MS);
-
-                    window.addEventListener(EventType.SECURE_SERVER_MESSAGE, ackHandler as EventListener);
-
-
-                    if (!isCurrentOwner()) {
-                        cleanup();
-                        resolve(false);
-                        return;
-                    }
-
-                    void sendSecureDiscoveryMessage(
-                        {
-                            type: SignalType.PUBLISH_DISCOVERY,
-                            requestId: publishRequestId,
-                            publication,
-                            encryptedBlob,
-                            ...publishWork
-                        },
-                        'publish-discovery',
-                        PUBLISH_ACK_TIMEOUT_MS + 6000
-                    ).then((sent) => {
-                        if (!isCurrentOwner() || !sent) {
-                            cleanup();
-                            resolve(false);
-                        }
-                    }).catch(() => {
-                        cleanup();
-                        resolve(false);
-                    });
-                });
-                if (!isCurrentOwner()) return false;
-
-                if (!ackSuccess) {
-
-                    return fail('publish-ack-failed');
+                const preparedPublication: PreparedDiscoveryPublication = {
+                    requestId: `pub-${crypto.randomUUID()}`,
+                    publication,
+                    encryptedBlob,
+                    ...publishWork,
+                    inputFingerprint: publishInputFingerprint,
+                    contextFingerprint,
+                    fingerprint: publishFingerprint,
+                    publicKey,
+                    connectionEpoch: operationConnectionEpoch!,
+                    avatarStateVersion: publishedAvatarStateVersion,
+                    expiresAt: Math.min(
+                        Date.now() + DISCOVERY_PUBLICATION_RETRY_TTL_MS,
+                        oprfState.epochRotatesAt,
+                    ),
+                };
+                if (preparedPublication.expiresAt <= Date.now() + WS_CONTROL_SEND_TIMEOUT_MS) {
+                    return fail('discovery_epoch_expired');
                 }
-
-                lastPublishedRef.current = Date.now();
-                lastPublishedContextFingerprintRef.current = contextFingerprint;
-                lastPublishedFingerprintRef.current = publishFingerprint;
-                lastPublishedAvatarStateVersionRef.current = publishedAvatarStateVersion;
-                lastPublishFailureRef.current = null;
-                return true;
+                preparedPublicationRef.current = preparedPublication;
+                return await sendPreparedPublication(preparedPublication, false);
             } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
 
@@ -1965,7 +1926,7 @@ export const useDiscovery = (
             wipeDiscoveryHybridKeys(accountKeys);
             accountKeys = null;
         }
-    }, [effectiveHandle, getDiscoveryHandle, evaluateHandleWithOprf, accountUsername, hybridKeysRef, getAvatarForDiscovery, sendSecureDiscoveryMessage, waitForOprfState, isDiscoveryTransportReady, ownerScope]);
+    }, [effectiveHandle, getDiscoveryHandle, evaluateHandleWithOprf, accountUsername, hybridKeysRef, getAvatarForDiscovery, waitForOprfState, isDiscoveryTransportReady, ownerScope]);
 
     const publishSelf = useCallback(async (
         force = false,
@@ -2001,6 +1962,7 @@ export const useDiscovery = (
 
     const sendCoverPublication = useCallback(async (): Promise<boolean> => {
         const operationOwnerScope = ownerScope;
+        const operationAbortSignal = ownerAbortControllerRef.current.signal;
         const operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
@@ -2064,20 +2026,34 @@ export const useDiscovery = (
             DISCOVERY_PUBLISH_POW_DIFFICULTY
         );
         if (!isCurrentOwner()) return false;
-        const sent = await sendSecureDiscoveryMessage(
-            {
-                type: SignalType.PUBLISH_DISCOVERY,
-                requestId: `pub-${crypto.randomUUID()}`,
-                publication: coverPublication,
-                encryptedBlob,
-                ...publishWork
-            },
-            'cover-publish-discovery',
-            PUBLISH_ACK_TIMEOUT_MS + 6000
-        );
-
-        return isCurrentOwner() && sent;
-    }, [effectiveHandle, sendSecureDiscoveryMessage, isDiscoveryTransportReady, ownerScope]);
+        const requestId = `pub-${crypto.randomUUID()}`;
+        try {
+            await requestDiscoveryResponse({
+                operation: 'cover-publish',
+                events: window,
+                signal: operationAbortSignal,
+                isCurrent: () => isCurrentOwner() && isDiscoveryTransportReady(),
+                send: async (signal) => {
+                    await websocketClient.sendSecureControlMessage({
+                        type: SignalType.PUBLISH_DISCOVERY,
+                        requestId,
+                        publication: coverPublication,
+                        encryptedBlob,
+                        ...publishWork,
+                    }, { failIfQueued: true, signal });
+                },
+                parse: (detail) => parsePublicationAck(detail, requestId),
+            });
+            return isCurrentOwner();
+        } catch (error) {
+            console.warn('[DISCOVERY] Cover publication request failed', {
+                requestId,
+                error: error instanceof Error ? error.message : String(error),
+                detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
+            });
+            return false;
+        }
+    }, [effectiveHandle, isDiscoveryTransportReady, ownerScope]);
 
     // Capture OPRF public key and epoch info from server
     useEffect(() => {
@@ -2124,6 +2100,7 @@ export const useDiscovery = (
             if (detail?.type === '__ws_connection_closed' || detail?.type === '__ws_connection_error' || detail?.type === '__ws_connection_opened') {
 
                 oprfStateRef.current = {};
+                preparedPublicationRef.current = null;
                 if (oprfEpochRefreshTimeoutRef.current !== null) {
                     clearTimeout(oprfEpochRefreshTimeoutRef.current);
                     oprfEpochRefreshTimeoutRef.current = null;
@@ -2201,7 +2178,7 @@ export const useDiscovery = (
             ) {
                 requestLifecyclePublish('peer-certificate-renewal');
             }
-        }, P2P_PEER_TRUST_REFRESH_INTERVAL_MS);
+        }, P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS);
 
         if (isDiscoveryTransportReady()) {
             requestOprfKey('initial-ready');
@@ -2357,18 +2334,19 @@ export const useDiscovery = (
     // Find a user by handle using OPRF-derived tokens
     const findUser = useCallback(async (
         targetHandle: string,
-        options?: { forceRefresh?: boolean; monitorContact?: boolean }
+        options?: DiscoveryLookupOptions
     ): Promise<OPRFDiscoveryMaterial | null> => {
         const operationOwnerScope = ownerScope;
-        let operationConnectionEpoch: number | null = null;
-        let networkEpochCaptured = false;
+        const operationAbortSignal = ownerAbortControllerRef.current.signal;
+        const lookupController = new AbortController();
+        let operationIdentity: AbortSignal | null = null;
+        let networkIdentityCaptured = false;
         const isCurrentOwner = () => (
             operationOwnerScope !== null &&
+            !operationAbortSignal.aborted &&
+            !lookupController.signal.aborted &&
             activeOwnerScopeRef.current === operationOwnerScope &&
-            (!networkEpochCaptured || (
-                operationConnectionEpoch !== null &&
-                websocketClient.isConnectionPrivacyEpochCurrent(operationConnectionEpoch)
-            ))
+            (!networkIdentityCaptured || websocketClient.isAnonymousHttpIdentityCurrent(operationIdentity))
         );
         if (!isCurrentOwner()) return null;
         const forceRefresh = !!options?.forceRefresh;
@@ -2390,8 +2368,8 @@ export const useDiscovery = (
             if (!isCurrentOwner()) return null;
             if (persisted) return persisted as OPRFDiscoveryMaterial;
         }
-        operationConnectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
-        networkEpochCaptured = true;
+        operationIdentity = websocketClient.captureAnonymousHttpIdentity();
+        networkIdentityCaptured = true;
         if (!isCurrentOwner()) return null;
         if (!isDiscoveryTransportReady()) {
             console.warn('[DISCOVERY] findUser: transport not ready', { target: targetHandle });
@@ -2419,7 +2397,7 @@ export const useDiscovery = (
             }
             if (findUserCache.has(lookupCacheKey)) {
 
-                return findUserCache.get(lookupCacheKey)!;
+                return observeDiscoveryProgress(findUserCache.get(lookupCacheKey)!, options?.onProgress);
             }
         } else {
             const lastFetchAt = discoveryNetworkFetchAt.get(lookupCacheKey) || 0;
@@ -2438,19 +2416,19 @@ export const useDiscovery = (
 
         const activeLookup = findUserInFlightLock.get(lookupCacheKey);
         if (activeLookup) {
-            return activeLookup;
+            return observeDiscoveryProgress(activeLookup, options?.onProgress);
         }
 
         if (forceRefresh) {
             const existingForce = forceRefreshFindUserCache.get(lookupCacheKey);
             if (existingForce) {
 
-                return existingForce;
+                return observeDiscoveryProgress(existingForce, options?.onProgress);
             }
 
             if (findUserCache.has(lookupCacheKey)) {
 
-                return findUserCache.get(lookupCacheKey)!;
+                return observeDiscoveryProgress(findUserCache.get(lookupCacheKey)!, options?.onProgress);
             }
         }
 
@@ -2462,6 +2440,11 @@ export const useDiscovery = (
             target: targetHandle,
             forceRefresh,
         });
+        const abortLookup = () => lookupController.abort();
+        operationAbortSignal.addEventListener('abort', abortLookup, { once: true });
+        operationIdentity?.addEventListener('abort', abortLookup, { once: true });
+        if (!isCurrentOwner()) abortLookup();
+        const progress = new DiscoveryProgressStream();
         let promise!: Promise<OPRFDiscoveryMaterial | null>;
         const rawLookup = (async () => {
             let epochResults: Map<number, { token: string; encryptionKey: Uint8Array }> | null = null;
@@ -2499,7 +2482,7 @@ export const useDiscovery = (
 
                 const runBucketLookup = async (): Promise<OPRFDiscoveryMaterial | null> => {
                     try {
-                        const bucketResponse = await findDiscoveryBlobsInBuckets(bucketTokens);
+                        const bucketResponse = await findDiscoveryBlobsInBuckets(bucketTokens, lookupController.signal, progress.report);
                         if (!isCurrentOwner()) return null;
                         if (bucketResponse && bucketResponse.blobs.length > 0) {
                             const bucketResult = await finalizeDiscoverySnapshotResult(
@@ -2508,7 +2491,8 @@ export const useDiscovery = (
                                 bucketResponse.blobs,
                                 encryptionKeys,
                                 false,
-                                options?.monitorContact !== false
+                                options?.monitorContact !== false,
+                                isCurrentOwner
                             );
                             if (!isCurrentOwner()) return null;
                             if (bucketResult) {
@@ -2541,9 +2525,14 @@ export const useDiscovery = (
                     });
                 }
                 return null;
-            } catch {
+            } catch (error) {
+                console.warn('[DISCOVERY] findUser: lookup failed', {
+                    error: error instanceof Error ? error.message : String(error),
+                });
                 return null;
             } finally {
+                operationAbortSignal.removeEventListener('abort', abortLookup);
+                operationIdentity?.removeEventListener('abort', abortLookup);
                 if (epochResults) {
                     for (const result of epochResults.values()) result.encryptionKey.fill(0);
                 }
@@ -2569,16 +2558,17 @@ export const useDiscovery = (
                     rawLookup,
                     new Promise<OPRFDiscoveryMaterial | null>((resolve) => {
                         timer = setTimeout(() => {
-                            console.warn('[DISCOVERY] findUser: HARD TIMEOUT, abandoning lookup', {
+                            console.warn('[DISCOVERY] findUser: HARD TIMEOUT, cancelling lookup', {
                                 target: targetHandle,
-                                ms: FIND_USER_HARD_TIMEOUT_MS,
+                                ms: DISCOVERY_LOOKUP_TIMEOUT_MS,
                             });
+                            abortLookup();
                             
                             if (findUserInFlightLock.get(lookupCacheKey) === promise) {
                                 findUserInFlightLock.delete(lookupCacheKey);
                             }
                             resolve(null);
-                        }, FIND_USER_HARD_TIMEOUT_MS);
+                        }, DISCOVERY_LOOKUP_TIMEOUT_MS);
                     }),
                 ]);
             } finally {
@@ -2586,13 +2576,14 @@ export const useDiscovery = (
             }
         })();
 
+        trackDiscoveryProgress(promise, progress);
         findUserInFlightLock.set(lookupCacheKey, promise);
         if (forceRefresh) {
             forceRefreshFindUserCache.set(lookupCacheKey, promise);
         } else {
             findUserCache.set(lookupCacheKey, promise);
         }
-        return promise;
+        return observeDiscoveryProgress(promise, options?.onProgress);
     }, [getDiscoveryTokensForEpochs, getDiscoveryHandle, waitForOprfState, findDiscoveryBlobsInBuckets, finalizeDiscoverySnapshotResult, isDiscoveryTransportReady, ownerScope, effectiveHandle]);
 
     return {

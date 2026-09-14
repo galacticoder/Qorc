@@ -1,8 +1,4 @@
-import {
-  USERNAME_DISPLAY_MAX_LENGTH,
-  SECURE_DB_MAX_FILE_SIZE,
-  SECURE_DB_BLOCKED_MIME_TYPES,
-} from '../constants';
+import { USERNAME_DISPLAY_MAX_LENGTH, SECURE_DB_BLOCKED_MIME_TYPES, MAX_FILE_SIZE } from '../constants';
 import type { MessageReceipt } from '../../components/chat/messaging/types';
 
 // Sanitize username for database operations
@@ -18,8 +14,8 @@ export const sanitizeDbUsername = (value: unknown): string | null => {
 export const validateFileData = (data: ArrayBuffer | Blob, fileId: string): void => {
   const size = data instanceof Blob ? data.size : data.byteLength;
 
-  if (size > SECURE_DB_MAX_FILE_SIZE) {
-    throw new Error(`File too large: ${size} bytes (max: ${SECURE_DB_MAX_FILE_SIZE})`);
+  if (size > MAX_FILE_SIZE) {
+    throw new Error(`File too large: ${size} bytes (max: ${MAX_FILE_SIZE})`);
   }
 
   if (size === 0) {

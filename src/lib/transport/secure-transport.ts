@@ -1,7 +1,10 @@
 // Transport Abstraction Layer
 
 import { SignalType } from '../types/signal-types';
-import { PQ_AEAD_CIPHERTEXT_OVERHEAD } from '../constants';
+import {
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
+  HASH_OUTPUT_BYTES,
+} from '../../../shared/crypto-sizes.js';
 
 // Connection states
 export type ConnectionState =
@@ -215,9 +218,9 @@ export function encodeFrame(
     if (sequence < 0n || sequence > 0xffffffffffffffffn) {
         throw new Error('Frame sequence outside uint64 range');
     }
-    if (!(ciphertext instanceof Uint8Array) || ciphertext.length <= PQ_AEAD_CIPHERTEXT_OVERHEAD ||
+    if (!(ciphertext instanceof Uint8Array) || ciphertext.length <= POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES ||
         ciphertext.length > MAX_MESSAGE_FRAME_SIZE - FRAME_OVERHEAD ||
-        !(tag instanceof Uint8Array) || tag.length !== FRAME_TAG_SIZE) {
+        !(tag instanceof Uint8Array) || tag.length !== HASH_OUTPUT_BYTES) {
         throw new Error('Invalid encrypted frame material');
     }
     const totalLength = 4 + 8 + ciphertext.length + tag.length;
@@ -262,9 +265,8 @@ export function decodeFrame(frame: Uint8Array): EncryptedFrame {
 
 // Frame constants
 export const TRANSPORT_FRAME_HEADER_SIZE = 12;
-export const FRAME_TAG_SIZE = 32;
-export const FRAME_OVERHEAD = TRANSPORT_FRAME_HEADER_SIZE + FRAME_TAG_SIZE;
-export const NOISE_FRAME_OVERHEAD = FRAME_OVERHEAD + PQ_AEAD_CIPHERTEXT_OVERHEAD;
+export const FRAME_OVERHEAD = TRANSPORT_FRAME_HEADER_SIZE + HASH_OUTPUT_BYTES;
+export const NOISE_FRAME_OVERHEAD = FRAME_OVERHEAD + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
 
 // Maximum frame sizes
 export const MAX_MESSAGE_FRAME_SIZE = 4 * 1024 * 1024;

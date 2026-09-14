@@ -13,7 +13,6 @@ import { CERTIFIED_IDENTITY_BUNDLE_VERSION } from '../types/identity-types';
 import type { PeerCertificateBundle } from '../types/p2p-types';
 import { hasExactObjectKeys } from '../sanitizers';
 import { CryptoUtils } from './crypto-utils';
-import { bytesToHex } from './byte-utils';
 import {
   computePeerCertificateFingerprint,
   encodePeerCertificateSigningPayload,
@@ -29,6 +28,7 @@ import {
   isValidX25519PublicKeyBase64
 } from './messaging-validators';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 const textEncoder = new TextEncoder();
 const HEX_64 = /^[a-f0-9]{64}$/i;

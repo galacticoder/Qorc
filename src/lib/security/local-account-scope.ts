@@ -2,8 +2,10 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { storage, websocket } from '../tauri-bindings';
 import { PinnedServer } from '../utils/auth-utils';
 import { canonicalAuthUsername, isCanonicalAuthUsername } from '../sanitizers';
-import { bytesToHex } from '../utils/byte-utils';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { Base64 } from '../cryptography/base64';
+import type { ServerKeyMaterial } from '../types/websocket-types';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 function digestScope(domain: string, parts: string[]): string {
   const encoded = new TextEncoder().encode([domain, ...parts].join('\0'));
@@ -33,10 +35,16 @@ function validateServerUrl(value: unknown): string {
   return serverUrl;
 }
 
-export async function captureCurrentServerContext(): Promise<CurrentServerContext> {
+export async function captureCurrentServerContext(expectedMaterial?: ServerKeyMaterial): Promise<CurrentServerContext> {
   const serverUrl = validateServerUrl(await websocket.getServerUrl());
   const serverKeys = await PinnedServer.load();
   if (!serverKeys) throw new Error('Pinned server identity is unavailable');
+  if (expectedMaterial && (
+    !expectedMaterial.dilithiumPublicKey || !expectedMaterial.x25519PublicKey ||
+    serverKeys.kyberPublicBase64 !== Base64.arrayBufferToBase64(expectedMaterial.kyberPublicKey) ||
+    serverKeys.dilithiumPublicBase64 !== Base64.arrayBufferToBase64(expectedMaterial.dilithiumPublicKey) ||
+    serverKeys.x25519PublicBase64 !== Base64.arrayBufferToBase64(expectedMaterial.x25519PublicKey)
+  )) throw new Error('Authenticated anonymous server identity no longer matches its pin');
   if (validateServerUrl(await websocket.getServerUrl()) !== serverUrl) {
     throw new Error('Authenticated server changed during operation');
   }

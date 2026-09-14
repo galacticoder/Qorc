@@ -34,13 +34,12 @@ import { rememberPeerDetectionKey } from '../../lib/spool/detection-key';
 import { clearPersistedDiscoveryMaterial } from '../../lib/discovery/persisted-discovery-material';
 import { createBoundedMapSetter } from '../../lib/utils/message-state-limits';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
+import { DISCOVERY_LOOKUP_TIMEOUT_MS } from '../../../shared/anonymous-transfer-policy.js';
 
 const DISCOVERY_REFRESH_FAILURE_TTL_MS = 30 * 1000;
-const DISCOVERY_LOOKUP_SEND_TIMEOUT_MS = 4 * 60 * 1000;
 const DEFERRABLE_SIGNAL_TYPES: ReadonlySet<string> = new Set([
   'typing-start',
   'typing-stop',
-  'receipt-batch',
 ]);
 
 const DEFERRABLE_DISCOVERY_WAIT_MS = 1500;
@@ -189,6 +188,8 @@ export function useEncryptionProvider({
 
     const resetEncryptionState = () => {
       encryptionGenerationRef.current += 1;
+      peerBundleInstalledRef.current.clear();
+      mlKemInstallInFlightRef.current.clear();
       sessionValidationRef.current.clear();
       preKeyPendingRef.current.clear();
       for (const waiter of sessionReadyWaitersRef.current.values()) {
@@ -401,9 +402,10 @@ export function useEncryptionProvider({
         fullBundle: any,
         _source: string
       ): Promise<boolean> => {
+        if (!isCurrentOperation() || isKeyTransparencyPeerRevoked(currentUser as string, peer)) return false;
         try {
-          await signal.processVerifiedPreKeyBundle(currentUser as string, peer, fullBundle);
-          
+          const installed = await signal.processVerifiedPreKeyBundle(currentUser as string, peer, fullBundle);
+          if (!installed || !isCurrentOperation() || isKeyTransparencyPeerRevoked(currentUser as string, peer)) return false;
           setBoundedPeerEntry(peerBundleInstalledRef.current, `${currentUser}:${peer}`, true);
           return true;
         } catch {
@@ -509,24 +511,25 @@ export function useEncryptionProvider({
           }
           const discoveryBudgetMs = isDeferrable
             ? DEFERRABLE_DISCOVERY_WAIT_MS
-            : DISCOVERY_LOOKUP_SEND_TIMEOUT_MS;
+            : DISCOVERY_LOOKUP_TIMEOUT_MS;
 
           const previousKyber = peerKeys?.kyberPublicBase64;
           const discoveryStartedAt = Date.now();
           let discoveryTimedOut = false;
+          let discoveryTimer: ReturnType<typeof setTimeout> | undefined;
           const refreshedMaterial = await Promise.race([
             resolveDiscoveryMaterial(
               refreshPeer,
               'Resolving discovery material for',
               { force: forceDiscoveryRefresh }
             ),
-            new Promise<null>((resolve) =>
-              setTimeout(() => {
+            new Promise<null>((resolve) => {
+              discoveryTimer = setTimeout(() => {
                 discoveryTimedOut = true;
                 resolve(null);
-              }, discoveryBudgetMs)
-            ),
-          ]);
+              }, discoveryBudgetMs);
+            }),
+          ]).finally(() => clearTimeout(discoveryTimer));
           if (!isCurrentOperation()) return deny('stale-operation');
           if (discoveryTimedOut && isDeferrable) {
             return deny('deferrable-signal-discovery-not-warm-yet', {
@@ -539,7 +542,7 @@ export function useEncryptionProvider({
               normalizedRefreshPeer,
               { value: null, expiresAt: Date.now() + DISCOVERY_REFRESH_FAILURE_TTL_MS }
             );
-            return deny('discovery-lookup-timed-out', { timeoutMs: DISCOVERY_LOOKUP_SEND_TIMEOUT_MS });
+            return deny('discovery-lookup-timed-out', { timeoutMs: DISCOVERY_LOOKUP_TIMEOUT_MS });
           }
           if (refreshedMaterial?.publicKeys?.kyberPublicBase64) {
             const trustedDiscovery = await resolveTrustedDiscoveryKeys(refreshPeer, refreshedMaterial);
@@ -657,7 +660,7 @@ export function useEncryptionProvider({
 
         if (isKeyTransparencyPeerRevoked(currentUser, resolvedUsername)) return deny('peer-revoked:pre-session');
 
-        const validateSession = async (peer: string): Promise<{ hasSession: boolean; isOwner: boolean }> => {
+        const validateSession = async (peer: string): Promise<{ hasSession: boolean; isOwner: boolean; deferred?: boolean }> => {
           const key = `${currentUser}:${peer}`;
           const existing = sessionValidationRef.current.get(key);
           if (existing) {
@@ -721,7 +724,7 @@ export function useEncryptionProvider({
 
                 if (isDeferrable) {
                   void install.catch(() => { });
-                  return { hasSession: false, isOwner: false };
+                  return { hasSession: false, isOwner: false, deferred: true };
                 }
                 await install;
                 if (!isCurrentOperation()) return { hasSession: false, isOwner: false };
@@ -740,19 +743,20 @@ export function useEncryptionProvider({
             try {
               let hasSession = await signal.hasSession(currentUser, peer);
               if (!isCurrentOperation()) return false;
-              if (hasSession) return true;
+              if (hasSession) {
+                const hasPeerKey = await signal.hasPeerStaticMlkemKey(currentUser, peer);
+                if (!isCurrentOperation()) return false;
+                if (hasPeerKey) return true;
+              }
 
               const cached = discoveryCacheRef.current.get(peer);
               if (cached?.fullBundle) {
                 const trustedCached = await resolveTrustedDiscoveryKeys(peer, cached);
                 if (!isCurrentOperation()) return false;
                 if (trustedCached) {
-                  const hasExistingSession = await signal.hasSession(currentUser, peer);
+                  const installed = await processPeerBundle(peer, cached.fullBundle, 'cached');
                   if (!isCurrentOperation()) return false;
-                  if (!hasExistingSession) {
-                    await processPeerBundle(peer, cached.fullBundle, 'cached');
-                    if (!isCurrentOperation()) return false;
-                  }
+                  if (!installed) return false;
                   hasSession = await signal.hasSession(currentUser, peer);
                   if (!isCurrentOperation()) return false;
                   if (hasSession) return true;
@@ -774,17 +778,23 @@ export function useEncryptionProvider({
                 return false;
               }
               rememberDiscoveryMaterial(peer, material);
-              const hasExistingSession = await signal.hasSession(currentUser, peer);
+              const installed = await processPeerBundle(peer, material.fullBundle, 'session-setup');
               if (!isCurrentOperation()) return false;
-              if (!hasExistingSession) {
-                await signal.processVerifiedPreKeyBundle(currentUser, peer, material.fullBundle);
-                if (!isCurrentOperation()) return false;
-              }
+              if (!installed) return false;
               hasSession = await signal.hasSession(currentUser, peer);
               return isCurrentOperation() && !!hasSession;
             } finally {
               if (sessionValidationRef.current.get(key) === promise) {
                 sessionValidationRef.current.delete(key);
+                if (isCurrentOperation()) {
+                  preKeyPendingRef.current.delete(peer);
+                  const waiter = sessionReadyWaitersRef.current.get(peer);
+                  if (waiter) {
+                    clearTimeout(waiter.timeoutId);
+                    sessionReadyWaitersRef.current.delete(peer);
+                    waiter.resolve();
+                  }
+                }
               }
             }
           })();
@@ -794,21 +804,15 @@ export function useEncryptionProvider({
           const hasSession = await promise;
           if (!isCurrentOperation()) return { hasSession: false, isOwner: true };
           
-          preKeyPendingRef.current.delete(peer);
-          const waiter = sessionReadyWaitersRef.current.get(peer);
-          if (waiter) {
-            try { clearTimeout(waiter.timeoutId); } catch { }
-            sessionReadyWaitersRef.current.delete(peer);
-            try { waiter.resolve(); } catch { }
-          }
           return { hasSession, isOwner: true };
         };
 
         await waitForSessionReady(resolvedUsername);
         if (!isCurrentOperation()) return deny('stale-operation');
 
-        const { hasSession, isOwner } = await validateSession(resolvedUsername);
+        const { hasSession, isOwner, deferred } = await validateSession(resolvedUsername);
         if (!isCurrentOperation()) return deny('stale-operation');
+        if (deferred) return deny('deferrable-signal-awaiting-peer-key-install');
         if (!hasSession) return deny('no-signal-session', { isOwner });
         if (isKeyTransparencyPeerRevoked(currentUser, resolvedUsername)) return deny('peer-revoked:post-session');
 

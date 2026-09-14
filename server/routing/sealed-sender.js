@@ -3,16 +3,13 @@
  */
 
 import { SPOOL_DETECTION_PROBE_BYTES, SPOOL_TAG_BYTES, isSpoolProbeHex, isSpoolTag } from '../../shared/spool-tag-protocol.js';
-import { ML_KEM_1024_CIPHERTEXT_BYTES } from '../../shared/crypto-sizes.js';
-import { BASE64_ALPHABET, SEALED_NONCE_BYTES } from '../utils/crypto-consts.js';
-import { CANONICAL_BASE64_RE } from '../utils/patterns.js';
+import { ML_KEM_1024_CIPHERTEXT_BYTES, SEALED_NONCE_BYTES } from '../../shared/crypto-sizes.js';
+import { BASE64_ALPHABET } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { CANONICAL_BASE64_RE } from '../../shared/patterns.js';
 
-export const SEALED_ENVELOPE_PROTOCOL = PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL;
 export const SEALED_STANDARD_CIPHERTEXT_BYTES = 131072 + 16;
 export const SEALED_LARGE_CIPHERTEXT_BYTES = 262144 + 16;
-export const SEALED_KEM_CIPHERTEXT_BYTES = ML_KEM_1024_CIPHERTEXT_BYTES;
-export { SEALED_NONCE_BYTES };
 const ALLOWED_CIPHERTEXT_SIZES = new Set([
   SEALED_STANDARD_CIPHERTEXT_BYTES,
   SEALED_LARGE_CIPHERTEXT_BYTES
@@ -57,7 +54,7 @@ export function validateSealedEnvelope(envelope) {
   }
 
   // Check version
-  if (envelope.version !== SEALED_ENVELOPE_PROTOCOL) {
+  if (envelope.version !== PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL) {
     return { valid: false, error: 'unsupported_version' };
   }
 
@@ -84,7 +81,7 @@ export function validateSealedEnvelope(envelope) {
   }
 
   const ephemeralKeyBytes = canonicalBase64DecodedLength(envelope.ephemeralKey);
-  if (ephemeralKeyBytes !== SEALED_KEM_CIPHERTEXT_BYTES) {
+  if (ephemeralKeyBytes !== ML_KEM_1024_CIPHERTEXT_BYTES) {
     return { valid: false, error: 'invalid_ephemeral_key' };
   }
 

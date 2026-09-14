@@ -1,7 +1,7 @@
 import { CryptoUtils } from './crypto-utils';
 import { PostQuantumSignature } from '../cryptography/signature';
-import { PQ_KEM_PUBLIC_KEY_SIZE } from '../constants';
 import { hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
+import { ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 export function isCanonicalBase64OfLength(value: unknown, expectedBytes: number): value is string {
   if (
@@ -23,7 +23,7 @@ export function isCanonicalBase64OfLength(value: unknown, expectedBytes: number)
 }
 
 export function isValidKyberPublicKeyBase64(value: unknown): value is string {
-  return isCanonicalBase64OfLength(value, PQ_KEM_PUBLIC_KEY_SIZE);
+  return isCanonicalBase64OfLength(value, ML_KEM_1024_PUBLIC_KEY_BYTES);
 }
 
 export function isValidDilithiumPublicKeyBase64(value: unknown): value is string {

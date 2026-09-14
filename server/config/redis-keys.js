@@ -20,6 +20,3 @@ export const REDIS_KEYS = Object.freeze({
   LB_HTTPS_PORT: 'cluster:lb:httpsPort',
   LB_ONION_ADDRESS: 'cluster:lb:onionAddress',
 });
-
-export const CLUSTER_MASTER_KEY = REDIS_KEYS.CLUSTER_MASTER;
-export const CLUSTER_SERVERS_KEY = REDIS_KEYS.CLUSTER_SERVERS;

@@ -6,7 +6,6 @@
 
 import crypto from 'crypto';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 
 import { SignalType } from '../signals.js';
 import { SERVER_CONSTANTS } from '../config/constants.js';
@@ -14,27 +13,22 @@ import { PQ_SESSION_REQUIRED } from '../config/error-codes.js';
 import { REQUIRED_WS_PQ_HANDSHAKE, validatePqHandshakePolicy } from '../security/layer-agreement-policy.js';
 import {
   ML_KEM_1024_CIPHERTEXT_BYTES,
-  ML_KEM_1024_PUBLIC_KEY_BYTES
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  HASH_OUTPUT_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+  X25519_KEY_BYTES,
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
 } from '../../shared/crypto-sizes.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
-import {
-  createAuthChannelBinding,
-} from '../../shared/auth-channel-binding.js';
+import { createAuthChannelBinding, AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
 import { encodeBase64AndWipeCopy, UTF8_ENCODER } from '../utils/encoding.js';
 import { envInt } from '../utils/env.js';
-import { HEX_32_RE, HEX_64_RE } from '../utils/patterns.js';
 import { isSafeJsonTree, isSafeWireMessageType } from '../utils/validation.js';
 import { computeHybridPublicKeyFingerprint } from '../crypto/hybrid-key-fingerprint.js';
 import { createAbortableAdmissionGate } from '../utils/admission-gate.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import {
-  AUTH_CHANNEL_BINDING_BYTES,
-  HASH_OUTPUT_BYTES,
-  POST_QUANTUM_AEAD_KEY_BYTES,
-  POST_QUANTUM_AEAD_NONCE_BYTES as WS_ENVELOPE_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES as WS_ENVELOPE_TAG_BYTES,
-  X25519_KEY_BYTES
-} from '../utils/crypto-consts.js';
+import { SESSION_ID_RE } from '../../shared/patterns.js';
+import { PostQuantumHash } from '../../shared/post-quantum-hash.js';
 
 // Server signing key for authenticated handshake acknowledgements.
 let serverDilithiumSigningKey = null;
@@ -71,13 +65,11 @@ const WS_CELL_CHUNK_COUNT_OFFSET = 92;
 const WS_CELL_TOTAL_LENGTH_OFFSET = 96;
 const WS_CELL_PLAINTEXT_LENGTH_OFFSET = 100;
 const WS_CELL_NONCE_OFFSET = 104;
-const WS_CELL_TAG_OFFSET = WS_CELL_NONCE_OFFSET + WS_ENVELOPE_NONCE_BYTES;
-const WS_CELL_CIPHERTEXT_OFFSET = WS_CELL_TAG_OFFSET + WS_ENVELOPE_TAG_BYTES;
-const WS_CELL_HEADER_BYTES = WS_CELL_CIPHERTEXT_OFFSET;
-const WS_CELL_CIPHERTEXT_OVERHEAD_BYTES = 32;
+const WS_CELL_TAG_OFFSET = WS_CELL_NONCE_OFFSET + POST_QUANTUM_AEAD_NONCE_BYTES;
+const WS_CELL_CIPHERTEXT_OFFSET = WS_CELL_TAG_OFFSET + HASH_OUTPUT_BYTES;
 const WS_CELL_PLAINTEXT_BYTES = SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES
-  - WS_CELL_HEADER_BYTES
-  - WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+  - WS_CELL_CIPHERTEXT_OFFSET
+  - POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
 const WS_CELL_MAX_LOGICAL_BYTES = 24 * 1024 * 1024;
 const WS_CELL_MAX_CHUNKS = Math.ceil(WS_CELL_MAX_LOGICAL_BYTES / WS_CELL_PLAINTEXT_BYTES);
 const WS_CELL_MAX_CONCURRENT = 4;
@@ -142,10 +134,7 @@ function isWebSocketDeliveryClosedError(error) {
     || /WebSocket (?:is )?(?:not open|closed|closing|CLOSED)/i.test(String(error?.message || ''));
 }
 
-function sendWebSocketFrameWithDeadline(ws, frame, timeoutMs = WS_DELIVERY_TIMEOUT_MS) {
-  const boundedTimeoutMs = Number.isSafeInteger(timeoutMs)
-    ? Math.min(WS_DELIVERY_TIMEOUT_MS, Math.max(1, timeoutMs))
-    : WS_DELIVERY_TIMEOUT_MS;
+function sendWebSocketFrameWithDeadline(ws, frame) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (callback, value) => {
@@ -165,7 +154,7 @@ function sendWebSocketFrameWithDeadline(ws, frame, timeoutMs = WS_DELIVERY_TIMEO
         }
       } catch { }
       resolve(false);
-    }, boundedTimeoutMs);
+    }, WS_DELIVERY_TIMEOUT_MS);
     timer.unref?.();
 
     try {
@@ -430,7 +419,6 @@ function getEncryptedResponsePlaintextBudgetBytes() {
 
 // Application-level progress chunks, each carried by authenticated fixed cells.
 const SECURE_CHUNK_BYTES = 48 * 1024;
-const SECURE_CHUNK_SINGLE_MAX_BYTES = SECURE_CHUNK_BYTES;
 const SECURE_CHUNK_MAX_TOTAL = 512;
 const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
 const SECURE_CHUNK_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
@@ -464,7 +452,7 @@ export async function sendSecureAuthResponse(ws, payload) {
   if (typeof json !== 'string') return false;
 
   const totalBytes = Buffer.byteLength(json, 'utf8');
-  if (totalBytes <= SECURE_CHUNK_SINGLE_MAX_BYTES) {
+  if (totalBytes <= SECURE_CHUNK_BYTES) {
     return sendSecureMessage(ws, payload);
   }
 
@@ -654,7 +642,7 @@ const PQ_HS_MAX_PER_MIN = envInt('PQ_HANDSHAKE_MAX_PER_MIN', 20, 1, 600);
 const PQ_HS_MAX_CONCURRENCY = envInt('PQ_HANDSHAKE_MAX_CONCURRENCY', 2, 1, 16);
 const PQ_HS_MAX_QUEUE = envInt('PQ_HANDSHAKE_MAX_QUEUE', 16, 0, 64);
 const PQ_HS_QUEUE_TIMEOUT_MS = envInt('PQ_HANDSHAKE_QUEUE_TIMEOUT_MS', 15_000, 1_000, 60_000);
-const PQ_HS_CONFIRM_TIMEOUT_MS = envInt('PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS', 45_000, 5_000, 120_000);
+const PQ_HS_CONFIRM_TIMEOUT_MS = envInt('PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS', 120_000, 5_000, 300_000);
 function pqHandshakeAdmissionError(message, code = 'PQ_HANDSHAKE_BUSY') {
   const error = new Error(message);
   error.code = code;
@@ -676,7 +664,7 @@ const pqHandshakeAdmissionGate = createAbortableAdmissionGate({
 function pqHandshakeFieldSizesValid(payload) {
   if (
     typeof payload.sessionId !== 'string' ||
-    !HEX_32_RE.test(payload.sessionId) ||
+    !SESSION_ID_RE.test(payload.sessionId) ||
     !Number.isSafeInteger(payload.timestamp) ||
     payload.timestamp < 0
   ) {
@@ -852,7 +840,7 @@ export async function handlePQHandshake({ ws, parsed, serverHybridKeyPair }) {
       combinedSecret,
       baseSalt,
       PROTOCOL_KEYS.WS_PQ_TWO_WAY_EPHEMERAL_BASE,
-      POST_QUANTUM_AEAD_KEY_BYTES
+      HASH_OUTPUT_BYTES
     );
     combinedSecret.fill(0);
     combinedSecret = new Uint8Array(baseHandshakeSecret.length + responderPqSharedSecret.length);
@@ -866,13 +854,13 @@ export async function handlePQHandshake({ ws, parsed, serverHybridKeyPair }) {
       combinedSecret,
       sendSalt,
       PROTOCOL_KEYS.WS_PQ_CLIENT_SEND,
-      POST_QUANTUM_AEAD_KEY_BYTES
+      HASH_OUTPUT_BYTES
     );
     clientRecvKey = PostQuantumHash.deriveKey(
       combinedSecret,
       recvSalt,
       PROTOCOL_KEYS.WS_PQ_CLIENT_RECV,
-      POST_QUANTUM_AEAD_KEY_BYTES
+      HASH_OUTPUT_BYTES
     );
 
     pendingSession = {
@@ -1177,7 +1165,7 @@ export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage
       !cell.subarray(0, WS_CELL_MAGIC.length).equals(WS_CELL_MAGIC) ||
       cell.readUInt8(4) !== WS_CELL_VERSION ||
       cell.readUInt8(5) !== WS_CELL_FLAGS ||
-      cell.readUInt16BE(6) !== WS_CELL_HEADER_BYTES
+      cell.readUInt16BE(6) !== WS_CELL_CIPHERTEXT_OFFSET
     ) throw new Error('Invalid fixed-cell header');
 
     const sessionId = cell.subarray(WS_CELL_SESSION_OFFSET, WS_CELL_FINGERPRINT_OFFSET).toString('hex');
@@ -1208,18 +1196,22 @@ export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage
     const plaintextLength = cell.readUInt32BE(WS_CELL_PLAINTEXT_LENGTH_OFFSET);
     if (
       counter === null || timestamp === null ||
-      !isSocketRemoteCounterFresh(session, counter) ||
-      !getEnvelopeTimestampValidation(timestamp).valid ||
       totalLength < 1 || totalLength > WS_CELL_MAX_LOGICAL_BYTES ||
       chunkCount < 1 || chunkCount > WS_CELL_MAX_CHUNKS ||
       chunkCount !== Math.ceil(totalLength / WS_CELL_PLAINTEXT_BYTES) ||
       chunkIndex >= chunkCount
     ) throw new Error('Invalid fixed-cell metadata');
+    if (!isSocketRemoteCounterFresh(session, counter)) {
+      throw new Error('Replayed or out-of-order fixed-cell counter');
+    }
+    if (!getEnvelopeTimestampValidation(timestamp).valid) {
+      throw new Error('Fixed-cell timestamp outside replay window');
+    }
     const expectedPlaintextLength = chunkIndex + 1 === chunkCount
       ? totalLength - chunkIndex * WS_CELL_PLAINTEXT_BYTES
       : WS_CELL_PLAINTEXT_BYTES;
     if (plaintextLength !== expectedPlaintextLength) throw new Error('Invalid fixed-cell fragment length');
-    const ciphertextLength = plaintextLength + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+    const ciphertextLength = plaintextLength + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
     if (WS_CELL_CIPHERTEXT_OFFSET + ciphertextLength > cell.length) {
       throw new Error('Invalid fixed-cell ciphertext length');
     }
@@ -1261,6 +1253,15 @@ export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage
         maxKeyLength: 256
       })
     ) throw new Error('Invalid fixed-cell payload schema');
+    const ageMs = Date.now() - timestamp;
+    if (ageMs > 15_000 && Date.now() - Number(ws._pqDelayedRequestLoggedAt || 0) > 60_000) {
+      ws._pqDelayedRequestLoggedAt = Date.now();
+      console.warn('[PQ-CELL] Delayed authenticated request', {
+        payloadType: Object.values(SignalType).includes(innerPayload.type) ? innerPayload.type : 'unknown',
+        ageMs,
+        cells: chunkCount,
+      });
+    }
     return await dispatchAuthenticatedCellPayload({
       ws,
       session,
@@ -1285,7 +1286,7 @@ export async function handlePQBinaryCell({ ws, cell, context, handleInnerMessage
 
 
 // Send a logical message as one or more authenticated fixed-size binary cells.
-export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, options = {}) {
+export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
   const payloadType = payload?.type || 'unknown';
   if (!isWebSocketOpen(ws)) return false;
 
@@ -1327,7 +1328,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, op
       const end = Math.min(plaintext.length, start + WS_CELL_PLAINTEXT_BYTES);
       const chunk = plaintext.subarray(start, end);
       const counter = incrementSocketSendCounter(session);
-      const nonce = crypto.randomBytes(WS_ENVELOPE_NONCE_BYTES);
+      const nonce = crypto.randomBytes(POST_QUANTUM_AEAD_NONCE_BYTES);
       const cell = crypto.randomBytes(SERVER_CONSTANTS.WS_FIXED_MESSAGE_SIZE_BYTES);
       let aad = null;
       let ciphertext = null;
@@ -1336,7 +1337,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, op
         WS_CELL_MAGIC.copy(cell, 0);
         cell.writeUInt8(WS_CELL_VERSION, 4);
         cell.writeUInt8(WS_CELL_FLAGS, 5);
-        cell.writeUInt16BE(WS_CELL_HEADER_BYTES, 6);
+        cell.writeUInt16BE(WS_CELL_CIPHERTEXT_OFFSET, 6);
         sessionId.copy(cell, WS_CELL_SESSION_OFFSET);
         fingerprint.copy(cell, WS_CELL_FINGERPRINT_OFFSET);
         messageId.copy(cell, WS_CELL_MESSAGE_ID_OFFSET);
@@ -1349,7 +1350,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, op
         nonce.copy(cell, WS_CELL_NONCE_OFFSET);
         const ciphertextEnd = WS_CELL_CIPHERTEXT_OFFSET
           + chunk.length
-          + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES;
+          + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
         aad = Buffer.concat([
           WS_CELL_AAD_DOMAIN,
           cell.subarray(0, WS_CELL_TAG_OFFSET),
@@ -1359,16 +1360,15 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload, op
         ciphertext = encrypted.ciphertext;
         tag = encrypted.tag;
         if (
-          ciphertext.length !== chunk.length + WS_CELL_CIPHERTEXT_OVERHEAD_BYTES ||
-          tag.length !== WS_ENVELOPE_TAG_BYTES ||
+          ciphertext.length !== chunk.length + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES ||
+          tag.length !== HASH_OUTPUT_BYTES ||
           WS_CELL_CIPHERTEXT_OFFSET + ciphertext.length > cell.length
         ) throw new Error('Fixed-cell encryption length mismatch');
         tag.copy(cell, WS_CELL_TAG_OFFSET);
         ciphertext.copy(cell, WS_CELL_CIPHERTEXT_OFFSET);
         const delivered = await sendWebSocketFrameWithDeadline(
           ws,
-          cell,
-          options.deliveryTimeoutMs
+          cell
         );
         if (!delivered) return false;
       } finally {

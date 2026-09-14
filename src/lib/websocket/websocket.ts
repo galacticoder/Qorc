@@ -16,20 +16,22 @@ import {
   SESSION_REKEY_INTERVAL_MS,
   WS_COVER_TRAFFIC_MIN_INTERVAL_MS,
   WS_COVER_TRAFFIC_MAX_INTERVAL_MS,
-  KYBER_PUBLIC_KEY_LENGTH,
-  DILITHIUM_PUBLIC_KEY_LENGTH,
+  WS_CONTROL_RESPONSE_TIMEOUT_MS,
+  WS_CONTROL_SEND_TIMEOUT_MS,
+  WS_FIXED_MESSAGE_SIZE_BYTES,
 } from '../constants';
 
 import { WebSocketRateLimiter } from './rate-limiter';
 import { WebSocketHeartbeat } from './heartbeat';
 import { WebSocketTorIntegration } from './tor-integration';
 import { WebSocketQueue } from './queue';
-import { WebSocketEncryption, WS_BINARY_CELL_BYTES } from './encryption';
+import { WebSocketEncryption } from './encryption';
 import { WebSocketHandshake } from './handshake';
 import { WebSocketMessageHandler } from './message-handler';
+import { AnonymousServerTrust } from '../transport/anonymous-server-trust';
 import { websocket, events } from '../tauri-bindings';
 import { GatekeeperClient } from '../cryptography/gatekeeper-client';
-import { Base64, decodeCanonicalBase64 as decodeBase64 } from '../cryptography/base64';
+import { Base64, decodeCanonicalBase64 } from '../cryptography/base64';
 import { solvePowChallenge } from '../cryptography/proof-of-work';
 import { getCurrentServerScope } from '../security/local-account-scope';
 import { getBlindRoutingClient } from '../transport/blind-routing-client';
@@ -38,7 +40,8 @@ import { tokenVault } from '../database/token-vault';
 import {
   createAuthChannelBinding,
 } from '../../../shared/auth-channel-binding.js';
-import { REQUEST_ID_RE } from '../../../shared/patterns.js';
+import { UUID_V4_RE } from '../../../shared/patterns.js';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 interface ConnectOptions {
   autoReconnectOnFailure?: boolean;
@@ -83,7 +86,6 @@ const NON_QUEUEABLE_CONTROL_TYPES = new Set<string>([
   SignalType.TOKEN_VALIDATION,
   SignalType.ACTIVATE_DELIVERY,
 ]);
-const AUTHORIZED_TOKEN_REFRESH_BASE_TIMEOUT_MS = 45_000;
 const ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE = 1;
 const SECURE_CHUNK_TIMEOUT_MS = 200_000;
 const PLAINTEXT_WIRE_TYPES = new Set<string>([
@@ -172,7 +174,7 @@ const isTokenValidationResponse = (value: unknown): value is ResumeAuthorization
     value.type !== SignalType.TOKEN_VALIDATION_RESPONSE ||
     typeof value.valid !== 'boolean' ||
     typeof value.requestId !== 'string' ||
-    !REQUEST_ID_RE.test(value.requestId)
+    !UUID_V4_RE.test(value.requestId)
   ) return false;
   if (value.valid) {
     return hasExactKeys(value, ['requestId', 'type', 'valid', 'serverEntryRequired', 'serverEntryGranted']) &&
@@ -231,7 +233,7 @@ const isNativeWsConnectionToken = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) > 0;
 
 const decodeServerResponseBase64 = (value: unknown, expectedLength: number): Uint8Array =>
-  decodeBase64(value, 'server response encoding', { exactBytes: expectedLength });
+  decodeCanonicalBase64(value, 'server response encoding', { exactBytes: expectedLength });
 
 const decodeCanonicalBase64List = (
   values: unknown,
@@ -281,8 +283,8 @@ const parseServerKeyBootstrap = (value: unknown): ServerKeyBootstrap | null => {
   const keys = value.hybridKeys;
   const decoded: Uint8Array[] = [];
   try {
-    decoded.push(decodeServerResponseBase64(keys.kyberPublicBase64, KYBER_PUBLIC_KEY_LENGTH));
-    decoded.push(decodeServerResponseBase64(keys.dilithiumPublicBase64, DILITHIUM_PUBLIC_KEY_LENGTH));
+    decoded.push(decodeServerResponseBase64(keys.kyberPublicBase64, ML_KEM_1024_PUBLIC_KEY_BYTES));
+    decoded.push(decodeServerResponseBase64(keys.dilithiumPublicBase64, ML_DSA_87_PUBLIC_KEY_BYTES));
     decoded.push(decodeServerResponseBase64(keys.x25519PublicBase64, 32));
   } catch {
     return null;
@@ -323,6 +325,7 @@ export class WebSocketConnection {
   private coverTrafficTimer: ReturnType<typeof setTimeout> | null = null;
   private coverTrafficGeneration = 0;
   private coverTrafficInFlightGeneration: number | null = null;
+  private cancelCoverAcknowledgement: (() => void) | null = null;
   private gatekeeper?: GatekeeperClient;
   private gatekeeperServerId?: string;
   private gatekeeperLifecycleTail: Promise<void> = Promise.resolve();
@@ -347,6 +350,7 @@ export class WebSocketConnection {
   private retiredNativeConnectionToken = 0;
   private connectionWaiterCancels = new Set<() => void>();
   private serverClockOffsetMs = 0;
+  private anonymousServerTrust = new AnonymousServerTrust();
   private serverBootstrapConnectionToken: number | null = null;
   private timestampRecoveryInFlight: Promise<void> | null = null;
   private timestampRecoveryGeneration = 0;
@@ -449,6 +453,10 @@ export class WebSocketConnection {
       onAuthenticatedServerTime: (serverTime) => {
         if (!this.updateServerClockOffset(serverTime)) {
           throw new Error('Authenticated server time is outside the accepted clock window');
+        }
+        const material = this.handshake.getServerKeyMaterial();
+        if (material && material.fingerprint === this.sessionKeyMaterial?.fingerprint) {
+          this.anonymousServerTrust.authenticate(material, this.getTrustedNow());
         }
       },
       getTrustedNow: () => this.getTrustedNow(),
@@ -683,7 +691,7 @@ export class WebSocketConnection {
     this.inboundMessages = [];
   }
 
-  private registerConnectionWaiterCancel(cancel: () => void): () => void {
+  registerConnectionWaiterCancel(cancel: () => void): () => void {
     this.connectionWaiterCancels.add(cancel);
     return () => this.connectionWaiterCancels.delete(cancel);
   }
@@ -739,7 +747,7 @@ export class WebSocketConnection {
 
   private enqueueInboundCell(cell: Uint8Array, connectionToken: number): void {
     const bytes = cell.byteLength;
-    const invalidCellSize = bytes !== WS_BINARY_CELL_BYTES;
+    const invalidCellSize = bytes !== WS_FIXED_MESSAGE_SIZE_BYTES;
     const exceedsBudget =
       this.inboundMessageCount + 1 > WS_INBOUND_PENDING_MAX_COUNT ||
       this.inboundMessageBytes + bytes > WS_INBOUND_PENDING_MAX_BYTES;
@@ -856,7 +864,7 @@ export class WebSocketConnection {
         let bridgeBytes: Uint8Array | null = new Uint8Array(frame);
         let cell: Uint8Array | null = null;
         try {
-          if (bridgeBytes.length !== 8 + WS_BINARY_CELL_BYTES) {
+          if (bridgeBytes.length !== 8 + WS_FIXED_MESSAGE_SIZE_BYTES) {
             throw new Error('Invalid native WebSocket binary bridge frame');
           }
           const token = Number(new DataView(
@@ -1050,6 +1058,7 @@ export class WebSocketConnection {
 
   // Set and get username
   setUsername(username: string) {
+    if (this._username !== username) this.anonymousServerTrust.invalidate();
     this._username = username;
     this.lastAuthUsername = username;
   }
@@ -1195,6 +1204,7 @@ export class WebSocketConnection {
   private stopCoverTraffic(): void {
     this.coverTrafficGeneration += 1;
     this.coverTrafficInFlightGeneration = null;
+    this.cancelCoverAcknowledgement?.();
     if (this.coverTrafficTimer) {
       clearTimeout(this.coverTrafficTimer);
       this.coverTrafficTimer = null;
@@ -1224,6 +1234,7 @@ export class WebSocketConnection {
   private async sendCoverTraffic(generation: number): Promise<void> {
     if (generation !== this.coverTrafficGeneration) return;
     if (this.coverTrafficInFlightGeneration === generation) return;
+    if (this.cancelCoverAcknowledgement || this.connectionWaiterCancels.size > 0) return;
     if (this.lifecycleState !== 'connected' || !this.sessionKeyMaterial) return;
     if (!this.isApplicationAuthReady()) return;
 
@@ -1231,6 +1242,7 @@ export class WebSocketConnection {
     try {
       const state = await websocket.getState();
       if (generation !== this.coverTrafficGeneration) return;
+      if (this.cancelCoverAcknowledgement || this.connectionWaiterCancels.size > 0) return;
       if (Number(state.queue_size || 0) > 0) {
         const now = Date.now();
         if (now - this.lastCoverBackpressureLogAt > 60000) {
@@ -1245,12 +1257,39 @@ export class WebSocketConnection {
       if (generation !== this.coverTrafficGeneration) return;
       const blindClient = getBlindRoutingClient(this.lastAuthUsername);
       const sealedEnvelope = blindClient.createCoverSealedEnvelope();
+      const requestId = crypto.randomUUID();
+      const connectionToken = this.nativeConnectionToken;
+      let unregisterConnectionCancel = () => {};
+      const release = () => {
+        if (this.cancelCoverAcknowledgement !== release) return;
+        this.cancelCoverAcknowledgement = null;
+        this.messageHandler.unregisterHandler(SignalType.BLIND_ROUTE_ACK, onAcknowledgement);
+        unregisterConnectionCancel();
+      };
+      const onAcknowledgement = (message: any) => {
+        if (
+          generation !== this.coverTrafficGeneration ||
+          connectionToken !== this.nativeConnectionToken ||
+          !isPlainObject(message) || hasPrototypePollutionKeys(message) ||
+          message.type !== SignalType.BLIND_ROUTE_ACK ||
+          message.requestId !== requestId ||
+          typeof message.success !== 'boolean' ||
+          (!hasExactKeys(message, ['type', 'requestId', 'success']) &&
+            !hasExactKeys(message, ['type', 'requestId', 'success', 'error'])) ||
+          ('error' in message && (typeof message.error !== 'string' || message.error.length < 1 || message.error.length > 200))
+        ) return;
+        release();
+      };
+      this.cancelCoverAcknowledgement = release;
+      this.messageHandler.registerHandler(SignalType.BLIND_ROUTE_ACK, onAcknowledgement);
+      unregisterConnectionCancel = this.registerConnectionWaiterCancel(release);
 
-      await this.dispatchPayload({
+      const sent = await this.dispatchPayload({
         type: SignalType.BLIND_ROUTE,
-        requestId: crypto.randomUUID(),
+        requestId,
         sealedEnvelope
       }, false, { isCoverTraffic: true });
+      if (sent === undefined) release();
     } catch {
     } finally {
       if (this.coverTrafficInFlightGeneration === generation) {
@@ -1648,7 +1687,7 @@ export class WebSocketConnection {
     const resumeRedemption = await takeResumeRedemption(account);
     if (!isCurrent() || !resumeRedemption) return false;
     const requestId = crypto.randomUUID();
-    if (!REQUEST_ID_RE.test(requestId)) return false;
+    if (!UUID_V4_RE.test(requestId)) return false;
 
     const timeoutMs = this.torIntegration.getAdaptedTimeout(30000);
     let cancelWait = () => {};
@@ -2282,16 +2321,16 @@ export class WebSocketConnection {
 
   async sendReliable(
     data: unknown,
-    options: { queueOnFailure?: boolean } = {},
+    options: { queueOnFailure?: boolean; signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const context = this.captureOutboundTransportContext();
     try {
-      await this.dispatchPayload(data, false);
+      await this.dispatchPayload(data, false, { signal: options.signal });
       return true;
     } catch {
-      if (!this.isOutboundTransportContextCurrent(context)) return false;
+      if (options.signal?.aborted || !this.isOutboundTransportContextCurrent(context)) return false;
       if (options.queueOnFailure !== false) {
-        try { void this.dispatchPayload(data, true).catch(() => { }); } catch { }
+        try { void this.dispatchPayload(data, true, { signal: options.signal }).catch(() => { }); } catch { }
       }
       return false;
     }
@@ -2447,7 +2486,7 @@ export class WebSocketConnection {
             !isPlainObject(msgObj) ||
             hasPrototypePollutionKeys(msgObj) ||
             msgObj[requestField] !== options.authBindingRequestId ||
-            !REQUEST_ID_RE.test(options.authBindingRequestId) ||
+            !UUID_V4_RE.test(options.authBindingRequestId) ||
             Object.prototype.hasOwnProperty.call(msgObj, 'authChannelBinding')
           ) {
             throw new Error('Invalid channel-bound authentication request');
@@ -2470,9 +2509,9 @@ export class WebSocketConnection {
         }
 
         const cells = await this.encryption.prepareSecureEnvelope(boundData);
-        throwIfOperationAborted(options.signal);
-        this.assertOutboundTransportContextCurrent(outboundContext);
         try {
+          throwIfOperationAborted(options.signal);
+          this.assertOutboundTransportContextCurrent(outboundContext);
           for (const cell of cells) {
             throwIfOperationAborted(options.signal);
             this.assertOutboundTransportContextCurrent(outboundContext);
@@ -2528,7 +2567,7 @@ export class WebSocketConnection {
     }
     await this.dispatchPayload({
       type: SignalType.PQ_HEARTBEAT_PING,
-      timestamp: Date.now(),
+      timestamp: this.getTrustedNow(),
       sessionId: sessionKeyMaterial.sessionId
     }, false);
   }
@@ -2851,6 +2890,7 @@ export class WebSocketConnection {
     if (this.lifecycleState !== 'idle' && this.lifecycleState !== 'disconnected') {
       throw new Error('Connection privacy mode can only reset while disconnected');
     }
+    this.anonymousServerTrust.invalidate();
     this.isInUnlinkedMode = false;
     this.unlinkedAuthorizationBlocked = false;
   }
@@ -3221,9 +3261,10 @@ export class WebSocketConnection {
         throw operationAbortError();
       }
     };
+    const requestId = crypto.randomUUID();
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (await this.issueAccountAuthorizationReplacement(assertConnectionCurrent)) {
+        if (await this.issueAccountAuthorizationReplacement(assertConnectionCurrent, requestId)) {
           this.accountAuthReplacementConnectionToken = connectionToken;
           return;
         }
@@ -3240,23 +3281,27 @@ export class WebSocketConnection {
   }
 
   private async issueAccountAuthorizationReplacement(
-    assertConnectionCurrent: () => void
+    assertConnectionCurrent: () => void,
+    requestId: string,
   ): Promise<boolean> {
-    const requestId = crypto.randomUUID();
     let cancelResponseWait = () => {};
+    const sendController = new AbortController();
     let finalized = false;
     try {
       const request = await tokenVault.prepareAuthorizedRefresh(ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE);
       assertConnectionCurrent();
 
-      const timeoutMs = this.torIntegration.getAdaptedTimeout(
-        AUTHORIZED_TOKEN_REFRESH_BASE_TIMEOUT_MS
-      );
+      const timeoutMs = WS_CONTROL_RESPONSE_TIMEOUT_MS;
+      let responseTimer: ReturnType<typeof setTimeout> | undefined;
+      let responsePending = true;
+      let beginResponseDeadline = () => {};
+      let failResponseWait = (_error: Error) => {};
       const responsePromise = new Promise<any>((resolve, reject) => {
         let settled = false;
         let unregisterConnectionCancel = () => {};
         const cleanup = () => {
-          clearTimeout(timeout);
+          clearTimeout(responseTimer);
+          sendController.abort();
           this.messageHandler.unregisterHandler(
             SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE,
             onResponse
@@ -3267,6 +3312,7 @@ export class WebSocketConnection {
         const finish = (error: Error | null, value?: any) => {
           if (settled) return;
           settled = true;
+          responsePending = false;
           cleanup();
           if (error) reject(error);
           else resolve(value);
@@ -3279,11 +3325,20 @@ export class WebSocketConnection {
           if (message?.requestId !== requestId) return;
           finish(new Error(message?.message || 'Account-auth refresh rejected'));
         };
-        const timeout = setTimeout(
-          () => finish(new Error('Account-auth refresh timeout')),
-          timeoutMs
-        );
+        beginResponseDeadline = () => {
+          if (!responsePending) return;
+          clearTimeout(responseTimer);
+          responseTimer = setTimeout(
+            () => finish(new Error('Account-auth refresh timeout')),
+            timeoutMs
+          );
+        };
+        failResponseWait = (error) => finish(error);
         cancelResponseWait = () => finish(operationAbortError());
+        responseTimer = setTimeout(
+          () => finish(new Error('Account-auth refresh send timeout')),
+          WS_CONTROL_SEND_TIMEOUT_MS,
+        );
         this.messageHandler.registerHandler(
           SignalType.ACCOUNT_AUTH_TOKEN_REFRESH_RESPONSE,
           onResponse
@@ -3293,22 +3348,20 @@ export class WebSocketConnection {
           cancelResponseWait
         );
       });
+      void responsePromise.catch(() => {});
 
-      try {
-        await this.sendSecureControlMessage({
-          type: SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
-          blindedTokens: request.blindedTokens,
-          tokenEpoch: request.tokenEpoch,
-          requestId
-        }, {
-          bypassStateCheck: true,
-          failIfQueued: true
-        });
-      } catch (error) {
-        cancelResponseWait();
-        await responsePromise.catch(() => { });
-        throw error;
-      }
+      void this.sendSecureControlMessage({
+        type: SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
+        blindedTokens: request.blindedTokens,
+        tokenEpoch: request.tokenEpoch,
+        requestId
+      }, {
+        bypassStateCheck: true,
+        failIfQueued: true,
+        signal: sendController.signal,
+      }).then(beginResponseDeadline, (error) => {
+        failResponseWait(error instanceof Error ? error : new Error(String(error)));
+      });
 
       const response = await responsePromise;
       assertConnectionCurrent();
@@ -3370,6 +3423,7 @@ export class WebSocketConnection {
       return finalized;
     } finally {
       cancelResponseWait();
+      sendController.abort();
     }
   }
 
@@ -3436,6 +3490,7 @@ export class WebSocketConnection {
   // Close connection
   async close(options: { killSession?: boolean } = {}): Promise<void> {
     this.isManualClose = true;
+    this.anonymousServerTrust.invalidate();
     this.connectionOperationGeneration += 1;
     this.timestampRecoveryGeneration += 1;
     this.timestampRecoveryInFlight = null;
@@ -3487,30 +3542,43 @@ export class WebSocketConnection {
   // Check if PQ session established
   isPQSessionEstablished(): boolean { return !!this.sessionKeyMaterial; }
 
-  getAnonymousHttpServerKeyMaterial(): ServerKeyMaterial | null {
+  private refreshAnonymousHttpTrust(): void {
+    if (this.isManualClose) {
+      this.anonymousServerTrust.invalidate();
+      return;
+    }
     const material = this.handshake.getServerKeyMaterial();
     if (
-      this.lifecycleState !== 'connected' ||
-      !this.sessionKeyMaterial ||
-      !material ||
-      !material.dilithiumPublicKey ||
-      !material.x25519PublicKey ||
-      material.fingerprint !== this.sessionKeyMaterial.fingerprint
-    ) return null;
-
-    return {
-      kyberPublicKey: new Uint8Array(material.kyberPublicKey),
-      dilithiumPublicKey: new Uint8Array(material.dilithiumPublicKey),
-      x25519PublicKey: new Uint8Array(material.x25519PublicKey),
-      fingerprint: material.fingerprint,
-      serverId: material.serverId,
-    };
+      this.lifecycleState === 'connected' &&
+      this.sessionKeyMaterial &&
+      material?.dilithiumPublicKey &&
+      material.x25519PublicKey &&
+      material.fingerprint === this.sessionKeyMaterial.fingerprint
+    ) this.anonymousServerTrust.authenticate(material, this.getTrustedNow());
   }
 
-  getAuthenticatedServerNow(): number | null {
-    return this.lifecycleState === 'connected' && this.sessionKeyMaterial
-      ? this.getTrustedNow()
-      : null;
+  captureAnonymousHttpContext() {
+    this.refreshAnonymousHttpTrust();
+    return this.anonymousServerTrust.capture();
+  }
+
+  captureAnonymousHttpIdentity(): AbortSignal | null {
+    this.refreshAnonymousHttpTrust();
+    return this.anonymousServerTrust.identity();
+  }
+
+  isAnonymousHttpIdentityCurrent(identity: AbortSignal | null): boolean {
+    return identity !== null && !identity.aborted && !this.isManualClose &&
+      identity === this.anonymousServerTrust.identity();
+  }
+
+  getAnonymousHttpServerKeyMaterial(): ServerKeyMaterial | null {
+    return this.captureAnonymousHttpContext()?.material ?? null;
+  }
+
+  getAnonymousHttpServerNow(): number | null {
+    this.refreshAnonymousHttpTrust();
+    return this.anonymousServerTrust.now();
   }
 
   // Bind caller work to one native socket without exposing account material.

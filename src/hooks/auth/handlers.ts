@@ -2,7 +2,6 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
-import { PostQuantumUtils } from "../../lib/utils/pq-utils";
 import type { HybridKeys, ServerHybridPublicKeys } from "../../lib/types/auth-types";
 import { OPAQUEClient, OPAQUEClientHelpers, OPAQUE_CONFIG } from "../../lib/cryptography/opaque-client";
 import { computeBlindUserId, computePrivateAuthStorageId } from "../../lib/utils/auth-utils";
@@ -12,7 +11,7 @@ import { tokenVault } from "../../lib/database/token-vault";
 import { blake3 } from '@noble/hashes/blake3.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { account, pir, storage } from "../../lib/tauri-bindings";
-import { decodeCanonicalBase64 } from "../../lib/cryptography/base64";
+import { decodeCanonicalBase64, Base64 } from '../../lib/cryptography/base64';
 import { PostQuantumWorker } from "../../lib/cryptography/worker-bridge";
 import { encodeAccountAuthSecret, isValidAccountCredential } from "../../lib/auth/account-credentials";
 import { getCurrentServerScope } from "../../lib/security/local-account-scope";
@@ -33,7 +32,6 @@ import {
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
 } from "../../lib/constants";
-import { REQUEST_ID_RE } from '../../../shared/patterns.js';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 import { STORAGE_PREFIXES } from '../../lib/database/storage-keys';
 import { ACCOUNT_AUTH_PURPOSE } from '../../lib/config/audiences';
@@ -43,6 +41,7 @@ import {
   PRIVATE_AUTH_PIR_QUERY_BYTES,
   PRIVATE_AUTH_PIR_RECORD_BYTES,
 } from '../../../shared/private-auth-protocol.js';
+import { UUID_V4_RE } from '../../../shared/patterns.js';
 
 const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -58,7 +57,7 @@ function privateAuthRequestCommitment(
   hash.update(pubParams);
   const digest = hash.digest();
   try {
-    return PostQuantumUtils.uint8ArrayToBase64(digest);
+    return Base64.arrayBufferToBase64(digest);
   } finally {
     digest.fill(0);
   }
@@ -346,7 +345,7 @@ export const createHandleAccountSubmit = (
     }
 
     const authRequestId = crypto.randomUUID();
-    if (!REQUEST_ID_RE.test(authRequestId)) {
+    if (!UUID_V4_RE.test(authRequestId)) {
       setters.setLoginError('Authentication request could not be initialized');
       return;
     }
@@ -502,7 +501,7 @@ export const createHandleAccountSubmit = (
               await awaitCurrent(websocketClient.sendSecureControlMessage({
                 type: SignalType.AUTH_REGISTER_REQUEST,
                 authRequestId,
-                blindedElement: PostQuantumUtils.uint8ArrayToBase64(registrationBlindedElement),
+                blindedElement: Base64.arrayBufferToBase64(registrationBlindedElement),
                 preflightPowSolution: registrationPreflightSolution
               }, { failIfQueued: true, signal: operation.signal }));
             } catch (sendError) {
@@ -640,7 +639,7 @@ export const createHandleAccountSubmit = (
               authRequestId,
               registrationAttemptId,
               blindedTokens: pendingRegistrationTokens.map((candidate) =>
-                PostQuantumUtils.uint8ArrayToBase64(candidate.blindedElement!)
+                Base64.arrayBufferToBase64(candidate.blindedElement!)
               ),
               tokenEpoch: getPrivacyPassBatchEpoch(pendingRegistrationTokens)
             }, { failIfQueued: true, signal: operation.signal }));
@@ -812,7 +811,7 @@ export const createHandleAccountSubmit = (
                     roundAuthChannelBinding = await awaitCurrent(websocketClient.sendSecureControlMessage({
                       type: SignalType.AUTH_PIR_REQUEST,
                       authRequestId,
-                      blindedElement: PostQuantumUtils.uint8ArrayToBase64(loginBlindedElement),
+                      blindedElement: Base64.arrayBufferToBase64(loginBlindedElement),
                       pubParams: preflightPowSolution ? loginPirPublicParams : undefined,
                       query: preflightPowSolution ? loginPirQuery : undefined,
                       requestCommitment,
@@ -953,9 +952,9 @@ export const createHandleAccountSubmit = (
               await awaitCurrent(websocketClient.sendSecureControlMessage({
                 type: SignalType.AUTH_PIR_FINALIZE,
                 authRequestId,
-                authProof: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.authMessage),
+                authProof: Base64.arrayBufferToBase64(loginFinalize.authMessage),
                 blindedTokens: pendingAccountTokens.map((candidate) =>
-                  PostQuantumUtils.uint8ArrayToBase64(candidate.blindedElement!)
+                  Base64.arrayBufferToBase64(candidate.blindedElement!)
                 ),
                 tokenEpoch: getPrivacyPassBatchEpoch(pendingAccountTokens),
                 powSolution

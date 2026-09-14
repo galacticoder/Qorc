@@ -8,7 +8,8 @@ import { PROTOCOL_KEYS as serverKeys } from '../config/protocol-keys.js';
 import { REDIS_KEYS } from '../config/redis-keys.js';
 import * as sharedKeys from '../../shared/protocol-keys.js';
 import { REQUIRED_WS_PQ_HANDSHAKE, validatePqHandshakePolicy } from '../security/layer-agreement-policy.js';
-import { SEALED_STANDARD_CIPHERTEXT_BYTES, SEALED_KEM_CIPHERTEXT_BYTES, SEALED_NONCE_BYTES, validateSealedEnvelope } from '../routing/sealed-sender.js';
+import { SEALED_STANDARD_CIPHERTEXT_BYTES, validateSealedEnvelope } from '../routing/sealed-sender.js';
+import { ML_KEM_1024_CIPHERTEXT_BYTES, SEALED_NONCE_BYTES } from '../../shared/crypto-sizes.js';
 import { PRIVATE_AUTH_TRANSCRIPT_BYTES } from '../../shared/private-auth-protocol.js';
 import { AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
 
@@ -131,7 +132,7 @@ test('sealed envelopes accept the unversioned protocol and reject versioned name
   const envelope = {
     version: clientKeys.SEALED_ENVELOPE_PROTOCOL,
     ciphertext: Buffer.alloc(SEALED_STANDARD_CIPHERTEXT_BYTES).toString('base64'),
-    ephemeralKey: Buffer.alloc(SEALED_KEM_CIPHERTEXT_BYTES).toString('base64'),
+    ephemeralKey: Buffer.alloc(ML_KEM_1024_CIPHERTEXT_BYTES).toString('base64'),
     nonce: Buffer.alloc(SEALED_NONCE_BYTES).toString('base64'),
     tag: '00'.repeat(8),
     probe: '00'.repeat(32),

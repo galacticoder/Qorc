@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { HASH_OUTPUT_BYTES, SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { HASH_OUTPUT_BYTES } from '../../shared/crypto-sizes.js';
 
 export function selectRandomRankEvictionIds(ids, cap, validateId) {
   const rankKey = crypto.randomBytes(HASH_OUTPUT_BYTES);

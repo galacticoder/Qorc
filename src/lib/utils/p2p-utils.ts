@@ -1,8 +1,8 @@
-import { CryptoUtils } from "../utils/crypto-utils";
 import { P2P_ROUTE_PROOF_TTL_MS, CERT_CLOCK_SKEW_MS } from "../constants";
 import { blake3 } from '@noble/hashes/blake3.js';
-import { bytesToHex } from './byte-utils';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { CryptoUtils } from './crypto-utils';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export const createP2PError = (code: string) => {
   const error = new Error(code);

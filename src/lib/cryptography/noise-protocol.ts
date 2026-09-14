@@ -3,22 +3,12 @@
  */
 
 import { PostQuantumKEM } from './kem';
-import { PostQuantumHash } from './hash';
 import { PostQuantumAEAD } from './aead';
 import { PostQuantumRandom } from './random';
 import { PostQuantumSignature } from './signature';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { SecureMemory } from './secure-memory';
-import {
-    NOISE_MAX_SESSION_AGE_MS,
-    NOISE_REPLAY_WINDOW_SIZE,
-    AUTH_USERNAME_REGEX,
-    PQ_KEM_CIPHERTEXT_SIZE,
-    PQ_KEM_PUBLIC_KEY_SIZE,
-    PQ_SIG_PUBLIC_KEY_SIZE,
-    PQ_SIG_SIGNATURE_SIZE,
-    X25519_PUBLIC_KEY_LENGTH
-} from '../constants';
+import { NOISE_MAX_SESSION_AGE_MS, NOISE_REPLAY_WINDOW_SIZE, AUTH_USERNAME_REGEX } from '../constants';
 import type {
     PQKeyPair,
     X25519KeyPair,
@@ -28,9 +18,17 @@ import type {
     EncryptedFrame
 } from '../types/noise-types';
 import { generateX25519KeyPair, computeX25519SharedSecret } from '../utils/noise-utils';
-import { wipeHandshakeBytes as clearHandshakeSnapshot } from './wipe';
-import { constantTimeBytesEqual } from '../utils/byte-utils';
+import { wipeHandshakeBytes } from './wipe';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  X25519_KEY_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
+import { constantTimeBytesEqual } from '../../../shared/bytes.js';
 
 const MAX_SEQUENCE = 0xffffffffffffffffn;
 const HANDSHAKE_FRESHNESS_MS = 5 * 60 * 1000;
@@ -188,7 +186,7 @@ export class PQSession {
             );
 
             const signature = await ownKeys.signTranscript(messageData);
-            if (!(signature instanceof Uint8Array) || signature.length !== PQ_SIG_SIGNATURE_SIZE) {
+            if (!(signature instanceof Uint8Array) || signature.length !== ML_DSA_87_SIGNATURE_BYTES) {
                 throw new Error('Native P2P signer returned an invalid signature');
             }
             const message: HandshakeMessage = {
@@ -228,7 +226,7 @@ export class PQSession {
         PQSession.validateHandshakeMessage(message, 'init');
         if (
             !(expectedSignerPublicKey instanceof Uint8Array) ||
-            expectedSignerPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE
+            expectedSignerPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES
         ) {
             throw new Error('Invalid expected handshake signer key');
         }
@@ -347,7 +345,7 @@ export class PQSession {
                     initiatorMessageHash
                 );
                 const responseSignature = await ownKeys.signTranscript(responseData);
-                if (!(responseSignature instanceof Uint8Array) || responseSignature.length !== PQ_SIG_SIGNATURE_SIZE) {
+                if (!(responseSignature instanceof Uint8Array) || responseSignature.length !== ML_DSA_87_SIGNATURE_BYTES) {
                     throw new Error('Native P2P signer returned an invalid signature');
                 }
                 const response: HandshakeMessage = {
@@ -397,7 +395,7 @@ export class PQSession {
                 }
             }
         } finally {
-            if (messageSnapshot) clearHandshakeSnapshot(messageSnapshot);
+            if (messageSnapshot) wipeHandshakeBytes(messageSnapshot);
             SecureMemory.zeroBuffer(expectedSignerSnapshot);
         }
     }
@@ -407,7 +405,7 @@ export class PQSession {
         PQSession.validateHandshakeMessage(response, 'response');
         if (
             !(expectedSignerPublicKey instanceof Uint8Array) ||
-            expectedSignerPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE
+            expectedSignerPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES
         ) {
             throw new Error('Invalid expected handshake signer key');
         }
@@ -537,7 +535,7 @@ export class PQSession {
                 if (responderX25519Secret) SecureMemory.zeroBuffer(responderX25519Secret);
             }
         } finally {
-            if (responseSnapshot) clearHandshakeSnapshot(responseSnapshot);
+            if (responseSnapshot) wipeHandshakeBytes(responseSnapshot);
             SecureMemory.zeroBuffer(expectedSignerSnapshot);
         }
     }
@@ -815,8 +813,8 @@ export class PQSession {
     ): Uint8Array {
         if (
             initiatorHash.length !== 32 ||
-            responderStaticKyberPublicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-            responderStaticX25519PublicKey.length !== X25519_PUBLIC_KEY_LENGTH
+            responderStaticKyberPublicKey.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+            responderStaticX25519PublicKey.length !== X25519_KEY_BYTES
         )
             throw new Error('Invalid Noise transcript context');
         const responseHash = this.hashHandshakeMessage(response, initiatorHash);
@@ -849,11 +847,11 @@ export class PQSession {
     private static validateOwnKeys(keys: OwnKeys): void {
         if (
             !(keys?.kyberPublicKey instanceof Uint8Array) ||
-            keys.kyberPublicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
+            keys.kyberPublicKey.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
             !(keys.dilithiumPublicKey instanceof Uint8Array) ||
-            keys.dilithiumPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
+            keys.dilithiumPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
             !(keys.x25519PublicKey instanceof Uint8Array) ||
-            keys.x25519PublicKey.length !== X25519_PUBLIC_KEY_LENGTH ||
+            keys.x25519PublicKey.length !== X25519_KEY_BYTES ||
             typeof keys.signTranscript !== 'function' ||
             typeof keys.respondToHandshake !== 'function'
         )
@@ -875,11 +873,11 @@ export class PQSession {
     private static validatePeerKeys(keys: PeerKeys): void {
         if (
             !(keys?.kyberPublicKey instanceof Uint8Array) ||
-            keys.kyberPublicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
+            keys.kyberPublicKey.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
             !(keys.dilithiumPublicKey instanceof Uint8Array) ||
-            keys.dilithiumPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
+            keys.dilithiumPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
             !(keys.x25519PublicKey instanceof Uint8Array) ||
-            keys.x25519PublicKey.length !== X25519_PUBLIC_KEY_LENGTH
+            keys.x25519PublicKey.length !== X25519_KEY_BYTES
         )
             throw new Error('Invalid peer Noise key material');
     }
@@ -897,16 +895,16 @@ export class PQSession {
             !/^[a-f0-9]{32}$/.test(message.sessionId) ||
             !Number.isSafeInteger(message.timestamp) ||
             !(message.kemCiphertext instanceof Uint8Array) ||
-            message.kemCiphertext.length !== PQ_KEM_CIPHERTEXT_SIZE ||
+            message.kemCiphertext.length !== ML_KEM_1024_CIPHERTEXT_BYTES ||
             !(message.ephemeralX25519Public instanceof Uint8Array) ||
-            message.ephemeralX25519Public.length !== X25519_PUBLIC_KEY_LENGTH ||
+            message.ephemeralX25519Public.length !== X25519_KEY_BYTES ||
             !(message.signature instanceof Uint8Array) ||
-            message.signature.length !== PQ_SIG_SIGNATURE_SIZE ||
+            message.signature.length !== ML_DSA_87_SIGNATURE_BYTES ||
             !(message.signerPublicKey instanceof Uint8Array) ||
-            message.signerPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
+            message.signerPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
             (expectedType === 'init'
                 ? !(message.ephemeralKyberPublic instanceof Uint8Array) ||
-                  message.ephemeralKyberPublic.length !== PQ_KEM_PUBLIC_KEY_SIZE
+                  message.ephemeralKyberPublic.length !== ML_KEM_1024_PUBLIC_KEY_BYTES
                 : message.ephemeralKyberPublic !== undefined)
         )
             throw new Error('Invalid Noise handshake key material');

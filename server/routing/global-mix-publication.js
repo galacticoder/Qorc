@@ -7,11 +7,11 @@ import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_DSA_87_SECRET_KEY_BYTES,
   ML_DSA_87_SIGNATURE_BYTES,
+  HASH_OUTPUT_BYTES,
 } from '../../shared/crypto-sizes.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
-import { BASE64URL_32_RE } from '../utils/patterns.js';
 import { validateSealedEnvelope } from './sealed-sender.js';
+import { BASE64URL_32_RE } from '../../shared/patterns.js';
 
 const GLOBAL_MIX_PUBLICATION_VERSION = 1;
 const GLOBAL_MIX_PUBLICATION_MAX_AGE_MS = 2 * 60_000;

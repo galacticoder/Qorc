@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
 import { SignalType } from '../signals.js';
-import { UserDatabase } from '../database/database.js';
 import { OPAQUEServer, OPAQUEHelpers } from '../crypto/opaque-service.js';
 import { PrivacyPassServer, PrivacyPassHelpers } from './privacy-pass-server.js';
 import {
@@ -10,7 +9,17 @@ import {
 } from '../messaging/pq-envelope-handler.js';
 import { ServerGatekeeper } from './gatekeeper.js';
 import { answerPrivateAuthPir } from './private-auth-pir.js';
-import { applyAdaptiveAuthDelay, recordAuthFailure, getAuthVerificationDifficulty, getAuthPreflightDifficulty, recordAuthPreflightCompletion, createPowChallenge, verifyPowSolution, throttleExpensiveAuthRequest, acquireExpensiveAuthVerificationSlot } from '../security/auth-throttle.js';
+import {
+  applyAdaptiveAuthDelay,
+  recordAuthFailure,
+  getAuthVerificationDifficulty,
+  getAuthPreflightDifficulty,
+  recordAuthPreflightCompletion,
+  createPowChallenge,
+  verifyPowSolution,
+  throttleExpensiveAuthRequest,
+  acquireExpensiveAuthVerificationSlot,
+} from '../security/auth-throttle.js';
 import { isAuthPreflightLive, verifyAuthPreflightProof } from './auth-preflight.js';
 import {
   decodeCanonicalBase64,
@@ -35,24 +44,23 @@ import {
 } from '../config/error-codes.js';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
-  ML_DSA_87_SIGNATURE_BYTES
+  ML_DSA_87_SIGNATURE_BYTES,
+  HASH_OUTPUT_BYTES,
+  OPAQUE_ELEMENT_BYTES,
+  OPAQUE_ENVELOPE_BYTES,
+  OPAQUE_NONCE_BYTES,
+  PRIVACY_PASS_BLINDED_TOKEN_BYTES,
 } from '../../shared/crypto-sizes.js';
 import {
   PRIVATE_AUTH_PIR_PUBLIC_PARAMS_BYTES,
   PRIVATE_AUTH_PIR_QUERY_BYTES,
 } from '../../shared/private-auth-protocol.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import {
-  AUTH_CHANNEL_BINDING_BYTES,
-  HASH_OUTPUT_BYTES,
-  OPAQUE_ELEMENT_BYTES,
-  OPAQUE_ENVELOPE_BYTES,
-  OPAQUE_NONCE_BYTES,
-  PRIVACY_PASS_BLINDED_TOKEN_BYTES,
-  SHA_256_ALGORITHM
-} from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
 
 import * as ServerConfig from '../config/config.js';
+import { UserDatabase } from '../database/user-db.js';
+import { AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
 
 async function rejectConnection(ws, type, reason, code = 1008, authRequestId = undefined) {
   console.warn('[AUTH] Rejecting connection', { type });

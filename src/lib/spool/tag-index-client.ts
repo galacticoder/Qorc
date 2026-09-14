@@ -3,13 +3,9 @@
  */
 
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
-import {
-  SPOOL_DETECTION_PROBE_HEX_CHARS,
-  SPOOL_TAG_HEX_CHARS,
-  SPOOL_TAG_PROTOCOL,
-} from '../../../shared/spool-tag-protocol.js';
-import { SPOOL_PIR_LAYOUT } from '../../../shared/spool-pir-layout.js';
+import { SPOOL_DETECTION_PROBE_HEX_CHARS, SPOOL_TAG_HEX_CHARS } from '../../../shared/spool-tag-protocol.js';
 import { SPOOL_TAG_INDEX_AUDIENCE } from '../config/audiences';
+import { SPOOL_TAG_PROTOCOL, SPOOL_PIR_LAYOUT } from '../../../shared/protocol-keys.js';
 
 export interface SpoolTagIndex {
   epoch: number;

@@ -4,9 +4,9 @@ import { Message } from '../../components/chat/messaging/types';
 import { dispatchCanceledEvent, detectMimeType, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
-import { bytesToHex } from '../../lib/utils/byte-utils';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 import type { SecureDB } from '../../lib/database/secureDB';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 // Validate all chunks are present
 export const validateAllChunks = (fileEntry: ExtendedFileState): boolean => {

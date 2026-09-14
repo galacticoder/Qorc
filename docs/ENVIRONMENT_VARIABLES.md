@@ -30,7 +30,7 @@ and `REDIS_PASSWORD` values.
 
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
-| `DISCONNECT_CLIENTS_ON_SERVER_PASSWORD_CHANGE` | `no`; enabled by `yes`, `true`, or `1` | `server/authentication/server-password-monitor.js` | When enabled at the moment `SERVER_PASSWORD` changes, synchronously removes authorization from and closes all WebSockets connected to that server process. When disabled, existing sockets remain authorized but all new connections use the new password bound issuer. |
+| `DISCONNECT_CLIENTS_ON_SERVER_PASSWORD_CHANGE` | `no`, enabled by `yes`, `true`, or `1` | `server/authentication/server-password-monitor.js` | When enabled at the moment `SERVER_PASSWORD` changes, synchronously removes authorization from and closes all WebSockets connected to that server process. When disabled, existing sockets remain authorized but all new connections use the new password bound issuer. |
 | `PORT` | Required by the runtime, Docker supplies `3000` | `server/config/config.js`, launchers | HTTPS listen port. |
 | `BIND_ADDRESS` | `127.0.0.1` | `server/bootstrap/server-bootstrap.js` | HTTPS bind interface. Docker sets `0.0.0.0`. |
 | `ALLOWED_CORS_ORIGINS` | Empty in the runtime, launcher supplies localhost development origins | `server/config/constants.js` | Comma separated browser origins. The fixed first-party Tauri origins are always included. Unknown browser origins receive no CORS grant and websocket upgrades with an unknown `Origin` are rejected. |
@@ -65,7 +65,7 @@ and `REDIS_PASSWORD` values.
 | `PQ_HANDSHAKE_MAX_CONCURRENCY` | `2`, 1-16 | same | Process level concurrent ML-KEM handshake work. |
 | `PQ_HANDSHAKE_MAX_QUEUE` | `16`, 0-64 | same | Bounded handshake waiters. |
 | `PQ_HANDSHAKE_QUEUE_TIMEOUT_MS` | `15000`, 1000-60000 | same | Maximum wait for a handshake slot. |
-| `PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS` | `45000`, 5000-120000 | same | Maximum time a staged session may wait for encrypted peer confirmation before the socket is closed and its pending/current transport state is wiped. |
+| `PQ_HANDSHAKE_CONFIRM_TIMEOUT_MS` | `120000`, 5000-300000 | same | Maximum time a staged session may wait for encrypted peer confirmation before the socket is closed and its pending/current transport state is wiped. Client acknowledgement and encrypted-confirmation phases have separate Tor-adjusted budgets, each capped at 180 seconds. |
 
 ## PostgreSQL
 
@@ -117,7 +117,24 @@ the password does not appear in command arguments. It is not an operator setting
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 64 KiB opaque failure writes, excess failures close without allocating a response. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS` | `200`, 1-4000 | same | Process wide token bucket for opaque failure writes. |
 | `PQ_ANONYMOUS_HTTP_REJECT_LOG_MAX_RPS` | `5`, 1-20 | same | Process-wide ceiling for fixed, non-attacker-controlled anonymous transport rejection diagnostics. |
-| `PQ_ANONYMOUS_HTTP_WRITE_TIMEOUT_MS` | `180000`, 5000-300000 | same | Deadline for a success or opaque failure response write, including clients that disconnect or stop reading. |
+
+Anonymous response transfers use a fixed 180-second idle limit and a size-based
+deadline of 180 seconds plus one second per 16 KiB, rounded up, with a minimum
+body budget of five minutes for slow but progressing transfers. An 8.5 MiB
+discovery response therefore has a 724-second body budget. The response writer
+uses 16 KiB chunks and applies the same idle budget to its underlying HTTPS
+socket. The native client disables the HTTP library's shorter Linux TCP user
+timeout, request cancellation and the explicit transfer deadlines own its
+lifetime, including when Tor applies SOCKS upload backpressure. The native client
+allows up to 150 seconds to establish the isolated Tor connection, within its
+180-second response-header budget, separately from the body budget. These
+limits are protocol policy, not environment settings. A discovery lookup fetches
+four padded responses (34 MiB total) and cancels outstanding downloads when it
+fails, changes account or authenticated server identity, crosses a linked/unlinked
+privacy boundary, or reaches its 20-minute overall deadline. A WebSocket reconnect
+does not cancel independent anonymous HTTP transfers. Their authenticated public
+server keys and monotonic server-time anchor remain usable for at most 20 minutes
+without a connected authenticated session, logout and explicit close revoke them.
 
 ## Authentication and cryptography
 | Name | Default / range | Owner | Purpose |
@@ -159,7 +176,7 @@ the password does not appear in command arguments. It is not an operator setting
 | `MIXNET_COVER_WRITES_MAX` | `2`, minimum to 64 | same | Maximum cover writes in a nonempty flush. |
 | `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400`, 60-604800 | same | Global sealed-spool row lifetime (24-hour default, seven-day maximum). |
 | `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768`, 64-10000000 | same | Global sealed-spool row cap held across the whole server for the full TTL. |
-| `GLOBAL_MIX_SPOOL_MAX_BYTES` | 512 MiB, 1 MiB-1 GiB | same | Global sealed-spool byte cap. Only the standard 128 KiB ciphertext class is retained; base64 and envelope framing make the serialized Redis row larger. The 1 GiB hard ceiling keeps the PIR tag index inside its fixed response class. Both caps refuse writes when reached until rows age out through `GLOBAL_MIX_SPOOL_TTL_SECONDS`. |
+| `GLOBAL_MIX_SPOOL_MAX_BYTES` | 512 MiB, 1 MiB-1 GiB | same | Global sealed-spool byte cap. Only the standard 128 KiB ciphertext class is retained, base64 and envelope framing make the serialized Redis row larger. The 1 GiB hard ceiling keeps the PIR tag index inside its fixed response class. Both caps refuse writes when reached until rows age out through `GLOBAL_MIX_SPOOL_TTL_SECONDS`. |
 | `GLOBAL_MIX_PUBLICATION_MAX_BYTES` | 2 MiB, 64 KiB-16 MiB | same | Maximum cross-node publication payload. |
 | `GLOBAL_MIX_PUBLICATION_VERIFY_MAX_RPS` | `128`, 1-2000 | same | Process-wide ML-DSA verification ceiling for signed cross-node Redis publications. |
 | `GLOBAL_MIX_DELIVERY_QUEUE_MAX_MESSAGES` | `64`, 1-4096 | same | Local cross-node delivery queue count. |
@@ -229,7 +246,7 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `SERVER_ID` | Required | server and cluster modules | Logical node identifier. It identifies a server process, never a user. |
-| `SERVER_HOST` | Required by the runtime; Docker supplies `server` | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
+| `SERVER_HOST` | Required by the runtime, Docker supplies `server` | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
 | `CLUSTER_PRIMARY` | Required | cluster modules | Must be exactly `true` for the primary node or `false` for a joining node. The role is never inferred from Redis state. |
 | `CLUSTER_AUTO_APPROVE` | Required | cluster modules | Must be exactly `true` or `false`. `true` lets the primary automatically approve authenticated pending join requests. Joining nodes can never approve themselves. |
 | `NO_GUI` | `false` | launchers | Disables the interactive server/load-balancer terminal UI. |
@@ -245,9 +262,9 @@ the password does not appear in command arguments. It is not an operator setting
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `OPENSSL_CONF` | Generated edge configuration | load-balancer modules | OpenSSL configuration that loads the bundled providers. |
-| `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qorc-edge`; external overrides are not accepted. |
-| `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qorc-edge`; external overrides are not accepted. |
-| `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qorc-edge`; inherited paths are not used by HAProxy or Tor. |
+| `OPENSSL_MODULES` | Fixed by the launcher | same | Internal OpenSSL provider module directory under `/opt/qorc-edge`, external overrides are not accepted. |
+| `OQS_PROVIDER_MODULE` | Fixed by the launcher | load-balancer image | Internal OQS provider path under `/opt/qorc-edge`, external overrides are not accepted. |
+| `LD_LIBRARY_PATH` | Fixed by the launcher | load-balancer image | Private-library search path under `/opt/qorc-edge`, inherited paths are not used by HAProxy or Tor. |
 | `TLS_CERT_CN` | `localhost` | `scripts/generate_tls.cjs` | Common name used by local TLS certificate generation. |
 
 ## Client and build tooling
@@ -268,10 +285,10 @@ the password does not appear in command arguments. It is not an operator setting
 | `QORC_GSTREAMER_LAUNCH` | Packaged or staged private launcher | native Linux screen capture | Advanced runtime override for the private GStreamer capture launcher. Normal builds set it automatically. |
 | `QORC_GSTREAMER_CAPTURE_PLUGINS` | Packaged or staged capture-plugin directory | same | Advanced runtime override for the curated capture-only plugin directory. |
 | `QORC_GSTREAMER_RUNTIME_LIB` | Packaged or staged private library directory | same | Advanced runtime override for the capture process dynamic-library directory. |
-| `QORC_GSTREAMER_SPA_PLUGINS` | Packaged or staged `spa-0.2` directory | same | Advanced runtime override for the private PipeWire SPA root. It must contain support modules plus the video adapter used by screen capture; this replaces rather than extends the host SPA path. |
+| `QORC_GSTREAMER_SPA_PLUGINS` | Packaged or staged `spa-0.2` directory | same | Advanced runtime override for the private PipeWire SPA root. It must contain support modules plus the video adapter used by screen capture, this replaces rather than extends the host SPA path. |
 | `QORC_GSTREAMER_PLUGIN_SCANNER` | Packaged or staged private scanner | same | Advanced runtime override for the GStreamer plugin scanner. |
 | `QORC_GSTREAMER_REGISTRY` | `$XDG_RUNTIME_DIR/qorc/gstreamer-registry-1.0.bin` | same | Advanced override for the per-session GStreamer registry file used by native screen capture. |
-| `PIPEWIRE_DEBUG` | `1` for the capture child unless inherited | PipeWire library inherited by the capture child | Advanced Linux screen-capture diagnostics. Level `1` retains errors; level `4` traces SPA factory loading and stream state. Do not enable verbose levels for normal releases. |
+| `PIPEWIRE_DEBUG` | `1` for the capture child unless inherited | PipeWire library inherited by the capture child | Advanced Linux screen-capture diagnostics. Level `1` retains errors, level `4` traces SPA factory loading and stream state. Do not enable verbose levels for normal releases. |
 | `GST_DEBUG` | Unset | GStreamer inherited by the capture child | Advanced GStreamer category/level diagnostics, for example `pipewiresrc:7,pipewirestream:7`. Verbose output can be large and may expose device metadata. |
 
 ## Docker interpolation
@@ -300,6 +317,6 @@ accepts remote traffic only through TLS with SCRAM-SHA-256 authentication.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BROADCAST_LANE_COVER_PERCENT` | `25` | Share of server cover traffic written to the first-contact lane. Without cover on that lane its entry count is a live readout of how fast new relationships form. |
-| `QORC_PIR_WORKER_PATH` | `workers/ypir/target/release/qorc-pir-worker` locally; `/app/bin/qorc-pir-worker` in Docker | Optional override. The Docker image bundles and verifies the worker at `/app/bin/qorc-pir-worker`, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
+| `QORC_PIR_WORKER_PATH` | `workers/ypir/target/release/qorc-pir-worker` locally, `/app/bin/qorc-pir-worker` in Docker | Optional override. The Docker image bundles and verifies the worker at `/app/bin/qorc-pir-worker`, so this is not normally set. **The server refuses to start without a usable worker**: small spool entries are served only by PIR, so booting without it would accept messages it can never deliver. |
 | `GLOBAL_MIX_SPOOL_TTL_SECONDS` | `86400` (24h) | Spool retention. No longer tied to a paging ceiling for the tagged lane, which PIR serves directly. |
 | `GLOBAL_MIX_SPOOL_MAX_MESSAGES` | `32768` | Caps retained logical records. PIR packs each retained record into nine 16 KiB rows, pads the database to a supported matrix shape, and keeps two snapshots during rotation. Memory grows at matrix size boundaries rather than one fixed amount. |

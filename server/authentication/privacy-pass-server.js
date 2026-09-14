@@ -17,8 +17,8 @@ import {
 import { decodeCanonicalBase64, encodeBase64AndWipeCopy, UTF8_ENCODER } from '../utils/encoding.js';
 import { withTransaction } from '../database/core.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
-import { PRIVACY_PASS_CONFIG as PP_CONFIG } from '../../shared/privacy-pass-protocol.js';
+import { PRIVACY_PASS_CONFIG } from '../../shared/privacy-pass-protocol.js';
+import { HASH_OUTPUT_BYTES } from '../../shared/crypto-sizes.js';
 
 // Domain separation labels
 const PP_LABELS = {
@@ -46,7 +46,7 @@ function normalizeIssuanceEpoch(epoch) {
         epoch < 0 ||
         epoch > 0xffffffff ||
         epoch > current ||
-        current - epoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS
+        current - epoch > PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS
     ) {
         throw new Error('Invalid Privacy Pass issuance epoch');
     }
@@ -124,7 +124,7 @@ export class PrivacyPassServer {
             const epoch = Number(cacheKey.slice(cacheKey.lastIndexOf(':') + 1));
             if (
                 Number.isSafeInteger(epoch) &&
-                epoch >= current - PP_CONFIG.TOKEN_MAX_AGE_EPOCHS &&
+                epoch >= current - PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS &&
                 epoch <= current
             ) {
                 continue;
@@ -335,8 +335,8 @@ export class PrivacyPassServer {
             throw new Error('Invalid blinded tokens');
         }
 
-        if (blindedTokens.length > PP_CONFIG.MAX_BATCH_SIZE) {
-            throw new Error(`Batch size exceeds limit of ${PP_CONFIG.MAX_BATCH_SIZE}`);
+        if (blindedTokens.length > PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE) {
+            throw new Error(`Batch size exceeds limit of ${PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE}`);
         }
 
         // sign with issuer key for this purpose
@@ -517,17 +517,17 @@ export class PrivacyPassServer {
 
     static async #isRedemptionValid(token, nullifier, mac, tokenSecret, expectedPurpose) {
         if (
-            !token || token.length !== PP_CONFIG.TOKEN_SIZE ||
-            !tokenSecret || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE ||
-            !nullifier || nullifier.length !== PP_CONFIG.NULLIFIER_SIZE ||
-            !mac || mac.length !== PP_CONFIG.MAC_SIZE
+            !token || token.length !== PRIVACY_PASS_CONFIG.TOKEN_SIZE ||
+            !tokenSecret || tokenSecret.length !== PRIVACY_PASS_CONFIG.TOKEN_SECRET_SIZE ||
+            !nullifier || nullifier.length !== PRIVACY_PASS_CONFIG.NULLIFIER_SIZE ||
+            !mac || mac.length !== PRIVACY_PASS_CONFIG.MAC_SIZE
         ) {
             return false;
         }
 
         const tokenEpoch = readTokenEpoch(tokenSecret);
         const currentEpoch = currentTokenEpoch();
-        if (tokenEpoch > currentEpoch || currentEpoch - tokenEpoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS) {
+        if (tokenEpoch > currentEpoch || currentEpoch - tokenEpoch > PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS) {
             return false;
         }
 
@@ -558,7 +558,7 @@ export class PrivacyPassServer {
         let oprfInput;
         let expectedToken;
         try {
-            if (!token || token.length !== PP_CONFIG.TOKEN_SIZE || !tokenSecret || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE) {
+            if (!token || token.length !== PRIVACY_PASS_CONFIG.TOKEN_SIZE || !tokenSecret || tokenSecret.length !== PRIVACY_PASS_CONFIG.TOKEN_SECRET_SIZE) {
                 return false;
             }
 
@@ -596,7 +596,7 @@ export class PrivacyPassServer {
             token,
             new Uint8Array(0),
             UTF8_ENCODER.encode(PP_LABELS.NULLIFIER),
-            PP_CONFIG.NULLIFIER_SIZE
+            PRIVACY_PASS_CONFIG.NULLIFIER_SIZE
         );
     }
 
@@ -612,7 +612,7 @@ export class PrivacyPassServer {
             32
         );
         try {
-            return blake3(key, { dkLen: PP_CONFIG.MAC_SIZE });
+            return blake3(key, { dkLen: PRIVACY_PASS_CONFIG.MAC_SIZE });
         } finally {
             key.fill(0);
         }
@@ -691,11 +691,11 @@ export class NullifierStore {
             !Number.isSafeInteger(tokenEpoch) ||
             tokenEpoch < 0 ||
             tokenEpoch > current ||
-            current - tokenEpoch > PP_CONFIG.TOKEN_MAX_AGE_EPOCHS
+            current - tokenEpoch > PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS
         ) {
             throw new Error('Invalid Privacy Pass nullifier epoch');
         }
-        return tokenEpoch + PP_CONFIG.TOKEN_MAX_AGE_EPOCHS;
+        return tokenEpoch + PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS;
     }
 
     /**
@@ -722,10 +722,10 @@ export const PrivacyPassHelpers = {
         let mac = null;
         let tokenSecret = null;
         try {
-            token = decodeCanonicalBase64(data?.token, PP_CONFIG.TOKEN_SIZE, 128);
-            nullifier = decodeCanonicalBase64(data?.nullifier, PP_CONFIG.NULLIFIER_SIZE, 64);
-            mac = decodeCanonicalBase64(data?.mac, PP_CONFIG.MAC_SIZE, 64);
-            tokenSecret = decodeCanonicalBase64(data?.tokenSecret, PP_CONFIG.TOKEN_SECRET_SIZE, 64);
+            token = decodeCanonicalBase64(data?.token, PRIVACY_PASS_CONFIG.TOKEN_SIZE, 128);
+            nullifier = decodeCanonicalBase64(data?.nullifier, PRIVACY_PASS_CONFIG.NULLIFIER_SIZE, 64);
+            mac = decodeCanonicalBase64(data?.mac, PRIVACY_PASS_CONFIG.MAC_SIZE, 64);
+            tokenSecret = decodeCanonicalBase64(data?.tokenSecret, PRIVACY_PASS_CONFIG.TOKEN_SECRET_SIZE, 64);
             return { token, nullifier, mac, tokenSecret };
         } catch (error) {
             token?.fill(0);
@@ -759,4 +759,4 @@ export const PrivacyPassHelpers = {
     },
 };
 
-export { PP_CONFIG, PP_LABELS };
+export { PP_LABELS };

@@ -1,9 +1,9 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../utils/crypto-utils";
 import { blake3 } from '@noble/hashes/blake3.js';
 import { storage } from '../tauri-bindings';
-import { bytesToHex } from './byte-utils';
 import { STORAGE_KEYS, STORAGE_KEY_DOMAINS } from '../database/storage-keys';
+import { CryptoUtils } from './crypto-utils';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export const clearStringRef = (ref: RefObject<string>) => {
   ref.current = "";

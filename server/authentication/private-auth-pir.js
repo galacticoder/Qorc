@@ -5,17 +5,17 @@ import { fileURLToPath } from 'node:url';
 import {
   PRIVATE_AUTH_ANONYMITY_SET_SIZE,
   PRIVATE_AUTH_PIR_RECORD_BYTES,
-  PRIVATE_AUTH_PIR_RECORD_MAGIC,
 } from '../../shared/private-auth-protocol.js';
 import { PirWorkerClient } from '../pir/pir-worker-client.js';
 import { decodeCanonicalBase64 } from '../utils/encoding.js';
 import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
   OPAQUE_ENVELOPE_BYTES,
   OPAQUE_SALT_BYTES,
-} from '../utils/crypto-consts.js';
-import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../shared/crypto-sizes.js';
+} from '../../shared/crypto-sizes.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { throwIfAuthConnectionClosed } from './auth-utils.js';
+import { PRIVATE_AUTH_PIR_RECORD_MAGIC } from '../../shared/protocol-keys.js';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WORKER_PATH = path.resolve(

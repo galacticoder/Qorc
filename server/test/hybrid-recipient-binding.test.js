@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer } from 'vite';
+import { X25519_KEY_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES, ML_KEM_1024_CIPHERTEXT_BYTES, ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, HASH_OUTPUT_BYTES } from '../../shared/crypto-sizes.js';
 
 async function withHybridModules(fn) {
   const root = process.cwd();
@@ -53,16 +54,16 @@ test('native and renderer hybrid envelope names agree', () => {
 
 test('hybrid envelopes bind outgoing recipient and delegate incoming identity checks to native code', async () => {
   await withHybridModules(async (Hybrid, constants, tauri, protocol) => {
-    const sender = encoded(constants.PQ_SIG_PUBLIC_KEY_SIZE, 1);
-    const recipient = encoded(constants.PQ_SIG_PUBLIC_KEY_SIZE, 2);
-    const wrongRecipient = encoded(constants.PQ_SIG_PUBLIC_KEY_SIZE, 3);
+    const sender = encoded(ML_DSA_87_PUBLIC_KEY_BYTES, 1);
+    const recipient = encoded(ML_DSA_87_PUBLIC_KEY_BYTES, 2);
+    const wrongRecipient = encoded(ML_DSA_87_PUBLIC_KEY_BYTES, 3);
 
     await assert.rejects(
       Hybrid.encryptForClient(
         { secret: 'must not be encrypted under mismatched routing' },
         {
-          kyberPublicBase64: encoded(constants.PQ_KEM_PUBLIC_KEY_SIZE, 4),
-          x25519PublicBase64: encoded(constants.X25519_PUBLIC_KEY_LENGTH, 5),
+          kyberPublicBase64: encoded(ML_KEM_1024_PUBLIC_KEY_BYTES, 4),
+          x25519PublicBase64: encoded(X25519_KEY_BYTES, 5),
           dilithiumPublicBase64: recipient
         },
         {
@@ -70,7 +71,7 @@ test('hybrid envelopes bind outgoing recipient and delegate incoming identity ch
           from: sender,
           type: 'libsignal-message',
           senderDilithiumPublicKey: sender,
-          signRoutingHeader: async () => encoded(constants.PQ_SIG_SIGNATURE_SIZE, 9),
+          signRoutingHeader: async () => encoded(ML_DSA_87_SIGNATURE_BYTES, 9),
         }
       ),
       /Routing recipient does not match recipient certificate key/
@@ -87,7 +88,7 @@ test('hybrid envelopes bind outgoing recipient and delegate incoming identity ch
       },
       routingSignature: {
         algorithm: 'ML-DSA-87',
-        signature: encoded(constants.PQ_SIG_SIGNATURE_SIZE, 6)
+        signature: encoded(ML_DSA_87_SIGNATURE_BYTES, 6)
       },
       algorithms: {
         outer: 'ML-KEM-1024',
@@ -95,13 +96,13 @@ test('hybrid envelopes bind outgoing recipient and delegate incoming identity ch
         aead: 'AES-256-GCM+XChaCha20-Poly1305',
         mac: 'BLAKE3-256'
       },
-      kemCiphertext: encoded(constants.PQ_KEM_CIPHERTEXT_SIZE, 7),
+      kemCiphertext: encoded(ML_KEM_1024_CIPHERTEXT_BYTES, 7),
       outer: {
         salt: encoded(32, 8),
         nonce: encoded(12, 9),
         ciphertext: encoded(1, 10),
         tag: encoded(16, 11),
-        mac: encoded(constants.PQ_AEAD_MAC_SIZE, 12)
+        mac: encoded(HASH_OUTPUT_BYTES, 12)
       }
     };
 

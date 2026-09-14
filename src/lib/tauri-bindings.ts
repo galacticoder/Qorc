@@ -3,7 +3,7 @@
  * Tauri TypeScript bindings for all commands
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke, SERIALIZE_TO_IPC_FN } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Base64 } from './cryptography/base64';
 import { PROTOCOL_KEYS } from './config/protocol-keys';
@@ -589,13 +589,42 @@ export const p2p = {
 };
 
 export const anonymousHttp = {
-    fetch: (body: Uint8Array, expectedServerUrl: string, lane: 'primary' | 'pir' = 'primary') =>
-        invoke<ArrayBuffer>('anonymous_api_fetch', body, {
-            headers: {
-                [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
-                'x-qorc-anonymous-transport-lane': lane,
-            },
-        }),
+    fetch: async (
+        body: Uint8Array,
+        expectedServerUrl: string,
+        options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void },
+    ) => {
+        options.signal?.throwIfAborted();
+        const requestId = crypto.randomUUID();
+        const cancel = () => {
+            void invoke('cancel_anonymous_api_fetch', { requestId }).catch((error) => {
+                console.warn('[ANON-HTTP] Request cancellation failed', { error: String(error) });
+            });
+        };
+        let active = true;
+        let receivedBytes = 0;
+        const progress = options.onProgress ? new Channel<{ receivedBytes: number; totalBytes: number }>((value) => {
+            if (!active || options.signal?.aborted || !value || value.totalBytes !== options.responseBytes ||
+                !Number.isSafeInteger(value.receivedBytes) || value.receivedBytes < receivedBytes ||
+                value.receivedBytes > options.responseBytes) return;
+            receivedBytes = value.receivedBytes;
+            options.onProgress?.(receivedBytes);
+        }) : undefined;
+        options.signal?.addEventListener('abort', cancel, { once: true });
+        try {
+            return await invoke<ArrayBuffer>('anonymous_api_fetch', body, {
+                headers: {
+                    [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
+                    'x-qorc-anonymous-request-id': requestId,
+                    'x-qorc-anonymous-response-bytes': String(options.responseBytes),
+                    ...(progress ? { 'x-qorc-anonymous-progress': progress[SERIALIZE_TO_IPC_FN]() } : {}),
+                },
+            });
+        } finally {
+            active = false;
+            options.signal?.removeEventListener('abort', cancel);
+        }
+    },
     prewarm: () => invoke<boolean>('prewarm_anonymous_transport'),
 };
 

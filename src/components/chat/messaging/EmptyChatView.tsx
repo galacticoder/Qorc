@@ -17,9 +17,10 @@ export const EmptyChatView: React.FC<EmptyChatViewProps> = ({ onCreateChat }) =>
           </div>
           <div className="qorc-empty-preview-message is-sent">
             <span className="qorc-empty-preview-bubble is-medium"><i /><i /></span>
+            <span className="qorc-empty-preview-person" />
           </div>
           <div className="qorc-empty-preview-message is-received">
-            <span className="qorc-empty-preview-person is-alt" />
+            <span className="qorc-empty-preview-person" />
             <span className="qorc-empty-preview-bubble is-short"><i /><i /></span>
           </div>
         </div>

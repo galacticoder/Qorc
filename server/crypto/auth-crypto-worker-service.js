@@ -17,7 +17,7 @@ import {
   AUTH_OPERATION_FAILED_MESSAGE,
   AUTH_SERVER_BUSY,
 } from '../config/error-codes.js';
-import { wipeBytes as wipe } from '../utils/wipe.js';
+import { wipeBytes } from '../utils/wipe.js';
 import { authConnectionClosedError } from '../authentication/auth-utils.js';
 
 const MAX_QUEUED_JOBS = 2;
@@ -36,13 +36,13 @@ function exactStandaloneBytes(value, expectedLength) {
 
 function wipePayload(payload) {
   if (!payload || typeof payload !== 'object') return;
-  for (const value of Object.values(payload)) wipe(value);
+  for (const value of Object.values(payload)) wipeBytes(value);
 }
 
 function wipeResult(result) {
   if (!result || typeof result !== 'object') return;
-  wipe(result.evaluatedTokens);
-  wipe(result.proof);
+  wipeBytes(result.evaluatedTokens);
+  wipeBytes(result.proof);
 }
 
 function removeAbortListener(job) {
@@ -100,8 +100,8 @@ function validateWorkerResponse(message, job) {
       !exactStandaloneBytes(message.evaluatedTokens, job.payload.count * 32) ||
       !exactStandaloneBytes(message.proof, 64)
     ) {
-      wipe(message.evaluatedTokens);
-      wipe(message.proof);
+      wipeBytes(message.evaluatedTokens);
+      wipeBytes(message.proof);
       return null;
     }
     return { evaluatedTokens: message.evaluatedTokens, proof: message.proof };

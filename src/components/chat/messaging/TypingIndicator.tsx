@@ -7,25 +7,25 @@ interface TypingIndicatorProps {
   className?: string;
 }
 
+export const TypingBubble = memo(function TypingBubble({ compact = false }: { compact?: boolean }) {
+  return (
+    <span className={cn('qorc-typing-bubble', compact && 'is-compact')} aria-hidden="true">
+      <span className="qorc-typing-bubble-dots">
+        <span />
+        <span />
+        <span />
+      </span>
+    </span>
+  );
+});
+
 export const TypingIndicator = memo(function TypingIndicator({ username, className }: TypingIndicatorProps) {
   const displayName = useDisplayUsername({ username });
 
   return (
     <div className={cn("flex items-center gap-2 mb-2", className)} style={{ marginLeft: '50px' }} aria-live="polite" aria-atomic="true">
-      <div
-        className="px-4 py-3 rounded-2xl rounded-tl-none select-none"
-        style={{
-          backgroundColor: 'var(--color-typing-bubble)',
-          borderTopLeftRadius: '4px'
-        }}
-      >
-        <div className="flex items-center gap-1 h-4" aria-hidden="true">
-          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '0ms', animationDuration: '1.4s' }} />
-          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '200ms', animationDuration: '1.4s' }} />
-          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '400ms', animationDuration: '1.4s' }} />
-        </div>
-        <span className="sr-only">{displayName} is typing</span>
-      </div>
+      <TypingBubble />
+      <span className="sr-only">{displayName} is typing</span>
     </div>
   );
 });

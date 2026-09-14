@@ -1,19 +1,19 @@
-import {
-  PQ_AEAD_CIPHERTEXT_OVERHEAD,
-  PQ_AEAD_MAC_SIZE,
-  PQ_AEAD_NONCE_SIZE,
-  PQ_KEM_CIPHERTEXT_SIZE,
-  PQ_KEM_PUBLIC_KEY_SIZE,
-  PQ_KEM_SECRET_KEY_SIZE,
-  PQ_SIG_PUBLIC_KEY_SIZE,
-  PQ_SIG_SECRET_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE,
-} from '../constants';
 import type { WorkerRequestMessage } from '../types/crypto-types';
 import { AUTH_CHANNEL_BINDING_BYTES } from '../../../shared/auth-channel-binding.js';
 import { PRIVACY_PASS_CONFIG } from '../../../shared/privacy-pass-protocol.js';
 import { hasExactKeys, hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
 import { ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE } from '../config/audiences';
+import {
+  HASH_OUTPUT_BYTES,
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SECRET_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  ML_KEM_1024_SECRET_KEY_BYTES,
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+} from '../../../shared/crypto-sizes.js';
 
 export const ARGON2_MAX_INPUT_BYTES = 8192;
 export const ARGON2_MAX_MEMORY_KIB = 512 * 1024;
@@ -22,7 +22,6 @@ export const ARGON2_MAX_PARALLELISM = 4;
 export const WORKER_AEAD_MAX_INPUT_BYTES = 20 * 1024 * 1024;
 export const WORKER_AEAD_MAX_AAD_BYTES = 1024 * 1024;
 export const WORKER_SIGNATURE_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
-export const PRIVACY_PASS_MAX_BATCH_SIZE = PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE;
 export const OPAQUE_PASSWORD_MAX_BYTES = 4096;
 
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -154,7 +153,7 @@ function validatePrivacyPassUnblindInput(data: Record<string, unknown>): void {
     !Array.isArray(tokenSecrets) ||
     !Array.isArray(signedBlindedTokens) ||
     tokenSecrets.length < 1 ||
-    tokenSecrets.length > PRIVACY_PASS_MAX_BATCH_SIZE ||
+    tokenSecrets.length > PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE ||
     tokenSecrets.length !== signedBlindedTokens.length
   ) {
     throw new Error('Invalid Privacy Pass issuance batch');
@@ -190,27 +189,27 @@ export function validateWorkerRequest(value: unknown): asserts value is WorkerRe
       break;
     case 'kem.encapsulate':
       exact(['publicKey']);
-      assertExactBytes(value.publicKey, PQ_KEM_PUBLIC_KEY_SIZE, 'ML-KEM public key');
+      assertExactBytes(value.publicKey, ML_KEM_1024_PUBLIC_KEY_BYTES, 'ML-KEM public key');
       break;
     case 'kem.decapsulate':
       exact(['ciphertext', 'secretKey']);
-      assertExactBytes(value.ciphertext, PQ_KEM_CIPHERTEXT_SIZE, 'ML-KEM ciphertext');
-      assertExactBytes(value.secretKey, PQ_KEM_SECRET_KEY_SIZE, 'ML-KEM secret key');
+      assertExactBytes(value.ciphertext, ML_KEM_1024_CIPHERTEXT_BYTES, 'ML-KEM ciphertext');
+      assertExactBytes(value.secretKey, ML_KEM_1024_SECRET_KEY_BYTES, 'ML-KEM secret key');
       break;
     case 'sig.sign':
       exact(['message', 'secretKey']);
       assertBoundedBytes(value.message, WORKER_SIGNATURE_MAX_MESSAGE_BYTES, 'ML-DSA message');
-      assertExactBytes(value.secretKey, PQ_SIG_SECRET_KEY_SIZE, 'ML-DSA secret key');
+      assertExactBytes(value.secretKey, ML_DSA_87_SECRET_KEY_BYTES, 'ML-DSA secret key');
       break;
     case 'sig.verify':
       exact(['message', 'publicKey', 'signature']);
       assertBoundedBytes(value.message, WORKER_SIGNATURE_MAX_MESSAGE_BYTES, 'ML-DSA message');
-      assertExactBytes(value.publicKey, PQ_SIG_PUBLIC_KEY_SIZE, 'ML-DSA public key');
-      assertExactBytes(value.signature, PQ_SIG_SIGNATURE_SIZE, 'ML-DSA signature');
+      assertExactBytes(value.publicKey, ML_DSA_87_PUBLIC_KEY_BYTES, 'ML-DSA public key');
+      assertExactBytes(value.signature, ML_DSA_87_SIGNATURE_BYTES, 'ML-DSA signature');
       break;
     case 'pp.generateTokenBatch':
       exact(['count', 'purpose']);
-      if (!Number.isInteger(value.count) || (value.count as number) < 1 || (value.count as number) > PRIVACY_PASS_MAX_BATCH_SIZE) {
+      if (!Number.isInteger(value.count) || (value.count as number) < 1 || (value.count as number) > PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE) {
         throw new Error('Invalid Privacy Pass batch size');
       }
       if (value.purpose !== ACCOUNT_AUTH_PURPOSE && value.purpose !== SERVER_ENTRY_PURPOSE) {
@@ -258,19 +257,19 @@ export function validateWorkerRequest(value: unknown): asserts value is WorkerRe
       assertBoundedBytes(value.plaintext, WORKER_AEAD_MAX_INPUT_BYTES, 'AEAD plaintext');
       assertExactBytes(value.key, 32, 'AEAD key');
       if (value.additionalData !== undefined) assertBoundedBytes(value.additionalData, WORKER_AEAD_MAX_AAD_BYTES, 'AEAD additional data');
-      if (value.explicitNonce !== undefined) assertExactBytes(value.explicitNonce, PQ_AEAD_NONCE_SIZE, 'AEAD nonce');
+      if (value.explicitNonce !== undefined) assertExactBytes(value.explicitNonce, POST_QUANTUM_AEAD_NONCE_BYTES, 'AEAD nonce');
       break;
     case 'aead.decrypt':
       exact(['ciphertext', 'nonce', 'tag', 'key', 'additionalData']);
       if (
         !(value.ciphertext instanceof Uint8Array) ||
-        value.ciphertext.length < PQ_AEAD_CIPHERTEXT_OVERHEAD ||
-        value.ciphertext.length > WORKER_AEAD_MAX_INPUT_BYTES + PQ_AEAD_CIPHERTEXT_OVERHEAD
+        value.ciphertext.length < POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES ||
+        value.ciphertext.length > WORKER_AEAD_MAX_INPUT_BYTES + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES
       ) {
         throw new Error('Invalid AEAD ciphertext');
       }
-      assertExactBytes(value.nonce, PQ_AEAD_NONCE_SIZE, 'AEAD nonce');
-      assertExactBytes(value.tag, PQ_AEAD_MAC_SIZE, 'AEAD tag');
+      assertExactBytes(value.nonce, POST_QUANTUM_AEAD_NONCE_BYTES, 'AEAD nonce');
+      assertExactBytes(value.tag, HASH_OUTPUT_BYTES, 'AEAD tag');
       assertExactBytes(value.key, 32, 'AEAD key');
       if (value.additionalData !== undefined) assertBoundedBytes(value.additionalData, WORKER_AEAD_MAX_AAD_BYTES, 'AEAD additional data');
       break;

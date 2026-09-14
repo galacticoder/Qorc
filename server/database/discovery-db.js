@@ -5,17 +5,17 @@
 import { getPgPool, withTransaction } from './core.js';
 import { selectRandomRankEvictionIds } from './random-rank-eviction.js';
 import {
-  DISCOVERY_BLOB_BASE64_CHARS,
   DISCOVERY_STORED_PUBLICATION_CAP,
   isCanonicalDiscoveryBlob,
-  isCanonicalDiscoveryBucketIds
+  isCanonicalDiscoveryBucketIds,
 } from '../discovery/bucket-layout.js';
-import { HEX_64_RE } from '../utils/patterns.js';
+import { SESSION_FINGERPRINT_RE } from '../../shared/patterns.js';
+import { DISCOVERY_BLOB_BASE64_CHARS } from '../../shared/discovery-constants.js';
 
 const DISCOVERY_BLOB_FETCH_MAX = 512;
 
 function isPublishId(value) {
-  return typeof value === 'string' && HEX_64_RE.test(value);
+  return typeof value === 'string' && SESSION_FINGERPRINT_RE.test(value);
 }
 
 export class DiscoveryDB {

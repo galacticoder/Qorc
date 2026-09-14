@@ -1,8 +1,11 @@
 import { RefObject } from "react";
 import type { PeerCertificateBundle, CertCacheEntry } from "../../lib/types/p2p-types";
-import { validatePeerCertificateBundle } from "../../lib/utils/peer-certificate-utils";
-import { computePeerCertificateFingerprint } from "../../lib/utils/peer-certificate-utils";
-import { loadPersistedPeerCert, savePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
+import {
+  validatePeerCertificateBundle,
+  computePeerCertificateFingerprint,
+} from '../../lib/utils/peer-certificate-utils';
+import { savePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
+import { loadAuthorizedPeerCertificate } from "../../lib/p2p/authorized-peer-certificate";
 import { MAX_P2P_CERT_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
 import { isKeyTransparencyAuthorizedPeerCertificate } from "../../lib/key-transparency/verified-material";
 
@@ -105,7 +108,7 @@ export function createGetPeerCertificate(
     if (cached) refs.peerCertificateCacheRef.current.delete(peerUsername);
 
     if (!bypassCache) {
-      const persisted = await loadPersistedPeerCert(options.ownerUsername, peerUsername, true);
+      const persisted = await loadAuthorizedPeerCertificate(options.ownerUsername, peerUsername, isCurrentOwner);
       if (!isCurrentOwner()) return null;
       if (persisted && isTransparencyAuthorized(peerUsername, persisted)) {
         return cacheValidatedCert(peerUsername, persisted).cert;

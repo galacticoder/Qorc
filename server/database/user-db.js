@@ -6,14 +6,17 @@
 
 import { getPgPool, crypto, privateLookupId, withTransaction } from './core.js';
 import { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../shared/private-auth-protocol.js';
-import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../shared/crypto-sizes.js';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  OPAQUE_ENVELOPE_BYTES,
+  OPAQUE_SALT_BYTES,
+} from '../../shared/crypto-sizes.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
   REGISTRATION_ATTEMPT_MISMATCH,
   REGISTRATION_RECEIPT_EXPIRED
 } from '../config/error-codes.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import { OPAQUE_ENVELOPE_BYTES, OPAQUE_SALT_BYTES } from '../utils/crypto-consts.js';
 import { isCanonicalBase64Bytes } from '../utils/encoding.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 

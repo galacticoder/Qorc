@@ -6,11 +6,7 @@ import {
   isCanonicalAuthUsername,
   sanitizeMessageId,
 } from "../../lib/sanitizers";
-import {
-  MAX_TOTAL_CHUNKS,
-  MAX_FILE_SIZE_BYTES,
-  MAX_CHUNK_SIZE_BYTES,
-} from "../../lib/constants";
+import { MAX_TOTAL_CHUNKS, DEFAULT_CHUNK_SIZE_SMALL, MAX_FILE_SIZE } from '../../lib/constants';
 import { SignalType } from '../../lib/types/signal-types';
 import { enforceConcurrentLimit, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { FileChunkPayload, ExtendedFileState } from "../../lib/types/file-types";
@@ -155,20 +151,20 @@ export const validateNewTransfer = (
     return 'invalid';
   }
 
-  if (!Number.isInteger(data.fileSize) || data.fileSize <= 0 || data.fileSize > MAX_FILE_SIZE_BYTES) {
+  if (!Number.isInteger(data.fileSize) || data.fileSize <= 0 || data.fileSize > MAX_FILE_SIZE) {
     console.error('[chunk-validation] fileSize invalid');
     setLoginError('File too large or invalid');
     return 'invalid';
   }
 
-  if (!Number.isInteger(data.chunkSize) || data.chunkSize <= 0 || data.chunkSize > MAX_CHUNK_SIZE_BYTES) {
+  if (!Number.isInteger(data.chunkSize) || data.chunkSize <= 0 || data.chunkSize > DEFAULT_CHUNK_SIZE_SMALL) {
     console.error('[chunk-validation] chunkSize invalid');
     setLoginError('Invalid file transfer metadata');
     return 'invalid';
   }
   
   const expectedMaxBytes = data.chunkSize * data.totalChunks;
-  if (expectedMaxBytes > MAX_FILE_SIZE_BYTES + MAX_CHUNK_SIZE_BYTES) {
+  if (expectedMaxBytes > MAX_FILE_SIZE + DEFAULT_CHUNK_SIZE_SMALL) {
     console.error('[chunk-validation] transfer exceeds safety cap');
     setLoginError('File transfer rejected (unsafe size)');
     return 'invalid';

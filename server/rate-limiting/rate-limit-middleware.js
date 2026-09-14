@@ -11,10 +11,7 @@ import {
 
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
-import {
-  PUBLICATION_ID_RE as PUBLISH_REQUEST_ID_RE,
-  UUID_V4_RE as AUTH_REQUEST_ID_RE
-} from '../utils/patterns.js';
+import { PUBLICATION_ID_RE, UUID_V4_RE } from '../../shared/patterns.js';
 
 const REQUEST_ID_AUTH_SIGNAL_TYPES = new Set([
   SignalType.TOKEN_VALIDATION,
@@ -24,14 +21,14 @@ const REQUEST_ID_AUTH_SIGNAL_TYPES = new Set([
 export function rateLimitCorrelationIds(messageType, message) {
   const authRequestId = isAccountAuthSignalType(messageType) &&
     typeof message?.authRequestId === 'string' &&
-    AUTH_REQUEST_ID_RE.test(message.authRequestId)
+    UUID_V4_RE.test(message.authRequestId)
     ? message.authRequestId
     : undefined;
   const requestId = (
     isServerEntrySignalType(messageType) || REQUEST_ID_AUTH_SIGNAL_TYPES.has(messageType)
   ) &&
     typeof message?.requestId === 'string' &&
-    AUTH_REQUEST_ID_RE.test(message.requestId)
+    UUID_V4_RE.test(message.requestId)
     ? message.requestId
     : undefined;
   return { authRequestId, requestId };
@@ -143,7 +140,7 @@ export class RateLimitMiddleware {
       
     const publishRequestId = isPublish &&
       typeof message?.requestId === 'string' &&
-      PUBLISH_REQUEST_ID_RE.test(message.requestId)
+      PUBLICATION_ID_RE.test(message.requestId)
       ? message.requestId
       : undefined;
     if (publishRequestId) {

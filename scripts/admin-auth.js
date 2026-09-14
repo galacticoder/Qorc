@@ -22,13 +22,10 @@ import {
   ML_KEM_1024_CIPHERTEXT_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES,
   ML_KEM_1024_SECRET_KEY_BYTES,
-} from '../shared/crypto-sizes.js';
-import {
   HASH_OUTPUT_BYTES,
   POST_QUANTUM_AEAD_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES,
   X25519_KEY_BYTES,
-} from '../server/utils/crypto-consts.js';
+} from '../shared/crypto-sizes.js';
 import { hasExactPlainObjectKeys, isSafeJsonTree } from '../server/utils/validation.js';
 import { envInt } from '../server/utils/env.js';
 import { PROTOCOL_KEYS } from '../server/config/protocol-keys.js';
@@ -150,7 +147,7 @@ function validateEncryptedAdminPackage(encryptedPackage) {
       exactBytes: POST_QUANTUM_AEAD_NONCE_BYTES,
     }) ||
     !canonicalBase64Shape(encryptedPackage.encryption.tag, {
-      exactBytes: POST_QUANTUM_AEAD_TAG_BYTES,
+      exactBytes: HASH_OUTPUT_BYTES,
     }) ||
     !canonicalBase64Shape(encryptedPackage.encryption.ciphertext, {
       maxBytes: ADMIN_KEYS_CIPHERTEXT_MAX_BYTES,
@@ -390,7 +387,7 @@ async function unlockKeypair(username, password, encryptedPackage) {
     );
     tag = decodeCanonicalBase64(
       encryptedPackage.encryption.tag,
-      { exactBytes: POST_QUANTUM_AEAD_TAG_BYTES },
+      { exactBytes: HASH_OUTPUT_BYTES },
       'SECURITY: Invalid admin key tag'
     );
     ciphertext = decodeCanonicalBase64(
@@ -677,7 +674,7 @@ class AdminAuth {
         !canonicalBase64Shape(token.x25519EphemeralPublic, { exactBytes: X25519_KEY_BYTES }) ||
         !canonicalBase64Shape(token.nonce, { exactBytes: POST_QUANTUM_AEAD_NONCE_BYTES }) ||
         !canonicalBase64Shape(token.ciphertext, { maxBytes: ADMIN_TOKEN_CIPHERTEXT_MAX_BYTES }) ||
-        !canonicalBase64Shape(token.tag, { exactBytes: POST_QUANTUM_AEAD_TAG_BYTES }) ||
+        !canonicalBase64Shape(token.tag, { exactBytes: HASH_OUTPUT_BYTES }) ||
         !canonicalBase64Shape(token.signatures.mldsa87, { exactBytes: ML_DSA_87_SIGNATURE_BYTES }) ||
         !canonicalBase64Shape(token.signatures.ed25519, { exactBytes: ED25519_SIGNATURE_BYTES })
       ) {

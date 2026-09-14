@@ -6,33 +6,41 @@ import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { Base64, decodeCanonicalBase64 } from './base64';
 import { PostQuantumKEM } from './kem';
-import { PostQuantumHash } from './hash';
 import { PostQuantumAEAD } from './aead';
 import { PostQuantumRandom } from './random';
 import { SecureMemory } from './secure-memory';
 import { HashingService } from './hashing';
-import {
-  CERT_CLOCK_SKEW_MS,
-  HYBRID_ENVELOPE_MAX_AGE_MS,
-  HYBRID_ENVELOPE_MAX_OUTER_CIPHERTEXT_BYTES,
-  HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES,
-  PQ_AEAD_NONCE_SIZE,
-  PQ_KEM_PUBLIC_KEY_SIZE,
-  PQ_SIG_PUBLIC_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE
-} from '../constants';
-import type { DecryptOptions, RoutingHeader, NormalizedPayload, RoutingHeaderBuildInput, HybridEnvelope, HybridRecipientKeys, ClientRoutingParams, EnvelopeDecryptKeys, HybridDecryptionResult, InnerEnvelope } from '../types/crypto-types';
-import { concatUint8Arrays } from '../utils/byte-utils';
+import { CERT_CLOCK_SKEW_MS, HYBRID_ENVELOPE_MAX_AGE_MS, HYBRID_ENVELOPE_MAX_OUTER_CIPHERTEXT_BYTES, HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES } from '../constants';
+import type {
+  DecryptOptions,
+  RoutingHeader,
+  NormalizedPayload,
+  RoutingHeaderBuildInput,
+  HybridEnvelope,
+  HybridRecipientKeys,
+  ClientRoutingParams,
+  EnvelopeDecryptKeys,
+  HybridDecryptionResult,
+  InnerEnvelope,
+} from '../types/crypto-types';
 import { computeX25519SharedSecret, generateX25519KeyPair } from '../utils/noise-utils';
 import { SignalType } from '../types/signal-types';
 import { account } from '../tauri-bindings';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { hasExactKeys, isPlainObject as isPlainRecord } from '../sanitizers';
+import { hasExactKeys, isPlainObject } from '../sanitizers';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+  AES_GCM_NONCE_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
+import { concatUint8Arrays } from '../../../shared/bytes.js';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const OUTER_SALT_BYTES = 32;
-const OUTER_NONCE_BYTES = 12;
 const OUTER_TAG_BYTES = 16;
 const INNER_SALT_BYTES = 32;
 const HYBRID_ROUTING_TYPES = new Set<string>(['libsignal-message', SignalType.FILE_MESSAGE_CHUNK]);
@@ -46,7 +54,7 @@ const HYBRID_ALGORITHMS = Object.freeze({
 type HybridPublicHeader = Pick<HybridEnvelope, 'version' | 'routing' | 'algorithms' | 'kemCiphertext'>;
 
 function validateRoutingHeader(header: unknown, now = Date.now()): asserts header is RoutingHeader {
-  if (!isPlainRecord(header) || !hasExactKeys(header, ['to', 'from', 'type', 'timestamp', 'size'])) {
+  if (!isPlainObject(header) || !hasExactKeys(header, ['to', 'from', 'type', 'timestamp', 'size'])) {
     throw new Error('Invalid routing header shape');
   }
   if (!HYBRID_ROUTING_TYPES.has(header.type as string)) {
@@ -66,8 +74,8 @@ function validateRoutingHeader(header: unknown, now = Date.now()): asserts heade
   ) {
     throw new Error('Invalid routing payload size');
   }
-  const toKey = decodeCanonicalBase64(header.to, 'routing recipient key', { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE });
-  const fromKey = decodeCanonicalBase64(header.from, 'routing sender key', { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE });
+  const toKey = decodeCanonicalBase64(header.to, 'routing recipient key', { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES });
+  const fromKey = decodeCanonicalBase64(header.from, 'routing sender key', { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES });
   SecureMemory.zeroBuffer(toKey);
   SecureMemory.zeroBuffer(fromKey);
 }
@@ -178,7 +186,7 @@ async function signPublicHeader(
   try {
     const signatureBase64 = await signer(message);
     const signature = decodeCanonicalBase64(signatureBase64, 'routing signature', {
-      exactBytes: PQ_SIG_SIGNATURE_SIZE,
+      exactBytes: ML_DSA_87_SIGNATURE_BYTES,
     });
     signature.fill(0);
     return signatureBase64;
@@ -255,7 +263,7 @@ async function createInnerLayer(
     ephemeral = generateX25519KeyPair();
     classicalShared = computeClassicalSharedSecret(ephemeral.secretKey, recipientX25519);
     innerSalt = PostQuantumRandom.randomBytes(INNER_SALT_BYTES);
-    innerNonce = PostQuantumRandom.randomBytes(PQ_AEAD_NONCE_SIZE);
+    innerNonce = PostQuantumRandom.randomBytes(POST_QUANTUM_AEAD_NONCE_BYTES);
     ({ encKey, macKey } = await deriveInnerKeyMaterial(
       pqSharedSecret,
       classicalShared,
@@ -341,7 +349,7 @@ export class Hybrid {
       senderPublicKey = decodeCanonicalBase64(
         routingParams.senderDilithiumPublicKey,
         'sender ML-DSA public key',
-        { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }
+        { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }
       );
       if (routingParams.from !== Base64.arrayBufferToBase64(senderPublicKey)) {
         throw new Error('Routing sender does not match signing key');
@@ -349,7 +357,7 @@ export class Hybrid {
       recipientSigningPublicKey = decodeCanonicalBase64(
         recipientKeys.dilithiumPublicBase64,
         'recipient ML-DSA public key',
-        { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }
+        { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }
       );
       if (routingParams.to !== Base64.arrayBufferToBase64(recipientSigningPublicKey)) {
         throw new Error('Routing recipient does not match recipient certificate key');
@@ -359,7 +367,7 @@ export class Hybrid {
       recipientKyber = decodeCanonicalBase64(
         recipientKeys.kyberPublicBase64,
         'recipient ML-KEM public key',
-        { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }
+        { exactBytes: ML_KEM_1024_PUBLIC_KEY_BYTES }
       );
       const encapsulated = await PostQuantumKEM.encapsulate(recipientKyber);
       kemCiphertext = encapsulated.ciphertext;
@@ -380,7 +388,7 @@ export class Hybrid {
       if (innerPayloadBytes.length > HYBRID_ENVELOPE_MAX_OUTER_CIPHERTEXT_BYTES) {
         throw new Error('Hybrid inner envelope is too large');
       }
-      outerNonce = PostQuantumRandom.randomBytes(OUTER_NONCE_BYTES);
+      outerNonce = PostQuantumRandom.randomBytes(AES_GCM_NONCE_BYTES);
       const outerCipher = gcm(outerKey, outerNonce, routingDigest);
       outerEncryptedWithTag = outerCipher.encrypt(innerPayloadBytes);
 

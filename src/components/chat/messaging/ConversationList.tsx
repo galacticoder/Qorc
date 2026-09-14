@@ -11,14 +11,21 @@ import { UserAvatar } from "../../ui/UserAvatar";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
 import { EventType } from "../../../lib/types/event-types";
 import { blockingSystem } from "../../../lib/blocking/blocking-system";
-import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
+import {
+  UI_CALL_STATUS_RATE_WINDOW_MS,
+  UI_CALL_STATUS_RATE_MAX,
+  MAX_UI_CALL_STATUS_PEER_LENGTH,
+  MAX_UI_CALL_STATUS_VALUE_LENGTH,
+} from '../../../lib/constants';
 import { formatRelativeAge } from "../../../lib/utils/date-utils";
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { UnreadIndicator } from "./UnreadIndicator";
+import { TypingBubble } from "./TypingIndicator";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
 import { CallIcon } from "../assets/icons";
 import { ConversationOptionsPopover } from "./ConversationOptionsPopover";
+import type { DiscoveryProgress, DiscoveryProgressObserver } from "../../../lib/discovery/progress";
 
 export interface Conversation {
   readonly id: string;
@@ -41,7 +48,7 @@ interface ConversationListProps {
   readonly selectedConversation?: string;
   readonly onSelectConversation: (username: string) => void;
   readonly onRemoveConversation: (username: string) => void;
-  readonly onAddConversation: (username: string, signal?: AbortSignal) => Promise<void>;
+  readonly onAddConversation: (username: string, signal?: AbortSignal, onProgress?: DiscoveryProgressObserver) => Promise<void>;
   readonly showNewChatInput?: boolean;
   readonly onNewChatOpenChange: (open: boolean) => void;
   readonly onTogglePin: (username: string) => void;
@@ -170,67 +177,61 @@ const ConversationItem = memo<ConversationItemProps>(({
           )}
         </div>
 
-        {/* Show unread indicator if there are unread messages and conversation is not selected */}
-        {isTyping && conversation.lastMessageTime ? (
-          <div
-            className="qorc-conversation-preview qorc-conversation-preview-typing"
-            role="status"
-            aria-label={`${displayName} is typing`}
-          >
-            <span>Typing</span>
-            <span className="qorc-conversation-typing-dots" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-          </div>
-        ) : !isSelected && (conversation.unreadCount ?? 0) > 0 ? (
-          <div className="qorc-conversation-preview">
-            <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
-          </div>
-        ) : conversation.secureContentId ? (
-          <div className="qorc-conversation-preview">
-            <BannerMessagePreview
-              messageId={conversation.secureContentId}
-              contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
-              maxWidth={800}
-              fontSize={12}
-              color="var(--qorc-conversation-preview-text)"
-              className="qorc-conversation-secure-message-preview"
-            />
-          </div>
-        ) : conversation.lastMessage ? (
-          <div
-            className="qorc-conversation-preview"
-            title={conversation.lastMessage}
-          >
-            {conversation.lastMessage}
-          </div>
-        ) : null}
-      </div>
-
-      {callStatus && (
-        <div className="qorc-conversation-controls">
-          <div
-            className={cn(
-              "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
-              callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
-              callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
-              callStatus.status === 'connected' && "bg-green-100 text-green-800"
-            )}
-            role="status"
-            aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
-          >
-            {callStatus.status === 'connecting' ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : callStatus.isVideo ? (
-              <Video className="w-3.5 h-3.5" />
-            ) : (
-              <Phone className="w-3.5 h-3.5" />
-            )}
-          </div>
+        <div className="qorc-conversation-preview-row">
+          {isTyping ? (
+            <div
+              className="qorc-conversation-preview qorc-conversation-preview-typing"
+              role="status"
+              aria-label={`${displayName} is typing`}
+            >
+              <TypingBubble compact />
+            </div>
+          ) : conversation.secureContentId ? (
+            <div className="qorc-conversation-preview">
+              <BannerMessagePreview
+                messageId={conversation.secureContentId}
+                contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
+                maxWidth={800}
+                fontSize={12}
+                color="var(--qorc-conversation-preview-text)"
+                className="qorc-conversation-secure-message-preview"
+              />
+            </div>
+          ) : conversation.lastMessage ? (
+            <div
+              className="qorc-conversation-preview"
+              title={conversation.lastMessage}
+            >
+              {conversation.lastMessage}
+            </div>
+          ) : null}
+          {(callStatus || (!isSelected && (conversation.unreadCount ?? 0) > 0)) && (
+            <div className="qorc-conversation-controls">
+              {callStatus && (
+                <div
+                  className={cn(
+                    "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
+                    callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
+                    callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
+                    callStatus.status === 'connected' && "bg-green-100 text-green-800"
+                  )}
+                  role="status"
+                  aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
+                >
+                  {callStatus.status === 'connecting' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : callStatus.isVideo ? (
+                    <Video className="w-3.5 h-3.5" />
+                  ) : (
+                    <Phone className="w-3.5 h-3.5" />
+                  )}
+                </div>
+              )}
+              {!isSelected && <UnreadIndicator count={conversation.unreadCount ?? 0} />}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 });
@@ -361,6 +362,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
+  const [discoveryProgress, setDiscoveryProgress] = useState<DiscoveryProgress | null>(null);
   const [blockingPeer, setBlockingPeer] = useState<string | null>(null);
   const activeDiscoveryRef = React.useRef<AbortController | null>(null);
   const [blockVersion, setBlockVersion] = useState(0);
@@ -429,6 +431,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     activeDiscoveryRef.current = null;
     controller.abort();
     setIsAdding(false);
+    setDiscoveryProgress(null);
   }, []);
 
   useEffect(() => () => {
@@ -444,8 +447,11 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     const controller = new AbortController();
     activeDiscoveryRef.current = controller;
     setIsAdding(true);
+    setDiscoveryProgress({ phase: 'preparing', receivedBytes: 0, totalBytes: 0 });
     try {
-      await onAddConversation(username, controller.signal);
+      await onAddConversation(username, controller.signal, (progress) => {
+        if (activeDiscoveryRef.current === controller && !controller.signal.aborted) setDiscoveryProgress(progress);
+      });
       if (controller.signal.aborted) return;
       setNewChatUsername("");
       onNewChatOpenChange(false);
@@ -456,6 +462,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       if (activeDiscoveryRef.current === controller) {
         activeDiscoveryRef.current = null;
         setIsAdding(false);
+        setDiscoveryProgress(null);
       }
     }
   }, [newChatUsername, onAddConversation, onNewChatOpenChange]);
@@ -607,6 +614,15 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     }
   }, [blockingPeer, handleNewChatOpenChange, onBlockConversation]);
 
+  const discoveryPercent = discoveryProgress && discoveryProgress.totalBytes > 0
+    ? Math.min(100, Math.max(0, discoveryProgress.receivedBytes / discoveryProgress.totalBytes * 100))
+    : 0;
+  const displayedDiscoveryPercent = discoveryPercent > 0 && discoveryPercent < 1
+    ? Number(discoveryPercent.toFixed(2)) : Math.floor(discoveryPercent);
+  const discoveryLabel = discoveryProgress?.phase === 'verifying' ? 'Verifying'
+    : discoveryProgress?.phase === 'downloading' ? `${displayedDiscoveryPercent}%`
+    : 'Preparing';
+
   return (
     <div className="qorc-conversation-list">
       <Dialog open={showNewChatInput} onOpenChange={handleNewChatOpenChange}>
@@ -632,7 +648,15 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
             </button>
           </div>
 
-          <div className={cn("qorc-cm-search", (isAdding || blockingPeer) && "is-searching")}>
+          <div
+            className={cn("qorc-cm-search", (isAdding || blockingPeer) && "is-searching", isAdding && "has-progress")}
+            style={{ '--qorc-discovery-progress': `${discoveryPercent}%` } as React.CSSProperties}
+          >
+            {isAdding && (
+              <span className="qorc-cm-search-progress" aria-hidden="true">
+                <span className="qorc-cm-search-progress-fill" />
+              </span>
+            )}
             <span className="qorc-cm-search-icon" aria-hidden="true">
               {isAdding || blockingPeer ? <Loader2 className="animate-spin" /> : <Search />}
             </span>
@@ -653,6 +677,19 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 }
               }}
             />
+            {conversationDialogMode === 'manage' && isAdding && (
+              <span
+                className="qorc-cm-search-progress-label"
+                role="progressbar"
+                aria-label={discoveryProgress?.phase === 'downloading' ? 'Downloading discovery data' : `${discoveryLabel} discovery`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={discoveryProgress?.phase === 'downloading' ? displayedDiscoveryPercent : undefined}
+                aria-valuetext={discoveryLabel}
+              >
+                {discoveryLabel}
+              </span>
+            )}
             {conversationDialogMode === 'manage' && isAdding && (
               <button
                 type="button"
@@ -773,7 +810,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                     onRemove={handleRemoveClick}
                     onTogglePin={onTogglePin}
                     callStatus={conversation.username === activePeer ? activeStatus : null}
-                    isTyping={typingUserSet.has(conversation.username) && Boolean(conversation.lastMessageTime)}
+                    isTyping={typingUserSet.has(conversation.username)}
                   />
                 );
               })}

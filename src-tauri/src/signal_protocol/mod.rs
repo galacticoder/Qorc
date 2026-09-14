@@ -33,7 +33,6 @@ const SIGNAL_DEVICE_ID_MAX: u32 = 127;
 const MAX_SIGNAL_STORE_BLOB_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_SIGNAL_PLAINTEXT_BYTES: usize = 64 * 1024;
 const MAX_PENDING_DECRYPTS: usize = 512;
-const MAX_PENDING_DECRYPT_PLAINTEXT_BYTES: usize = MAX_SIGNAL_PLAINTEXT_BYTES;
 const MAX_PENDING_DECRYPT_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_TRANSPORT_MESSAGE_ID_BYTES: usize = 256;
 const MAX_PENDING_APPLICATION_TYPE_BYTES: usize = 64;
@@ -1856,7 +1855,7 @@ impl SignalHandler {
             &entry.transport_message_id,
             &entry.application_type,
         )?;
-        if entry.plaintext.len() > MAX_PENDING_DECRYPT_PLAINTEXT_BYTES {
+        if entry.plaintext.len() > MAX_SIGNAL_PLAINTEXT_BYTES {
             return Err(QorcError::SignalProtocol(
                 "Pending decrypt plaintext limit exceeded".to_string(),
             ));

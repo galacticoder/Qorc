@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown, Volume2 } from 'lucide-react';
-import type { CallState } from '../../../lib/transport/secure-calling-service';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
@@ -9,6 +8,7 @@ import { readAppSettingsAsync } from '../../../lib/ui/app-settings';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import { nativeCamera, nativeMicrophone } from '../../../lib/tauri-bindings';
 import { getDefaultAvatarColor } from '../../../lib/utils/avatar-utils';
+import type { CallState } from '../../../lib/types/calling-types';
 
 interface CallModalProps {
   readonly call: CallState | null;

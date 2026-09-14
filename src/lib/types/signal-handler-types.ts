@@ -7,7 +7,7 @@ import type { AuthLifecycle } from '../auth/auth-lifecycle';
 import type { HybridKeys, ServerHybridPublicKeys } from './auth-types';
 
 export interface SignalHandlers {
-  Authentication: any;
+  Authentication: AuthRefs;
   handleEncryptedMessagePayload: (message: any) => Promise<boolean | void>;
 }
 

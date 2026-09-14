@@ -26,9 +26,9 @@ import { SignalType } from '../types/signal-types';
 import { keyTransparencyClient } from '../key-transparency/client';
 import { hasResumeToken, replenishResumePool } from './resume-tokens';
 import { hasExactKeys } from '../sanitizers';
-import { REQUEST_ID_RE } from '../../../shared/patterns.js';
 import { STORAGE_PREFIXES } from '../database/storage-keys';
 import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
+import { UUID_V4_RE } from '../../../shared/patterns.js';
 
 type AuthCompletionKind = 'failure' | 'login' | 'registration';
 type AuthOperationRefs = Pick<AuthRefs, 'authLifecycle'>;
@@ -96,7 +96,7 @@ function validateAuthCompletion(data: unknown): AuthCompletionKind {
   if (
     payload.type !== SignalType.AUTH_FULL_SUCCESS ||
     typeof payload.authRequestId !== 'string' ||
-    !REQUEST_ID_RE.test(payload.authRequestId) ||
+    !UUID_V4_RE.test(payload.authRequestId) ||
     typeof payload.authenticated !== 'boolean' ||
     typeof payload.serverEntryRequired !== 'boolean' ||
     typeof payload.serverEntryGranted !== 'boolean' ||
@@ -464,7 +464,7 @@ export async function handleTokenValidationResponse(data: any, auth: TokenValida
     Array.isArray(data) ||
     Object.getPrototypeOf(data) !== Object.prototype ||
     typeof data.requestId !== 'string' ||
-    !REQUEST_ID_RE.test(data.requestId) ||
+    !UUID_V4_RE.test(data.requestId) ||
     typeof data.valid !== 'boolean' ||
     (data.valid
       ? !hasExactKeys(data, ['requestId', 'serverEntryGranted', 'serverEntryRequired', 'type', 'valid']) ||

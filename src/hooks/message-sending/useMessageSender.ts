@@ -6,7 +6,15 @@ import type { SecureDB } from '../../lib/database/secureDB';
 import type { StoredMessage } from '../../lib/types/database-types';
 import { canonicalAuthUsernameOrNull, sanitizeContent, sanitizeMessageId } from '../../lib/sanitizers';
 import type { UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
-import { sanitizeReply, logError, getIdCache, mapSignalType, createLocalMessage, getSessionApi, recordSessionRequest } from '../../lib/utils/message-sending-utils';
+import {
+  sanitizeReply,
+  logError,
+  getIdCache,
+  mapSignalType,
+  createLocalMessage,
+  getSessionApi,
+  recordSessionRequest,
+} from '../../lib/utils/message-sending-utils';
 import { createSessionReadyHandler, createSessionResetRetryHandler } from './handlers';
 import { buildMessagePayload, dispatchLocalEvents, storeUnacknowledgedMessage, requestBundleForRetry } from './send';
 import {

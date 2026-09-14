@@ -1,7 +1,6 @@
 import React, { useRef, useMemo, useCallback, useEffect, useState } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
 import { format, isSameMinute } from "date-fns";
-import { formatMessageTimestamp } from "../../../lib/utils/date-utils.ts";
 import { EmojiPicker } from "../../ui/EmojiPicker";
 import { useEmojiPicker } from "../../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types";
@@ -14,13 +13,14 @@ import { MessageReceipt } from "./MessageReceipt";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../../ui/UserAvatar";
-import { EventType } from "../../../lib/types/event-types.ts";
-import { SignalType } from "../../../lib/types/signal-types.ts";
 import { SecureCanvasText } from "./SecureCanvasText";
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { createDownloadLink, parseCurrentVoiceNoteFilename } from "../../../lib/utils/file-utils";
 import { nativeMessageContent } from "../../../lib/tauri-bindings";
 import { MessageLinkPreviews } from "./MessageLinkPreview";
+import { formatMessageTimestamp } from '../../../lib/utils/date-utils';
+import { EventType } from '../../../lib/types/event-types';
+import { SignalType } from '../../../lib/types/signal-types';
 
 interface SystemAction {
   readonly label: string;

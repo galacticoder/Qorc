@@ -10,16 +10,18 @@ import type { PeerCertificateBundle } from '../types/p2p-types';
 import type { AvatarRef } from './avatar-blob-crypto';
 import type { CertifiedPeerBundle } from '../types/identity-types';
 import { SPOOL_DETECTION_KEY_BYTES } from '../../../shared/spool-tag-protocol.js';
-import { DISCOVERY_BLOB_BASE64_CHARS } from '../constants';
-import {
-    bytesToHex,
-    concatUint8Arrays,
-    constantTimeBytesEqual,
-    hexToBytes as decodeHex,
-} from '../utils/byte-utils';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { hasPrototypePollutionKeys } from '../sanitizers';
+import { Base64 } from '../cryptography/base64';
+import { DISCOVERY_BLOB_BASE64_CHARS } from '../../../shared/discovery-constants.js';
+import {
+  bytesToHex,
+  concatUint8Arrays,
+  constantTimeBytesEqual,
+  hexToBytes as decodeHex,
+} from '../../../shared/bytes.js';
+import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 
 export { DISCOVERY_BLOB_BASE64_CHARS } from '../constants';
 
@@ -62,17 +64,14 @@ export interface OPRFDiscoveryBlob {
 }
 
 const DISCOVERY_BLOB_WIRE_BYTES = (DISCOVERY_BLOB_BASE64_CHARS / 4) * 3;
-const DISCOVERY_BLOB_NONCE_BYTES = 36;
 const DISCOVERY_BLOB_SELECTOR_BYTES = 24;
-const DISCOVERY_BLOB_TAG_BYTES = 32;
-const DISCOVERY_BLOB_AEAD_CIPHERTEXT_OVERHEAD_BYTES = 32;
-const DISCOVERY_BLOB_PREFIX_BYTES = DISCOVERY_BLOB_NONCE_BYTES + DISCOVERY_BLOB_SELECTOR_BYTES;
+const DISCOVERY_BLOB_PREFIX_BYTES = POST_QUANTUM_AEAD_NONCE_BYTES + DISCOVERY_BLOB_SELECTOR_BYTES;
 const DISCOVERY_BLOB_PREFIX_BASE64_CHARS = (DISCOVERY_BLOB_PREFIX_BYTES / 3) * 4;
 const DISCOVERY_BLOB_HEADER_BYTES = 4;
 const DISCOVERY_BLOB_PLAINTEXT_BYTES = DISCOVERY_BLOB_WIRE_BYTES -
     DISCOVERY_BLOB_PREFIX_BYTES -
-    DISCOVERY_BLOB_TAG_BYTES -
-    DISCOVERY_BLOB_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
+    HASH_OUTPUT_BYTES -
+    POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
 const DISCOVERY_BLOB_REQUIRED_KEYS = [
     'certifiedPeerBundle',
     'fullBundle',
@@ -86,7 +85,7 @@ const DISCOVERY_DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_B
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
 
 function deriveDiscoveryBlobSelector(encryptionKey: Uint8Array, nonce: Uint8Array): Uint8Array {
-    if (encryptionKey.length !== 32 || nonce.length !== DISCOVERY_BLOB_NONCE_BYTES) {
+    if (encryptionKey.length !== 32 || nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {
         throw new Error('Invalid discovery selector material');
     }
     const domain = new TextEncoder().encode(PROTOCOL_KEYS.DISCOVERY_BLOB_SELECTOR);
@@ -276,7 +275,7 @@ export class OPRFDiscoveryClient {
         plaintext.set(content, DISCOVERY_BLOB_HEADER_BYTES);
         const padding = plaintext.subarray(DISCOVERY_BLOB_HEADER_BYTES + content.length);
         crypto.getRandomValues(padding);
-        const nonce = crypto.getRandomValues(new Uint8Array(DISCOVERY_BLOB_NONCE_BYTES));
+        const nonce = crypto.getRandomValues(new Uint8Array(POST_QUANTUM_AEAD_NONCE_BYTES));
         const aad = new TextEncoder().encode(PROTOCOL_KEYS.DISCOVERY_BLOB_AAD);
         let selector: Uint8Array | null = null;
         let ciphertext: Uint8Array | null = null;
@@ -290,7 +289,7 @@ export class OPRFDiscoveryClient {
             combined.set(selector, nonce.length);
             combined.set(tag, nonce.length + selector.length);
             combined.set(ciphertext, nonce.length + selector.length + tag.length);
-            const encoded = PostQuantumUtils.uint8ArrayToBase64(combined);
+            const encoded = Base64.arrayBufferToBase64(combined);
             if (encoded.length !== DISCOVERY_BLOB_BASE64_CHARS || encoded.endsWith('=')) {
                 throw new Error('Discovery PURB wire shape mismatch');
             }
@@ -331,8 +330,8 @@ export class OPRFDiscoveryClient {
                 blobBase64.slice(0, DISCOVERY_BLOB_PREFIX_BASE64_CHARS)
             );
             if (prefix.length !== DISCOVERY_BLOB_PREFIX_BYTES) return null;
-            nonce = prefix.slice(0, DISCOVERY_BLOB_NONCE_BYTES);
-            selector = prefix.slice(DISCOVERY_BLOB_NONCE_BYTES);
+            nonce = prefix.slice(0, POST_QUANTUM_AEAD_NONCE_BYTES);
+            selector = prefix.slice(POST_QUANTUM_AEAD_NONCE_BYTES);
             expectedSelector = deriveDiscoveryBlobSelector(encryptionKey, nonce);
             if (!constantTimeBytesEqual(selector, expectedSelector)) return null;
             if (stats) stats.selectorMatches += 1;
@@ -342,9 +341,9 @@ export class OPRFDiscoveryClient {
 
             tag = data.slice(
                 DISCOVERY_BLOB_PREFIX_BYTES,
-                DISCOVERY_BLOB_PREFIX_BYTES + DISCOVERY_BLOB_TAG_BYTES
+                DISCOVERY_BLOB_PREFIX_BYTES + HASH_OUTPUT_BYTES
             );
-            ciphertext = data.slice(DISCOVERY_BLOB_PREFIX_BYTES + DISCOVERY_BLOB_TAG_BYTES);
+            ciphertext = data.slice(DISCOVERY_BLOB_PREFIX_BYTES + HASH_OUTPUT_BYTES);
             aad = new TextEncoder().encode(PROTOCOL_KEYS.DISCOVERY_BLOB_AAD);
             plaintext = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, encryptionKey, aad);
             if (plaintext.length !== DISCOVERY_BLOB_PLAINTEXT_BYTES) return null;

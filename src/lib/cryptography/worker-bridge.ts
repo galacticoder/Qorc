@@ -5,22 +5,9 @@
 
 import { PostQuantumRandom } from './random';
 import { hasExactKeys, isPlainObject, hasPrototypePollutionKeys } from '../sanitizers'
-import {
-  PQ_WORKER_MAX_RESTART_ATTEMPTS,
-  PQ_KEM_PUBLIC_KEY_SIZE,
-  PQ_KEM_SECRET_KEY_SIZE,
-  PQ_KEM_CIPHERTEXT_SIZE,
-  PQ_KEM_SHARED_SECRET_SIZE,
-  PQ_SIG_PUBLIC_KEY_SIZE,
-  PQ_SIG_SECRET_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE,
-  PQ_AEAD_NONCE_SIZE,
-  PQ_AEAD_MAC_SIZE,
-  PQ_AEAD_CIPHERTEXT_OVERHEAD,
-} from '../constants';
+import { PQ_WORKER_MAX_RESTART_ATTEMPTS } from '../constants';
 import type { WorkerRequestMessage, Argon2HashResult } from '../types/crypto-types';
 import { SignalType } from '../types/signal-types';
-import { constantTimeBytesEqual } from '../utils/byte-utils';
 import { ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE } from '../config/audiences';
 import {
   WORKER_AEAD_MAX_AAD_BYTES,
@@ -38,6 +25,19 @@ import { wipeBinaryValues } from './wipe';
 import PQWorker from './post-quantum-worker?worker';
 // @ts-ignore
 import PQWorkerUrl from './post-quantum-worker?worker&url';
+import {
+  HASH_OUTPUT_BYTES,
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SECRET_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  ML_KEM_1024_SECRET_KEY_BYTES,
+  ML_KEM_1024_SHARED_SECRET_BYTES,
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { constantTimeBytesEqual } from '../../../shared/bytes.js';
 
 const EXPECTED_AUTH_TOKEN_BYTES = 32;
 
@@ -135,41 +135,41 @@ const isKemKeyPairResult = (result: unknown): result is { publicKey: Uint8Array;
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['publicKey', 'secretKey'])
     && result.publicKey instanceof Uint8Array
-    && result.publicKey.length === PQ_KEM_PUBLIC_KEY_SIZE
+    && result.publicKey.length === ML_KEM_1024_PUBLIC_KEY_BYTES
     && result.secretKey instanceof Uint8Array
-    && result.secretKey.length === PQ_KEM_SECRET_KEY_SIZE;
+    && result.secretKey.length === ML_KEM_1024_SECRET_KEY_BYTES;
 };
 
 const isKemEncapsulateResult = (result: unknown): result is { ciphertext: Uint8Array; sharedSecret: Uint8Array } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['ciphertext', 'sharedSecret'])
     && result.ciphertext instanceof Uint8Array
-    && result.ciphertext.length === PQ_KEM_CIPHERTEXT_SIZE
+    && result.ciphertext.length === ML_KEM_1024_CIPHERTEXT_BYTES
     && result.sharedSecret instanceof Uint8Array
-    && result.sharedSecret.length === PQ_KEM_SHARED_SECRET_SIZE;
+    && result.sharedSecret.length === ML_KEM_1024_SHARED_SECRET_BYTES;
 };
 
 const isKemDecapsulateResult = (result: unknown): result is { sharedSecret: Uint8Array } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['sharedSecret'])
     && result.sharedSecret instanceof Uint8Array
-    && result.sharedSecret.length === PQ_KEM_SHARED_SECRET_SIZE;
+    && result.sharedSecret.length === ML_KEM_1024_SHARED_SECRET_BYTES;
 };
 
 const isSigKeyPairResult = (result: unknown): result is { publicKey: Uint8Array; secretKey: Uint8Array } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['publicKey', 'secretKey'])
     && result.publicKey instanceof Uint8Array
-    && result.publicKey.length === PQ_SIG_PUBLIC_KEY_SIZE
+    && result.publicKey.length === ML_DSA_87_PUBLIC_KEY_BYTES
     && result.secretKey instanceof Uint8Array
-    && result.secretKey.length === PQ_SIG_SECRET_KEY_SIZE;
+    && result.secretKey.length === ML_DSA_87_SECRET_KEY_BYTES;
 };
 
 const isSigSignResult = (result: unknown): result is { signature: Uint8Array } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['signature'])
     && result.signature instanceof Uint8Array
-    && result.signature.length === PQ_SIG_SIGNATURE_SIZE;
+    && result.signature.length === ML_DSA_87_SIGNATURE_BYTES;
 };
 
 const isSigVerifyResult = (result: unknown): result is { verified: boolean } => {
@@ -240,7 +240,7 @@ const isOpaqueFinishRegResult = (result: unknown): result is { envelope: Uint8Ar
     && result.exportKey instanceof Uint8Array
     && result.exportKey.length === 32
     && result.authPublicKey instanceof Uint8Array
-    && result.authPublicKey.length === PQ_SIG_PUBLIC_KEY_SIZE;
+    && result.authPublicKey.length === ML_DSA_87_PUBLIC_KEY_BYTES;
 };
 
 const isOpaqueStartLoginResult = (result: unknown): result is { blindedElement: Uint8Array; blindingFactor: Uint8Array } => {
@@ -255,7 +255,7 @@ const isOpaqueFinishLoginResult = (result: unknown): result is { success: boolea
       && result.exportKey instanceof Uint8Array
       && result.exportKey.length === 32
       && result.authMessage instanceof Uint8Array
-      && result.authMessage.length === PQ_SIG_SIGNATURE_SIZE;
+      && result.authMessage.length === ML_DSA_87_SIGNATURE_BYTES;
   }
   return result.success === false
     && (hasExactKeys(result, ['success']) || (
@@ -282,12 +282,12 @@ const isAeadEncryptResult = (result: unknown): result is { ciphertext: Uint8Arra
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['ciphertext', 'nonce', 'tag'])
     && result.ciphertext instanceof Uint8Array
-    && result.ciphertext.length >= PQ_AEAD_CIPHERTEXT_OVERHEAD
-    && result.ciphertext.length <= WORKER_AEAD_MAX_INPUT_BYTES + PQ_AEAD_CIPHERTEXT_OVERHEAD
+    && result.ciphertext.length >= POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES
+    && result.ciphertext.length <= WORKER_AEAD_MAX_INPUT_BYTES + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES
     && result.nonce instanceof Uint8Array
-    && result.nonce.length === PQ_AEAD_NONCE_SIZE
+    && result.nonce.length === POST_QUANTUM_AEAD_NONCE_BYTES
     && result.tag instanceof Uint8Array
-    && result.tag.length === PQ_AEAD_MAC_SIZE;
+    && result.tag.length === HASH_OUTPUT_BYTES;
 };
 
 const isAeadDecryptResult = (result: unknown): result is { plaintext: Uint8Array } => {
@@ -593,7 +593,6 @@ export class PostQuantumWorker {
     timeoutId: ReturnType<typeof setTimeout>;
   }>();
   private static restartAttempts = 0;
-  private static readonly MAX_RESTART_ATTEMPTS = PQ_WORKER_MAX_RESTART_ATTEMPTS;
   private static restarting = false;
   private static disabled = false;
   private static authToken: Uint8Array | null = null;
@@ -776,7 +775,7 @@ export class PostQuantumWorker {
   }
 
   private static scheduleRestart(): void {
-    if (PostQuantumWorker.restartAttempts >= PostQuantumWorker.MAX_RESTART_ATTEMPTS) {
+    if (PostQuantumWorker.restartAttempts >= PQ_WORKER_MAX_RESTART_ATTEMPTS) {
       console.error('[PostQuantum][Worker] Max restart attempts reached; worker disabled');
       PostQuantumWorker.restarting = false;
       PostQuantumWorker.disabled = true;
@@ -791,7 +790,7 @@ export class PostQuantumWorker {
       } catch (error) {
         console.error('[PostQuantum][Worker] Restart attempt failed:', error);
       }
-      if (!PostQuantumWorker.worker && PostQuantumWorker.restartAttempts < PostQuantumWorker.MAX_RESTART_ATTEMPTS) {
+      if (!PostQuantumWorker.worker && PostQuantumWorker.restartAttempts < PQ_WORKER_MAX_RESTART_ATTEMPTS) {
         PostQuantumWorker.restarting = true;
         PostQuantumWorker.scheduleRestart();
       }
@@ -1183,7 +1182,7 @@ export class PostQuantumWorker {
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
     )) throw new Error('Invalid AEAD additional data');
     if (explicitNonce !== undefined && (
-      !(explicitNonce instanceof Uint8Array) || explicitNonce.length !== PQ_AEAD_NONCE_SIZE
+      !(explicitNonce instanceof Uint8Array) || explicitNonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES
     )) throw new Error('Invalid AEAD nonce');
     PostQuantumWorker.validateWorker();
     if (!PostQuantumWorker.worker) {
@@ -1214,7 +1213,7 @@ export class PostQuantumWorker {
       }
     });
     if (
-      response.ciphertext.length !== plaintext.length + PQ_AEAD_CIPHERTEXT_OVERHEAD ||
+      response.ciphertext.length !== plaintext.length + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES ||
       (explicitNonce && !constantTimeBytesEqual(response.nonce, explicitNonce))
     ) {
       wipeBinaryValues(response);
@@ -1232,11 +1231,11 @@ export class PostQuantumWorker {
   ): Promise<Uint8Array> {
     if (
       !(ciphertext instanceof Uint8Array) ||
-      ciphertext.length < PQ_AEAD_CIPHERTEXT_OVERHEAD ||
-      ciphertext.length > WORKER_AEAD_MAX_INPUT_BYTES + PQ_AEAD_CIPHERTEXT_OVERHEAD
+      ciphertext.length < POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES ||
+      ciphertext.length > WORKER_AEAD_MAX_INPUT_BYTES + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES
     ) throw new Error('Invalid AEAD ciphertext');
-    if (!(nonce instanceof Uint8Array) || nonce.length !== PQ_AEAD_NONCE_SIZE) throw new Error('Invalid AEAD nonce');
-    if (!(tag instanceof Uint8Array) || tag.length !== PQ_AEAD_MAC_SIZE) throw new Error('Invalid AEAD tag');
+    if (!(nonce instanceof Uint8Array) || nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) throw new Error('Invalid AEAD nonce');
+    if (!(tag instanceof Uint8Array) || tag.length !== HASH_OUTPUT_BYTES) throw new Error('Invalid AEAD tag');
     if (!(key instanceof Uint8Array) || key.length !== 32) throw new Error('Invalid AEAD key');
     if (additionalData !== undefined && (
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
@@ -1270,7 +1269,7 @@ export class PostQuantumWorker {
         reject(error);
       }
     });
-    if (response.plaintext.length !== ciphertext.length - PQ_AEAD_CIPHERTEXT_OVERHEAD) {
+    if (response.plaintext.length !== ciphertext.length - POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES) {
       response.plaintext.fill(0);
       throw new Error('Invalid AEAD worker result');
     }

@@ -1,13 +1,14 @@
-import { AUTH_USERNAME_REGEX, USERNAME_REGEX } from './constants';
-import { SignalType } from './types/signal-types';
 import {
+  AUTH_USERNAME_REGEX,
+  USERNAME_REGEX,
   MAX_CONTENT_LENGTH,
   MAX_USERNAME_LENGTH,
   UNSAFE_FILENAME_CHARS_REGEX,
   WHITESPACE_COLLAPSE_REGEX,
   CONTROL_CHARS_REGEX,
-  NEWLINE_REGEX
+  NEWLINE_REGEX,
 } from './constants';
+import { SignalType } from './types/signal-types';
 
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
 

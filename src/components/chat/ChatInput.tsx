@@ -1,13 +1,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
-import { Message } from "./messaging/types";
+import { Message, MessageReply } from './messaging/types';
 import { useFileSender } from "./ChatInput/useFileSender";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
 import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
-import { MessageReply } from "./messaging/types";
 import { HEX_PATTERN, MAX_FILE_SIZE, MAX_VOICE_NOTE_DURATION_SECONDS } from "@/lib/constants";
 import { sanitizeMessage } from "@/lib/sanitizers";
 import type { HybridKeys } from "@/lib/types/auth-types";

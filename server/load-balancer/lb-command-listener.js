@@ -7,17 +7,15 @@ import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { REDIS_KEYS } from '../config/redis-keys.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
-    ML_DSA_87_SIGNATURE_BYTES,
-    ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  HASH_OUTPUT_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+  X25519_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
-import {
-    POST_QUANTUM_AEAD_NONCE_BYTES,
-    POST_QUANTUM_AEAD_TAG_BYTES,
-    X25519_KEY_BYTES,
-} from '../utils/crypto-consts.js';
-import { UUID_V4_RE } from '../utils/patterns.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import { wipeByteArrays } from '../utils/wipe.js';
+import { UUID_V4_RE } from '../../shared/patterns.js';
 
 const COMMAND_WIRE_MAX_CHARS = 32 * 1024;
 const COMMAND_CIPHERTEXT_MAX_BYTES = 1024;
@@ -89,7 +87,7 @@ export class LBCommandListener {
                 !canonicalBase64Shape(payload.encrypted.kyberCiphertext, { exactBytes: ML_KEM_1024_CIPHERTEXT_BYTES }) ||
                 !canonicalBase64Shape(payload.encrypted.x25519EphemeralPublic, { exactBytes: X25519_KEY_BYTES }) ||
                 !canonicalBase64Shape(payload.encrypted.nonce, { exactBytes: POST_QUANTUM_AEAD_NONCE_BYTES }) ||
-                !canonicalBase64Shape(payload.encrypted.tag, { exactBytes: POST_QUANTUM_AEAD_TAG_BYTES }) ||
+                !canonicalBase64Shape(payload.encrypted.tag, { exactBytes: HASH_OUTPUT_BYTES }) ||
                 !canonicalBase64Shape(payload.encrypted.ciphertext, { maxBytes: COMMAND_CIPHERTEXT_MAX_BYTES })
             ) {
                 throw new Error('Unsupported command payload version');

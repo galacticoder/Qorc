@@ -1826,6 +1826,11 @@ export function useEncryptedMessageHandler(
                 signerPublicKeyBase64: authenticatedSenderDilithiumPublicKey,
                 announcedAt: authenticatedP2PEndpointAt,
               }).catch(() => { });
+              if (receiverObservedTransport !== 'p2p') {
+                window.dispatchEvent(new CustomEvent(EventType.P2P_ENDPOINT_RECEIVED, {
+                  detail: { account: currentUser, peer: authenticatedSenderUsername },
+                }));
+              }
             }
           }
         }

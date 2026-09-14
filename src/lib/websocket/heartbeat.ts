@@ -54,7 +54,7 @@ export class WebSocketHeartbeat {
   // Send heartbeat ping
   private async sendHeartbeat(): Promise<void> {
     const generation = this.lifecycleGeneration;
-    if (this.inFlightGeneration === generation) {
+    if (this.inFlightGeneration === generation || this.heartbeatTimeoutTimer) {
       return;
     }
     this.inFlightGeneration = generation;

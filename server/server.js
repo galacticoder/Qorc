@@ -1,4 +1,5 @@
 import nodeCrypto from 'crypto';
+import { DISCOVERY_PUBLICATION_DEDUP_TTL_MS } from '../shared/discovery-constants.js';
 
 if (process.platform !== 'linux') {
   throw new Error('Native server deployment supports only Linux');
@@ -14,14 +15,6 @@ import {
   SignalType
 } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import {
-  closePgPool,
-  destroyDatabaseSecrets,
-  DiscoveryDB,
-  initDatabase,
-  privateLookupId,
-  UserDatabase
-} from './database/database.js';
 import { AvatarBlobDB } from './database/avatar-blob-db.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
@@ -38,18 +31,13 @@ import apiRoutes, {
   destroyApiRoutes,
   dispatchAnonymousApiOperation
 } from './routes/api-routes.js';
-import {
-  createPqAnonymousBodyAdmission,
-  createPqAnonymousHttpHandler,
-  handlePqAnonymousHttpParseError,
-  PQ_ANONYMOUS_HTTP_MAX_REQUEST_BYTES
-} from './routes/pq-anonymous-http.js';
-import { createServer as createBootstrapServer, registerShutdownHandlers } from './bootstrap/server-bootstrap.js';
+import { createPqAnonymousBodyAdmission, createPqAnonymousHttpHandler, handlePqAnonymousHttpParseError } from './routes/pq-anonymous-http.js';
+import { createServer, registerShutdownHandlers } from './bootstrap/server-bootstrap.js';
 import { attachGateway } from './websocket/gateway.js';
 import { validateWsWireProtection } from './security/layer-agreement-policy.js';
 import { SERVER_CONSTANTS, SECURITY_HEADERS, CORS_CONFIG } from './config/constants.js';
 import { PROTOCOL_KEYS } from './config/protocol-keys.js';
-import { POW_SEED_BYTES, SHA_256_ALGORITHM } from './utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from './utils/crypto-consts.js';
 
 import {
   handlePQHandshake,
@@ -89,7 +77,7 @@ import {
 import {
   destroyDiscoveryBucketIndex
 } from './discovery/bucket-index.js';
-import { cleanup as cleanupRedis } from './session/redis-client.js';
+import { cleanup } from './session/redis-client.js';
 import { shutdownAuthCryptoWorker } from './crypto/auth-crypto-worker-service.js';
 import { destroyAuthRootKey } from './crypto/auth-root.js';
 import { verifyPowSolution } from './security/auth-throttle.js';
@@ -112,12 +100,6 @@ import {
 } from './key-transparency/service.js';
 import { hasExactPlainObjectKeys } from './utils/validation.js';
 import { isCanonicalBase64Bytes } from './utils/encoding.js';
-import {
-  DISCOVERY_EPOCH_ID_RE,
-  HEX_64_RE,
-  PUBLICATION_ID_RE,
-  UUID_V4_RE
-} from './utils/patterns.js';
 import { LOOPBACK_HOST } from './config/infrastructure.js';
 import {
   ACCOUNT_AUTH_PURPOSE
@@ -136,8 +118,19 @@ import {
   PQ_SESSION_REQUIRED,
   SERVER_KEYS_UNAVAILABLE_MESSAGE
 } from './config/error-codes.js';
+import {
+  SESSION_FINGERPRINT_RE,
+  DISCOVERY_EPOCH_ID_RE,
+  PUBLICATION_ID_RE,
+  UUID_V4_RE,
+} from '../shared/patterns.js';
+import { ANONYMOUS_HTTP_REQUEST_PIR_BYTES } from '../shared/anonymous-http-layout.js';
+import { POW_SEED_BYTES } from '../shared/crypto-sizes.js';
+import { closePgPool, destroyDatabaseSecrets, privateLookupId } from './database/core.js';
+import { DiscoveryDB } from './database/discovery-db.js';
+import { initDatabase } from './database/schema.js';
+import { UserDatabase } from './database/user-db.js';
 
-const DISCOVERY_PUBLISH_POW_DOMAIN = PROTOCOL_KEYS.DISCOVERY_PUBLISH_POW;
 const DISCOVERY_PUBLISH_POW_DIFFICULTY = 18;
 const SERVER_ENTRY_TOKEN_INVALID = 'SERVER_ENTRY_TOKEN_INVALID';
 
@@ -267,7 +260,7 @@ async function createExpressApp({ context }) {
     pqAnonymousBodyAdmission,
     express.raw({
       type: 'application/octet-stream',
-      limit: PQ_ANONYMOUS_HTTP_MAX_REQUEST_BYTES,
+      limit: ANONYMOUS_HTTP_REQUEST_PIR_BYTES,
       inflate: false
     }),
     pqAnonymousHttpHandler,
@@ -349,7 +342,7 @@ async function createWebSocketServer({ server: httpsServer }) {
 
 async function prepareServerContext() {
   const identitySeedHex = process.env.SERVER_TRANSPORT_IDENTITY_SEED;
-  if (typeof identitySeedHex !== 'string' || !HEX_64_RE.test(identitySeedHex)) {
+  if (typeof identitySeedHex !== 'string' || !SESSION_FINGERPRINT_RE.test(identitySeedHex)) {
     throw new Error('SERVER_TRANSPORT_IDENTITY_SEED must be a shared, random 32-byte hex seed');
   }
   const identitySeed = Buffer.from(identitySeedHex, 'hex');
@@ -381,7 +374,7 @@ async function prepareServerContext() {
 
   initializeEnvelopeHandler(serverHybridKeyPair);
 
-  const { getPgPool } = await import('./database/database.js');
+  const { getPgPool } = await import('./database/core.js');
   const db = await getPgPool();
   await rateLimitMiddleware.limiter();
 
@@ -567,7 +560,6 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context }) {
 
 const recentPublishTokens = new Map();
 const pendingPublishTokens = new Map();
-const PUBLISH_DEDUP_WINDOW_MS = 5000;
 const RECENT_PUBLISH_TOKEN_MAX = 2048;
 
 function discoveryPublicationDedupKey(publication, encryptedBlob) {
@@ -587,7 +579,7 @@ function discoveryPublicationDedupKey(publication, encryptedBlob) {
 
 function rememberRecentPublishToken(tokenKey, publishedAt) {
   for (const [token, timestamp] of recentPublishTokens) {
-    if (publishedAt - timestamp >= PUBLISH_DEDUP_WINDOW_MS) {
+    if (publishedAt - timestamp >= DISCOVERY_PUBLICATION_DEDUP_TTL_MS) {
       recentPublishTokens.delete(token);
     }
   }
@@ -602,11 +594,10 @@ function rememberRecentPublishToken(tokenKey, publishedAt) {
     if (recentPublishTokens.get(tokenKey) === publishedAt) {
       recentPublishTokens.delete(tokenKey);
     }
-  }, PUBLISH_DEDUP_WINDOW_MS + 1);
+  }, DISCOVERY_PUBLICATION_DEDUP_TTL_MS + 1);
   expiry.unref?.();
 }
 const DISCOVERY_FORWARD_PUBLISH_WINDOW_MS = 24 * 60 * 60 * 1000;
-const DISCOVERY_LEASE_TTL_MS = DISCOVERY_FORWARD_PUBLISH_WINDOW_MS;
 
 async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = false }) {
   const { authHandler } = context;
@@ -1033,6 +1024,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
             ? normalizedMessage.requestId
             : undefined;
           const sendPublishAck = async ({ success, error }) => {
+            const startedAt = Date.now();
             const ackPayload = {
               type: SignalType.OK,
               requestId,
@@ -1045,10 +1037,26 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
                 : 'discovery_publish_failed';
             }
             try {
-              await sendSecureMessage(ws, ackPayload);
-              return true;
+              const delivered = await sendSecureMessage(ws, ackPayload) === true;
+              const result = {
+                requestId,
+                accepted: ackPayload.success,
+                delivered,
+                durationMs: Date.now() - startedAt,
+                ...(ackPayload.error ? { error: ackPayload.error } : {})
+              };
+              if (delivered && ackPayload.success) {
+                console.log('[DISCOVERY] Publication acknowledgement', result);
+              } else {
+                console.warn('[DISCOVERY] Publication acknowledgement', result);
+              }
+              return delivered;
             } catch (ackError) {
-              console.warn('[DISCOVERY] Publish acknowledgement send failed');
+              console.warn('[DISCOVERY] Publish acknowledgement send failed', {
+                requestId,
+                durationMs: Date.now() - startedAt,
+                error: ackError instanceof Error ? ackError.message : String(ackError)
+              });
               throw ackError;
             }
           };
@@ -1081,7 +1089,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
           const publicationValid = Boolean(
             publication &&
             DISCOVERY_EPOCH_ID_RE.test(publication.epochId) &&
-            HEX_64_RE.test(publication.publishId) &&
+            SESSION_FINGERPRINT_RE.test(publication.publishId) &&
             isCanonicalDiscoveryBucketIds(publication.bucketIds) &&
             isCanonicalDiscoveryBlob(normalizedMessage.encryptedBlob) &&
             isCanonicalBase64Bytes(normalizedMessage.powNonce, POW_SEED_BYTES) &&
@@ -1108,7 +1116,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
           }
 
           const publishPowSeed = deriveAnonymousRequestPowSeed(
-            DISCOVERY_PUBLISH_POW_DOMAIN,
+            PROTOCOL_KEYS.DISCOVERY_PUBLISH_POW,
             publication.epochId,
             normalizedMessage.powNonce,
             [
@@ -1135,14 +1143,14 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
           if (publishTokenKey) {
             const now = Date.now();
             const lastPublish = recentPublishTokens.get(publishTokenKey);
-            if (lastPublish && (now - lastPublish) < PUBLISH_DEDUP_WINDOW_MS) {
+            if (lastPublish && (now - lastPublish) < DISCOVERY_PUBLICATION_DEDUP_TTL_MS) {
               await sendPublishAck({ success: true });
               return;
             }
           }
 
           const publishPowClaim = await claimAnonymousRequestPow(
-            DISCOVERY_PUBLISH_POW_DOMAIN,
+            PROTOCOL_KEYS.DISCOVERY_PUBLISH_POW,
             publishPowSeed,
             normalizedMessage.powSolution,
             discoveryEpochInfo.rotatesAt
@@ -1177,7 +1185,7 @@ async function handleWebSocketMessage({ ws, parsed, context, isPqProtected = fal
               enqueueWork = enqueueDiscoveryPublication({
                 publication,
                 encryptedBlob: normalizedMessage.encryptedBlob,
-                leaseMs: DISCOVERY_LEASE_TTL_MS,
+                leaseMs: DISCOVERY_FORWARD_PUBLISH_WINDOW_MS,
                 authorizationCheck: () => hasAnonymousDeliveryAuthorization(ws)
               });
               pendingPublishTokens.set(publishTokenKey, enqueueWork);
@@ -1415,7 +1423,7 @@ async function shutdownServer(signal) {
   destroyAuthRootKey();
 
   try {
-    await cleanupRedis();
+    await cleanup();
   } catch (error) {
     console.error('[SERVER] Redis shutdown failed', error);
   }
@@ -1452,7 +1460,7 @@ async function startServer() {
 
     console.log('[SERVER] Core services initialized', { port: ServerConfig.PORT });
 
-    const result = await createBootstrapServer({
+    const result = await createServer({
       createApp: createExpressApp,
       createWebSocketServer,
       onServerReady,

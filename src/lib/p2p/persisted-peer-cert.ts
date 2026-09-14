@@ -2,12 +2,12 @@ import type { PeerCertificateBundle } from '../types/p2p-types';
 import { storage } from '../tauri-bindings';
 import { validatePeerCertificateBundle } from '../utils/peer-certificate-utils';
 import { parseP2PEndpointUrl } from '../utils/p2p-endpoint';
-import { PQ_SIG_PUBLIC_KEY_SIZE } from '../constants';
 import { getCurrentLocalAccountScope } from '../security/local-account-scope';
 import { canonicalAuthUsername } from '../sanitizers';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 const MAX_PERSISTED_CERT_CHARS = 64 * 1024;
 const PERSISTED_RECORD_KEYS = ['cert', 'endpoint', 'protocol'];
@@ -51,7 +51,7 @@ const validatePersistedEndpoint = (value: unknown): PersistedPeerEndpoint | null
   if (!parsed?.hasDirectAddress) throw new Error('Invalid persisted peer endpoint URL');
   if (
     typeof candidate.signerPublicKeyBase64 !== 'string' ||
-    candidate.signerPublicKeyBase64.length !== 4 * Math.ceil(PQ_SIG_PUBLIC_KEY_SIZE / 3) ||
+    candidate.signerPublicKeyBase64.length !== 4 * Math.ceil(ML_DSA_87_PUBLIC_KEY_BYTES / 3) ||
     !Number.isSafeInteger(candidate.announcedAt) ||
     (candidate.announcedAt as number) < 0
   ) throw new Error('Invalid persisted peer endpoint');

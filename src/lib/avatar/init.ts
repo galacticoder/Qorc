@@ -3,8 +3,7 @@ import { STORAGE_KEYS } from '../database/storage-keys';
 import { EventType } from '../types/event-types';
 import { generateDefaultAvatar, hashAvatarData, isValidAvatarData, isValidCachedAvatar } from '../utils/avatar-utils';
 import type { SecureDB } from '../database/secureDB';
-import type { CachedAvatar } from '../types/avatar-types';
-import type { AvatarSystemState } from '../types/avatar-types';
+import type { CachedAvatar, AvatarSystemState } from '../types/avatar-types';
 import { MAX_PEER_AVATAR_CACHE_ENTRIES } from '../constants';
 import { isCanonicalAuthUsername, isPlainObject } from '../sanitizers';
 

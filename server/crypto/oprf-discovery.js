@@ -6,8 +6,8 @@ import { ristretto255_oprf } from '@noble/curves/ed25519.js';
 
 import { deriveAuthRootKey } from './auth-root.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
-import { HEX_64_RE } from '../utils/patterns.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { SESSION_FINGERPRINT_RE } from '../../shared/patterns.js';
 
 const OPRF_KEY_INFO = UTF8_ENCODER.encode(PROTOCOL_KEYS.DISCOVERY_VOPRF_AUTHORITY);
 export const OPRF_DISCOVERY_POW_DIFFICULTY = 18;
@@ -113,7 +113,7 @@ class OPRFDiscoveryServer {
     if (!this.rateLimiter.checkGlobalOnly()) {
       throw new Error('Rate limit exceeded for OPRF evaluations');
     }
-    if (typeof blindedPointHex !== 'string' || !HEX_64_RE.test(blindedPointHex)) {
+    if (typeof blindedPointHex !== 'string' || !SESSION_FINGERPRINT_RE.test(blindedPointHex)) {
       throw new Error('Invalid blinded OPRF point');
     }
 

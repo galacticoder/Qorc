@@ -249,6 +249,7 @@ export function attachGateway({
   }, heartbeatIntervalMs);
 
   wss.on('connection', async (ws) => {
+    const connectedAt = Date.now();
     const connectionAbortController = new AbortController();
     ws._connectionAbortController = connectionAbortController;
     ws._connectionAbortSignal = connectionAbortController.signal;
@@ -298,9 +299,19 @@ export function attachGateway({
         code: typeof error?.code === 'string' ? error.code : 'WS_TRANSPORT_ERROR'
       });
     });
-    ws.on('close', async () => {
+    ws.on('close', async (code) => {
       if (connectionCleanupStarted) return;
       connectionCleanupStarted = true;
+      const details = {
+        code,
+        durationMs: Date.now() - connectedAt,
+        missedHeartbeats: Number(ws._missedHeartbeats || 0)
+      };
+      if (code === 1000 || code === 1001) {
+        logger.info('[WS] Connection closed', details);
+      } else {
+        logger.warn('[WS] Connection closed abnormally', details);
+      }
       connectionAbortController.abort();
       discardEarlyFrames();
       try {

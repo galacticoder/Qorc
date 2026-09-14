@@ -3,9 +3,9 @@ import { Message } from '../../components/chat/messaging/types';
 import { sanitizeMessageId, sanitizeUsername } from '../sanitizers';
 import { AUTH_USERNAME_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
 import type { IdCache, SessionApi } from '../types/message-sending-types';
-import { CryptoUtils } from '../utils/crypto-utils';
 import { nativeMessageContent, signal } from '../tauri-bindings';
 import { setBoundedMapEntry } from './message-state-limits';
+import { CryptoUtils } from './crypto-utils';
 
 const MAX_SESSION_REQUEST_PEERS = 256;
 

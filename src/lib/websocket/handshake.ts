@@ -2,7 +2,6 @@
  * WebSocket PQ Handshake Manager
  */
 
-import { PostQuantumHash } from '../cryptography/hash';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
@@ -16,15 +15,17 @@ import type {
   ServerKeyMaterial,
   SessionKeyMaterial,
 } from '../types/websocket-types';
-import {
-  PQ_KEM_CIPHERTEXT_SIZE,
-  SESSION_REKEY_INTERVAL_MS,
-} from '../constants';
+import { SESSION_REKEY_INTERVAL_MS } from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ML_KEM_1024_CIPHERTEXT_BYTES } from '../../../shared/crypto-sizes.js';
+import { Base64 } from '../cryptography/base64';
+import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
 
 const SERVER_KEY_WAIT_BASE_TIMEOUT_MS = 45_000;
 const SERVER_KEY_REQUEST_INTERVAL_MS = 5_000;
-const HANDSHAKE_ACK_BASE_TIMEOUT_MS = 30_000;
+const HANDSHAKE_ACK_BASE_TIMEOUT_MS = 60_000;
+const HANDSHAKE_CONFIRM_BASE_TIMEOUT_MS = 60_000;
+const HANDSHAKE_PHASE_MAX_TIMEOUT_MS = 180_000;
 
 interface HandshakeRequestPayload {
   version: string;
@@ -262,7 +263,7 @@ export class WebSocketHandshake {
     }
     const sessionId = PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(16));
     const handshakeNonce = PostQuantumRandom.randomBytes(32);
-    const handshakeNonceBase64 = PostQuantumUtils.uint8ArrayToBase64(handshakeNonce);
+    const handshakeNonceBase64 = Base64.arrayBufferToBase64(handshakeNonce);
     const timestamp = this.callbacks.getTrustedNow();
 
     let baseHandshakeSecret: Uint8Array | null = null;
@@ -296,9 +297,9 @@ export class WebSocketHandshake {
         sessionId,
         timestamp,
         clientNonce: handshakeNonceBase64,
-        kemCiphertext: PostQuantumUtils.uint8ArrayToBase64(kemCiphertext),
-        clientKemPublicKey: PostQuantumUtils.uint8ArrayToBase64(clientKemKeyPair.publicKey),
-        clientX25519PublicKey: PostQuantumUtils.uint8ArrayToBase64(ephemeral.publicKey),
+        kemCiphertext: Base64.arrayBufferToBase64(kemCiphertext),
+        clientKemPublicKey: Base64.arrayBufferToBase64(clientKemKeyPair.publicKey),
+        clientX25519PublicKey: Base64.arrayBufferToBase64(ephemeral.publicKey),
         fingerprint: serverMaterial.fingerprint
       };
       requestDigest = computeHandshakeRequestDigest(handshakePayload);
@@ -353,7 +354,10 @@ export class WebSocketHandshake {
     let cancelAckWait: ((error: Error) => void) | null = null;
     let sessionInstalled = false;
     const ackPromise = new Promise<void>((resolve, reject) => {
-      const timeoutDuration = this.callbacks.getTorAdaptedTimeout(HANDSHAKE_ACK_BASE_TIMEOUT_MS);
+      const timeoutDuration = Math.min(
+        this.callbacks.getTorAdaptedTimeout(HANDSHAKE_ACK_BASE_TIMEOUT_MS),
+        HANDSHAKE_PHASE_MAX_TIMEOUT_MS,
+      );
       let settled = false;
       let ackVerificationInFlight = false;
       let confirmationHandler: MessageHandler | null = null;
@@ -425,6 +429,7 @@ export class WebSocketHandshake {
           return;
         }
         ackVerificationInFlight = true;
+        const acknowledgementReceivedAt = performance.now();
         this.diagnostic('ack-received', {
           durationMs: Date.now() - startedAt,
         });
@@ -445,7 +450,7 @@ export class WebSocketHandshake {
             ack.requestTimestamp !== timestamp ||
             ack.requestDigest !== requestDigest ||
             typeof ack.responseKemCiphertext !== 'string' ||
-            ack.responseKemCiphertext.length !== 4 * Math.ceil(PQ_KEM_CIPHERTEXT_SIZE / 3) ||
+            ack.responseKemCiphertext.length !== 4 * Math.ceil(ML_KEM_1024_CIPHERTEXT_BYTES / 3) ||
             !Number.isSafeInteger(ack.timestamp) ||
             ack.serverTime !== ack.timestamp ||
             typeof ack.signature !== 'string' ||
@@ -460,7 +465,7 @@ export class WebSocketHandshake {
           signature = PostQuantumUtils.base64ToUint8Array(ack.signature);
           if (
             signature.length !== PostQuantumSignature.sizes.signature ||
-            PostQuantumUtils.uint8ArrayToBase64(signature) !== ack.signature
+            Base64.arrayBufferToBase64(signature) !== ack.signature
           ) {
             throw new Error('Invalid handshake acknowledgement signature');
           }
@@ -473,6 +478,7 @@ export class WebSocketHandshake {
           if (!valid) {
             throw new Error('Handshake acknowledgement signature verification failed');
           }
+          if (settled || generation !== this.lifecycleGeneration) return;
 
           let responseKemCiphertext: Uint8Array | null = null;
           let responderSharedSecret: Uint8Array | null = null;
@@ -486,8 +492,8 @@ export class WebSocketHandshake {
               ack.responseKemCiphertext as string
             );
             if (
-              responseKemCiphertext.length !== PQ_KEM_CIPHERTEXT_SIZE ||
-              PostQuantumUtils.uint8ArrayToBase64(responseKemCiphertext) !== ack.responseKemCiphertext
+              responseKemCiphertext.length !== ML_KEM_1024_CIPHERTEXT_BYTES ||
+              Base64.arrayBufferToBase64(responseKemCiphertext) !== ack.responseKemCiphertext
             ) {
               throw new Error('Invalid responder ML-KEM ciphertext');
             }
@@ -495,6 +501,7 @@ export class WebSocketHandshake {
               responseKemCiphertext,
               retainedClientKemKeyPair.secretKey
             );
+            if (settled || generation !== this.lifecycleGeneration) return;
             combinedSecret = new Uint8Array(
               retainedBaseHandshakeSecret.length + responderSharedSecret.length
             );
@@ -568,6 +575,15 @@ export class WebSocketHandshake {
           });
           
           void confirmationPromise.catch(() => { });
+          clearTimeout(timeout);
+          const confirmationTimeoutMs = Math.min(
+            this.callbacks.getTorAdaptedTimeout(HANDSHAKE_CONFIRM_BASE_TIMEOUT_MS),
+            HANDSHAKE_PHASE_MAX_TIMEOUT_MS,
+          );
+          timeout = setTimeout(() => {
+            settleFailure(new Error('Encrypted handshake confirmation timeout'));
+          }, confirmationTimeoutMs);
+          this.diagnostic('confirmation-wait-begin', { timeoutMs: confirmationTimeoutMs });
           await this.callbacks.transmitHandshake({
             type: SignalType.PQ_HANDSHAKE_CONFIRM,
             version: PROTOCOL_KEYS.WS_PQ_PROTOCOL,
@@ -582,7 +598,7 @@ export class WebSocketHandshake {
             durationMs: Date.now() - startedAt,
           });
           rejectConfirmation = null;
-          settleSuccess(ack.serverTime as number);
+          settleSuccess((ack.serverTime as number) + Math.floor(performance.now() - acknowledgementReceivedAt));
         } catch (error) {
           this.diagnostic('ack-processing-failed', {
             durationMs: Date.now() - startedAt,
@@ -611,6 +627,7 @@ export class WebSocketHandshake {
       window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
       window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
     });
+    void ackPromise.catch(() => { });
 
     try {
       if (generation !== this.lifecycleGeneration) {

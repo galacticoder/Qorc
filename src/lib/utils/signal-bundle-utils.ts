@@ -69,7 +69,7 @@ async function discoveryMaterialForIdentityCheck(
 ): Promise<any> {
   const persisted = await loadTrustedPersistedDiscoveryMaterial(accountUsername, peerUsername);
   if (persisted) return persisted;
-  return findUser(peerUsername, { forceRefresh: true });
+  return findUser(peerUsername);
 }
 
 export interface PeerIdentityLike {

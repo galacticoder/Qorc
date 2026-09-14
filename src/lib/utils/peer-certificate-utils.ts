@@ -2,18 +2,11 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import type { PeerCertificateBundle } from '../types/p2p-types';
 import { CryptoUtils } from './crypto-utils';
 import { toUint8 } from './p2p-utils';
-import { bytesToHex } from './byte-utils';
 import { Base64, decodeCanonicalBase64 } from '../cryptography/base64';
-import {
-  AUTH_USERNAME_REGEX,
-  CERT_CLOCK_SKEW_MS,
-  P2P_PEER_CERT_TTL_MS,
-  PQ_KEM_PUBLIC_KEY_SIZE,
-  PQ_SIG_PUBLIC_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE,
-  X25519_PUBLIC_KEY_LENGTH
-} from '../constants';
+import { AUTH_USERNAME_REGEX, CERT_CLOCK_SKEW_MS, P2P_PEER_CERT_TTL_MS } from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES, X25519_KEY_BYTES } from '../../../shared/crypto-sizes.js';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 const PEER_CERTIFICATE_KEYS = [
   'username',
@@ -65,10 +58,10 @@ export async function validatePeerCertificateBundle(
       !Number.isSafeInteger(cert.expiresAt) ||
       cert.expiresAt - cert.issuedAt !== P2P_PEER_CERT_TTL_MS
     ) return null;
-    dilithiumKey = canonicalKey(cert.dilithiumPublicKey, PQ_SIG_PUBLIC_KEY_SIZE);
-    kyberKey = canonicalKey(cert.kyberPublicKey, PQ_KEM_PUBLIC_KEY_SIZE);
-    x25519Key = canonicalKey(cert.x25519PublicKey, X25519_PUBLIC_KEY_LENGTH);
-    signature = canonicalKey(cert.signature, PQ_SIG_SIGNATURE_SIZE);
+    dilithiumKey = canonicalKey(cert.dilithiumPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
+    kyberKey = canonicalKey(cert.kyberPublicKey, ML_KEM_1024_PUBLIC_KEY_BYTES);
+    x25519Key = canonicalKey(cert.x25519PublicKey, X25519_KEY_BYTES);
+    signature = canonicalKey(cert.signature, ML_DSA_87_SIGNATURE_BYTES);
     if (!dilithiumKey || !kyberKey || !x25519Key || !signature) return null;
     if (!isSelfSignedPeerCertificate(cert)) return null;
     canonical = encodePeerCertificateSigningPayload(cert);

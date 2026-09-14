@@ -16,23 +16,22 @@ import {
 import { readAppSettingsAsync, updateAppSettingsAsync } from '../ui/app-settings';
 import { unifiedSignalTransport } from './unified-signal-transport';
 import {
-    CALL_TIMEOUT,
-    CALL_RING_TIMEOUT,
-    CALL_DEVICE_SETTLE_MS,
-    MAX_CALL_SIGNAL_CLOCK_SKEW_MS,
-    P2P_CONNECTION_TIMEOUT_MS,
-    TARGET_FPS,
-    VISUAL_FRAME_SEND_DEADLINE_MAX_MS,
-    VISUAL_FRAME_SEND_DEADLINE_MS,
+  CALL_RING_TIMEOUT,
+  CALL_DEVICE_SETTLE_MS,
+  MAX_CALL_SIGNAL_CLOCK_SKEW_MS,
+  P2P_CONNECTION_TIMEOUT_MS,
+  TARGET_FPS,
+  VISUAL_FRAME_SEND_DEADLINE_MAX_MS,
+  VISUAL_FRAME_SEND_DEADLINE_MS,
 } from '../constants';
 import {
-    audioCodec,
-    nativeAudioPlayback,
-    nativeCamera,
-    nativeMicrophone,
-    nativeScreen,
-    signal as signalApi,
-    requireNativeMediaAccess,
+  audioCodec,
+  nativeAudioPlayback,
+  nativeCamera,
+  nativeMicrophone,
+  nativeScreen,
+  signal,
+  requireNativeMediaAccess,
 } from '../tauri-bindings';
 import {
     isExactCallSignal,
@@ -770,7 +769,7 @@ export class SecureCallingService {
                 if (this.currentCall?.id === activeCallId && this.currentCall.status === 'ringing') {
                     void this.endCall('timeout');
                 }
-            }, CALL_TIMEOUT);
+            }, CALL_RING_TIMEOUT);
 
             console.info('[CALL-DIAG]', { phase: 'service.offer-before', callType: actualCallType });
             await this.sendCallSignal({
@@ -3020,7 +3019,7 @@ export class SecureCallingService {
 
     private async waitForSignalSession(peer: string, generation: number): Promise<void> {
         const isCurrent = () => generation === this.lifecycleGeneration && !this.destroyed;
-        const hasSession = await signalApi.hasSession(this.localUsername, peer);
+        const hasSession = await signal.hasSession(this.localUsername, peer);
         if (!isCurrent()) throw new Error('Call signaling was cancelled');
         if (hasSession) return;
         if (this.pendingSignalSessionWaitCancels.size >= MAX_PENDING_SIGNAL_SESSION_WAITS) {
@@ -3080,7 +3079,7 @@ export class SecureCallingService {
                 10_000
             );
 
-            void signalApi.hasSession(this.localUsername, peer).then(
+            void signal.hasSession(this.localUsername, peer).then(
                 (ready) => {
                     if (!isCurrent()) finish(new Error('Call signaling was cancelled'));
                     else if (ready) finish();

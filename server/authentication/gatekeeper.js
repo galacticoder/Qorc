@@ -11,7 +11,16 @@ import {
     consumeVerifiedAuthChannelBinding,
     sendSecureMessage,
 } from '../messaging/pq-envelope-handler.js';
-import { applyAdaptiveAuthDelay, recordAuthFailure, getAuthPreflightDifficulty, getAuthVerificationDifficulty, recordAuthPreflightCompletion, createPowChallenge, verifyPowSolution, acquireExpensiveAuthVerificationSlot } from '../security/auth-throttle.js';
+import {
+  applyAdaptiveAuthDelay,
+  recordAuthFailure,
+  getAuthPreflightDifficulty,
+  getAuthVerificationDifficulty,
+  recordAuthPreflightCompletion,
+  createPowChallenge,
+  verifyPowSolution,
+  acquireExpensiveAuthVerificationSlot,
+} from '../security/auth-throttle.js';
 import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
@@ -42,16 +51,15 @@ import {
     POW_REQUIRED,
     PROOF_OF_WORK_REQUIRED_MESSAGE
 } from '../config/error-codes.js';
-import { ML_DSA_87_SIGNATURE_BYTES } from '../../shared/crypto-sizes.js';
-import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
-    AUTH_CHANNEL_BINDING_BYTES,
-    HASH_OUTPUT_BYTES,
-    OPAQUE_ELEMENT_BYTES,
-    OPAQUE_SALT_BYTES,
-    PRIVACY_PASS_BLINDED_TOKEN_BYTES,
-    XCHACHA20_NONCE_BYTES
-} from '../utils/crypto-consts.js';
+  ML_DSA_87_SIGNATURE_BYTES,
+  HASH_OUTPUT_BYTES,
+  OPAQUE_ELEMENT_BYTES,
+  OPAQUE_SALT_BYTES,
+  PRIVACY_PASS_BLINDED_TOKEN_BYTES,
+  XCHACHA20_NONCE_BYTES,
+} from '../../shared/crypto-sizes.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
     AccountAuthRefreshDecision,
     clearAccountAuthRefreshState,
@@ -60,6 +68,7 @@ import {
     releaseFailedAccountAuthRefresh,
     reserveAccountAuthRefresh
 } from './account-auth-refresh-state.js';
+import { AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
 
 const GATEKEEPER_CHALLENGE_TTL_MS = 2 * 60_000;
 const GATEKEEPER_PREFLIGHT_TTL_MS = 60_000;

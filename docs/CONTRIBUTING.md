@@ -37,6 +37,27 @@ This project and everyone participating in it is governed by the [Qorc Code of C
     node scripts/start-client.cjs
     ```
 
+### Load Balancer Credentials
+
+The load balancer stores its encrypted admin credentials and command keys in
+`server/config/.haproxy-stats-creds.pqc` and `server/config/.haproxy-keys.enc`.
+These are bind-mounted host files. `node scripts/start-docker.cjs reset`
+removes Docker volumes, not these files or `.env`.
+
+An authentication failure does not necessarily mean the `.env` password is
+wrong. Changing cryptographic protocol labels also makes existing encrypted
+material incompatible. Old protocols are not tried, and startup never silently
+replaces credentials after a verification failure.
+
+To intentionally recreate incompatible admin material, stop all load-balancer
+processes, verify the configured `HAPROXY_STATS_USERNAME` and
+`HAPROXY_STATS_PASSWORD`, and explicitly delete both encrypted files listed
+above. Deleting them permanently discards the old admin material.
+Start the load balancer again with the current code, with both files absent it
+generates a fresh pair using the configured credentials. This replaces the
+load-balancer command keys, not the server identity seeds, user data, or Tor
+hidden-service keys.
+
 ### Desktop Build Modes
 
 `node scripts/start-client.cjs` stages the platform runtimes and PIR sidecar,
@@ -156,6 +177,38 @@ If you find a bug, please create an issue on GitHub. Include:
     the relevant `logs/instance-<id>-logs.txt` file. Simultaneous launcher runs
     automatically receive separate instance IDs, native data, and log files.
     Set `QORC_INSTANCE_ID` only when a stable explicit test identity is needed.
+
+For delayed WebSocket control replies, match the client and server request IDs.
+The client `awaiting-ack` timestamp and server `delivered` result describe local
+socket writes, not end-to-end delivery through Tor. Cover traffic waits for its
+encrypted routing acknowledgement before another cover packet is allowed,
+an empty local writer queue alone does not mean the Tor stream has drained.
+Heartbeats also wait for their reply before sending another probe, subject to
+their bounded liveness deadline. Cover packets yield to outstanding discovery,
+credential and routing requests. Control requests have separate 60-second local
+send and 180-second response budgets, cancellation aborts queued sends and
+connection replacement releases the response wait immediately.
+Retries of a prepared discovery publication or one credential replacement keep
+their request ID so a delayed reply can complete the retry. The signed server
+clock advances through handshake confirmation using elapsed monotonic time.
+Server `[PQ-CELL]` diagnostics distinguish expired timestamps, replayed counters,
+and malformed metadata without relaxing authentication or the replay window.
+Delayed authenticated-request warnings are limited to once per minute per socket
+and report only the signal type, age, and cell count.
+
+All peer signal types await the existing bounded P2P dial and authenticated
+handshake before attempting direct delivery. A pending dial does not trigger
+server routing after a short grace period. A genuine P2P failure is logged with
+its signal type and cause before encrypted server delivery is attempted.
+
+For anonymous HTTP failures, distinguish the upload/header phase from response
+body progress. The native SOCKS upload regression reproduces Linux OS error 110
+from the HTTP library's default 30-second TCP user timeout and verifies that the
+configured client survives backpressure without bypassing Tor. The app's request
+deadline still cancels a permanently stalled upload. Downloads use a shared
+three-minute idle budget on both ends, including the server's underlying socket,
+and retain size-based total deadlines. Server write callbacks cover 16 KiB at a
+time so a partially draining 64 KiB batch is not treated as entirely idle.
 
 ## Suggesting Enhancements
 

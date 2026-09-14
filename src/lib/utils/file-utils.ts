@@ -16,8 +16,8 @@ import {
   MAX_VOICE_NOTE_BYTES,
   MAX_VOICE_NOTE_DURATION_SECONDS,
 } from '../constants';
-import { asciiMatchesAt, bytesMatchAt, readUint32BE } from './byte-utils';
 import { tryDecodeCanonicalBase64 } from '../cryptography/base64';
+import { asciiMatchesAt, bytesMatchAt, readUint32BE } from '../../../shared/bytes.js';
 
 const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_DIMENSION = 8192;

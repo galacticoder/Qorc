@@ -6,10 +6,10 @@ import { Base64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
 import { computeBlindUserId } from '../utils/auth-utils';
 import {
-    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-    PRIVATE_AUTH_PIR_RECORD_BYTES,
-    PRIVATE_AUTH_PIR_RECORD_MAGIC
+  PRIVATE_AUTH_ANONYMITY_SET_SIZE,
+  PRIVATE_AUTH_PIR_RECORD_BYTES,
 } from '../../../shared/private-auth-protocol.js';
+import { PRIVATE_AUTH_PIR_RECORD_MAGIC } from '../../../shared/protocol-keys.js';
 
 // OPAQUE configuration
 const OPAQUE_CONFIG = {

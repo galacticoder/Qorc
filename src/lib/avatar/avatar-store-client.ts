@@ -23,7 +23,6 @@ import {
 } from '../security/local-account-scope';
 import { createAnonymousHttpPow } from '../cryptography/anonymous-http-pow';
 import { wipeAnonymousToken } from '../cryptography/wipe';
-import { DISCOVERY_EPOCH_DURATION_MS } from '../constants';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEYS } from '../database/storage-keys';
@@ -33,6 +32,8 @@ import {
     AVATAR_BLOB_PUT_AUDIENCE,
     AVATAR_POOL_AUDIENCE,
 } from '../config/audiences';
+import { Base64 } from '../cryptography/base64';
+import { DISCOVERY_EPOCH_DURATION_MS } from '../../../shared/discovery-constants.js';
 
 const AVATAR_COVER_TOTAL_IDS = 10;
 const AVATAR_BLOB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -123,7 +124,7 @@ function randomCoverPurbBase64(): string {
         for (let off = 0; off < buf.length; off += 65536) {
             crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, buf.length)));
         }
-        return PostQuantumUtils.uint8ArrayToBase64(buf);
+        return Base64.arrayBufferToBase64(buf);
     } finally {
         buf.fill(0);
     }
@@ -312,7 +313,7 @@ export function isValidAvatarRef(value: unknown, expectedHash: string): value is
     try {
         const key = PostQuantumUtils.base64ToUint8Array(ref.keyB64);
         try {
-            return key.length === 32 && PostQuantumUtils.uint8ArrayToBase64(key) === ref.keyB64;
+            return key.length === 32 && Base64.arrayBufferToBase64(key) === ref.keyB64;
         } finally {
             key.fill(0);
         }

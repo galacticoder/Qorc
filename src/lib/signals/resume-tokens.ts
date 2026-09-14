@@ -8,7 +8,7 @@ import {
 } from '../cryptography/privacy-pass-client';
 import { getCurrentLocalAccountScope, getCurrentServerScope } from '../security/local-account-scope';
 import { tokenVault } from '../database/token-vault';
-import { wipeAnonymousToken as wipeToken, wipeAnonymousTokens as wipeTokens } from '../cryptography/wipe';
+import { wipeAnonymousToken, wipeAnonymousTokens } from '../cryptography/wipe';
 import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
 const RESUME_POOL_TARGET = 32;
@@ -54,18 +54,18 @@ async function loadPool(serverScope: string, lifecycleToken: object): Promise<An
   try {
     assertCurrentPoolLifecycle(lifecycleToken);
   } catch (error) {
-    wipeTokens(tokens);
+    wipeAnonymousTokens(tokens);
     throw error;
   }
   if (tokens.length > RESUME_POOL_TARGET) {
-    for (const token of tokens) wipeToken(token);
+    for (const token of tokens) wipeAnonymousToken(token);
     throw new Error('Resume-token pool exceeds its fixed capacity');
   }
   const usable = tokens.filter((token) =>
     !token.pending && isPrivacyPassTokenUsable(token, ACCOUNT_AUTH_PURPOSE)
   );
   for (const token of tokens) {
-    if (!usable.includes(token)) wipeToken(token);
+    if (!usable.includes(token)) wipeAnonymousToken(token);
   }
   return usable;
 }
@@ -130,8 +130,8 @@ export async function replenishResumePool(username: string, replaceExisting = fa
 
       await savePool([...existing, ...reserved], serverScope, lifecycleToken);
     } finally {
-      wipeTokens(existing);
-      wipeTokens(reserved);
+      wipeAnonymousTokens(existing);
+      wipeAnonymousTokens(reserved);
     }
   });
 }
@@ -146,7 +146,7 @@ export async function hasResumeToken(username: string): Promise<boolean> {
     try {
       return tokens.length > 0;
     } finally {
-      wipeTokens(tokens);
+      wipeAnonymousTokens(tokens);
     }
   });
 }
@@ -171,7 +171,7 @@ export async function takeResumeRedemption(username: string): Promise<Record<str
     } finally {
       redemption?.nullifier.fill(0);
       redemption?.mac.fill(0);
-      wipeTokens(tokens);
+      wipeAnonymousTokens(tokens);
     }
   });
 }

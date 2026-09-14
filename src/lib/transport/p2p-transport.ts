@@ -8,7 +8,7 @@ import { p2p, events } from '../tauri-bindings';
 import { UnlistenFn } from '@tauri-apps/api/event';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumSignature } from '../cryptography/signature';
-import { tryDecodeCanonicalBase64 } from '../cryptography/base64';
+import { tryDecodeCanonicalBase64, Base64 } from '../cryptography/base64';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { PQNoiseSession, clearP2PNoiseHandshakeReplayCache } from './pq-noise-session';
@@ -22,6 +22,8 @@ import {
     isKeyTransparencyPeerRevoked
 } from '../key-transparency/verified-material';
 import { blockingSystem } from '../blocking/blocking-system';
+import { loadAuthorizedPeerCertificate } from '../p2p/authorized-peer-certificate';
+import { keyTransparencyClient } from '../key-transparency/client';
 import {
     SecureTransport,
     SecureConnection,
@@ -41,17 +43,20 @@ import {
     NOISE_FRAME_OVERHEAD
 } from './secure-transport';
 import {
-    AUTH_USERNAME_REGEX,
-    P2P_CONNECTION_TIMEOUT_MS,
-    P2P_KEEPALIVE_INTERVAL_MS,
-    P2P_MAX_STREAMS_PER_CONNECTION,
-    P2P_STUCK_STATE_TIMEOUT_MS,
-    PQ_KEM_CIPHERTEXT_SIZE,
-    PQ_KEM_PUBLIC_KEY_SIZE,
-    PQ_SIG_PUBLIC_KEY_SIZE,
-    PQ_SIG_SIGNATURE_SIZE,
-    X25519_PUBLIC_KEY_LENGTH
+  AUTH_USERNAME_REGEX,
+  P2P_CONNECTION_TIMEOUT_MS,
+  P2P_KEEPALIVE_INTERVAL_MS,
+  P2P_MAX_STREAMS_PER_CONNECTION,
+  P2P_STUCK_STATE_TIMEOUT_MS,
 } from '../constants';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  X25519_KEY_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { SecureMemory } from '../cryptography/secure-memory';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -624,7 +629,6 @@ class P2PConnection implements SecureConnection {
     private pendingIncomingFrames: Uint8Array[] = [];
     private readonly MAX_PENDING_INCOMING_FRAMES = 8;
     private pendingIncomingFrameBytes: number = 0;
-    private readonly MAX_PENDING_INCOMING_BYTES = NATIVE_BRIDGE_RAW_MAX_BYTES;
     private pendingIncomingFlushDraining: boolean = false;
 
     private bridgeMessageQueue: Array<{ message: any; checkHandshake: boolean; byteLength: number }> = [];
@@ -681,7 +685,7 @@ class P2PConnection implements SecureConnection {
             this.session &&
             existingSigningKey?.length &&
             nextSigningKey?.length &&
-            !PostQuantumUtils.timingSafeEqual(existingSigningKey, nextSigningKey)
+            !SecureMemory.constantTimeCompare(existingSigningKey, nextSigningKey)
         ) {
             const error = new Error('Peer certificate does not match the active handshake');
             (error as any).code = 'PEER_HANDSHAKE_SIGNING_KEY_MISMATCH';
@@ -772,19 +776,31 @@ class P2PConnection implements SecureConnection {
         let connectPromise!: Promise<void>;
         const adoptionVersion = this.incomingAdoptionVersion;
         connectPromise = (async () => {
-            try {
-                this.setState('connecting');
-                await this.connectViaP2PBridge();
-            } catch (error) {
-                if (
-                    this.incomingAdoptionVersion !== adoptionVersion &&
-                    this.role === 'responder'
-                ) {
-                    await this.waitForIncomingAdoption(this.incomingAdoptionVersion);
-                    return;
+            let unsubscribe = () => { };
+            const established = new Promise<void>((resolve) => {
+                unsubscribe = this.onStateChange((state) => {
+                    if (state === 'connected' && this.session) resolve();
+                });
+            });
+            const attempt = (async () => {
+                try {
+                    this.setState('connecting');
+                    await this.connectViaP2PBridge();
+                } catch (error) {
+                    if (
+                        this.incomingAdoptionVersion !== adoptionVersion &&
+                        this.role === 'responder'
+                    ) {
+                        await this.waitForIncomingAdoption(this.incomingAdoptionVersion);
+                        return;
+                    }
+                    throw error;
                 }
-                throw error;
+            })();
+            try {
+                await Promise.race([attempt, established]);
             } finally {
+                unsubscribe();
                 if (this.connectPromise === connectPromise) {
                     this.connectPromise = null;
                 }
@@ -1053,7 +1069,6 @@ class P2PConnection implements SecureConnection {
     private async connectViaP2PBridge(): Promise<void> {
         const endpoint = parseP2PEndpointUrl(this.peerIdentity.endpointUrl);
         if (!endpoint) {
-            this.owner.requestPeerCertificate(this.peerId);
             const error = new Error(`No P2P endpoint available for ${this.peerId}`);
             (error as any).code = 'P2P_ENDPOINT_MISSING';
             throw error;
@@ -1211,7 +1226,7 @@ class P2PConnection implements SecureConnection {
             }
 
             const expectedSignerPublicKey = this.peerIdentity?.dilithiumPublicKey;
-            if (expectedSignerPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE) {
+            if (expectedSignerPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES) {
                 throw new Error('Certified peer signing key unavailable');
             }
             phase = 'verify-response';
@@ -1287,7 +1302,7 @@ class P2PConnection implements SecureConnection {
         const toBase64 = (value?: Uint8Array | string): string | undefined => {
             if (!value) return undefined;
             if (typeof value === 'string') return value;
-            return PostQuantumUtils.uint8ArrayToBase64(value);
+            return Base64.arrayBufferToBase64(value);
         };
 
         return {
@@ -1334,12 +1349,12 @@ class P2PConnection implements SecureConnection {
             return tryDecodeCanonicalBase64(value, 'P2P handshake field', { exactBytes: expectedLength });
         };
 
-        const kemCiphertext = toUint8(json.kemCiphertext, PQ_KEM_CIPHERTEXT_SIZE);
-        const ephemeralX25519Public = toUint8(json.ephemeralX25519Public, X25519_PUBLIC_KEY_LENGTH);
-        const signature = toUint8(json.signature, PQ_SIG_SIGNATURE_SIZE);
-        const signerPublicKey = toUint8(json.signerPublicKey, PQ_SIG_PUBLIC_KEY_SIZE);
+        const kemCiphertext = toUint8(json.kemCiphertext, ML_KEM_1024_CIPHERTEXT_BYTES);
+        const ephemeralX25519Public = toUint8(json.ephemeralX25519Public, X25519_KEY_BYTES);
+        const signature = toUint8(json.signature, ML_DSA_87_SIGNATURE_BYTES);
+        const signerPublicKey = toUint8(json.signerPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
         const ephemeralKyberPublic = json.type === 'init'
-            ? toUint8(json.ephemeralKyberPublic, PQ_KEM_PUBLIC_KEY_SIZE)
+            ? toUint8(json.ephemeralKyberPublic, ML_KEM_1024_PUBLIC_KEY_BYTES)
             : null;
         if (!kemCiphertext || !ephemeralX25519Public || !signature || !signerPublicKey || (json.type === 'init' && !ephemeralKyberPublic)) {
             kemCiphertext?.fill(0);
@@ -1375,7 +1390,7 @@ class P2PConnection implements SecureConnection {
             from: this.localPeerId,
             to: this.peerId,
             sessionId: this.session.getBindingId(),
-            frame: PostQuantumUtils.uint8ArrayToBase64(frame)
+            frame: Base64.arrayBufferToBase64(frame)
         };
     }
 
@@ -1415,7 +1430,7 @@ class P2PConnection implements SecureConnection {
             if (
                 frame.byteLength < 44 ||
                 frame.byteLength > 512 ||
-                PostQuantumUtils.uint8ArrayToBase64(frame) !== json.frame
+                Base64.arrayBufferToBase64(frame) !== json.frame
             ) {
                 frame.fill(0);
                 return null;
@@ -1839,13 +1854,13 @@ class P2PConnection implements SecureConnection {
     private queueIncomingFrame(data: Uint8Array): void {
         if (!data || data.length === 0) return;
         const incomingSize = data.byteLength;
-        if (incomingSize > this.MAX_PENDING_INCOMING_BYTES) {
+        if (incomingSize > NATIVE_BRIDGE_RAW_MAX_BYTES) {
             void this.close('P2P pre-session frame exceeds queue limit').catch(() => { });
             return;
         }
         if (
             this.pendingIncomingFrames.length >= this.MAX_PENDING_INCOMING_FRAMES ||
-            this.pendingIncomingFrameBytes + incomingSize > this.MAX_PENDING_INCOMING_BYTES
+            this.pendingIncomingFrameBytes + incomingSize > NATIVE_BRIDGE_RAW_MAX_BYTES
         ) {
             void this.close('P2P pre-session queue overflow').catch(() => { });
             return;
@@ -2121,7 +2136,7 @@ class P2PConnection implements SecureConnection {
             const expectedSignerPublicKey = this.peerIdentity?.dilithiumPublicKey;
             if (
                 this.peerIdentity?.certVerified !== true ||
-                expectedSignerPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE
+                expectedSignerPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES
             ) {
                 throw new Error('Certified peer signing key unavailable');
             }
@@ -2810,6 +2825,7 @@ export class P2PTransport implements SecureTransport {
     private inboundBridgeEventCount = 0;
     private inboundBridgeEventBytes = 0;
     private readonly MAX_INBOUND_BRIDGE_EVENT_BYTES = 16 * 1024 * 1024;
+    private pendingInboundTrust = new Map<string, { connectionToken: number; cancel: () => void }>();
 
     private isOpaqueBridgeId(value: string): boolean {
         return BRIDGE_PEER_ID_REGEX.test(value);
@@ -2826,9 +2842,9 @@ export class P2PTransport implements SecureTransport {
             !AUTH_USERNAME_REGEX.test(peerId) ||
             identity?.certVerified !== true ||
             identity.username !== peerId ||
-            identity.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-            identity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
-            identity.x25519PublicKey?.length !== X25519_PUBLIC_KEY_LENGTH ||
+            identity.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+            identity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
+            identity.x25519PublicKey?.length !== X25519_KEY_BYTES ||
             !Number.isSafeInteger(identity.certificateExpiresAt)
         ) {
             throw new Error('Invalid certified P2P peer identity');
@@ -2855,9 +2871,9 @@ export class P2PTransport implements SecureTransport {
     private validateInitialization(options: TransportInitOptions): void {
         if (
             !AUTH_USERNAME_REGEX.test(options.localUsername) ||
-            options.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-            options.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
-            options.x25519PublicKey?.length !== X25519_PUBLIC_KEY_LENGTH ||
+            options.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+            options.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
+            options.x25519PublicKey?.length !== X25519_KEY_BYTES ||
             typeof options.signTranscript !== 'function' ||
             typeof options.respondToHandshake !== 'function'
         ) {
@@ -2881,7 +2897,7 @@ export class P2PTransport implements SecureTransport {
             );
             kemCiphertext = encapsulated.ciphertext;
             encapsulatedSecret = encapsulated.sharedSecret;
-            testX25519Secret = PostQuantumRandom.randomBytes(X25519_PUBLIC_KEY_LENGTH);
+            testX25519Secret = PostQuantumRandom.randomBytes(X25519_KEY_BYTES);
             testX25519Public = new Uint8Array(x25519.getPublicKey(testX25519Secret));
             expectedX25519Secret = new Uint8Array(
                 x25519.getSharedSecret(testX25519Secret, options.x25519PublicKey)
@@ -2889,12 +2905,12 @@ export class P2PTransport implements SecureTransport {
             const nativeSecrets = await options.respondToHandshake(kemCiphertext, testX25519Public);
             decapsulatedSecret = nativeSecrets.pqSecret;
             nativeX25519Secret = nativeSecrets.x25519Secret;
-            if (!PostQuantumUtils.timingSafeEqual(encapsulatedSecret, decapsulatedSecret)) {
+            if (!SecureMemory.constantTimeCompare(encapsulatedSecret, decapsulatedSecret)) {
                 throw new Error('Local ML-KEM public/private key mismatch');
             }
             if (
-                nativeX25519Secret.length !== X25519_PUBLIC_KEY_LENGTH ||
-                !PostQuantumUtils.timingSafeEqual(expectedX25519Secret, nativeX25519Secret)
+                nativeX25519Secret.length !== X25519_KEY_BYTES ||
+                !SecureMemory.constantTimeCompare(expectedX25519Secret, nativeX25519Secret)
             ) {
                 throw new Error('Local X25519 public/private key mismatch');
             }
@@ -2925,7 +2941,7 @@ export class P2PTransport implements SecureTransport {
             return false;
         }
         const same = (left: Uint8Array, right: Uint8Array): boolean =>
-            left.length === right.length && PostQuantumUtils.timingSafeEqual(left, right);
+            left.length === right.length && SecureMemory.constantTimeCompare(left, right);
         return same(this.ownKeys.kyberPublicKey, options.kyberPublicKey) &&
             same(this.ownKeys.dilithiumPublicKey, options.dilithiumPublicKey) &&
             same(this.ownKeys.x25519PublicKey, options.x25519PublicKey);
@@ -2963,11 +2979,11 @@ export class P2PTransport implements SecureTransport {
             if (from !== candidate.from || !AUTH_USERNAME_REGEX.test(from)) return null;
             if (candidate.to !== this.localPeerId) return null;
             const fields: Array<[unknown, number]> = [
-                [candidate.ephemeralKyberPublic, PQ_KEM_PUBLIC_KEY_SIZE],
-                [candidate.kemCiphertext, PQ_KEM_CIPHERTEXT_SIZE],
-                [candidate.ephemeralX25519Public, X25519_PUBLIC_KEY_LENGTH],
-                [candidate.signature, PQ_SIG_SIGNATURE_SIZE],
-                [candidate.signerPublicKey, PQ_SIG_PUBLIC_KEY_SIZE]
+                [candidate.ephemeralKyberPublic, ML_KEM_1024_PUBLIC_KEY_BYTES],
+                [candidate.kemCiphertext, ML_KEM_1024_CIPHERTEXT_BYTES],
+                [candidate.ephemeralX25519Public, X25519_KEY_BYTES],
+                [candidate.signature, ML_DSA_87_SIGNATURE_BYTES],
+                [candidate.signerPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES]
             ];
             for (const [value, length] of fields) {
                 const decoded = tryDecodeCanonicalBase64(value, 'P2P certificate field', { exactBytes: length });
@@ -3134,6 +3150,64 @@ export class P2PTransport implements SecureTransport {
         }
     }
 
+    private restoreInboundPeerTrust(data: any, peer: string): void {
+        const { connectionId, connectionToken } = data;
+        const existing = this.pendingInboundTrust.get(connectionId);
+        if (existing?.connectionToken === connectionToken) return;
+        existing?.cancel();
+        if (this.pendingInboundTrust.size >= 32) {
+            void p2p.disconnect(connectionId, connectionToken).catch(() => { });
+            return;
+        }
+        const generation = this.lifecycleGeneration;
+        const account = this.localUsername;
+        const identityEpoch = this.getPeerIdentityEpoch(peer);
+        let event: any = data;
+        const pending = {
+            connectionToken,
+            cancel: () => {
+                clearTimeout(timer);
+                event = null;
+                if (this.pendingInboundTrust.get(connectionId) === pending) {
+                    this.pendingInboundTrust.delete(connectionId);
+                }
+                this.releaseUnauthenticatedBridgeAlias(connectionId);
+            },
+        };
+        const timer = setTimeout(() => {
+            pending.cancel();
+            void p2p.disconnect(connectionId, connectionToken).catch(() => { });
+        }, 10_000);
+        this.pendingInboundTrust.set(connectionId, pending);
+        const isCurrent = () => (
+            this.pendingInboundTrust.get(connectionId) === pending &&
+            generation === this.lifecycleGeneration &&
+            this.initialized &&
+            !!this.ownKeys &&
+            this.localUsername === account &&
+            this.getPeerIdentityEpoch(peer) === identityEpoch &&
+            !isKeyTransparencyPeerRevoked(account, peer) &&
+            blockingSystem.isEnforcementReady() &&
+            !blockingSystem.isBlockedSync(peer)
+        );
+        void (async () => {
+            await keyTransparencyClient.restorePersistedAuthorizations(account);
+            if (!isCurrent()) return;
+            const cert = await loadAuthorizedPeerCertificate(account, peer, isCurrent);
+            if (!cert || !isCurrent()) return;
+            await this.registerPeerCertificate(peer, cert);
+            if (!isCurrent()) return;
+            const resumed = event;
+            pending.cancel();
+            this.enqueueInboundBridgeEvent(resumed, generation);
+        })().catch(() => { }).finally(() => {
+            if (this.pendingInboundTrust.get(connectionId) === pending) {
+                pending.cancel();
+                void p2p.disconnect(connectionId, connectionToken).catch(() => { });
+            }
+        });
+    }
+
     private processInboundBridgeEvent(data: any): void {
         if (!data || typeof data !== 'object') return;
         const connectionId = (data as any).connectionId;
@@ -3145,6 +3219,10 @@ export class P2PTransport implements SecureTransport {
         if (!isNativeConnectionToken(connectionToken)) {
             console.warn('[P2P-RECV] DROP: event missing connection generation', { type: data?.type });
             return;
+        }
+        if (data.type === '__p2p_closed') {
+            const pending = this.pendingInboundTrust.get(connectionId);
+            if (pending?.connectionToken === connectionToken) pending.cancel();
         }
         const inferredHandshakePeer = data.type === 'message'
             ? this.inferPeerFromHandshakeInit(data.data)
@@ -3216,7 +3294,7 @@ export class P2PTransport implements SecureTransport {
                     const readiness = this.connectionReadinessScore(existingForPeer);
                     const keepExistingGeneration =
                         readiness >= 4 ||
-                        this.localPeerId < inferredPeer;
+                        (existingForPeer.hasNativeConnectionGeneration() && this.localPeerId < inferredPeer);
                     if (readiness > 0 && keepExistingGeneration) {
                         if (!this.authenticatedBridgeAliases.has(connectionId)) {
                             this.usernameAliases.delete(connectionId);
@@ -3258,10 +3336,7 @@ export class P2PTransport implements SecureTransport {
                         this.knownPeerIdentities.get(peerKey) ||
                         this.knownPeerIdentities.get(inferredPeer);
                     if (!knownIdentity?.certVerified) {
-                        if (!this.authenticatedBridgeAliases.has(connectionId)) {
-                            this.usernameAliases.delete(connectionId);
-                        }
-                        void p2p.disconnect(connectionId, connectionToken).catch(() => { });
+                        this.restoreInboundPeerTrust(data, inferredPeer);
                         return;
                     }
                     let identity: PeerIdentity;
@@ -3794,6 +3869,8 @@ export class P2PTransport implements SecureTransport {
                 entry.data = null;
             }
             this.inboundBridgeEventQueue = [];
+            for (const pending of this.pendingInboundTrust.values()) pending.cancel();
+            this.pendingInboundTrust.clear();
             this.connectSingleflight.clear();
             this.peerCertRequestTimestamps.clear();
             this.peerCertRequestWindow = { startedAt: 0, count: 0 };
@@ -3956,10 +4033,14 @@ export class P2PTransport implements SecureTransport {
     }
 
     hasAuthenticatedEndpoint(peerId: string): boolean {
+        return this.getAuthenticatedEndpoint(peerId) !== null;
+    }
+
+    getAuthenticatedEndpoint(peerId: string): string | null {
         const alias = this.usernameAliases.get(peerId);
         const endpoint = this.authenticatedEndpoints.get(peerId) ||
             (alias ? this.authenticatedEndpoints.get(alias) : undefined);
-        return !!endpoint?.endpointUrl;
+        return endpoint?.endpointUrl ?? null;
     }
 
     async registerPeerCertificate(peerId: string, certificate: PeerCertificateBundle): Promise<void> {
@@ -4007,9 +4088,9 @@ export class P2PTransport implements SecureTransport {
         const existing = this.knownPeerIdentities.get(peerId) ||
             (alias ? this.knownPeerIdentities.get(alias) : undefined);
         const identityChanged = existing?.certVerified === true && (
-            !PostQuantumUtils.timingSafeEqual(existing.kyberPublicKey, nextIdentity.kyberPublicKey) ||
-            !PostQuantumUtils.timingSafeEqual(existing.dilithiumPublicKey, nextIdentity.dilithiumPublicKey) ||
-            !PostQuantumUtils.timingSafeEqual(existing.x25519PublicKey, nextIdentity.x25519PublicKey)
+            !SecureMemory.constantTimeCompare(existing.kyberPublicKey, nextIdentity.kyberPublicKey) ||
+            !SecureMemory.constantTimeCompare(existing.dilithiumPublicKey, nextIdentity.dilithiumPublicKey) ||
+            !SecureMemory.constantTimeCompare(existing.x25519PublicKey, nextIdentity.x25519PublicKey)
         );
         if (identityChanged) {
             peerIdentityEpoch = this.bumpPeerIdentityEpoch(peerId);
@@ -4082,7 +4163,7 @@ export class P2PTransport implements SecureTransport {
         const existing = this.knownPeerIdentities.get(peerId) || (alias ? this.knownPeerIdentities.get(alias) : undefined);
         const cachedEndpoint = this.authenticatedEndpoints.get(peerId) ||
             (alias ? this.authenticatedEndpoints.get(alias) : undefined);
-        const certifiedKeyBase64 = PostQuantumUtils.uint8ArrayToBase64(certifiedIdentity.dilithiumPublicKey);
+        const certifiedKeyBase64 = Base64.arrayBufferToBase64(certifiedIdentity.dilithiumPublicKey);
         const authenticatedEndpointUrl = cachedEndpoint &&
             cachedEndpoint.signerPublicKeyBase64 === certifiedKeyBase64
             ? cachedEndpoint.endpointUrl || undefined
@@ -4145,7 +4226,7 @@ export class P2PTransport implements SecureTransport {
         const signerPublicKey = tryDecodeCanonicalBase64(
             signerPublicKeyBase64,
             'P2P endpoint signer public key',
-            { exactBytes: PQ_SIG_PUBLIC_KEY_SIZE }
+            { exactBytes: ML_DSA_87_PUBLIC_KEY_BYTES }
         );
         if (!signerPublicKey) return false;
         const alias = this.usernameAliases.get(peerId);
@@ -4153,7 +4234,7 @@ export class P2PTransport implements SecureTransport {
             (alias ? this.knownPeerIdentities.get(alias) : undefined);
         if (existing?.certVerified && (
             existing.username !== peerId ||
-            !PostQuantumUtils.timingSafeEqual(existing.dilithiumPublicKey, signerPublicKey)
+            !SecureMemory.constantTimeCompare(existing.dilithiumPublicKey, signerPublicKey)
         )) {
             signerPublicKey.fill(0);
             return false;

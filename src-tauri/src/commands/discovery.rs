@@ -1,12 +1,13 @@
 //! Isolated binary transport for discovery, OPRF, and key transparency
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
     State,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Channel, InvokeBody, JavaScriptChannelId, Request, Response},
 };
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -129,9 +130,107 @@ const RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES: usize = 2 * 1024 * 1024;
 const RESPONSE_PIR_BYTES: usize = 1024 * 1024;
 const RESPONSE_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 const RESPONSE_DISCOVERY_BYTES: usize = 8912896;
-const MAX_RESPONSE_BYTES: usize = RESPONSE_DISCOVERY_BYTES;
-const ANONYMOUS_TRANSPORT_LANE_HEADER: &str = "x-qorc-anonymous-transport-lane";
-const PIR_TRANSPORT_LANE: &str = "pir";
+const HEADER_TIMEOUT: Duration = Duration::from_secs(180);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(150);
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+const MIN_BODY_TIMEOUT: Duration = Duration::from_secs(300);
+const MIN_TRANSFER_BYTES_PER_SECOND: usize = 16 * 1024;
+const REQUEST_ID_HEADER: &str = "x-qorc-anonymous-request-id";
+const RESPONSE_BYTES_HEADER: &str = "x-qorc-anonymous-response-bytes";
+const PROGRESS_HEADER: &str = "x-qorc-anonymous-progress";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnonymousDownloadProgress {
+    received_bytes: usize,
+    total_bytes: usize,
+}
+
+struct RequestCancellation {
+    id: Uuid,
+    receiver: watch::Receiver<bool>,
+}
+
+type CancellationEntries = HashMap<Uuid, (Instant, watch::Sender<bool>)>;
+static REQUEST_CANCELLATIONS: LazyLock<Mutex<CancellationEntries>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn prune_cancellations(entries: &mut CancellationEntries) {
+    entries.retain(|_, (at, sender)| {
+        sender.receiver_count() > 0 || at.elapsed() < Duration::from_secs(60)
+    });
+}
+
+impl RequestCancellation {
+    fn register(id: Uuid) -> Result<Self, String> {
+        let mut entries = REQUEST_CANCELLATIONS
+            .lock()
+            .map_err(|_| "anonymous cancellation unavailable")?;
+        prune_cancellations(&mut entries);
+        if let Some((_, sender)) = entries.get(&id) {
+            if sender.receiver_count() == 0 && *sender.borrow() {
+                entries.remove(&id);
+                return Err("anonymous request cancelled".to_string());
+            }
+            return Err("duplicate anonymous request id".to_string());
+        }
+        if entries.len() >= 128 {
+            return Err("anonymous request limit reached".to_string());
+        }
+        let (sender, receiver) = watch::channel(false);
+        entries.insert(id, (Instant::now(), sender));
+        Ok(Self { id, receiver })
+    }
+}
+
+impl Drop for RequestCancellation {
+    fn drop(&mut self) {
+        if let Ok(mut entries) = REQUEST_CANCELLATIONS.lock() {
+            entries.remove(&self.id);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn cancel_anonymous_api_fetch(request_id: String) -> Result<(), String> {
+    let id = Uuid::parse_str(&request_id).map_err(|_| "invalid anonymous request id")?;
+    let mut entries = REQUEST_CANCELLATIONS
+        .lock()
+        .map_err(|_| "anonymous cancellation unavailable")?;
+    prune_cancellations(&mut entries);
+    if let Some((_, sender)) = entries.get(&id) {
+        sender.send_replace(true);
+    } else {
+        if entries.len() >= 128 {
+            return Err("anonymous cancellation limit reached".to_string());
+        }
+        let (sender, _) = watch::channel(true);
+        entries.insert(id, (Instant::now(), sender));
+    }
+    Ok(())
+}
+
+fn uses_bulk_transport(request_bytes: usize, response_bytes: usize) -> bool {
+    request_bytes > REQUEST_SMALL_BYTES || response_bytes > RESPONSE_SMALL_BYTES
+}
+
+fn body_timeout(bytes: usize) -> Duration {
+    MIN_BODY_TIMEOUT.max(
+        BODY_IDLE_TIMEOUT
+            + Duration::from_secs(bytes.div_ceil(MIN_TRANSFER_BYTES_PER_SECOND) as u64),
+    )
+}
+
+fn anonymous_http_client_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .no_gzip()
+        .connect_timeout(CONNECT_TIMEOUT);
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    let builder = builder.tcp_user_timeout(None);
+    builder
+}
 
 async fn wait_for_bootstrap(tor: &Arc<crate::tor::TorManager>) -> bool {
     if tor.is_ready().await {
@@ -174,6 +273,33 @@ fn valid_response_size(size: usize) -> bool {
 async fn read_capped_body(
     response: &mut reqwest::Response,
     max_bytes: usize,
+    progress: Option<&Channel<AnonymousDownloadProgress>>,
+) -> Result<Vec<u8>, String> {
+    read_capped_body_with_timeouts(
+        response,
+        max_bytes,
+        BODY_IDLE_TIMEOUT,
+        body_timeout(max_bytes),
+        |received_bytes| {
+            if let Some(progress) = progress
+                && let Err(error) = progress.send(AnonymousDownloadProgress {
+                    received_bytes,
+                    total_bytes: max_bytes,
+                })
+            {
+                tracing::debug!(%error, "Anonymous download progress receiver unavailable");
+            }
+        },
+    )
+    .await
+}
+
+async fn read_capped_body_with_timeouts(
+    response: &mut reqwest::Response,
+    max_bytes: usize,
+    idle_timeout: Duration,
+    total_timeout: Duration,
+    mut on_progress: impl FnMut(usize),
 ) -> Result<Vec<u8>, String> {
     if response
         .content_length()
@@ -182,12 +308,40 @@ async fn read_capped_body(
         return Err("anonymous response too large".to_string());
     }
 
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    let started_at = Instant::now();
+    let deadline = tokio::time::Instant::now() + total_timeout;
+    let mut body = Vec::with_capacity(max_bytes);
+    let mut last_progress = None;
+    on_progress(0);
+    loop {
+        let chunk = tokio::time::timeout_at(
+            deadline.min(tokio::time::Instant::now() + idle_timeout),
+            response.chunk(),
+        )
         .await
-        .map_err(|_| "failed to read anonymous response".to_string())?
-    {
+        .map_err(|_| {
+            let reason = if tokio::time::Instant::now() >= deadline {
+                "transfer deadline"
+            } else {
+                "read idle timeout"
+            };
+            format!(
+                "anonymous response {reason}: received {}/{} bytes after {} ms",
+                body.len(),
+                max_bytes,
+                started_at.elapsed().as_millis()
+            )
+        })?
+        .map_err(|error| {
+            format!(
+                "anonymous response read failed: received {}/{} bytes after {} ms: {:?}",
+                body.len(),
+                max_bytes,
+                started_at.elapsed().as_millis(),
+                error.without_url()
+            )
+        })?;
+        let Some(chunk) = chunk else { break };
         if body
             .len()
             .checked_add(chunk.len())
@@ -196,6 +350,14 @@ async fn read_capped_body(
             return Err("anonymous response too large".to_string());
         }
         body.extend_from_slice(&chunk);
+        let now = Instant::now();
+        if body.len() == max_bytes
+            || last_progress
+                .is_none_or(|at: Instant| now.duration_since(at) >= Duration::from_millis(100))
+        {
+            on_progress(body.len());
+            last_progress = Some(now);
+        }
     }
     Ok(body)
 }
@@ -267,9 +429,48 @@ pub async fn prewarm_anonymous_transport(state: State<'_, AppState>) -> Result<b
 
 #[tauri::command]
 pub async fn anonymous_api_fetch(
+    webview: tauri::Webview,
     state: State<'_, AppState>,
     request: Request<'_>,
 ) -> Result<Response, String> {
+    let progress = request
+        .headers()
+        .get(PROGRESS_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<JavaScriptChannelId>().ok())
+                .map(|channel| channel.channel_on::<_, AnonymousDownloadProgress>(webview))
+                .ok_or_else(|| "invalid anonymous progress channel".to_string())
+        })
+        .transpose()?;
+    let id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| "invalid anonymous request id".to_string())?;
+    let mut cancellation = RequestCancellation::register(id)?;
+    tokio::select! {
+        biased;
+        _ = cancellation.receiver.wait_for(|cancelled| *cancelled) => Err("anonymous request cancelled".to_string()),
+        result = execute_anonymous_api_fetch(state, request, progress.as_ref()) => result,
+    }
+}
+
+async fn execute_anonymous_api_fetch(
+    state: State<'_, AppState>,
+    request: Request<'_>,
+    progress: Option<&Channel<AnonymousDownloadProgress>>,
+) -> Result<Response, String> {
+    let expected_response_bytes = request
+        .headers()
+        .get(RESPONSE_BYTES_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|size| valid_response_size(*size) && *size <= RESPONSE_DISCOVERY_BYTES)
+        .ok_or_else(|| "invalid expected anonymous response size".to_string())?;
     let request_body = match request.body() {
         InvokeBody::Raw(body) if valid_request_size(body.len()) => body.clone(),
         _ => return Err("invalid anonymous request body".to_string()),
@@ -281,11 +482,7 @@ pub async fn anonymous_api_fetch(
         .filter(|value| !value.is_empty() && value.len() <= 2048)
         .ok_or_else(|| "invalid expected server URL".to_string())?
         .to_string();
-    let use_pir_tor = request
-        .headers()
-        .get(ANONYMOUS_TRANSPORT_LANE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == PIR_TRANSPORT_LANE);
+    let use_bulk_tor = uses_bulk_transport(request_body.len(), expected_response_bytes);
 
     let storage = state
         .inner()
@@ -305,7 +502,7 @@ pub async fn anonymous_api_fetch(
         .host_str()
         .map(|host| host.to_ascii_lowercase().ends_with(".onion"))
         .unwrap_or(false);
-    let tor = if use_pir_tor {
+    let tor = if use_bulk_tor {
         let primary = state
             .inner()
             .tor_manager()
@@ -314,18 +511,12 @@ pub async fn anonymous_api_fetch(
             .inner()
             .pir_tor_manager()
             .ok_or_else(|| "PIR Tor manager not initialized".to_string())?;
-        if !pir_tor.is_running() {
-            pir_tor
-                .mirror_configuration_from(&primary)
-                .await
-                .map_err(|_| "PIR Tor configuration unavailable".to_string())?;
-            let started = pir_tor
-                .start()
-                .await
-                .map_err(|_| "PIR Tor transport failed to start".to_string())?;
-            if !started.success {
-                return Err("PIR Tor transport failed to start".to_string());
-            }
+        let started = pir_tor
+            .ensure_started_from(&primary)
+            .await
+            .map_err(|_| "Bulk Tor transport failed to start".to_string())?;
+        if !started.success {
+            return Err("Bulk Tor transport failed to start".to_string());
         }
         if !wait_for_bootstrap(&pir_tor).await {
             return Err("PIR Tor transport unavailable".to_string());
@@ -354,12 +545,7 @@ pub async fn anonymous_api_fetch(
     let proxy = reqwest::Proxy::all(&proxy_url)
         .map_err(|_| "failed to configure anonymous transport".to_string())?
         .basic_auth(&isolation_user, "isolate");
-    let mut builder = reqwest::Client::builder()
-        .proxy(proxy)
-        .redirect(reqwest::redirect::Policy::none())
-        .http1_only()
-        .no_gzip()
-        .timeout(Duration::from_secs(180));
+    let mut builder = anonymous_http_client_builder().proxy(proxy);
     if host_is_onion {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -367,18 +553,36 @@ pub async fn anonymous_api_fetch(
         .build()
         .map_err(|_| "failed to create anonymous transport".to_string())?;
 
-    let mut response = client
-        .post(api_url)
-        .header("Accept", "application/octet-stream")
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .header(reqwest::header::CACHE_CONTROL, "no-store")
-        .header(reqwest::header::CONNECTION, "close")
-        .body(request_body)
-        .send()
-        .await
-        .map_err(|_| "anonymous request failed".to_string())?;
+    let started_at = Instant::now();
+    let request_bytes = request_body.len();
+    let mut response = tokio::time::timeout(
+        HEADER_TIMEOUT,
+        client
+            .post(api_url)
+            .header("Accept", "application/octet-stream")
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CACHE_CONTROL, "no-store")
+            .header(reqwest::header::CONNECTION, "close")
+            .body(request_body)
+            .send(),
+    )
+    .await
+    .map_err(|_| format!(
+        "anonymous response header timeout after {} ms (request bytes: {request_bytes})",
+        started_at.elapsed().as_millis(),
+    ))?
+    .map_err(|error| {
+        format!(
+            "anonymous request failed before response headers after {} ms (request bytes: {request_bytes}): {:?}",
+            started_at.elapsed().as_millis(),
+            error.without_url()
+        )
+    })?;
     if !response.status().is_success() {
-        return Err("anonymous request failed".to_string());
+        return Err(format!(
+            "anonymous request failed with HTTP status {}",
+            response.status()
+        ));
     }
     if response
         .headers()
@@ -389,10 +593,20 @@ pub async fn anonymous_api_fetch(
         return Err("invalid anonymous response".to_string());
     }
 
-    let response_body = read_capped_body(&mut response, MAX_RESPONSE_BYTES).await?;
+    tracing::info!(
+        expected_bytes = expected_response_bytes,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "[ANON-HTTP] response headers received"
+    );
+    let response_body = read_capped_body(&mut response, expected_response_bytes, progress).await?;
     if !valid_response_size(response_body.len()) {
         return Err("invalid anonymous response".to_string());
     }
+    tracing::info!(
+        received_bytes = response_body.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "[ANON-HTTP] response body received"
+    );
     let current_server_url = storage
         .get_text("server_url")
         .await
@@ -407,7 +621,311 @@ pub async fn anonymous_api_fetch(
 
 #[cfg(test)]
 mod tests {
-    use super::{anonymous_api_url, valid_request_size, valid_response_size};
+    #[test]
+    fn bulk_transport_is_selected_from_transfer_size() {
+        assert!(!super::uses_bulk_transport(64 * 1024, 64 * 1024));
+        for response_bytes in [
+            512 * 1024,
+            1024 * 1024,
+            2 * 1024 * 1024,
+            4 * 1024 * 1024,
+            8912896,
+        ] {
+            assert!(super::uses_bulk_transport(64 * 1024, response_bytes));
+        }
+        assert!(super::uses_bulk_transport(512 * 1024, 64 * 1024));
+        assert!(super::uses_bulk_transport(2 * 1024 * 1024, 1024 * 1024));
+    }
+
+    use super::{
+        REQUEST_CANCELLATIONS, RESPONSE_DISCOVERY_BYTES, RequestCancellation, anonymous_api_url,
+        body_timeout, cancel_anonymous_api_fetch, read_capped_body_with_timeouts,
+        valid_request_size, valid_response_size,
+    };
+    #[cfg(target_os = "linux")]
+    use super::{REQUEST_PIR_BYTES, anonymous_http_client_builder};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use uuid::Uuid;
+
+    #[cfg(target_os = "linux")]
+    async fn paused_socks_upload(
+        builder: reqwest::ClientBuilder,
+        pause: Duration,
+        deadline: Duration,
+    ) -> Result<reqwest::Response, String> {
+        crate::install_rustls_provider();
+        let listener = tokio::net::TcpSocket::new_v4().unwrap();
+        listener.set_recv_buffer_size(16 * 1024).unwrap();
+        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listener.listen(1).unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut greeting = [0u8; 2];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 5);
+            let mut methods = vec![0u8; greeting[1] as usize];
+            socket.read_exact(&mut methods).await.unwrap();
+            assert!(methods.contains(&2));
+            socket.write_all(&[5, 2]).await.unwrap();
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 1);
+            let mut username = vec![0u8; greeting[1] as usize];
+            socket.read_exact(&mut username).await.unwrap();
+            assert_eq!(username, b"isolated-test");
+            let password_len = socket.read_u8().await.unwrap() as usize;
+            let mut password = vec![0u8; password_len];
+            socket.read_exact(&mut password).await.unwrap();
+            assert_eq!(password, b"isolate");
+            socket.write_all(&[1, 0]).await.unwrap();
+            let mut connect = [0u8; 4];
+            socket.read_exact(&mut connect).await.unwrap();
+            assert_eq!(connect, [5, 1, 0, 3]);
+            let target_len = socket.read_u8().await.unwrap() as usize;
+            let mut target = vec![0u8; target_len];
+            socket.read_exact(&mut target).await.unwrap();
+            assert_eq!(target, b"test.onion");
+            assert_eq!(socket.read_u16().await.unwrap(), 80);
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+            tokio::time::sleep(pause).await;
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let count = socket.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    return;
+                }
+                received.extend_from_slice(&buffer[..count]);
+                if let Some(header_end) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                {
+                    if received.len() >= header_end + 4 + REQUEST_PIR_BYTES {
+                        assert_eq!(received.len(), header_end + 4 + REQUEST_PIR_BYTES);
+                        assert!(received[header_end + 4..].iter().all(|byte| *byte == 7));
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
+                .await
+                .unwrap();
+        });
+        let proxy = reqwest::Proxy::all(format!("socks5h://{address}"))
+            .unwrap()
+            .basic_auth("isolated-test", "isolate");
+        let result = tokio::time::timeout(
+            deadline,
+            builder
+                .proxy(proxy)
+                .build()
+                .unwrap()
+                .post("http://test.onion/api/anonymous")
+                .body(vec![7u8; REQUEST_PIR_BYTES])
+                .send(),
+        )
+        .await;
+        proxy_task.abort();
+        if let Err(error) = proxy_task.await {
+            assert!(error.is_cancelled(), "{error}");
+        }
+        result
+            .map_err(|_| "request deadline".to_string())?
+            .map_err(|error| format!("{:?}", error.without_url()))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tor_backpressure_cannot_trigger_reqwests_hidden_tcp_deadline() {
+        let pause = Duration::from_secs(35);
+        let deadline = Duration::from_secs(50);
+        let (old, current) = tokio::join!(
+            paused_socks_upload(reqwest::Client::builder(), pause, deadline),
+            paused_socks_upload(anonymous_http_client_builder(), pause, deadline),
+        );
+        let old_error = old.unwrap_err();
+        assert!(old_error.contains("code: 110"), "{old_error}");
+        let response = current.expect("a progressing PIR upload survives SOCKS backpressure");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"test");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stalled_socks_upload_remains_bounded_by_the_request_deadline() {
+        let result = paused_socks_upload(
+            anonymous_http_client_builder(),
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "request deadline");
+    }
+
+    async fn streaming_response(
+        delay: Duration,
+        total_timeout: Option<Duration>,
+    ) -> reqwest::Response {
+        crate::install_rustls_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for byte in b"test" {
+                tokio::time::sleep(delay).await;
+                if socket.write_all(&[*byte]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut builder = reqwest::Client::builder().no_proxy();
+        if let Some(timeout) = total_timeout {
+            builder = builder.timeout(timeout);
+        }
+        builder
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn progressing_body_outlives_old_request_deadline() {
+        let mut old =
+            streaming_response(Duration::from_millis(50), Some(Duration::from_millis(90))).await;
+        let old_error = read_capped_body_with_timeouts(
+            &mut old,
+            4,
+            Duration::from_millis(300),
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(old_error.contains("received"));
+        let mut response = streaming_response(Duration::from_millis(50), None).await;
+        let mut received = Vec::new();
+        let body = read_capped_body_with_timeouts(
+            &mut response,
+            4,
+            Duration::from_millis(300),
+            Duration::from_secs(2),
+            |bytes| received.push(bytes),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, b"test");
+        assert_eq!(received.first(), Some(&0));
+        assert_eq!(received.last(), Some(&4));
+        assert!(received.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn configured_body_idle_budget_admits_a_tor_stall() {
+        let mut response = streaming_response(Duration::from_millis(127), None).await;
+        let body = read_capped_body_with_timeouts(
+            &mut response,
+            4,
+            super::BODY_IDLE_TIMEOUT / 1000,
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(body, b"test");
+    }
+
+    #[tokio::test]
+    async fn stalled_body_reports_progress_and_idle_failure() {
+        let mut response = streaming_response(Duration::from_secs(2), None).await;
+        let error = read_capped_body_with_timeouts(
+            &mut response,
+            4,
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("read idle timeout"));
+        assert!(error.contains("received 0/4 bytes"));
+    }
+
+    #[tokio::test]
+    async fn trickling_body_still_has_a_finite_transfer_deadline() {
+        let mut response = streaming_response(Duration::from_millis(50), None).await;
+        let error = read_capped_body_with_timeouts(
+            &mut response,
+            4,
+            Duration::from_millis(300),
+            Duration::from_millis(90),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("transfer deadline"));
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_reading() {
+        let mut response = streaming_response(Duration::from_millis(50), None).await;
+        let error = read_capped_body_with_timeouts(
+            &mut response,
+            3,
+            Duration::from_millis(300),
+            Duration::from_secs(2),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "anonymous response too large");
+    }
+
+    #[test]
+    fn discovery_budget_accounts_for_the_padded_response_size() {
+        assert_eq!(
+            body_timeout(RESPONSE_DISCOVERY_BYTES),
+            Duration::from_secs(724)
+        );
+        assert_eq!(body_timeout(64 * 1024), Duration::from_secs(300));
+        assert_eq!(body_timeout(512 * 1024), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn cancellation_before_registration_prevents_the_request() {
+        let id = Uuid::new_v4();
+        cancel_anonymous_api_fetch(id.to_string()).unwrap();
+        assert!(
+            matches!(RequestCancellation::register(id), Err(error) if error == "anonymous request cancelled")
+        );
+        assert!(!REQUEST_CANCELLATIONS.lock().unwrap().contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_active_native_request_and_cleans_up() {
+        let id = Uuid::new_v4();
+        let mut cancellation = RequestCancellation::register(id).unwrap();
+        assert!(RequestCancellation::register(id).is_err());
+        cancel_anonymous_api_fetch(id.to_string()).unwrap();
+        cancellation
+            .receiver
+            .wait_for(|cancelled| *cancelled)
+            .await
+            .unwrap();
+        drop(cancellation);
+        assert!(!REQUEST_CANCELLATIONS.lock().unwrap().contains_key(&id));
+    }
 
     #[test]
     fn anonymous_url_is_fixed_and_requires_wss() {

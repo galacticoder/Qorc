@@ -7,6 +7,13 @@ import { computeBlindUserId } from "../../lib/utils/auth-utils";
 import { shouldAttemptDiscovery } from "../../lib/utils/discovery-utils";
 import { SecureDB } from "../../lib/database/secureDB";
 import { keyTransparencyClient } from "../../lib/key-transparency/client";
+import {
+  DiscoveryProgressStream,
+  observeDiscoveryProgress,
+  trackDiscoveryProgress,
+  type DiscoveryLookupOptions,
+  type DiscoveryProgressObserver,
+} from "../../lib/discovery/progress";
 import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX } from "../../lib/constants";
 import {
   dispatchSafeEvent,
@@ -51,7 +58,7 @@ export const useConversations = (
   messages: Message[],
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   secureDB: SecureDB | null,
-  findUser: (handle: string) => Promise<any>,
+  findUser: (handle: string, options?: DiscoveryLookupOptions) => Promise<any>,
   initialDataLoaded: boolean
 ) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -93,6 +100,7 @@ export const useConversations = (
     username: string,
     autoSelect: boolean = true,
     signal?: AbortSignal,
+    onProgress?: DiscoveryProgressObserver,
   ): Promise<Conversation | null> => {
     const owner = currentUsername;
     const generation = accountGenerationRef.current;
@@ -134,7 +142,7 @@ export const useConversations = (
 
     const pendingMap = pendingAddsRef.current;
     if (pendingMap.has(discoveryId)) {
-      return waitForConversationDiscovery(pendingMap.get(discoveryId)!, signal);
+      return waitForConversationDiscovery(observeDiscoveryProgress(pendingMap.get(discoveryId)!, onProgress), signal);
     }
 
     const now = Date.now();
@@ -148,6 +156,7 @@ export const useConversations = (
     }
     rateState.count += 1;
 
+    const progress = new DiscoveryProgressStream();
     const operation = (async (): Promise<Conversation | null> => {
       try {
         if (!isCurrent()) throw new Error('Account changed during conversation discovery');
@@ -162,7 +171,7 @@ export const useConversations = (
         if (!shouldAttemptDiscovery(conversationUsername)) {
           throw new Error('User not eligible for discovery');
         }
-        const material = await waitForConversationDiscovery(findUser(conversationUsername), signal);
+        const material = await waitForConversationDiscovery(findUser(conversationUsername, { onProgress: progress.report }), signal);
         if (signal?.aborted) throw conversationDiscoveryAbortError();
         if (!isCurrent()) throw new Error('Account changed during conversation discovery');
         if (!material) throw new Error('User not found in discovery billboard');
@@ -195,8 +204,9 @@ export const useConversations = (
     wrapped = operation.finally(() => {
       if (pendingMap.get(discoveryId) === wrapped) pendingMap.delete(discoveryId);
     });
+    trackDiscoveryProgress(wrapped, progress);
     pendingMap.set(discoveryId, wrapped);
-    return wrapped;
+    return observeDiscoveryProgress(wrapped, onProgress);
   }, [conversations, currentUsername, selectedConversation, users, secureDB, findUser]);
 
   const getLatestConversationTimestamp = useCallback((username: string) => {

@@ -3,18 +3,18 @@ import { fileURLToPath } from 'node:url';
 import { blake3 } from '@noble/hashes/blake3.js';
 
 import {
-  SPOOL_PIR_LAYOUT,
   SPOOL_PIR_RECORD_BYTES,
   SPOOL_PIR_ROW_BYTES,
-  splitSpoolPirRecord
+  splitSpoolPirRecord,
 } from '../../shared/spool-pir-layout.js';
 import { SPOOL_TAG_INDEX_POLL_INTERVAL_MS } from '../../shared/spool-tag-protocol.js';
 import { INVALID_PIR_EPOCH_MESSAGE } from '../config/error-codes.js';
 import { readGlobalMixPirSnapshot } from '../routing/blind-router.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
-import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
 import { PirWorkerClient } from './pir-worker-client.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { HASH_OUTPUT_BYTES } from '../../shared/crypto-sizes.js';
+import { SPOOL_PIR_LAYOUT } from '../../shared/protocol-keys.js';
 
 const PIR_SNAPSHOT_MIN_REFRESH_MS = Math.max(SPOOL_TAG_INDEX_POLL_INTERVAL_MS, 180_000);
 

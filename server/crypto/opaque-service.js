@@ -13,24 +13,20 @@ import {
 import { throwIfAuthConnectionClosed } from '../authentication/auth-utils.js';
 import { decodeCanonicalBase64, UTF8_ENCODER } from '../utils/encoding.js';
 import {
-    ML_DSA_87_PUBLIC_KEY_BYTES as ML_DSA_PUBLIC_KEY_BYTES,
-    ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_BYTES
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  HASH_OUTPUT_BYTES,
+  OPAQUE_ELEMENT_BYTES,
+  OPAQUE_ENVELOPE_BYTES,
+  OPAQUE_NONCE_BYTES,
+  OPAQUE_SALT_BYTES,
+  OPAQUE_SECRET_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
-import {
-    OPAQUE_AUTH_SIGNATURE_CONTEXT,
-    PRIVATE_AUTH_ANONYMITY_SET_SIZE
-} from '../../shared/private-auth-protocol.js';
+import { PRIVATE_AUTH_ANONYMITY_SET_SIZE } from '../../shared/private-auth-protocol.js';
 
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
-import {
-    AUTH_CHANNEL_BINDING_BYTES,
-    HASH_OUTPUT_BYTES,
-    OPAQUE_ELEMENT_BYTES,
-    OPAQUE_ENVELOPE_BYTES,
-    OPAQUE_NONCE_BYTES,
-    OPAQUE_SALT_BYTES,
-    OPAQUE_SECRET_KEY_BYTES
-} from '../utils/crypto-consts.js';
+import { OPAQUE_AUTH_SIGNATURE_CONTEXT } from '../../shared/protocol-keys.js';
+import { AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
 
 const PRIVATE_AUTH_RECORD_KEYS = Object.freeze(['authPublicKey', 'envelope', 'salt']);
 const GATEKEEPER_RECORD_KEYS = Object.freeze(['authPublicKey', 'envelope', 'oprfSecretKey', 'salt']);
@@ -52,7 +48,7 @@ function createDummyAuthPublicKey() {
 }
 
 function verifyMlDsaSignature(signature, message, publicKey) {
-    if (signature.length !== ML_DSA_SIGNATURE_BYTES || publicKey.length !== ML_DSA_PUBLIC_KEY_BYTES) return false;
+    if (signature.length !== ML_DSA_87_SIGNATURE_BYTES || publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES) return false;
     return ml_dsa87.verify(signature, message, publicKey);
 }
 
@@ -139,7 +135,7 @@ export class OPAQUEServer {
         try {
             if (
                 envelopeBytes.length !== OPAQUE_ENVELOPE_BYTES ||
-                authPublicKeyBytes.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                authPublicKeyBytes.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
                 saltBytes.length !== OPAQUE_SALT_BYTES
             ) {
                 throw new Error('Invalid private-auth registration record');
@@ -177,7 +173,7 @@ export class OPAQUEServer {
         let salt = null;
         try {
             envelope = decodeCanonicalBase64(record.envelope, OPAQUE_ENVELOPE_BYTES);
-            authPublicKey = decodeCanonicalBase64(record.authPublicKey, ML_DSA_PUBLIC_KEY_BYTES);
+            authPublicKey = decodeCanonicalBase64(record.authPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
             salt = decodeCanonicalBase64(record.salt, OPAQUE_SALT_BYTES);
             return { envelope, authPublicKey, salt };
         } catch (error) {
@@ -232,7 +228,7 @@ export class OPAQUEServer {
             if (
                 blinded.length !== OPAQUE_ELEMENT_BYTES ||
                 secretKey.length !== OPAQUE_SECRET_KEY_BYTES ||
-                authPublicKey.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                authPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
                 envelope.length !== OPAQUE_ENVELOPE_BYTES ||
                 salt.length !== OPAQUE_SALT_BYTES
             ) {
@@ -303,8 +299,8 @@ export class OPAQUEServer {
         let transcript = null;
         try {
             if (
-                signature.length !== ML_DSA_SIGNATURE_BYTES ||
-                publicKey.length !== ML_DSA_PUBLIC_KEY_BYTES ||
+                signature.length !== ML_DSA_87_SIGNATURE_BYTES ||
+                publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
                 nonce.length !== OPAQUE_NONCE_BYTES ||
                 channelBinding.length !== AUTH_CHANNEL_BINDING_BYTES
             ) {
@@ -339,7 +335,7 @@ export class OPAQUEServer {
     ) {
         const records = Array.isArray(anonymitySetRecords) ? anonymitySetRecords : [];
         const anonymitySetSize = this.getAnonymitySetSize();
-        let authPublicKeys = new Uint8Array(anonymitySetSize * ML_DSA_PUBLIC_KEY_BYTES);
+        let authPublicKeys = new Uint8Array(anonymitySetSize * ML_DSA_87_PUBLIC_KEY_BYTES);
         let signature = null;
         let transcript = null;
         let nonce = null;
@@ -351,7 +347,7 @@ export class OPAQUEServer {
             }
             for (let slot = 0; slot < anonymitySetSize; slot += 1) {
                 throwIfAuthOperationAborted(signal);
-                authPublicKeys.set(this.#dummyAuthPublicKey, slot * ML_DSA_PUBLIC_KEY_BYTES);
+                authPublicKeys.set(this.#dummyAuthPublicKey, slot * ML_DSA_87_PUBLIC_KEY_BYTES);
             }
 
             const seenSlots = new Uint8Array(anonymitySetSize);
@@ -372,7 +368,7 @@ export class OPAQUEServer {
                 }
                 const parsed = this.#parseStoredRecord(rawRecord);
                 try {
-                    authPublicKeys.set(parsed.authPublicKey, slot * ML_DSA_PUBLIC_KEY_BYTES);
+                    authPublicKeys.set(parsed.authPublicKey, slot * ML_DSA_87_PUBLIC_KEY_BYTES);
                 } finally {
                     parsed.envelope.fill(0);
                     parsed.authPublicKey.fill(0);
@@ -381,9 +377,9 @@ export class OPAQUEServer {
             }
 
             signature = this.#Uint8Array(clientAuthMessage);
-            if (signature.length !== ML_DSA_SIGNATURE_BYTES) {
+            if (signature.length !== ML_DSA_87_SIGNATURE_BYTES) {
                 signature.fill(0);
-                signature = new Uint8Array(ML_DSA_SIGNATURE_BYTES);
+                signature = new Uint8Array(ML_DSA_87_SIGNATURE_BYTES);
                 invalidInput = true;
             }
             nonce = this.#Uint8Array(serverNonce);

@@ -93,7 +93,8 @@ test('server Redis consumers use the Redis key registry', () => {
   for (const name of ['CLUSTER_CONFIG', 'CLUSTER_HEALTH', 'CLUSTER_KEYS', 'CLUSTER_MESSAGES', 'CLUSTER_PENDING', 'CLUSTER_TOKENS']) {
     assert.equal(cluster.includes(`REDIS_KEYS.${name}`), true);
   }
-  assert.match(throttle, /KEY_PREFIX = REDIS_KEYS\.AUTH_FAILURE_PREFIX/);
-  assert.match(throttle, /PIR_KEY_PREFIX = REDIS_KEYS\.AUTH_PIR_REQUEST_PREFIX/);
+  assert.match(throttle, /recordEvent\(REDIS_KEYS\.AUTH_FAILURE_PREFIX\)/);
+  assert.match(throttle, /getRecentCount\(REDIS_KEYS\.AUTH_PIR_REQUEST_PREFIX\)/);
+  assert.doesNotMatch(throttle, /const \w+ = REDIS_KEYS\./);
   assert.equal((listener.match(/REDIS_KEYS\.LB_ENCRYPTED_COMMAND_CHANNEL/g) || []).length, 3);
 });

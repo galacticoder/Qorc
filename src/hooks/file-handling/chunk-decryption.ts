@@ -1,11 +1,11 @@
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import { MAX_CHUNK_SIZE_BYTES } from "../../lib/constants";
 import { decodeBase64Chunk, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { resolveTrustedPeerDilithiumPublicKey, type PeerIdentityLike } from "../../lib/utils/signal-bundle-utils";
 import { HashingService } from '../../lib/cryptography/hashing';
 import { isHybridEnvelopeWireShape } from '../../lib/transport/envelope-shape';
 import { SignalType } from '../../lib/types/signal-types';
+import { DEFAULT_CHUNK_SIZE_SMALL } from '../../lib/constants';
 
 export interface DecryptionContext {
   fileEntry: ExtendedFileState;
@@ -31,7 +31,7 @@ export const parseEncryptedChunk = (chunkData: string): { iv: Uint8Array; authTa
 
     if (!(iv instanceof Uint8Array && authTag instanceof Uint8Array && encrypted instanceof Uint8Array) ||
       iv.length !== 12 || authTag.length !== 16 || encrypted.length === 0 ||
-      encrypted.length > MAX_CHUNK_SIZE_BYTES + 1024) {
+      encrypted.length > DEFAULT_CHUNK_SIZE_SMALL + 1024) {
       iv?.fill(0);
       authTag?.fill(0);
       encrypted?.fill(0);

@@ -2,11 +2,9 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
-import { Message } from "./types";
-import { ChatInput } from "../ChatInput.tsx";
+import { Message, MessageReply } from './types';
 import { User } from "./UserList";
 import { SignalType } from "@/lib/types/signal-types.ts";
-import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/message-handling/useTypingIndicator";
 import { useHasPendingIdentityChange } from "@/lib/security/identity-change-store";
 import {
@@ -18,7 +16,6 @@ import { keyTransparencyEpochStartMs } from "@/lib/key-transparency/crypto";
 import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
-import type { CallState } from "../../../lib/transport/secure-calling-service";
 import { ConversationOptionsPopover } from './ConversationOptionsPopover';
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { useBlockStatus } from '@/hooks/useBlockStatus';
@@ -35,6 +32,8 @@ import type { HybridKeys } from "../../../lib/types/auth-types";
 import type { SecureDB } from '../../../lib/database/secureDB';
 import { toast } from 'sonner';
 import { ConversationSkeleton } from '../../ui/ViewSkeletons';
+import { ChatInput } from '../ChatInput';
+import type { CallState } from '../../../lib/types/calling-types';
 
 interface ChatInterfaceProps {
   readonly onSendMessage: (

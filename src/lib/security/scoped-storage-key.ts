@@ -1,5 +1,5 @@
 import { blake3 } from '@noble/hashes/blake3.js';
-import { bytesToHex } from '../utils/byte-utils';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export function deriveScopedStorageKey(
   prefix: string,

@@ -2,7 +2,6 @@ import * as argon2 from "argon2-wasm";
 import { ml_kem1024 as kyber } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { PrivacyPassOps, OPAQUEOps } from './crypto-ops';
-import { PQ_AEAD_NONCE_SIZE, PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_MAC_SIZE } from '../constants';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -11,6 +10,7 @@ import { validateWorkerRequest } from './worker-request-validation';
 import { isPlainObject } from '../sanitizers';
 import { wipeBinaryValues } from './wipe';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { AES_GCM_NONCE_BYTES, HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 
 let AUTH_TOKEN = new Uint8Array(32);
 crypto.getRandomValues(AUTH_TOKEN);
@@ -205,8 +205,8 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
 
         const encNonce: Uint8Array = (data.explicitNonce && data.explicitNonce instanceof Uint8Array)
           ? data.explicitNonce
-          : crypto.getRandomValues(new Uint8Array(PQ_AEAD_NONCE_SIZE));
-        if (encNonce.length !== PQ_AEAD_NONCE_SIZE) throw new Error(`Nonce must be ${PQ_AEAD_NONCE_SIZE} bytes`);
+          : crypto.getRandomValues(new Uint8Array(POST_QUANTUM_AEAD_NONCE_BYTES));
+        if (encNonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) throw new Error(`Nonce must be ${POST_QUANTUM_AEAD_NONCE_BYTES} bytes`);
 
         const encAad = (data.additionalData && data.additionalData instanceof Uint8Array)
           ? data.additionalData : new Uint8Array(0);
@@ -231,11 +231,11 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
           encMacKeyInput.set(data.key, macLabel.length);
           encMacKey = blake3(encMacKeyInput, { dkLen: 32 });
 
-          encIv = encNonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
+          encIv = encNonce.slice(0, AES_GCM_NONCE_BYTES);
           const encCipher = gcm(encK1, encIv, encAad);
           encLayer1 = encCipher.encrypt(data.plaintext);
 
-          encXnonce = encNonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
+          encXnonce = encNonce.slice(AES_GCM_NONCE_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES);
           const encXchacha = xchacha20poly1305(encK2, encXnonce, encAad);
           encLayer2 = encXchacha.encrypt(encLayer1);
 
@@ -266,8 +266,8 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
       case 'aead.decrypt': {
         if (!data.ciphertext || !(data.ciphertext instanceof Uint8Array)) throw new Error('ciphertext required');
         if (!data.key || !(data.key instanceof Uint8Array) || data.key.length !== 32) throw new Error('32-byte key required');
-        if (!data.nonce || !(data.nonce instanceof Uint8Array) || data.nonce.length !== PQ_AEAD_NONCE_SIZE) throw new Error(`Nonce must be ${PQ_AEAD_NONCE_SIZE} bytes`);
-        if (!data.tag || !(data.tag instanceof Uint8Array) || data.tag.length !== PQ_AEAD_MAC_SIZE) throw new Error(`Tag must be ${PQ_AEAD_MAC_SIZE} bytes`);
+        if (!data.nonce || !(data.nonce instanceof Uint8Array) || data.nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) throw new Error(`Nonce must be ${POST_QUANTUM_AEAD_NONCE_BYTES} bytes`);
+        if (!data.tag || !(data.tag instanceof Uint8Array) || data.tag.length !== HASH_OUTPUT_BYTES) throw new Error(`Tag must be ${HASH_OUTPUT_BYTES} bytes`);
 
         const decAad = (data.additionalData && data.additionalData instanceof Uint8Array)
           ? data.additionalData : new Uint8Array(0);
@@ -307,12 +307,12 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
           if (diff !== 0) throw new Error('BLAKE3 MAC verification failed');
 
           // XChaCha20-Poly1305 decrypt
-          decXnonce = data.nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
+          decXnonce = data.nonce.slice(AES_GCM_NONCE_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES);
           const decXchacha = xchacha20poly1305(decK2, decXnonce, decAad);
           decLayer1 = decXchacha.decrypt(data.ciphertext);
 
           // AES-256-GCM decrypt
-          decIv = data.nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
+          decIv = data.nonce.slice(0, AES_GCM_NONCE_BYTES);
           const decDecipher = gcm(decK1, decIv, decAad);
           decPlaintext = decDecipher.decrypt(decLayer1);
 

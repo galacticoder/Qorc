@@ -2,11 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { EventType } from '../../lib/types/event-types';
 import type { HybridKeys } from '../../lib/types/p2p-types';
 import { toUint8 } from '../../lib/utils/p2p-utils';
-import {
-  PQ_KEM_PUBLIC_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE,
-  X25519_PUBLIC_KEY_LENGTH,
-} from '../../lib/constants';
 import { account } from '../../lib/tauri-bindings';
 import type { HybridKeys as NativeAccountPublicKeys } from '../../lib/types/auth-types';
 import type { HybridPublicKeys } from '../../lib/types/message-sending-types';
@@ -15,6 +10,7 @@ import {
   isKeyTransparencyPeerRevoked,
 } from '../../lib/key-transparency/verified-material';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
+import { ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES, X25519_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 // Refs and state from authentication needed to derive P2P keys
 export interface AuthenticationRefs {
@@ -56,11 +52,11 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
     ) {
       return null;
     }
-    const kyberPublic = toUint8(keys.kyber.publicKeyBase64, PQ_KEM_PUBLIC_KEY_SIZE);
-    const x25519Public = toUint8(keys.x25519.publicKeyBase64, X25519_PUBLIC_KEY_LENGTH);
+    const kyberPublic = toUint8(keys.kyber.publicKeyBase64, ML_KEM_1024_PUBLIC_KEY_BYTES);
+    const x25519Public = toUint8(keys.x25519.publicKeyBase64, X25519_KEY_BYTES);
     if (
-      kyberPublic?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-      x25519Public?.length !== X25519_PUBLIC_KEY_LENGTH
+      kyberPublic?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+      x25519Public?.length !== X25519_KEY_BYTES
     ) {
       kyberPublic?.fill(0);
       x25519Public?.fill(0);
@@ -79,8 +75,8 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
       },
       signTranscript: async (message: Uint8Array): Promise<Uint8Array> => {
         const signatureBase64 = await account.sign(PROTOCOL_KEYS.P2P_TRANSCRIPT_SIGNING, message);
-        const signature = toUint8(signatureBase64, PQ_SIG_SIGNATURE_SIZE);
-        if (!signature || signature.length !== PQ_SIG_SIGNATURE_SIZE) {
+        const signature = toUint8(signatureBase64, ML_DSA_87_SIGNATURE_BYTES);
+        if (!signature || signature.length !== ML_DSA_87_SIGNATURE_BYTES) {
           signature?.fill(0);
           throw new Error('Native P2P signer returned an invalid signature');
         }

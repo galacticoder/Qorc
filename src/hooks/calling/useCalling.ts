@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
+import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
@@ -27,6 +27,7 @@ import {
   type ActionRefs,
   type ActionSetters
 } from './actions';
+import { CallState } from '../../lib/types/calling-types';
 
 // Hook wiring the calling service to the auth context
 export const useCalling = (

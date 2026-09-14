@@ -3,9 +3,6 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
 import {
   KEY_TRANSPARENCY_DELTA_MAX_EPOCHS,
-  KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES,
-  KEY_TRANSPARENCY_ML_DSA_SECRET_KEY_BYTES,
-  KEY_TRANSPARENCY_PROTOCOL,
   encodeKeyTransparencySignaturePayload,
   isKeyTransparencyHash,
   isKeyTransparencyLabel,
@@ -20,6 +17,8 @@ import {
 } from '../database/key-transparency-db.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { SHA3_512_ALGORITHM } from '../utils/crypto-consts.js';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SECRET_KEY_BYTES } from '../../shared/crypto-sizes.js';
+import { KEY_TRANSPARENCY_PROTOCOL } from '../../shared/protocol-keys.js';
 
 const SIGNER_KEY_ID_DOMAIN = Buffer.from(PROTOCOL_KEYS.KEY_TRANSPARENCY_SIGNER_KEY, 'utf8');
 
@@ -81,9 +80,9 @@ function signHead(state, epoch) {
 export async function initializeKeyTransparencyService(dilithiumKeyPair) {
   if (
     !(dilithiumKeyPair?.publicKey instanceof Uint8Array) ||
-    dilithiumKeyPair.publicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES ||
+    dilithiumKeyPair.publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
     !(dilithiumKeyPair?.secretKey instanceof Uint8Array) ||
-    dilithiumKeyPair.secretKey.length !== KEY_TRANSPARENCY_ML_DSA_SECRET_KEY_BYTES
+    dilithiumKeyPair.secretKey.length !== ML_DSA_87_SECRET_KEY_BYTES
   ) throw new Error('Key-transparency ML-DSA signer is invalid');
   await initializeKeyTransparencyDatabase();
   signerPublicKey = dilithiumKeyPair.publicKey;

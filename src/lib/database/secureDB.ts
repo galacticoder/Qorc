@@ -3,9 +3,8 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { hasValidMessageControlState, isControlOperationId } from '../messages/message-controls';
 import type { Message } from '../../components/chat/messaging/types';
 import { validateFileData, mergeReceipts } from '../utils/database-utils';
-import { isCanonicalAuthUsername as isCanonicalUsername, sanitizeMessageId } from '../sanitizers';
+import { isCanonicalAuthUsername, sanitizeMessageId } from '../sanitizers';
 import { normalizeKnownUsers } from './known-users';
-import { bytesToHex } from '../utils/byte-utils';
 import { EphemeralConfig,
    EphemeralData,
    StoredMessage,
@@ -13,18 +12,19 @@ import { EphemeralConfig,
    ConversationMetadata
   } from '../types/database-types';
 import {
-   SECURE_DB_MAX_VALUE_SIZE,
-   SECURE_DB_MAX_FILE_SIZE,
-   SECURE_DB_MIN_CLEANUP_INTERVAL,
-   SECURE_DB_MAX_EPHEMERAL_BATCH,
-   HYBRID_ENVELOPE_MAX_AGE_MS,
+  SECURE_DB_MAX_VALUE_SIZE,
+  SECURE_DB_MIN_CLEANUP_INTERVAL,
+  SECURE_DB_MAX_EPHEMERAL_BATCH,
+  HYBRID_ENVELOPE_MAX_AGE_MS,
   MAX_KNOWN_PEERS,
   CONVERSATION_SEGMENT_SIZE,
   CONVERSATION_WARM_MESSAGE_COUNT,
   MAX_CONVERSATION_STORED_MESSAGES,
- } from '../constants';
+  MAX_FILE_SIZE,
+} from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEYS, STORAGE_PREFIXES, STORAGE_STORES } from './storage-keys';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 const MAX_CONVERSATION_INPUT_MESSAGES = MAX_CONVERSATION_STORED_MESSAGES + 500;
 const MAX_CONVERSATION_BATCH_WRITES = 511;
@@ -90,7 +90,7 @@ export class SecureDB {
   private kvViewPromise: Promise<SQLiteKV> | null = null;
 
   constructor(username: string, accountScope: string, ephemeralConfig?: Partial<EphemeralConfig>) {
-    if (!isCanonicalUsername(username)) throw new Error('Invalid username');
+    if (!isCanonicalAuthUsername(username)) throw new Error('Invalid username');
     if (!/^[a-f0-9]{64}$/.test(accountScope)) throw new Error('Invalid database account scope');
     this.username = username;
     this.accountScope = accountScope;
@@ -307,7 +307,7 @@ export class SecureDB {
     const peer = key.slice(0, separator);
     const rawIndex = key.slice(separator + 1);
     if (rawIndex.length !== SEGMENT_INDEX_DIGITS || !/^[0-9]+$/.test(rawIndex)) return null;
-    if (!isCanonicalUsername(peer)) return null;
+    if (!isCanonicalAuthUsername(peer)) return null;
     const index = Number(rawIndex);
     if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_SEGMENT_INDEX) return null;
     return { peer, index };
@@ -318,8 +318,8 @@ export class SecureDB {
     const sender = typeof msg?.sender === 'string' ? msg.sender : '';
     const recipient = typeof msg?.recipient === 'string' ? msg.recipient : '';
     if (
-      !isCanonicalUsername(sender) ||
-      !isCanonicalUsername(recipient) ||
+      !isCanonicalAuthUsername(sender) ||
+      !isCanonicalAuthUsername(recipient) ||
       sender === recipient
     ) return null;
     if (sender === currentUser) return recipient;
@@ -429,13 +429,13 @@ export class SecureDB {
     peer: string,
     activePeer?: string,
   ): { messages: StoredMessage[]; droppedSegments: number } {
-    if (!isCanonicalUsername(peer) || peer === this.username) {
+    if (!isCanonicalAuthUsername(peer) || peer === this.username) {
       throw new Error('Invalid conversation peer');
     }
     if (!Array.isArray(msgs) || msgs.length > MAX_CONVERSATION_INPUT_MESSAGES) {
       throw new Error('Conversation input limit exceeded');
     }
-    if (activePeer !== undefined && (!isCanonicalUsername(activePeer) || activePeer === this.username)) {
+    if (activePeer !== undefined && (!isCanonicalAuthUsername(activePeer) || activePeer === this.username)) {
       throw new Error('Invalid active conversation peer');
     }
     const dedup = new Map<string, StoredMessage>();
@@ -498,7 +498,7 @@ export class SecureDB {
   }
 
   private async loadConversationTail(peer: string, needed: number): Promise<StoredMessage[]> {
-    if (!isCanonicalUsername(peer) || peer === this.username) {
+    if (!isCanonicalAuthUsername(peer) || peer === this.username) {
       throw new Error('Invalid conversation peer');
     }
     const layout = await this.conversationLayout(peer);
@@ -527,7 +527,7 @@ export class SecureDB {
   }
 
   private async loadConversation(peer: string): Promise<StoredMessage[]> {
-    if (!isCanonicalUsername(peer) || peer === this.username) {
+    if (!isCanonicalAuthUsername(peer) || peer === this.username) {
       throw new Error('Invalid conversation peer');
     }
     const layout = await this.conversationLayout(peer);
@@ -840,7 +840,7 @@ export class SecureDB {
   ): Promise<StoredMessage | null> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       sanitizeMessageId(messageId) !== messageId
     ) {
       throw new Error('Invalid conversation message selector');
@@ -886,7 +886,7 @@ export class SecureDB {
   ): Promise<StoredMessage | null> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       sanitizeMessageId(messageId) !== messageId
     ) {
       throw new Error('Invalid outgoing file message selector');
@@ -930,7 +930,7 @@ export class SecureDB {
   ): Promise<Set<string>> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       mutations.size > MAX_CONVERSATION_STORED_MESSAGES
     ) {
       throw new Error('Invalid conversation mutation batch');
@@ -981,7 +981,7 @@ export class SecureDB {
   ): Promise<StoredMessage | null> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       sanitizeMessageId(messageId) !== messageId
     ) {
       throw new Error('Invalid conversation message selector');
@@ -1005,7 +1005,7 @@ export class SecureDB {
   async hasCompleteFileMessage(peerUsername: string, messageId: string): Promise<boolean> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       sanitizeMessageId(messageId) !== messageId
     ) {
       throw new Error('Invalid file message selector');
@@ -1026,7 +1026,7 @@ export class SecureDB {
     }
     if (
       activeConversationPeer !== undefined &&
-      (!isCanonicalUsername(activeConversationPeer) || activeConversationPeer === this.username)
+      (!isCanonicalAuthUsername(activeConversationPeer) || activeConversationPeer === this.username)
     ) {
       throw new Error('Invalid active conversation peer');
     }
@@ -1184,7 +1184,7 @@ export class SecureDB {
         !entry ||
         typeof entry !== 'object' ||
         Object.keys(entry).some((key) => !CONVERSATION_METADATA_KEYS.has(key)) ||
-        !isCanonicalUsername(entry.peerUsername)
+        !isCanonicalAuthUsername(entry.peerUsername)
       ) {
         throw new Error('Invalid conversation metadata');
       }
@@ -1285,7 +1285,7 @@ export class SecureDB {
 
   async markConversationRead(peerUsername: string, readTimestamp: number): Promise<void> {
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       !isValidTimestamp(readTimestamp) || readTimestamp <= 0
     ) throw new Error('Invalid conversation read state');
 
@@ -1308,7 +1308,7 @@ export class SecureDB {
 
   // Toggle conversation pin status
   async toggleConversationPin(peerUsername: string, isPinned: boolean): Promise<void> {
-    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+    if (!isCanonicalAuthUsername(peerUsername) || peerUsername === this.username) {
       throw new Error('Invalid conversation peer');
     }
     await this.withMessageLock(async () => {
@@ -1352,7 +1352,7 @@ export class SecureDB {
   // Load conversation messages
   async loadConversationMessages(peerUsername: string, limit = 50, offset = 0): Promise<StoredMessage[]> {
     if (
-      !isCanonicalUsername(peerUsername) || peerUsername === this.username ||
+      !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       !Number.isSafeInteger(limit) || limit <= 0 || limit > CONVERSATION_SEGMENT_SIZE ||
       !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_CONVERSATION_STORED_MESSAGES
     ) {
@@ -1366,7 +1366,7 @@ export class SecureDB {
 
   async recordDeliberateContact(peerUsername: string): Promise<void> {
     if (!this.nativeReady) throw new Error('Native database is not initialized');
-    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+    if (!isCanonicalAuthUsername(peerUsername) || peerUsername === this.username) {
       throw new Error('Invalid conversation peer');
     }
     return this.withMessageLock(async () => {
@@ -1388,7 +1388,7 @@ export class SecureDB {
   }
 
   async hasDeliberateContact(peerUsername: string): Promise<boolean> {
-    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+    if (!isCanonicalAuthUsername(peerUsername) || peerUsername === this.username) {
       throw new Error('Invalid conversation peer');
     }
     return this.withMessageLock(async () => {
@@ -1485,7 +1485,7 @@ export class SecureDB {
 
   // Delete the conversation, its compact index entry, and locally retained file payloads
   async deleteConversationMessages(peerUsername: string): Promise<number> {
-    if (!isCanonicalUsername(peerUsername) || peerUsername === this.username) {
+    if (!isCanonicalAuthUsername(peerUsername) || peerUsername === this.username) {
       throw new Error('Invalid conversation peer');
     }
     return this.withMessageLock(async () => {
@@ -1646,7 +1646,7 @@ export class SecureDB {
   async clearUnacknowledgedMessages(peerUsername: string, operationIds: string[]): Promise<void> {
     if (
       !this.ephemeralConfig.enabled ||
-      !isCanonicalUsername(peerUsername) ||
+      !isCanonicalAuthUsername(peerUsername) ||
       peerUsername === this.username ||
       !Array.isArray(operationIds) ||
       operationIds.length > MAX_EPHEMERAL_LIST_ITEMS
@@ -1673,7 +1673,7 @@ export class SecureDB {
   async clearAllUnacknowledgedMessagesForPeer(peerUsername: string): Promise<void> {
     if (
       !this.ephemeralConfig.enabled ||
-      !isCanonicalUsername(peerUsername) ||
+      !isCanonicalAuthUsername(peerUsername) ||
       peerUsername === this.username
     ) {
       throw new Error('Invalid peer recovery cleanup');
@@ -1805,7 +1805,7 @@ export class SecureDB {
       );
       let out: Uint8Array | null = null;
       try {
-        if (decrypted.length === 0 || decrypted.length > SECURE_DB_MAX_FILE_SIZE) {
+        if (decrypted.length === 0 || decrypted.length > MAX_FILE_SIZE) {
           throw new Error('Stored file has an invalid size');
         }
         const outBuffer = new ArrayBuffer(decrypted.byteLength);

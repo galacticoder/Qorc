@@ -18,15 +18,12 @@ import {
   ML_KEM_1024_CIPHERTEXT_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES,
   ML_KEM_1024_SECRET_KEY_BYTES,
+  HASH_OUTPUT_BYTES,
+  POST_QUANTUM_AEAD_NONCE_BYTES,
+  X25519_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { deriveQuantumAeadKey } from '../crypto/aead-key-derivation.js';
-import {
-  HASH_OUTPUT_BYTES,
-  POST_QUANTUM_AEAD_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES,
-  X25519_KEY_BYTES,
-} from '../utils/crypto-consts.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import { wipeByteArrays } from '../utils/wipe.js';
@@ -130,7 +127,7 @@ function validateKeyPackage(data) {
     !canonicalBase64Shape(data.kdf.salt, { exactBytes: HASH_OUTPUT_BYTES }) ||
     !canonicalBase64Shape(data.usernameHash, { exactBytes: HASH_OUTPUT_BYTES }) ||
     !canonicalBase64Shape(data.enc.nonce, { exactBytes: POST_QUANTUM_AEAD_NONCE_BYTES }) ||
-    !canonicalBase64Shape(data.enc.tag, { exactBytes: POST_QUANTUM_AEAD_TAG_BYTES }) ||
+    !canonicalBase64Shape(data.enc.tag, { exactBytes: HASH_OUTPUT_BYTES }) ||
     !canonicalBase64Shape(data.enc.ciphertext, { maxBytes: KEY_CIPHERTEXT_MAX_BYTES })
   ) throw new Error('Invalid encrypted HAProxy key package');
   return data;
@@ -174,7 +171,7 @@ function validateEncryptedCredentials(data) {
     !canonicalBase64Shape(data.encrypted.nonce, {
       exactBytes: POST_QUANTUM_AEAD_NONCE_BYTES,
     }) ||
-    !canonicalBase64Shape(data.encrypted.tag, { exactBytes: POST_QUANTUM_AEAD_TAG_BYTES }) ||
+    !canonicalBase64Shape(data.encrypted.tag, { exactBytes: HASH_OUTPUT_BYTES }) ||
     !canonicalBase64Shape(data.encrypted.ciphertext, {
       maxBytes: CREDENTIAL_CIPHERTEXT_MAX_BYTES,
     })

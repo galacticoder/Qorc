@@ -38,15 +38,12 @@ pub async fn tor_start(state: State<'_, AppState>) -> Result<TorStartResult, Str
     if result.success
         && let Some(pir_tor) = state.inner().pir_tor_manager()
     {
-        match pir_tor.mirror_configuration_from(&tor).await {
-            Ok(_) => match pir_tor.start().await {
-                Ok(pir_result) if !pir_result.success => {
-                    warn!("[TOR-PIR] dedicated process did not start")
-                }
-                Err(_) => warn!("[TOR-PIR] dedicated process start failed"),
-                _ => {}
-            },
-            Err(_) => warn!("[TOR-PIR] dedicated process configuration failed"),
+        match pir_tor.ensure_started_from(&tor).await {
+            Ok(pir_result) if !pir_result.success => {
+                warn!("[TOR-BULK] dedicated process did not start")
+            }
+            Err(_) => warn!("[TOR-BULK] dedicated process start failed"),
+            _ => {}
         }
     }
     Ok(result)

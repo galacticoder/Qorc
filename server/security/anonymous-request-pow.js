@@ -3,8 +3,9 @@ import crypto from 'crypto';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { privateLookupId } from '../database/core.js';
 import { withRedisClient } from '../session/redis-client.js';
-import { POW_SEED_BYTES, SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
 import { isCanonicalBase64Bytes } from '../utils/encoding.js';
+import { POW_SEED_BYTES } from '../../shared/crypto-sizes.js';
 
 export function deriveAnonymousRequestPowSeed(domain, epoch, powNonce, parts) {
   if (

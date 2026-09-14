@@ -9,8 +9,8 @@ import {
   SPOOL_DETECTION_PROBE_HEX_CHARS,
   spoolDetectionTag,
 } from '../../../shared/spool-tag-protocol.js';
-import { bytesToHex, hexToBytes } from '../utils/byte-utils';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { bytesToHex, hexToBytes } from '../../../shared/bytes.js';
 
 const detectionKeyStorageKey = async (owner: string): Promise<string> => {
   const accountScope = await getCurrentLocalAccountScope(

@@ -3,14 +3,12 @@
  */
 
 import crypto from 'crypto';
-import { DiscoveryDB } from '../database/database.js';
 import { withRedisClient } from '../session/redis-client.js';
 import {
   DISCOVERY_EPOCH_EXPIRED,
   DISCOVERY_PUBLICATION_UNAVAILABLE
 } from '../config/error-codes.js';
 import { envInt } from '../utils/env.js';
-import { DISCOVERY_EPOCH_ID_RE, HEX_64_RE } from '../utils/patterns.js';
 import { randomDelay } from '../utils/random.js';
 import { exactRedisScoreArgument } from '../utils/redis-args.js';
 import {
@@ -23,12 +21,9 @@ import {
   invalidateDiscoveryBucketIndex
 } from './bucket-index.js';
 import {
-  DISCOVERY_BLOB_BASE64_CHARS,
-  DISCOVERY_FIXED_BUCKET_COUNT,
-  DISCOVERY_PUBLICATION_BUCKET_COUNT,
   DISCOVERY_STORED_PUBLICATION_CAP,
   isCanonicalDiscoveryBlob,
-  isCanonicalDiscoveryBucketIds
+  isCanonicalDiscoveryBucketIds,
 } from './bucket-layout.js';
 import { currentDiscoveryEpochId } from './epoch.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
@@ -36,9 +31,14 @@ import {
   signDiscoveryPublicationEntry,
   verifyDiscoveryPublicationEntry
 } from './publication-auth.js';
+import { SESSION_FINGERPRINT_RE, DISCOVERY_EPOCH_ID_RE } from '../../shared/patterns.js';
+import { DiscoveryDB } from '../database/discovery-db.js';
+import {
+  DISCOVERY_BLOB_BASE64_CHARS,
+  DISCOVERY_FIXED_BUCKET_COUNT,
+  DISCOVERY_PUBLICATION_BUCKET_COUNT,
+} from '../../shared/discovery-constants.js';
 
-const DISCOVERY_PUBLICATION_POOL_KEY = PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS;
-const DISCOVERY_PUBLICATION_PROCESSING_KEY = PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS;
 
 const PUBLICATION_DELAY_MIN_MS = envInt('DISCOVERY_PUBLICATION_DELAY_MIN_MS', 2_000, 1000, 30 * 60 * 1000);
 const PUBLICATION_DELAY_MAX_MS = envInt('DISCOVERY_PUBLICATION_DELAY_MAX_MS', 10_000, PUBLICATION_DELAY_MIN_MS, 60 * 60 * 1000);
@@ -90,7 +90,7 @@ function normalizePublication(value) {
   if (Object.keys(value).sort().join(',') !== 'bucketIds,epochId,publishId') return null;
   const epochId = typeof value.epochId === 'string' ? value.epochId.trim() : '';
   const publishId = typeof value.publishId === 'string' ? value.publishId.trim().toLowerCase() : '';
-  if (!DISCOVERY_EPOCH_ID_RE.test(epochId) || !HEX_64_RE.test(publishId)) return null;
+  if (!DISCOVERY_EPOCH_ID_RE.test(epochId) || !SESSION_FINGERPRINT_RE.test(publishId)) return null;
   if (!isCanonicalDiscoveryBucketIds(value.bucketIds)) return null;
   return { epochId, publishId, bucketIds: value.bucketIds.slice() };
 }
@@ -322,8 +322,8 @@ export async function enqueueDiscoveryPublication({
       return client.eval(
         ENQUEUE_PUBLICATION_SCRIPT,
         2,
-        DISCOVERY_PUBLICATION_POOL_KEY,
-        DISCOVERY_PUBLICATION_PROCESSING_KEY,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
         MAX_PUBLICATION_POOL_ENTRIES,
         entry.releaseAt,
         serializePublicationEntry(entry),
@@ -362,7 +362,7 @@ async function storePublication(entry, storedAt) {
 async function recoverStalePublicationClaims(client) {
   const now = Date.now();
   const stale = await client.zrangebyscore(
-    DISCOVERY_PUBLICATION_PROCESSING_KEY,
+    PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
     '-inf',
     now,
     'LIMIT',
@@ -370,12 +370,12 @@ async function recoverStalePublicationClaims(client) {
     PUBLICATION_BATCH_MAX
   );
   for (const raw of stale || []) {
-    const currentScore = await client.zscore(DISCOVERY_PUBLICATION_PROCESSING_KEY, raw);
+    const currentScore = await client.zscore(PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS, raw);
     if (currentScore === null || Number(currentScore) > now) continue;
     if (!parsePublicationEntry(raw, { queued: true })) {
       await removePublication(
         client,
-        DISCOVERY_PUBLICATION_PROCESSING_KEY,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
         raw,
         currentScore
       );
@@ -383,8 +383,8 @@ async function recoverStalePublicationClaims(client) {
     }
     await movePublication(
       client,
-      DISCOVERY_PUBLICATION_PROCESSING_KEY,
-      DISCOVERY_PUBLICATION_POOL_KEY,
+      PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
+      PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
       raw,
       Date.now() + randomDelay(PUBLICATION_FLUSH_MIN_MS, PUBLICATION_FLUSH_MAX_MS),
       currentScore
@@ -398,7 +398,7 @@ async function finalizePublicationClaim(raw, claimUntil, succeeded) {
     if (succeeded) {
       await removePublication(
         client,
-        DISCOVERY_PUBLICATION_PROCESSING_KEY,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
         raw,
         claimUntil
       );
@@ -407,7 +407,7 @@ async function finalizePublicationClaim(raw, claimUntil, succeeded) {
     if (!parsePublicationEntry(raw, { queued: true })) {
       await removePublication(
         client,
-        DISCOVERY_PUBLICATION_PROCESSING_KEY,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
         raw,
         claimUntil
       );
@@ -415,8 +415,8 @@ async function finalizePublicationClaim(raw, claimUntil, succeeded) {
     }
     await movePublication(
       client,
-      DISCOVERY_PUBLICATION_PROCESSING_KEY,
-      DISCOVERY_PUBLICATION_POOL_KEY,
+      PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
+      PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
       raw,
       Date.now() + randomDelay(PUBLICATION_FLUSH_MIN_MS, PUBLICATION_FLUSH_MAX_MS),
       claimUntil
@@ -445,7 +445,7 @@ async function flushDiscoveryPublicationRelay() {
     await withRedisClient(async (client) => {
       await recoverStalePublicationClaims(client);
       const rawItems = await client.zrangebyscore(
-        DISCOVERY_PUBLICATION_POOL_KEY,
+        PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
         '-inf',
         Date.now(),
         'LIMIT',
@@ -454,13 +454,13 @@ async function flushDiscoveryPublicationRelay() {
       );
 
       for (const raw of rawItems || []) {
-        const currentScore = await client.zscore(DISCOVERY_PUBLICATION_POOL_KEY, raw);
+        const currentScore = await client.zscore(PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS, raw);
         if (currentScore === null || Number(currentScore) > Date.now()) continue;
         const entry = parsePublicationEntry(raw, { queued: true });
         if (!entry) {
           await removePublication(
             client,
-            DISCOVERY_PUBLICATION_POOL_KEY,
+            PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
             raw,
             currentScore
           );
@@ -469,8 +469,8 @@ async function flushDiscoveryPublicationRelay() {
         const claimUntil = Date.now() + PUBLICATION_PROCESSING_TIMEOUT_MS;
         const moved = await movePublication(
           client,
-          DISCOVERY_PUBLICATION_POOL_KEY,
-          DISCOVERY_PUBLICATION_PROCESSING_KEY,
+          PROTOCOL_KEYS.DISCOVERY_PUBLICATION_DELAY_REDIS,
+          PROTOCOL_KEYS.DISCOVERY_PUBLICATION_PROCESSING_REDIS,
           raw,
           claimUntil,
           currentScore

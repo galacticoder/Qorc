@@ -646,7 +646,13 @@ async function checkStatsCredentials() {
       }
       return;
     } catch (error) {
-      throw new Error(`HAProxy stats credentials in .env cannot unlock the stored credential material: ${error.message}`);
+      throw new Error(
+        'Stored HAProxy credential material could not be authenticated with the current protocol and .env credentials. ' +
+        'An incompatible protocol change, changed credentials, or damaged files can cause this. ' +
+        'Docker reset preserves these bind-mounted files. See docs/CONTRIBUTING.md#load-balancer-credentials before recreating them. ' +
+        `Cause: ${error.message}`,
+        { cause: error }
+      );
     }
   }
 

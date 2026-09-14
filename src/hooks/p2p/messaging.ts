@@ -1,8 +1,9 @@
 import { RefObject } from "react";
-import { AUTH_USERNAME_REGEX, PQ_SIG_PUBLIC_KEY_SIZE } from "../../lib/constants";
+import { AUTH_USERNAME_REGEX } from "../../lib/constants";
 import { SignalType } from "../../lib/types/signal-types";
 import type { P2PMessage } from "../../lib/types/p2p-types";
 import { MAX_MESSAGE_FRAME_SIZE } from "../../lib/transport/secure-transport";
+import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 export interface MessagingRefs {
   handleEncryptedMessagePayloadRef: RefObject<((message: any) => Promise<boolean | void>) | null>;
@@ -39,7 +40,7 @@ export function createHandleIncomingP2PMessage(refs: MessagingRefs) {
       !AUTH_USERNAME_REGEX.test(verifiedSender.username) ||
       verifiedSender.username !== message.from ||
       typeof verifiedSender.dilithiumBase64 !== 'string' ||
-      verifiedSender.dilithiumBase64.length !== 4 * Math.ceil(PQ_SIG_PUBLIC_KEY_SIZE / 3)
+      verifiedSender.dilithiumBase64.length !== 4 * Math.ceil(ML_DSA_87_PUBLIC_KEY_BYTES / 3)
     ) {
       console.warn('[MSG-RECV] DROP: P2P sender identity was not transport verified');
       return false;

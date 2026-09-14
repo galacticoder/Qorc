@@ -1,6 +1,5 @@
 import {
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
-  KEY_TRANSPARENCY_PROTOCOL,
   exactPlainObject,
   isKeyTransparencyHash,
   isKeyTransparencyLabel,
@@ -19,6 +18,7 @@ import { keyTransparencyStoreKey } from './store-key';
 import { parseProtocolCollectionStore } from './store-serialization';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEYS, STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
 
 
 export const KEY_TRANSPARENCY_CHUNK_EPOCHS = 720;

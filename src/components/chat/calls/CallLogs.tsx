@@ -222,6 +222,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     const [searchQuery, setSearchQuery] = useState('');
     const [usernameMap, setUsernameMap] = useState<Record<string, string>>({});
     const [optionsOpen, setOptionsOpen] = useState(false);
+    const historyControlsDisabled = isLoading || logs.length === 0;
     const scrollAreaRef = useRef<HTMLDivElement>(null);
     const normalizedQuery = searchQuery.trim().toLowerCase();
     const isSearching = normalizedQuery.length > 0;
@@ -233,6 +234,10 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     useEffect(() => {
         if (!isLoading && logs.length === 0) setSearchQuery('');
     }, [isLoading, logs.length]);
+
+    useEffect(() => {
+        if (historyControlsDisabled) setOptionsOpen(false);
+    }, [historyControlsDisabled]);
 
     const searchScopeLogs = useMemo(
         () => (isSearching ? getAllLogs() : logs),
@@ -305,10 +310,11 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     }, [filteredLogs]);
 
     const handleClearLogs = useCallback(() => {
+        if (historyControlsDisabled) return;
         clearLogs();
         setSearchQuery('');
         setOptionsOpen(false);
-    }, [clearLogs]);
+    }, [clearLogs, historyControlsDisabled]);
 
     return (
         <section className="qorc-call-log-page">
@@ -319,7 +325,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                 </div>
 
                 <div className="qorc-call-log-header-actions">
-                    <div className={`qorc-call-log-search${logs.length === 0 ? ' is-disabled' : ''}`}>
+                    <div className={`qorc-call-log-search${historyControlsDisabled ? ' is-disabled' : ''}`}>
                         <Search aria-hidden="true" />
                         <input
                             type="text"
@@ -327,7 +333,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                             onChange={(event) => setSearchQuery(event.target.value)}
                             placeholder="Search calls"
                             aria-label="Search call history"
-                            disabled={logs.length === 0}
+                            disabled={historyControlsDisabled}
                         />
                         {searchQuery.length > 0 && (
                             <button
@@ -335,13 +341,17 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                                 onClick={() => setSearchQuery('')}
                                 title="Clear search"
                                 aria-label="Clear call search"
+                                disabled={historyControlsDisabled}
                             >
                                 <X aria-hidden="true" />
                             </button>
                         )}
                     </div>
 
-                    <Popover open={optionsOpen} onOpenChange={setOptionsOpen}>
+                    <Popover
+                        open={optionsOpen && !historyControlsDisabled}
+                        onOpenChange={(open) => setOptionsOpen(open && !historyControlsDisabled)}
+                    >
                         <PopoverTrigger asChild>
                             <Button
                                 size="sm"
@@ -349,6 +359,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                                 className="qorc-icon-btn"
                                 title="Call history options"
                                 aria-label="Call history options"
+                                disabled={historyControlsDisabled}
                             >
                                 <MoreVertical className="w-4 h-4" aria-hidden="true" />
                             </Button>
@@ -359,7 +370,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                                 type="button"
                                 className="qorc-call-log-popover-action is-danger"
                                 onClick={handleClearLogs}
-                                disabled={logs.length === 0}
+                                disabled={historyControlsDisabled}
                             >
                                 <Trash2 aria-hidden="true" />
                                 <span>Clear history</span>

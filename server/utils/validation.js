@@ -1,4 +1,4 @@
-import { UUID_V4_RE } from './patterns.js';
+import { UUID_V4_RE } from '../../shared/patterns.js';
 
 const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const WIRE_MESSAGE_TYPE_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;

@@ -1,33 +1,19 @@
 import crypto from 'crypto';
 import { deriveAuthRootKey } from '../crypto/auth-root.js';
-import {
-  AES_256_CTR,
-  AES_256_CTR_IV_BYTES,
-  SHA_256_ALGORITHM
-} from '../utils/crypto-consts.js';
+import { AES_256_CTR, SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
 import { envInt } from '../utils/env.js';
-import { HEX_64_RE } from '../utils/patterns.js';
 import { getDiscoveryEpochInfo } from './epoch.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
   DISCOVERY_BLOB_BASE64_CHARS,
-  DISCOVERY_BUCKET_QUERY_COUNT,
   DISCOVERY_BUCKET_TARGET_SIZE,
   DISCOVERY_DATABASE_KIND,
   DISCOVERY_FIXED_BUCKET_COUNT,
-  DISCOVERY_PUBLICATION_BUCKET_COUNT
+  DISCOVERY_PUBLICATION_BUCKET_COUNT,
 } from '../../shared/discovery-constants.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
-
-export const DISCOVERY_MANIFEST_VERSION = PROTOCOL_KEYS.DISCOVERY_BUCKET_MANIFEST;
-export {
-  DISCOVERY_BLOB_BASE64_CHARS,
-  DISCOVERY_BUCKET_QUERY_COUNT,
-  DISCOVERY_BUCKET_TARGET_SIZE,
-  DISCOVERY_DATABASE_KIND,
-  DISCOVERY_FIXED_BUCKET_COUNT,
-  DISCOVERY_PUBLICATION_BUCKET_COUNT
-};
+import { SESSION_FINGERPRINT_RE } from '../../shared/patterns.js';
+import { AES_256_CTR_IV_BYTES } from '../../shared/crypto-sizes.js';
 
 export const DISCOVERY_INDEX_MAX_STALENESS_MS = envInt(
   'DISCOVERY_INDEX_MAX_STALENESS_MS',
@@ -185,7 +171,7 @@ export function buildDiscoveryBucketIndex(publications, now = Date.now()) {
   for (const publication of rows) {
     if (
       typeof publication?.publishId !== 'string' ||
-      !HEX_64_RE.test(publication.publishId) ||
+      !SESSION_FINGERPRINT_RE.test(publication.publishId) ||
       !isCanonicalDiscoveryBucketIds(publication.bucketIds) ||
       (publication.expiresAt !== undefined && (
         !Number.isSafeInteger(publication.expiresAt) ||
@@ -206,7 +192,7 @@ export function buildDiscoveryBucketIndex(publications, now = Date.now()) {
 
   return {
     manifest: {
-      version: DISCOVERY_MANIFEST_VERSION,
+      version: PROTOCOL_KEYS.DISCOVERY_BUCKET_MANIFEST,
       kind: DISCOVERY_DATABASE_KIND,
       epochId,
       createdAt: epoch.startedAt,

@@ -128,6 +128,7 @@ fn init_logging() {
     for directive in [
         "qorc_lib::network::websocket=info",
         "qorc_lib::commands::websocket=info",
+        "qorc_lib::commands::discovery=info",
         "qorc_lib::commands::system=info",
         "qorc_lib::commands::camera=info",
         "qorc_lib::camera_capture=info",
@@ -398,6 +399,7 @@ pub fn run() {
             commands::p2p::p2p_authenticate_connection,
             commands::p2p::p2p_local_endpoint,
             commands::discovery::anonymous_api_fetch,
+            commands::discovery::cancel_anonymous_api_fetch,
             commands::discovery::prewarm_anonymous_transport,
             commands::notification::notification_show,
             commands::notification::notification_set_enabled,

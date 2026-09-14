@@ -12,14 +12,13 @@ interface BlockStatusCacheEntry {
 
 class BlockStatusManager {
   private readonly cache = new Map<string, BlockStatusCacheEntry>();
-  private readonly CACHE_TTL = BLOCK_STATUS_CACHE_TTL_MS;
 
   // Get cached block status for a user
   get(username: string): boolean | null {
     const cached = this.cache.get(username);
     if (!cached) return null;
 
-    if (Date.now() - cached.timestamp > this.CACHE_TTL) {
+    if (Date.now() - cached.timestamp > BLOCK_STATUS_CACHE_TTL_MS) {
       this.cache.delete(username);
       return null;
     }

@@ -4,7 +4,6 @@
 
 import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
-import { PostQuantumUtils } from '../utils/pq-utils';
 import { CryptoUtils } from '../utils/crypto-utils';
 import { HybridKeys, PeerCertificateBundle, PeerSession, P2PMessage } from '../types/p2p-types';
 import {
@@ -19,36 +18,34 @@ import {
 } from '../utils/p2p-utils';
 import { blockingSystem } from '../blocking/blocking-system';
 import {
-    AUTH_USERNAME_REGEX,
-    CERT_CLOCK_SKEW_MS,
-    MAX_CONCURRENT_P2P_CONNECTS,
-    P2P_FILE_CHUNK_RATE_LIMIT,
-    P2P_GLOBAL_FILE_CHUNK_RATE_LIMIT,
-    P2P_GLOBAL_MESSAGE_RATE_LIMIT,
-    P2P_CONNECTION_TIMEOUT_MS,
-    P2P_MAX_PEERS,
-    P2P_MESSAGE_RATE_LIMIT,
-    P2P_MESSAGE_RATE_WINDOW_MS,
-    P2P_RATE_LIMITER_MAX_ENTRIES,
-    P2P_ROUTE_PROOF_TTL_MS,
-    PQ_KEM_PUBLIC_KEY_SIZE,
-    PQ_SIG_PUBLIC_KEY_SIZE,
-    PQ_SIG_SIGNATURE_SIZE
+  AUTH_USERNAME_REGEX,
+  CERT_CLOCK_SKEW_MS,
+  MAX_CONCURRENT_P2P_CONNECTS,
+  P2P_FILE_CHUNK_RATE_LIMIT,
+  P2P_GLOBAL_FILE_CHUNK_RATE_LIMIT,
+  P2P_GLOBAL_MESSAGE_RATE_LIMIT,
+  P2P_CONNECTION_TIMEOUT_MS,
+  P2P_MAX_PEERS,
+  P2P_MESSAGE_RATE_LIMIT,
+  P2P_MESSAGE_RATE_WINDOW_MS,
+  P2P_RATE_LIMITER_MAX_ENTRIES,
+  P2P_ROUTE_PROOF_TTL_MS,
+  MAX_EVENT_USERNAME_LENGTH,
 } from '../constants';
 import {
-    isPlainObject,
-    hasPrototypePollutionKeys,
-    hasExactObjectKeys as exactObjectKeys,
-    sanitizeMessageId,
-    sanitizeEventUsername
+  isPlainObject,
+  hasPrototypePollutionKeys,
+  hasExactObjectKeys,
+  sanitizeMessageId,
+  sanitizeEventUsername,
 } from '../sanitizers';
-import {
-    MAX_EVENT_USERNAME_LENGTH,
-} from '../constants';
 import { P2PTransport, p2pTransport } from './p2p-transport';
 import { ConnectionState, MAX_MESSAGE_FRAME_SIZE, type SecureConnection } from './secure-transport';
-import { canonicalBase64Shape, isHybridEnvelopeWireShape } from './envelope-shape';
+import { isHybridEnvelopeWireShape } from './envelope-shape';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
+import { SecureMemory } from '../cryptography/secure-memory';
+import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 
 const MAX_PENDING_P2P_VERIFICATIONS_PER_PEER = 16;
 const MAX_PENDING_P2P_VERIFICATION_BYTES_PER_PEER = 8 * 1024 * 1024;
@@ -79,8 +76,8 @@ const stringifyDeterministic = (obj: any): string | undefined => {
 };
 
 const isDirectP2PPayload = (value: unknown): value is P2PMessage['payload'] => {
-    if (!exactObjectKeys(value, ['type', 'messageId', 'envelope']) &&
-        !exactObjectKeys(value, ['type', 'messageId', 'fileTransferId', 'envelope'])) return false;
+    if (!hasExactObjectKeys(value, ['type', 'messageId', 'envelope']) &&
+        !hasExactObjectKeys(value, ['type', 'messageId', 'fileTransferId', 'envelope'])) return false;
     if (value.type !== SignalType.SEALED_ENVELOPE) return false;
     if (sanitizeMessageId(value.messageId) !== value.messageId) return false;
     if ('fileTransferId' in value && (
@@ -92,14 +89,14 @@ const isDirectP2PPayload = (value: unknown): value is P2PMessage['payload'] => {
 };
 
 const isSignedP2PMessageHeaderShape = (message: unknown): message is P2PMessage => {
-    if (!exactObjectKeys(message, ['type', 'from', 'to', 'timestamp', 'payload', 'routeProof', 'signature'])) return false;
+    if (!hasExactObjectKeys(message, ['type', 'from', 'to', 'timestamp', 'payload', 'routeProof', 'signature'])) return false;
     if (
         message.type !== SignalType.SEALED_ENVELOPE ||
         typeof message.from !== 'string' || !AUTH_USERNAME_REGEX.test(message.from) ||
         typeof message.to !== 'string' || !AUTH_USERNAME_REGEX.test(message.to) ||
         !Number.isSafeInteger(message.timestamp) ||
         typeof message.signature !== 'string' ||
-        message.signature.length !== 4 * Math.ceil(PQ_SIG_SIGNATURE_SIZE / 3) ||
+        message.signature.length !== 4 * Math.ceil(ML_DSA_87_SIGNATURE_BYTES / 3) ||
         !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(message.signature) ||
         !isPlainObject(message.payload) ||
         !isPlainObject(message.routeProof)
@@ -109,8 +106,8 @@ const isSignedP2PMessageHeaderShape = (message: unknown): message is P2PMessage 
 
 const isSignedP2PMessageShape = (message: unknown): message is P2PMessage => {
     if (!isSignedP2PMessageHeaderShape(message)) return false;
-    if (!canonicalBase64Shape(message.signature, { exactBytes: PQ_SIG_SIGNATURE_SIZE }) || !isDirectP2PPayload(message.payload)) return false;
-    return exactObjectKeys(message.routeProof, ['kind', 'at', 'expiresAt', 'channelId', 'sequence']) &&
+    if (!canonicalBase64Shape(message.signature, { exactBytes: ML_DSA_87_SIGNATURE_BYTES }) || !isDirectP2PPayload(message.payload)) return false;
+    return hasExactObjectKeys(message.routeProof, ['kind', 'at', 'expiresAt', 'channelId', 'sequence']) &&
         message.routeProof.kind === PROTOCOL_KEYS.ROUTE_PROOF_KIND &&
         Number.isSafeInteger(message.routeProof.at) &&
         Number.isSafeInteger(message.routeProof.expiresAt) &&
@@ -327,8 +324,8 @@ export class SecureP2PService {
             connection.state !== 'connected' ||
             identity?.certVerified !== true ||
             identity.username !== peer ||
-            identity.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-            identity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
+            identity.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+            identity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
             identity.x25519PublicKey?.length !== 32 ||
             !Number.isSafeInteger(identity.certificateExpiresAt)
         ) return null;
@@ -336,7 +333,7 @@ export class SecureP2PService {
     }
 
     private getRouteChannelId(session: PeerSession, peerDilithiumPublicKey: Uint8Array): string {
-        if (!this.dilithiumPublicKey || peerDilithiumPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE) {
+        if (!this.dilithiumPublicKey || peerDilithiumPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES) {
             throw new Error('Certified route identity unavailable');
         }
         const sessionBinding = session.connection.getSessionBinding();
@@ -549,8 +546,8 @@ export class SecureP2PService {
                     !connection ||
                     certifiedIdentity?.certVerified !== true ||
                     certifiedIdentity.username !== appPeerId ||
-                    certifiedIdentity.kyberPublicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
-                    certifiedIdentity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
+                    certifiedIdentity.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
+                    certifiedIdentity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
                     certifiedIdentity.x25519PublicKey?.length !== 32 ||
                     !Number.isSafeInteger(certifiedIdentity.certificateExpiresAt)
                 ) {
@@ -674,11 +671,11 @@ export class SecureP2PService {
         if (this.initialized || this.initializationPromise) {
             throw new Error('P2P key material cannot change after initialization');
         }
-        const dilithiumPublic = toUint8(keys.dilithium?.publicKeyBase64, PQ_SIG_PUBLIC_KEY_SIZE);
+        const dilithiumPublic = toUint8(keys.dilithium?.publicKeyBase64, ML_DSA_87_PUBLIC_KEY_BYTES);
         if (
             keys.native !== true ||
-            !dilithiumPublic || dilithiumPublic.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
-            keys.kyber?.publicKey?.length !== PQ_KEM_PUBLIC_KEY_SIZE ||
+            !dilithiumPublic || dilithiumPublic.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
+            keys.kyber?.publicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
             keys.x25519?.publicKey?.length !== 32 ||
             typeof keys.signTranscript !== 'function' ||
             typeof keys.respondToHandshake !== 'function'
@@ -894,7 +891,7 @@ export class SecureP2PService {
             !this.dilithiumPublicKey ||
             peerIdentity?.certVerified !== true ||
             peerIdentity.username !== to ||
-            peerIdentity.dilithiumPublicKey?.length !== PQ_SIG_PUBLIC_KEY_SIZE
+            peerIdentity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES
         ) {
             throw new Error('Certified peer identity is unavailable');
         }
@@ -934,7 +931,7 @@ export class SecureP2PService {
                 routeProof: unsignedMessage.routeProof
             }));
             signature = await this.signTranscript(messageBytes);
-            if (signature.length !== PQ_SIG_SIGNATURE_SIZE) {
+            if (signature.length !== ML_DSA_87_SIGNATURE_BYTES) {
                 throw new Error('Native P2P signer returned an invalid signature');
             }
             if (generation !== this.lifecycleGeneration || this.shuttingDown) {
@@ -1025,7 +1022,7 @@ export class SecureP2PService {
             const activeIdentity = session?.connection?.peerIdentity;
             const peerPublicKey = activeIdentity?.certVerified &&
                 activeIdentity.username === message.from &&
-                activeIdentity.dilithiumPublicKey?.length === PQ_SIG_PUBLIC_KEY_SIZE
+                activeIdentity.dilithiumPublicKey?.length === ML_DSA_87_PUBLIC_KEY_BYTES
                 ? activeIdentity.dilithiumPublicKey
                 : undefined;
 
@@ -1042,7 +1039,7 @@ export class SecureP2PService {
                         routeProof: message.routeProof,
                     }));
                     signature = CryptoUtils.Base64.base64ToUint8Array(message.signature);
-                    if (signature.length !== PQ_SIG_SIGNATURE_SIZE) return;
+                    if (signature.length !== ML_DSA_87_SIGNATURE_BYTES) return;
                     const isValid = await CryptoUtils.Dilithium.verify(signature, messageBytes, peerPublicKey);
                     if (generation !== this.lifecycleGeneration || this.shuttingDown) return;
                     session = this.getCurrentCertifiedSession(message.from, sourceConnection);
@@ -1253,15 +1250,15 @@ export class SecureP2PService {
             !this.x25519PublicKey
         ) return false;
 
-        const dilithiumPublic = toUint8(keys.dilithium?.publicKeyBase64, PQ_SIG_PUBLIC_KEY_SIZE);
+        const dilithiumPublic = toUint8(keys.dilithium?.publicKeyBase64, ML_DSA_87_PUBLIC_KEY_BYTES);
         try {
             return !!dilithiumPublic &&
-                dilithiumPublic.length === PQ_SIG_PUBLIC_KEY_SIZE &&
-                keys.kyber?.publicKey?.length === PQ_KEM_PUBLIC_KEY_SIZE &&
+                dilithiumPublic.length === ML_DSA_87_PUBLIC_KEY_BYTES &&
+                keys.kyber?.publicKey?.length === ML_KEM_1024_PUBLIC_KEY_BYTES &&
                 keys.x25519?.publicKey?.length === 32 &&
-                PostQuantumUtils.timingSafeEqual(this.dilithiumPublicKey, dilithiumPublic) &&
-                PostQuantumUtils.timingSafeEqual(this.kyberPublicKey, keys.kyber.publicKey) &&
-                PostQuantumUtils.timingSafeEqual(this.x25519PublicKey, keys.x25519.publicKey);
+                SecureMemory.constantTimeCompare(this.dilithiumPublicKey, dilithiumPublic) &&
+                SecureMemory.constantTimeCompare(this.kyberPublicKey, keys.kyber.publicKey) &&
+                SecureMemory.constantTimeCompare(this.x25519PublicKey, keys.x25519.publicKey);
         } finally {
             dilithiumPublic?.fill(0);
         }

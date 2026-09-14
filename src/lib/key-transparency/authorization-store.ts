@@ -17,9 +17,9 @@ import { storage } from '../tauri-bindings';
 import { createStoreLock } from './store-lock';
 import { canonicalAuthUsername } from '../sanitizers';
 import { keyTransparencyStoreKey } from './store-key';
-import { HEX_64_RE } from '../../../shared/patterns.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
+import { SESSION_FINGERPRINT_RE } from '../../../shared/patterns.js';
 
 const MAX_STORED_AUTHORIZATIONS = 2048;
 const AUTHORIZED_KEYS = [
@@ -67,7 +67,7 @@ function normalizePeer(peer: unknown): string {
 }
 
 function isFingerprint(value: unknown): value is string {
-  return typeof value === 'string' && HEX_64_RE.test(value);
+  return typeof value === 'string' && SESSION_FINGERPRINT_RE.test(value);
 }
 
 function isContactState(rootCommitment: unknown, version: unknown): boolean {

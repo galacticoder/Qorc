@@ -1,4 +1,4 @@
-import { asciiMatchesAt, readUint32BE } from './byte-utils';
+import { asciiMatchesAt, readUint32BE } from '../../../shared/bytes.js';
 
 export interface ImageDimensions {
     width: number;

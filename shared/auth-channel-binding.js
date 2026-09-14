@@ -1,16 +1,8 @@
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { AUTH_CHANNEL_BINDING_CONTEXT } from './protocol-keys.js';
-import {
-  REQUEST_ID_RE,
-  SESSION_FINGERPRINT_RE,
-  SESSION_ID_RE
-} from './patterns.js';
+import { SESSION_FINGERPRINT_RE, SESSION_ID_RE, UUID_V4_RE } from './patterns.js';
 
-export {
-  REQUEST_ID_RE,
-  SESSION_FINGERPRINT_RE,
-  SESSION_ID_RE
-} from './patterns.js';
+export { SESSION_FINGERPRINT_RE, SESSION_ID_RE } from './patterns.js';
 
 export const AUTH_CHANNEL_BINDING_BYTES = 64;
 
@@ -23,7 +15,7 @@ export function createAuthChannelBinding({ sessionId, sessionFingerprint, reques
   if (!SESSION_FINGERPRINT_RE.test(sessionFingerprint || '')) {
     throw new Error('Invalid authentication channel server fingerprint');
   }
-  if (!REQUEST_ID_RE.test(requestId || '')) {
+  if (!UUID_V4_RE.test(requestId || '')) {
     throw new Error('Invalid authentication channel request identifier');
   }
 

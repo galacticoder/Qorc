@@ -7,11 +7,11 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { Base64, decodeCanonicalBase64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
 import { normalizePrivacyPassPurpose } from './privacy-pass-purpose';
-import { PRIVACY_PASS_CONFIG as PP_CONFIG } from '../../../shared/privacy-pass-protocol.js';
+import { PRIVACY_PASS_CONFIG } from '../../../shared/privacy-pass-protocol.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export function getPrivacyPassTokenEpoch(tokenSecret: Uint8Array): number {
-    if (!(tokenSecret instanceof Uint8Array) || tokenSecret.length !== PP_CONFIG.TOKEN_SECRET_SIZE) {
+    if (!(tokenSecret instanceof Uint8Array) || tokenSecret.length !== PRIVACY_PASS_CONFIG.TOKEN_SECRET_SIZE) {
         throw new Error('Invalid Privacy Pass token secret');
     }
     return new DataView(
@@ -22,7 +22,7 @@ export function getPrivacyPassTokenEpoch(tokenSecret: Uint8Array): number {
 }
 
 export function getPrivacyPassBatchEpoch(tokens: ReadonlyArray<{ tokenSecret: Uint8Array }>): number {
-    if (!Array.isArray(tokens) || tokens.length < 1 || tokens.length > PP_CONFIG.MAX_BATCH_SIZE) {
+    if (!Array.isArray(tokens) || tokens.length < 1 || tokens.length > PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE) {
         throw new Error('Invalid Privacy Pass token batch');
     }
     const epoch = getPrivacyPassTokenEpoch(tokens[0].tokenSecret);
@@ -40,7 +40,7 @@ export function isPrivacyPassTokenEpochUsable(tokenSecret: Uint8Array): boolean 
         return false;
     }
     const currentEpoch = Math.floor(Date.now() / 86_400_000);
-    return tokenEpoch <= currentEpoch && currentEpoch - tokenEpoch <= PP_CONFIG.TOKEN_MAX_AGE_EPOCHS;
+    return tokenEpoch <= currentEpoch && currentEpoch - tokenEpoch <= PRIVACY_PASS_CONFIG.TOKEN_MAX_AGE_EPOCHS;
 }
 
 export function isPrivacyPassTokenUsable(token: AnonymousToken, purpose: string): boolean {
@@ -48,7 +48,7 @@ export function isPrivacyPassTokenUsable(token: AnonymousToken, purpose: string)
         return Boolean(
             token &&
             !token.used &&
-            token.unblindedToken?.length === PP_CONFIG.TOKEN_SIZE &&
+            token.unblindedToken?.length === PRIVACY_PASS_CONFIG.TOKEN_SIZE &&
             isPrivacyPassTokenEpochUsable(token.tokenSecret) &&
             normalizePrivacyPassPurpose(token.purpose) === normalizePrivacyPassPurpose(purpose)
         );
@@ -147,7 +147,7 @@ export class PrivacyPassClient {
                 token.unblindedToken,
                 new Uint8Array(0),
                 new TextEncoder().encode(PROTOCOL_KEYS.PRIVACY_PASS_NULLIFIER),
-                PP_CONFIG.NULLIFIER_SIZE
+                PRIVACY_PASS_CONFIG.NULLIFIER_SIZE
             );
 
             macKey = hkdf(
@@ -157,7 +157,7 @@ export class PrivacyPassClient {
                 new TextEncoder().encode(PROTOCOL_KEYS.PRIVACY_PASS_REDEMPTION_MAC),
                 32
             );
-            mac = blake3(macKey, { dkLen: PP_CONFIG.MAC_SIZE });
+            mac = blake3(macKey, { dkLen: PRIVACY_PASS_CONFIG.MAC_SIZE });
 
             return {
                 tokenSecret: token.tokenSecret,
@@ -191,10 +191,10 @@ function deserializeTokenObject(parsed: any): AnonymousToken {
     let blindedElement: Uint8Array | undefined;
     let unblindedToken: Uint8Array | undefined;
     try {
-        tokenSecret = decodeCanonicalBase64(parsed.tokenSecret, 'token encoding', { exactBytes: PP_CONFIG.TOKEN_SECRET_SIZE });
+        tokenSecret = decodeCanonicalBase64(parsed.tokenSecret, 'token encoding', { exactBytes: PRIVACY_PASS_CONFIG.TOKEN_SECRET_SIZE });
         blindingFactor = parsed.blindingFactor == null ? undefined : decodeCanonicalBase64(parsed.blindingFactor, 'token encoding', { exactBytes: 32 });
         blindedElement = parsed.blindedElement == null ? undefined : decodeCanonicalBase64(parsed.blindedElement, 'token encoding', { exactBytes: 32 });
-        unblindedToken = parsed.unblindedToken == null ? undefined : decodeCanonicalBase64(parsed.unblindedToken, 'token encoding', { exactBytes: PP_CONFIG.TOKEN_SIZE });
+        unblindedToken = parsed.unblindedToken == null ? undefined : decodeCanonicalBase64(parsed.unblindedToken, 'token encoding', { exactBytes: PRIVACY_PASS_CONFIG.TOKEN_SIZE });
         if (
             (!unblindedToken && (!blindedElement || !blindingFactor)) ||
             (unblindedToken && (blindedElement || blindingFactor))
@@ -349,7 +349,7 @@ export const PrivacyPassHelpers = {
         if (!Array.isArray(rawTokens) || rawTokens.length === 0) {
             throw new Error('Missing or empty signedBlindedTokens in issuance response');
         }
-        if (rawTokens.length > PP_CONFIG.MAX_BATCH_SIZE || !rawTokens.every((t) => typeof t === 'string')) {
+        if (rawTokens.length > PRIVACY_PASS_CONFIG.MAX_BATCH_SIZE || !rawTokens.every((t) => typeof t === 'string')) {
             throw new Error('Invalid signed token batch');
         }
 
@@ -385,5 +385,3 @@ export const PrivacyPassHelpers = {
         }
     }
 };
-
-export { PP_CONFIG };

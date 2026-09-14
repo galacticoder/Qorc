@@ -4,8 +4,8 @@
 
 import { database } from '../tauri-bindings';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { bytesToHex } from '../utils/byte-utils';
 import { STORAGE_KEY_DOMAINS } from './storage-keys';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export class SQLiteKV {
   private static readonly MAX_MUTATION_DELETIONS = 2_048;

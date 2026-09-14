@@ -24,7 +24,6 @@ const previewRequests = new Map<string, Promise<NativeLinkPreview>>();
 const MAX_CACHED_PREVIEWS = 16;
 const MAX_CACHED_MESSAGE_TARGETS = 2048;
 const MAX_CACHED_MESSAGE_PREVIEWS = 512;
-const MESSAGE_PREVIEW_MEMORY_TTL_MS = SEGMENT_UNLOAD_IDLE_MS;
 
 type ExpiringTargetRequest = {
     expiresAt: number;
@@ -66,7 +65,7 @@ const cachedTargets = (cacheKey: string, messageId: string): Promise<NativeMessa
     const cached = targetRequests.get(cacheKey);
     if (cached && cached.expiresAt > now) {
         targetRequests.delete(cacheKey);
-        cached.expiresAt = now + MESSAGE_PREVIEW_MEMORY_TTL_MS;
+        cached.expiresAt = now + SEGMENT_UNLOAD_IDLE_MS;
         targetRequests.set(cacheKey, cached);
         return cached.request;
     }
@@ -88,7 +87,7 @@ const cachedTargets = (cacheKey: string, messageId: string): Promise<NativeMessa
         throw lastError;
     })();
     const entry = {
-        expiresAt: now + MESSAGE_PREVIEW_MEMORY_TTL_MS,
+        expiresAt: now + SEGMENT_UNLOAD_IDLE_MS,
         request,
     };
     targetRequests.set(cacheKey, entry);
@@ -106,7 +105,7 @@ const readMessagePreviewCache = (cacheKey: string): NativeLinkPreview[] | undefi
         return undefined;
     }
     messagePreviewCache.delete(cacheKey);
-    cached.expiresAt = Date.now() + MESSAGE_PREVIEW_MEMORY_TTL_MS;
+    cached.expiresAt = Date.now() + SEGMENT_UNLOAD_IDLE_MS;
     messagePreviewCache.set(cacheKey, cached);
     return cached.previews;
 };
@@ -115,7 +114,7 @@ const writeMessagePreviewCache = (cacheKey: string, previews: NativeLinkPreview[
     trimExpiredCache(messagePreviewCache, MAX_CACHED_MESSAGE_PREVIEWS);
     messagePreviewCache.delete(cacheKey);
     messagePreviewCache.set(cacheKey, {
-        expiresAt: Date.now() + MESSAGE_PREVIEW_MEMORY_TTL_MS,
+        expiresAt: Date.now() + SEGMENT_UNLOAD_IDLE_MS,
         previews,
     });
 };

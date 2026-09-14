@@ -1,5 +1,5 @@
-import { PostQuantumHash } from './post-quantum-hash.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
+import { PostQuantumHash } from '../../shared/post-quantum-hash.js';
 
 export function computeHybridPublicKeyFingerprint(keyPair) {
   const encoded = UTF8_ENCODER.encode(JSON.stringify({

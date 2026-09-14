@@ -1,6 +1,5 @@
 import crypto from 'crypto';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 import { privateLookupId } from '../database/core.js';
 
 import { verifyPowSolution } from '../security/auth-throttle.js';
@@ -19,34 +18,44 @@ import { UTF8_ENCODER } from '../utils/encoding.js';
 import { setNoStoreHeaders } from '../utils/http.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
 import { createInflightBodyAdmission } from '../utils/http-admission.js';
-import {
-  hasExactPlainObjectKeys as exactPlainObject,
-  isSafeJsonTree
-} from '../utils/validation.js';
+import { hasExactPlainObjectKeys, isSafeJsonTree } from '../utils/validation.js';
 import { computeHybridPublicKeyFingerprint } from '../crypto/hybrid-key-fingerprint.js';
 import {
-  ML_DSA_87_SIGNATURE_BYTES as ML_DSA_SIGNATURE_BYTES,
-  ML_KEM_1024_CIPHERTEXT_BYTES as ML_KEM_CIPHERTEXT_BYTES,
-  ML_KEM_1024_PUBLIC_KEY_BYTES as ML_KEM_PUBLIC_KEY_BYTES
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  HASH_OUTPUT_BYTES,
+  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
+  POW_SEED_BYTES,
 } from '../../shared/crypto-sizes.js';
 import {
   KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
   KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS
 } from '../../shared/key-transparency-protocol.js';
 import { DISCOVERY_BUCKET_QUERY_COUNT } from '../../shared/discovery-constants.js';
+import { writeAnonymousResponse } from './anonymous-response-writer.js';
+import { ANONYMOUS_DISCOVERY_RESPONSE_BYTES } from '../../shared/anonymous-transfer-policy.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import {
-  HASH_OUTPUT_BYTES,
-  POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
-  POST_QUANTUM_AEAD_KEY_BYTES,
-  POST_QUANTUM_AEAD_NONCE_BYTES as AEAD_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES as AEAD_TAG_BYTES,
-  POW_SEED_BYTES,
-  POW_SOLUTION_BYTES
-} from '../utils/crypto-consts.js';
+  ANONYMOUS_HTTP_REQUEST_CIPHERTEXT_OFFSET,
+  ANONYMOUS_HTTP_REQUEST_LARGE_BYTES,
+  ANONYMOUS_HTTP_REQUEST_PIR_BYTES,
+  ANONYMOUS_HTTP_REQUEST_POW_NONCE_OFFSET,
+  ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET,
+  ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES,
+  ANONYMOUS_HTTP_REQUEST_SMALL_BYTES,
+  ANONYMOUS_HTTP_REQUEST_TAG_OFFSET,
+  ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET,
+  ANONYMOUS_HTTP_RESPONSE_PIR_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_SIGNATURE_OFFSET,
+  ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_TAG_OFFSET,
+  ANONYMOUS_HTTP_WIRE_VERSION,
+} from '../../shared/anonymous-http-layout.js';
+import { PostQuantumHash } from '../../shared/post-quantum-hash.js';
 
-const PROTOCOL_VERSION = PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL;
-const WIRE_VERSION = 1;
 const REQUEST_MAGIC = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_REQUEST_MAGIC, 'ascii');
 const RESPONSE_MAGIC = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_MAGIC, 'ascii');
 const REQUEST_AAD_DOMAIN = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_REQUEST_AAD, 'utf8');
@@ -54,34 +63,13 @@ const RESPONSE_AAD_DOMAIN = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE
 const RESPONSE_SIGNATURE_DOMAIN = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_SIGNATURE, 'utf8');
 const REQUEST_POW_DOMAIN = Buffer.from(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_ADMISSION_POW, 'utf8');
 
-const REQUEST_SMALL_BYTES = 64 * 1024;
-const REQUEST_LARGE_BYTES = 512 * 1024;
-const REQUEST_PIR_BYTES = 2 * 1024 * 1024;
-export const PQ_ANONYMOUS_HTTP_MAX_REQUEST_BYTES = REQUEST_PIR_BYTES;
 const REQUEST_CLASS_BYTES = new Map([
-  [1, REQUEST_SMALL_BYTES],
-  [2, REQUEST_LARGE_BYTES],
-  [3, REQUEST_PIR_BYTES],
+  [1, ANONYMOUS_HTTP_REQUEST_SMALL_BYTES],
+  [2, ANONYMOUS_HTTP_REQUEST_LARGE_BYTES],
+  [3, ANONYMOUS_HTTP_REQUEST_PIR_BYTES],
 ]);
 
-const RESPONSE_SMALL_BYTES = 64 * 1024;
-const RESPONSE_TAG_INDEX_BYTES = 512 * 1024;
-const RESPONSE_PIR_BYTES = 1024 * 1024;
-const RESPONSE_AVATAR_BYTES = 4 * 1024 * 1024;
-const RESPONSE_DISCOVERY_BYTES = 8912896;
 
-const AEAD_CIPHERTEXT_OVERHEAD = POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-const REQUEST_POW_NONCE_OFFSET = 3252;
-const REQUEST_POW_SOLUTION_OFFSET = REQUEST_POW_NONCE_OFFSET + POW_SEED_BYTES;
-const REQUEST_PREFIX_BYTES = REQUEST_POW_SOLUTION_OFFSET + POW_SOLUTION_BYTES;
-const REQUEST_NONCE_OFFSET = REQUEST_PREFIX_BYTES;
-const REQUEST_TAG_OFFSET = REQUEST_NONCE_OFFSET + AEAD_NONCE_BYTES;
-const REQUEST_CIPHERTEXT_OFFSET = REQUEST_TAG_OFFSET + AEAD_TAG_BYTES;
-const RESPONSE_PREFIX_BYTES = 1652;
-const RESPONSE_NONCE_OFFSET = RESPONSE_PREFIX_BYTES;
-const RESPONSE_TAG_OFFSET = RESPONSE_NONCE_OFFSET + AEAD_NONCE_BYTES;
-const RESPONSE_SIGNATURE_OFFSET = RESPONSE_TAG_OFFSET + AEAD_TAG_BYTES;
-const RESPONSE_CIPHERTEXT_OFFSET = RESPONSE_SIGNATURE_OFFSET + ML_DSA_SIGNATURE_BYTES;
 
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const REQUEST_POW_DIFFICULTY = 12;
@@ -98,16 +86,16 @@ const REQUEST_BODY_PARSE_TYPES = new Set([
 ]);
 
 const OPERATION_POLICY = Object.freeze({
-  [AVATAR_BLOB_GET_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 2, responseBytes: RESPONSE_AVATAR_BYTES }),
-  [AVATAR_BLOB_PUT_AUDIENCE]: Object.freeze({ requestClass: 2, requestBytes: REQUEST_LARGE_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  [AVATAR_POOL_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  'discovery/bucket': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 4, responseBytes: RESPONSE_DISCOVERY_BYTES }),
-  [DISCOVERY_MANIFEST_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS, responseBytes: KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES }),
-  [KEY_TRANSPARENCY_APPEND_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  'oprf/evaluate': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: RESPONSE_SMALL_BYTES }),
-  'spool/tag-index': Object.freeze({ requestClass: 1, requestBytes: REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: RESPONSE_TAG_INDEX_BYTES }),
-  'spool/pir': Object.freeze({ requestClass: 3, requestBytes: REQUEST_PIR_BYTES, responseClass: 5, responseBytes: RESPONSE_PIR_BYTES })
+  [AVATAR_BLOB_GET_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 2, responseBytes: ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES }),
+  [AVATAR_BLOB_PUT_AUDIENCE]: Object.freeze({ requestClass: 2, requestBytes: ANONYMOUS_HTTP_REQUEST_LARGE_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
+  [AVATAR_POOL_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
+  'discovery/bucket': Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 4, responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES }),
+  [DISCOVERY_MANIFEST_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
+  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS, responseBytes: KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES }),
+  [KEY_TRANSPARENCY_APPEND_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
+  'oprf/evaluate': Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
+  'spool/tag-index': Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES }),
+  'spool/pir': Object.freeze({ requestClass: 3, requestBytes: ANONYMOUS_HTTP_REQUEST_PIR_BYTES, responseClass: 5, responseBytes: ANONYMOUS_HTTP_RESPONSE_PIR_BYTES })
 });
 
 const MAX_INFLIGHT = envInt(
@@ -126,25 +114,19 @@ const MAX_REJECTION_LOGS_PER_SECOND = envInt(
   1,
   20
 );
-const RESPONSE_WRITE_TIMEOUT_MS = envInt(
-  'PQ_ANONYMOUS_HTTP_WRITE_TIMEOUT_MS',
-  180_000,
-  5_000,
-  300_000
-);
 
 function responseSignatureDigest(body) {
   return PostQuantumHash.digestParts([
     RESPONSE_SIGNATURE_DOMAIN,
-    body.subarray(0, RESPONSE_SIGNATURE_OFFSET),
-    body.subarray(RESPONSE_CIPHERTEXT_OFFSET)
+    body.subarray(0, ANONYMOUS_HTTP_RESPONSE_SIGNATURE_OFFSET),
+    body.subarray(ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET)
   ], HASH_OUTPUT_BYTES);
 }
 
 function requestPowSeed(body) {
   return PostQuantumHash.digestParts([
     REQUEST_POW_DOMAIN,
-    body.subarray(0, REQUEST_POW_SOLUTION_OFFSET)
+    body.subarray(0, ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET)
   ], POW_SEED_BYTES);
 }
 
@@ -155,36 +137,13 @@ function randomFill(buffer) {
 }
 
 async function sendBinaryResponse(res, body) {
+  if (res.destroyed || res.writableEnded) return false;
   res.status(200);
   setNoStoreHeaders(res);
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Encoding', 'identity');
   res.setHeader('Content-Length', String(body.length));
-  await new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      res.off?.('finish', finish);
-      res.off?.('close', finish);
-      res.off?.('error', finish);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      try { res.destroy?.(); } catch { }
-      finish();
-    }, RESPONSE_WRITE_TIMEOUT_MS);
-    timer.unref?.();
-    res.once?.('finish', finish);
-    res.once?.('close', finish);
-    res.once?.('error', finish);
-    try {
-      res.end(body, finish);
-    } catch {
-      finish();
-    }
-  });
+  return writeAnonymousResponse(res, body);
 }
 
 const allowOpaqueFailure = createTokenBucketRateLimiter(MAX_FAILURES_PER_SECOND);
@@ -210,24 +169,24 @@ async function reject(res, reason) {
 }
 
 async function sendOpaqueFailure(res) {
+  if (res.destroyed || res.writableEnded) return false;
   if (!allowOpaqueFailure() || opaqueFailureInflight >= MAX_FAILURE_INFLIGHT) {
     try { res.destroy?.(); } catch { }
     return false;
   }
   opaqueFailureInflight += 1;
-  const body = Buffer.allocUnsafe(RESPONSE_SMALL_BYTES);
+  const body = Buffer.allocUnsafe(ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES);
   try {
     await randomFill(body);
-    await sendBinaryResponse(res, body);
-    return true;
+    return await sendBinaryResponse(res, body);
   } finally {
     body.fill(0);
     opaqueFailureInflight = Math.max(0, opaqueFailureInflight - 1);
   }
 }
 
-export async function handlePqAnonymousHttpParseError(error, _req, res, _next) {
-  if (res.headersSent || res.writableEnded) {
+export async function handlePqAnonymousHttpParseError(error, req, res, _next) {
+  if (error?.type === 'request.aborted' || req.aborted || res.destroyed || res.headersSent || res.writableEnded) {
     try { res.destroy?.(); } catch { }
     return;
   }
@@ -256,10 +215,10 @@ function parsePaddedRequest(plaintext) {
     return null;
   }
   if (
-    !exactPlainObject(parsed, ['body', 'operation', 'version']) ||
-    parsed.version !== PROTOCOL_VERSION ||
+    !hasExactPlainObjectKeys(parsed, ['body', 'operation', 'version']) ||
+    parsed.version !== PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL ||
     typeof parsed.operation !== 'string' ||
-    !exactPlainObject(parsed.body, Object.keys(parsed.body || {})) ||
+    !hasExactPlainObjectKeys(parsed.body, Object.keys(parsed.body || {})) ||
     !isSafeJsonTree(parsed.body)
   ) return null;
   return parsed;
@@ -323,7 +282,7 @@ async function encodeResponse({
   serverHybridKeyPair
 }) {
   const response = Buffer.allocUnsafe(policy.responseBytes);
-  const responsePlaintextBytes = policy.responseBytes - RESPONSE_CIPHERTEXT_OFFSET - AEAD_CIPHERTEXT_OVERHEAD;
+  const responsePlaintextBytes = policy.responseBytes - ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET - POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
   let responsePlaintext = null;
   let responseKemCiphertext = null;
   let responseSharedSecret = null;
@@ -340,7 +299,7 @@ async function encodeResponse({
     responseSharedSecret = responseEncapsulation.sharedSecret;
 
     response.set(RESPONSE_MAGIC, 0);
-    response[8] = WIRE_VERSION;
+    response[8] = ANONYMOUS_HTTP_WIRE_VERSION;
     response[9] = policy.responseClass;
     response[10] = 0;
     response[11] = 0;
@@ -351,7 +310,7 @@ async function encodeResponse({
 
     responseAad = Buffer.concat([
       RESPONSE_AAD_DOMAIN,
-      response.subarray(0, RESPONSE_PREFIX_BYTES)
+      response.subarray(0, ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES)
     ]);
     responseSalt = PostQuantumHash.blake3(responseAad);
     responseCombinedSecret = new Uint8Array(requestKey.length + responseSharedSecret.length);
@@ -361,17 +320,17 @@ async function encodeResponse({
       responseCombinedSecret,
       responseSalt,
       PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_KDF,
-      POST_QUANTUM_AEAD_KEY_BYTES
+      HASH_OUTPUT_BYTES
     );
 
     let encodedPayload = UTF8_ENCODER.encode(JSON.stringify({
-      version: PROTOCOL_VERSION,
+      version: PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL,
       payload
     }));
     if (encodedPayload.length > responsePlaintextBytes - 4) {
       encodedPayload.fill(0);
       encodedPayload = UTF8_ENCODER.encode(JSON.stringify({
-        version: PROTOCOL_VERSION,
+        version: PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL,
         payload: { ok: false, error: 'anonymous_response_too_large' }
       }));
     }
@@ -389,19 +348,19 @@ async function encodeResponse({
       responseKey,
       responseAad
     );
-    if (encrypted.ciphertext.length !== policy.responseBytes - RESPONSE_CIPHERTEXT_OFFSET) {
+    if (encrypted.ciphertext.length !== policy.responseBytes - ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET) {
       throw new Error('anonymous response encryption length mismatch');
     }
-    response.set(encrypted.nonce, RESPONSE_NONCE_OFFSET);
-    response.set(encrypted.tag, RESPONSE_TAG_OFFSET);
-    response.set(encrypted.ciphertext, RESPONSE_CIPHERTEXT_OFFSET);
+    response.set(encrypted.nonce, ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES);
+    response.set(encrypted.tag, ANONYMOUS_HTTP_RESPONSE_TAG_OFFSET);
+    response.set(encrypted.ciphertext, ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET);
 
     signatureDigest = responseSignatureDigest(response);
     signature = await CryptoUtils.Dilithium.sign(
       signatureDigest,
       serverHybridKeyPair.dilithium.secretKey
     );
-    response.set(signature, RESPONSE_SIGNATURE_OFFSET);
+    response.set(signature, ANONYMOUS_HTTP_RESPONSE_SIGNATURE_OFFSET);
     return response;
   } catch (error) {
     response.fill(0);
@@ -473,7 +432,7 @@ export function createPqAnonymousHttpHandler({
       if (!verifyPowSolution(
         Buffer.from(powSeed).toString('base64'),
         REQUEST_POW_DIFFICULTY,
-        requestBody.subarray(REQUEST_POW_SOLUTION_OFFSET, REQUEST_PREFIX_BYTES).toString('base64')
+        requestBody.subarray(ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET, ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES).toString('base64')
       )) {
         await reject(res, 'admission-work');
         return;
@@ -481,7 +440,7 @@ export function createPqAnonymousHttpHandler({
 
       if (
         !crypto.timingSafeEqual(requestBody.subarray(0, 8), REQUEST_MAGIC) ||
-        requestBody[8] !== WIRE_VERSION ||
+        requestBody[8] !== ANONYMOUS_HTTP_WIRE_VERSION ||
         requestBody[10] !== 0 ||
         requestBody[11] !== 0
       ) {
@@ -522,18 +481,18 @@ export function createPqAnonymousHttpHandler({
       }
       rememberLocalReplay(localReplayIds, replayId);
 
-      requestKemCiphertext = new Uint8Array(requestBody.subarray(84, 84 + ML_KEM_CIPHERTEXT_BYTES));
+      requestKemCiphertext = new Uint8Array(requestBody.subarray(84, 84 + ML_KEM_1024_CIPHERTEXT_BYTES));
       requestKemSecret = await CryptoUtils.Kyber.decapsulate(
         requestKemCiphertext,
         serverHybridKeyPair.kyber.secretKey
       );
       clientKemPublicKey = new Uint8Array(requestBody.subarray(
-        84 + ML_KEM_CIPHERTEXT_BYTES,
-        84 + ML_KEM_CIPHERTEXT_BYTES + ML_KEM_PUBLIC_KEY_BYTES
+        84 + ML_KEM_1024_CIPHERTEXT_BYTES,
+        84 + ML_KEM_1024_CIPHERTEXT_BYTES + ML_KEM_1024_PUBLIC_KEY_BYTES
       ));
       clientX25519PublicKey = new Uint8Array(requestBody.subarray(
-        84 + ML_KEM_CIPHERTEXT_BYTES + ML_KEM_PUBLIC_KEY_BYTES,
-        REQUEST_POW_NONCE_OFFSET
+        84 + ML_KEM_1024_CIPHERTEXT_BYTES + ML_KEM_1024_PUBLIC_KEY_BYTES,
+        ANONYMOUS_HTTP_REQUEST_POW_NONCE_OFFSET
       ));
       x25519Secret = CryptoUtils.Hybrid.computeClassicalSharedSecret(
         serverHybridKeyPair.x25519.secretKey,
@@ -541,7 +500,7 @@ export function createPqAnonymousHttpHandler({
       );
       requestAad = Buffer.concat([
         REQUEST_AAD_DOMAIN,
-        requestBody.subarray(0, REQUEST_PREFIX_BYTES)
+        requestBody.subarray(0, ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES)
       ]);
       requestSalt = PostQuantumHash.blake3(requestAad);
       combinedSecret = new Uint8Array(requestKemSecret.length + x25519Secret.length);
@@ -551,12 +510,12 @@ export function createPqAnonymousHttpHandler({
         combinedSecret,
         requestSalt,
         PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_REQUEST_KDF,
-        POST_QUANTUM_AEAD_KEY_BYTES
+        HASH_OUTPUT_BYTES
       );
       plaintext = CryptoUtils.PostQuantumAEAD.decrypt(
-        requestBody.subarray(REQUEST_CIPHERTEXT_OFFSET),
-        requestBody.subarray(REQUEST_NONCE_OFFSET, REQUEST_TAG_OFFSET),
-        requestBody.subarray(REQUEST_TAG_OFFSET, REQUEST_CIPHERTEXT_OFFSET),
+        requestBody.subarray(ANONYMOUS_HTTP_REQUEST_CIPHERTEXT_OFFSET),
+        requestBody.subarray(ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES, ANONYMOUS_HTTP_REQUEST_TAG_OFFSET),
+        requestBody.subarray(ANONYMOUS_HTTP_REQUEST_TAG_OFFSET, ANONYMOUS_HTTP_REQUEST_CIPHERTEXT_OFFSET),
         requestKey,
         requestAad
       );

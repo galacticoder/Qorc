@@ -1,8 +1,7 @@
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { EventType } from '../types/event-types';
 import { MAX_AVATAR_DIMENSION } from '../constants';
-import type { AvatarData } from '../types/avatar-types';
-import type { AvatarSystemState } from '../types/avatar-types';
+import type { AvatarData, AvatarSystemState } from '../types/avatar-types';
 import {
     validateImageData,
     compressImage,

@@ -2,15 +2,11 @@
  * Post-Quantum Utilities
  */
 
-import { SecureMemory } from '../cryptography/secure-memory';
-import { PostQuantumRandom } from '../cryptography/random';
 import { PQ_UTILS_MAX_DATA_SIZE } from '../constants';
-import { bytesToHex as encodeBytesToHex, concatUint8Arrays } from './byte-utils';
 import { Base64 } from '../cryptography/base64';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 export class PostQuantumUtils {
-  static timingSafeEqual = SecureMemory.constantTimeCompare;
-
   static clearMemory(data: Uint8Array): void {
     data.fill(0);
   }
@@ -27,7 +23,7 @@ export class PostQuantumUtils {
     if (bytes.length > PQ_UTILS_MAX_DATA_SIZE) {
       throw new Error(`Data too large: ${bytes.length} bytes exceeds limit`);
     }
-    return encodeBytesToHex(bytes);
+    return bytesToHex(bytes);
   }
 
   static hexToBytes(hex: string): Uint8Array {
@@ -62,17 +58,5 @@ export class PostQuantumUtils {
     } catch {
       throw new Error('Failed to decode base64');
     }
-  }
-
-  static uint8ArrayToBase64(bytes: Uint8Array): string {
-    return Base64.arrayBufferToBase64(bytes);
-  }
-
-  static concatBytes(...arrays: Uint8Array[]): Uint8Array {
-    return concatUint8Arrays(...arrays);
-  }
-
-  static randomBytes(length: number): Uint8Array {
-    return PostQuantumRandom.randomBytes(length);
   }
 }

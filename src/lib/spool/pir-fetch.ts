@@ -8,7 +8,6 @@ import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { SPOOL_PIR_AUDIENCE } from '../config/audiences';
 import {
   SPOOL_PIR_EPOCH_UNAVAILABLE,
-  SPOOL_PIR_LAYOUT,
   SPOOL_PIR_RECORD_BYTES,
   SPOOL_PIR_ROW_BYTES,
   SPOOL_PIR_ROWS_PER_RECORD,
@@ -16,9 +15,9 @@ import {
   spoolPirRecordRowPositions,
 } from '../../../shared/spool-pir-layout.js';
 import { Base64, tryDecodeCanonicalBase64 } from '../cryptography/base64';
+import { SPOOL_PIR_LAYOUT } from '../../../shared/protocol-keys.js';
+import { ML_KEM_1024_CIPHERTEXT_BYTES, SEALED_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 
-const KEM_CIPHERTEXT_BYTES = 1568;
-const NONCE_BYTES = 12;
 
 const PIR_RECORD_CONCURRENCY = 1;
 
@@ -130,9 +129,9 @@ export function sealedEnvelopeFromRecord(
   probe: string
 ): RetrievedSealedEnvelope | null {
   if (record.length !== SPOOL_PIR_RECORD_BYTES) return null;
-  const ephemeralKey = record.subarray(0, KEM_CIPHERTEXT_BYTES);
-  const nonce = record.subarray(KEM_CIPHERTEXT_BYTES, KEM_CIPHERTEXT_BYTES + NONCE_BYTES);
-  const ciphertext = record.subarray(KEM_CIPHERTEXT_BYTES + NONCE_BYTES);
+  const ephemeralKey = record.subarray(0, ML_KEM_1024_CIPHERTEXT_BYTES);
+  const nonce = record.subarray(ML_KEM_1024_CIPHERTEXT_BYTES, ML_KEM_1024_CIPHERTEXT_BYTES + SEALED_NONCE_BYTES);
+  const ciphertext = record.subarray(ML_KEM_1024_CIPHERTEXT_BYTES + SEALED_NONCE_BYTES);
   return {
     version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
     ciphertext: Base64.arrayBufferToBase64(ciphertext),

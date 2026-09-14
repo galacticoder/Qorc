@@ -11,7 +11,7 @@ import {
   TOR_DEFAULT_MONITOR_INTERVAL_MS,
   TOR_MAX_BACKOFF_MS
 } from '../constants';
-import { tor as tauriTor, websocket as tauriWebsocket } from '../tauri-bindings';
+import { tor, websocket } from '../tauri-bindings';
 import type { TorStatus } from '../tauri-bindings';
 
 const TOR_DEEP_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -59,7 +59,7 @@ export class TorNetworkManager {
   }
 
   private async readDaemonState(): Promise<TorStatus> {
-    return tauriTor.status();
+    return tor.status();
   }
 
   private applyDaemonState(status: TorStatus): boolean {
@@ -116,7 +116,7 @@ export class TorNetworkManager {
   }
 
   private async syncBackendTorState(): Promise<void> {
-    await tauriWebsocket.syncTorState();
+    await websocket.syncTorState();
   }
 
   async syncWithDaemon(): Promise<boolean> {
@@ -309,7 +309,7 @@ export class TorNetworkManager {
     }
 
     const start = performance.now();
-    const test = await tauriTor.verifyConnection();
+    const test = await tor.verifyConnection();
     if (generation !== this.lifecycleGeneration) return;
     const latency = performance.now() - start;
     this.lastDeepHealthCheckAt = Date.now();
@@ -367,7 +367,7 @@ export class TorNetworkManager {
         if (!isCurrent()) return false;
         if (!status.is_running) {
           const result = await this.retryWithBackoff(
-            () => tauriTor.start(),
+            () => tor.start(),
             this.config.maxRetries,
             isCurrent
           );
@@ -460,7 +460,7 @@ export class TorNetworkManager {
     try {
       if (generation !== this.lifecycleGeneration) return false;
       const startedAt = performance.now();
-      const result = await tauriTor.verifyConnection();
+      const result = await tor.verifyConnection();
       if (generation !== this.lifecycleGeneration) return false;
       const latency = performance.now() - startedAt;
       this.lastDeepHealthCheckAt = Date.now();

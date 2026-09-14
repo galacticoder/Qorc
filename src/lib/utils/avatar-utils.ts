@@ -11,9 +11,9 @@ import {
     validatePngContainer,
     validateWebpContainer
 } from './image-container-validation';
-import { bytesToHex } from './byte-utils';
 import { Base64 } from '../cryptography/base64';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 const DEFAULT_AVATAR_COLORS = [
   '#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ED4245',

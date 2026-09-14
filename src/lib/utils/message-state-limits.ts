@@ -1,8 +1,8 @@
 import type { Message } from '../../components/chat/messaging/types';
 import {
-  MAX_UI_MESSAGES_PER_CONVERSATION,
   MAX_UI_MESSAGES_TOTAL,
   MAX_CONVERSATION_STORED_MESSAGES,
+  CONVERSATION_SEGMENT_SIZE,
 } from '../constants';
 
 export const setBoundedMapEntry = <K, V>(
@@ -51,7 +51,7 @@ export const boundMessageState = (messages: Message[], activePeer?: string | nul
     );
     const conversationLimit = isActiveConversation
       ? MAX_CONVERSATION_STORED_MESSAGES
-      : MAX_UI_MESSAGES_PER_CONVERSATION;
+      : CONVERSATION_SEGMENT_SIZE;
     if (!isActiveConversation && inactiveRetainedCount >= MAX_UI_MESSAGES_TOTAL) continue;
     if (count >= conversationLimit) continue;
     conversationCounts.set(key, count + 1);

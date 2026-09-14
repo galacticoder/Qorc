@@ -1,9 +1,6 @@
 import { CryptoUtils } from './unified-crypto.js';
-import {
-  POST_QUANTUM_AEAD_KEY_BYTES,
-  WIDE_HASH_OUTPUT_BYTES
-} from '../utils/crypto-consts.js';
 import { UTF8_ENCODER } from '../utils/encoding.js';
+import { HASH_OUTPUT_BYTES, WIDE_HASH_OUTPUT_BYTES } from '../../shared/crypto-sizes.js';
 
 export async function deriveQuantumAeadKey(rawSecret, context) {
   if (!(rawSecret instanceof Uint8Array) || rawSecret.length === 0) {
@@ -21,7 +18,7 @@ export async function deriveQuantumAeadKey(rawSecret, context) {
       secret,
       salt,
       info,
-      POST_QUANTUM_AEAD_KEY_BYTES
+      HASH_OUTPUT_BYTES
     );
   } finally {
     secret.fill(0);

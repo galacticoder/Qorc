@@ -84,6 +84,9 @@ const APP_SETTINGS_CSS = `
     }
 
     .settings-screen {
+      container-type: size;
+      display: flex;
+      flex-direction: column;
       width: 100%;
       height: 100%;
       min-height: 0;
@@ -92,22 +95,24 @@ const APP_SETTINGS_CSS = `
     }
 
     .settings-content {
+      --settings-section-gap: 44px;
+      --settings-avatar-size: max(64px, min(220px, calc(50cqh - 130px), calc(50cqw - 48px)));
       width: 100%;
-      height: 100%;
+      flex: 1;
+      min-height: 0;
       min-width: 0;
       display: grid;
       grid-template-columns: minmax(0, 1fr);
       grid-template-areas:
-        "title"
         "account"
         "general"
         "devices"
         "privacy";
       align-content: start;
       align-items: start;
-      gap: 44px;
+      gap: var(--settings-section-gap);
       overflow-y: auto;
-      padding: 16px 18px 72px;
+      padding: var(--settings-section-gap) 18px 72px;
       background: var(--settings-bg);
       scrollbar-width: thin;
     }
@@ -126,10 +131,10 @@ const APP_SETTINGS_CSS = `
     }
 
     .settings-brand {
-      grid-area: title;
+      flex-shrink: 0;
       margin: 0;
-      min-height: 40px;
-      padding: 0;
+      min-height: 56px;
+      padding: 16px 18px 0;
       display: flex;
       align-items: center;
       gap: 10px;
@@ -164,6 +169,8 @@ const APP_SETTINGS_CSS = `
 
     .pane[data-settings-pane="account"] {
       grid-area: account;
+      display: grid;
+      align-content: center;
     }
 
     .pane[data-settings-pane="general"] {
@@ -398,11 +405,11 @@ const APP_SETTINGS_CSS = `
 
     .account-preview {
       min-width: 0;
-      display: flex;
-      flex-direction: row;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas: "avatar name actions";
       align-items: center;
-      justify-content: flex-start;
-      gap: 18px;
+      gap: 12px 18px;
       margin-bottom: 0;
       padding: 20px 18px;
       border-radius: 8px;
@@ -410,6 +417,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .avatar-preview-button {
+      grid-area: avatar;
       display: block;
       border: 0;
       border-radius: 50%;
@@ -424,8 +432,8 @@ const APP_SETTINGS_CSS = `
 
     .avatar-preview {
       position: relative;
-      width: 104px;
-      height: 104px;
+      width: var(--settings-avatar-size);
+      height: var(--settings-avatar-size);
       overflow: hidden;
       display: grid;
       place-items: center;
@@ -444,7 +452,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .avatar-preview-placeholder {
-      font-size: 36px;
+      font-size: calc(var(--settings-avatar-size) * .35);
       line-height: 1;
       font-weight: 650;
       text-transform: uppercase;
@@ -468,8 +476,8 @@ const APP_SETTINGS_CSS = `
     }
 
     .avatar-hover-overlay svg {
-      width: 25px;
-      height: 25px;
+      width: 32px;
+      height: 32px;
     }
 
     .avatar-upload-input {
@@ -477,21 +485,25 @@ const APP_SETTINGS_CSS = `
     }
 
     .account-name-row {
+      grid-area: name;
+      align-self: center;
       flex: 0 1 auto;
       max-width: 100%;
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, auto) 38px;
       align-items: center;
-      justify-content: flex-start;
+      justify-content: start;
       gap: 10px;
       margin-top: 0;
     }
 
     .account-username {
+      grid-column: 1;
       min-width: 0;
       max-width: min(520px, 60vw);
       overflow: hidden;
       color: var(--settings-text);
-      font-size: 21px;
+      font-size: 24px;
       line-height: 1.25;
       font-weight: 650;
       text-align: left;
@@ -528,17 +540,20 @@ const APP_SETTINGS_CSS = `
     }
 
     .account-actions {
-      width: auto;
+      grid-area: actions;
+      width: 100%;
+      max-width: 240px;
       flex: 0 0 auto;
       align-self: center;
       display: flex;
       justify-content: flex-end;
-      margin: 0 0 0 auto;
+      margin: 0;
     }
 
     .account-action-controls {
       min-width: 0;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: flex-end;
       gap: 8px;
@@ -965,8 +980,8 @@ const APP_SETTINGS_CSS = `
 
     @media (max-width: 900px) {
       .settings-content {
-        gap: 36px;
-        padding: 16px 18px 60px;
+        --settings-section-gap: 36px;
+        padding: var(--settings-section-gap) 18px 60px;
       }
 
       .account-preview {
@@ -976,14 +991,9 @@ const APP_SETTINGS_CSS = `
 
     @media (max-width: 580px) {
       .account-preview {
-        flex-wrap: wrap;
-      }
-
-      .account-actions {
-        width: 100%;
-        max-width: none;
-        flex-basis: 100%;
-        margin-left: 0;
+        --settings-avatar-size: min(96px, max(64px, calc(30cqw - 24px)));
+        grid-template-columns: auto minmax(0, 1fr) minmax(100px, auto);
+        gap: 12px;
       }
 
       .pane-head {
@@ -1014,10 +1024,13 @@ const APP_SETTINGS_CSS = `
 
       .account-actions .confirm-inline {
         width: 100%;
+        flex-direction: column;
+        align-items: stretch;
       }
 
       .account-action-controls {
-        width: 100%;
+        flex-direction: column;
+        align-items: stretch;
       }
 
       .account-action-controls > button,

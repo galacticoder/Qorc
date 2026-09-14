@@ -4,10 +4,16 @@
 
 import { account } from '../tauri-bindings';
 import type { AnonymousToken } from '../cryptography/privacy-pass-client';
-import { getPrivacyPassBatchEpoch, isPrivacyPassTokenEpochUsable, isPrivacyPassTokenUsable, PrivacyPassClient, TokenSerializer } from '../cryptography/privacy-pass-client';
+import {
+  getPrivacyPassBatchEpoch,
+  isPrivacyPassTokenEpochUsable,
+  isPrivacyPassTokenUsable,
+  PrivacyPassClient,
+  TokenSerializer,
+} from '../cryptography/privacy-pass-client';
 import { Base64 } from '../cryptography/base64';
 import { getCurrentServerScope } from '../security/local-account-scope';
-import { wipeAnonymousToken as wipeToken } from '../cryptography/wipe';
+import { wipeAnonymousToken } from '../cryptography/wipe';
 import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
 // Vault configuration
@@ -89,7 +95,7 @@ export class TokenVault {
             loadedTokens = [];
             this.isUnlocked = true;
         } catch (error) {
-            for (const token of loadedTokens) wipeToken(token);
+            for (const token of loadedTokens) wipeAnonymousToken(token);
             if (this.generation === generation) this.lock();
             throw error;
         }
@@ -103,7 +109,7 @@ export class TokenVault {
         this.generation += 1;
 
         // Clear token secrets from memory
-        for (const token of this.tokens) wipeToken(token);
+        for (const token of this.tokens) wipeAnonymousToken(token);
 
         this.tokens = [];
         this.isUnlocked = false;
@@ -148,14 +154,14 @@ export class TokenVault {
             this.tokens = replacement;
             await this.saveToStorage(generation);
             this.assertGeneration(generation);
-            for (const token of originalTokens) wipeToken(token);
+            for (const token of originalTokens) wipeAnonymousToken(token);
         } catch (error) {
             if (this.generation === generation) {
                 this.tokens = originalTokens;
             } else {
-                for (const token of originalTokens) wipeToken(token);
+                for (const token of originalTokens) wipeAnonymousToken(token);
             }
-            for (const token of replacement) wipeToken(token);
+            for (const token of replacement) wipeAnonymousToken(token);
             throw error;
         }
     }
@@ -193,14 +199,14 @@ export class TokenVault {
             this.assertGeneration(generation);
             await this.saveToStorage(generation);
             this.assertGeneration(generation);
-            for (const token of discarded) wipeToken(token);
+            for (const token of discarded) wipeAnonymousToken(token);
         } catch (error) {
             if (this.generation === generation) {
                 this.tokens = originalTokens;
             } else {
-                for (const token of originalTokens) wipeToken(token);
+                for (const token of originalTokens) wipeAnonymousToken(token);
             }
-            for (const token of added) wipeToken(token);
+            for (const token of added) wipeAnonymousToken(token);
             throw error;
         }
     }
@@ -218,7 +224,7 @@ export class TokenVault {
         const existing = await this.getPendingTokens(2);
         if (existing.length > 0) {
             if (existing.length !== 1 || existing[0].blindedElement?.length !== 32) {
-                for (const token of existing) wipeToken(token);
+                for (const token of existing) wipeAnonymousToken(token);
                 throw new Error('Invalid pending account-auth replacement');
             }
             try {
@@ -227,7 +233,7 @@ export class TokenVault {
                     tokenEpoch: getPrivacyPassBatchEpoch(existing)
                 };
             } finally {
-                wipeToken(existing[0]);
+                wipeAnonymousToken(existing[0]);
             }
         }
         const ppClient = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
@@ -240,7 +246,7 @@ export class TokenVault {
             };
         } finally {
             for (const token of generated.blindedTokens) token.fill(0);
-            for (const token of generated.tokenSecrets) wipeToken(token);
+            for (const token of generated.tokenSecrets) wipeAnonymousToken(token);
         }
     }
 
@@ -268,7 +274,7 @@ export class TokenVault {
         try {
             await this.updateTokens(completed);
         } finally {
-            for (const token of pendingTokens) wipeToken(token);
+            for (const token of pendingTokens) wipeAnonymousToken(token);
         }
     }
 
@@ -298,12 +304,12 @@ export class TokenVault {
             try {
                 await this.saveToStorage(generation);
                 this.assertGeneration(generation);
-                for (const token of discarded) wipeToken(token);
+                for (const token of discarded) wipeAnonymousToken(token);
             } catch (error) {
                 if (this.generation === generation) {
                     this.tokens = originalTokens;
                 } else {
-                    for (const token of originalTokens) wipeToken(token);
+                    for (const token of originalTokens) wipeAnonymousToken(token);
                 }
                 throw error;
             }
@@ -358,14 +364,14 @@ export class TokenVault {
             this.tokens = nextTokens;
             await this.saveToStorage(generation);
             this.assertGeneration(generation);
-            for (const token of replacedTokens) wipeToken(token);
+            for (const token of replacedTokens) wipeAnonymousToken(token);
         } catch (error) {
             if (this.generation === generation) {
                 this.tokens = originalTokens;
             } else {
-                for (const token of originalTokens) wipeToken(token);
+                for (const token of originalTokens) wipeAnonymousToken(token);
             }
-            for (const token of ownedUpdates) wipeToken(token);
+            for (const token of ownedUpdates) wipeAnonymousToken(token);
             throw error;
         }
     }
@@ -397,7 +403,7 @@ export class TokenVault {
                 if (this.generation === generation) {
                     this.tokens = originalTokens;
                 } else {
-                    for (const token of originalTokens) wipeToken(token);
+                    for (const token of originalTokens) wipeAnonymousToken(token);
                 }
                 throw error;
             }
@@ -431,7 +437,7 @@ export class TokenVault {
             let removedAmbiguousToken = false;
             loadedTokens = loadedTokens.filter((token) => {
                 if (!token.pending && !token.used) return true;
-                wipeToken(token);
+                wipeAnonymousToken(token);
                 removedAmbiguousToken = true;
                 return false;
             });
@@ -446,7 +452,7 @@ export class TokenVault {
             loadedTokens = [];
             return result;
         } catch (error) {
-            for (const token of loadedTokens) wipeToken(token);
+            for (const token of loadedTokens) wipeAnonymousToken(token);
             loadedTokens = [];
             if (this.generation !== generation) throw error;
             throw new Error(`Token vault could not be opened: ${error instanceof Error ? error.message : String(error)}`);

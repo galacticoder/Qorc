@@ -5,9 +5,6 @@ import {
   KEY_TRANSPARENCY_DELTA_MAX_EPOCHS,
   KEY_TRANSPARENCY_DELTA_MAX_RECORDS,
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
-  KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES,
-  KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES,
-  KEY_TRANSPARENCY_PROTOCOL,
   encodeKeyTransparencySignaturePayload,
   exactPlainObject,
   isKeyTransparencyHash,
@@ -17,7 +14,7 @@ import {
   keyTransparencyHeadPayload,
   keyTransparencyRecoveryActivationEpoch,
 } from '../../../shared/key-transparency-protocol.js';
-import { decodeCanonicalBase64 as decodeBase64 } from '../cryptography/base64';
+import { decodeCanonicalBase64 } from '../cryptography/base64';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import {
   computeKeyTransparencyRecordHash,
@@ -34,6 +31,8 @@ import type {
   KeyTransparencyTransition,
   VerifiedKeyTransparencyContactState,
 } from './types';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
+import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
 
 const HEAD_KEYS = ['entryCount', 'epoch', 'genesisEpoch', 'protocol', 'rootHash', 'signature', 'signerKeyId'];
 const SYNC_KEYS = [
@@ -59,7 +58,7 @@ function globalFailure(message: string): never {
 
 function decodeKeyTransparencyBase64(value: unknown, expectedBytes: number): Uint8Array {
   try {
-    return decodeBase64(value, 'key-transparency base64 value', { exactBytes: expectedBytes });
+    return decodeCanonicalBase64(value, 'key-transparency base64 value', { exactBytes: expectedBytes });
   } catch {
     globalFailure('Invalid key-transparency base64 value');
   }
@@ -93,12 +92,12 @@ export function verifyKeyTransparencyHead(
   const head = parseKeyTransparencyHead(value);
   if (
     !(signerPublicKey instanceof Uint8Array) ||
-    signerPublicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES
+    signerPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES
   ) globalFailure('Invalid key-transparency signer key');
   if (keyTransparencySignerKeyId(signerPublicKey) !== head.signerKeyId) {
     globalFailure('Key-transparency head was signed by an unexpected signer');
   }
-  const signature = decodeKeyTransparencyBase64(head.signature, KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES);
+  const signature = decodeKeyTransparencyBase64(head.signature, ML_DSA_87_SIGNATURE_BYTES);
   const payload = encodeKeyTransparencySignaturePayload(
     'log-head',
     keyTransparencyHeadPayload(head),
@@ -364,7 +363,7 @@ export function keyTransparencyRootMatches(
   try {
     publicKey = decodeKeyTransparencyBase64(
       accountRootPublicKeyBase64,
-      KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES,
+      ML_DSA_87_PUBLIC_KEY_BYTES,
     );
     return keyTransparencyPublicKeyCommitment(publicKey) === contact.rootCommitment;
   } catch {

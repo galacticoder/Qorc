@@ -17,7 +17,7 @@ import {
   TEMP_DIRECTORY,
   haproxyStatsDashboardUrl,
 } from '../config/infrastructure.js';
-import { CLUSTER_SERVERS_KEY, REDIS_KEYS } from '../config/redis-keys.js';
+import { REDIS_KEYS } from '../config/redis-keys.js';
 import { processMatchesExecutable, readProcessIdFileSnapshot } from '../utils/process-identity.js';
 import { acquireProcessLock, releaseProcessLock } from '../utils/process-lock.js';
 import { safeServiceEndpointForDisplay } from '../utils/safe-url.js';
@@ -67,7 +67,7 @@ class AutoLoadBalancer {
   // Get active servers from Redis
   async getActiveServers() {
     return await withRedisClient(async (client) => {
-      const servers = await client.hgetall(CLUSTER_SERVERS_KEY);
+      const servers = await client.hgetall(REDIS_KEYS.CLUSTER_SERVERS);
       const now = Date.now();
       const activeServers = [];
 

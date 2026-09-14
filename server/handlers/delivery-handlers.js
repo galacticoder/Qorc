@@ -7,9 +7,10 @@ import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 
 import * as ServerConfig from '../config/config.js';
 import { LIVE_ONLY_DELIVERY_POLICY } from '../config/audiences.js';
-import { BLIND_ROUTE_REQUEST_ID_RE, validateBlindRouteRequest } from '../routing/blind-route-schema.js';
+import { validateBlindRouteRequest } from '../routing/blind-route-schema.js';
 import { envInt } from '../utils/env.js';
 import { createWindowBudget } from '../utils/window-budget.js';
+import { UUID_V4_RE } from '../../shared/patterns.js';
 
 export function hasAccountAuthentication(ws) {
   return ws?._authenticated === true;
@@ -74,7 +75,7 @@ const consumeBlindRouteBudget = createWindowBudget({
  * Handle blind route message
  */
 export async function handleBlindRoute({ ws, parsed }) {
-  const requestId = typeof parsed?.requestId === 'string' && BLIND_ROUTE_REQUEST_ID_RE.test(parsed.requestId)
+  const requestId = typeof parsed?.requestId === 'string' && UUID_V4_RE.test(parsed.requestId)
     ? parsed.requestId
     : undefined;
   const ack = (fields) => sendSecureMessage(ws, { type: SignalType.BLIND_ROUTE_ACK, requestId, ...fields });
@@ -122,7 +123,7 @@ export async function handleBlindRoute({ ws, parsed }) {
 // Activate authorized socket for global mix broadcast
 export async function handleActivateDelivery({ ws, parsed }) {
   const requestId = typeof parsed?.requestId === 'string' &&
-    BLIND_ROUTE_REQUEST_ID_RE.test(parsed.requestId)
+    UUID_V4_RE.test(parsed.requestId)
     ? parsed.requestId
     : undefined;
   const response = (fields) => sendSecureMessage(ws, {

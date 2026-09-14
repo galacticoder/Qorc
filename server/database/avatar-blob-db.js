@@ -5,28 +5,26 @@
 import crypto from 'crypto';
 import { getPgPool, withTransaction } from './core.js';
 import { selectRandomRankEvictionIds } from './random-rank-eviction.js';
+import { AES_256_CTR, BASE64_ALPHABET, SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
+import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+import { SESSION_FINGERPRINT_RE, CANONICAL_BASE64_RE } from '../../shared/patterns.js';
 import {
-  AES_256_CTR,
   AES_256_CTR_IV_BYTES,
   AVATAR_MISS_SECRET_BYTES,
-  BASE64_ALPHABET,
+  HASH_OUTPUT_BYTES,
   POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
   POST_QUANTUM_AEAD_NONCE_BYTES,
-  POST_QUANTUM_AEAD_TAG_BYTES,
-  SHA_256_ALGORITHM
-} from '../utils/crypto-consts.js';
-import { CANONICAL_BASE64_RE, HEX_64_RE } from '../utils/patterns.js';
-import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
+} from '../../shared/crypto-sizes.js';
 
 // Expected base64 length of a PURB
 export const AVATAR_PURB_WIRE_BYTES =
   POST_QUANTUM_AEAD_NONCE_BYTES +
-  POST_QUANTUM_AEAD_TAG_BYTES +
+  HASH_OUTPUT_BYTES +
   (256 * 1024 + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES);
 export const AVATAR_BLOB_B64_CHARS = 4 * Math.ceil(AVATAR_PURB_WIRE_BYTES / 3);
 
 export function isValidAvatarBlobId(blobId) {
-  return typeof blobId === 'string' && HEX_64_RE.test(blobId);
+  return typeof blobId === 'string' && SESSION_FINGERPRINT_RE.test(blobId);
 }
 
 export function isValidAvatarBlobData(data) {

@@ -1,5 +1,4 @@
 import { sha3_512 } from '@noble/hashes/sha3.js';
-import { bytesToHex } from '../utils/byte-utils';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import {
@@ -9,15 +8,10 @@ import {
 } from '../config/audiences';
 
 import {
-  KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES,
-  KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES,
   KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY,
-  KEY_TRANSPARENCY_APPEND_POW_DOMAIN,
   KEY_TRANSPARENCY_DELTA_MAX_EPOCHS,
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
-  KEY_TRANSPARENCY_PROTOCOL,
   KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
-  KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
   exactPlainObject,
   isKeyTransparencyHash,
   keyTransparencyPowEpoch,
@@ -105,6 +99,13 @@ import {
   verifyKeyTransparencyGossipHead,
   verifyKeyTransparencyTransitions,
 } from './verifier';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
+import { bytesToHex } from '../../../shared/bytes.js';
+import {
+  KEY_TRANSPARENCY_APPEND_POW_DOMAIN,
+  KEY_TRANSPARENCY_PROTOCOL,
+  KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
+} from '../../../shared/protocol-keys.js';
 
 
 const MAX_SYNC_ROUNDS = 64;
@@ -162,12 +163,12 @@ function contactStorageKey(accountScope: string, label: string): string {
 function decodeCanonicalPublicKey(value: string): Uint8Array {
   if (
     typeof value !== 'string' ||
-    value.length !== 4 * Math.ceil(KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES / 3) ||
+    value.length !== 4 * Math.ceil(ML_DSA_87_PUBLIC_KEY_BYTES / 3) ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
   ) throw new Error('Invalid account-root public key');
   const publicKey = Base64.base64ToUint8Array(value);
   if (
-    publicKey.length !== KEY_TRANSPARENCY_ML_DSA_PUBLIC_KEY_BYTES ||
+    publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
     Base64.arrayBufferToBase64(publicKey) !== value
   ) {
     publicKey.fill(0);
@@ -221,7 +222,7 @@ function parseGossipCandidate(value: unknown): KeyTransparencyLogHead | null {
     head.entryCount < 0 ||
     head.entryCount > KEY_TRANSPARENCY_MAX_LOG_SIZE ||
     typeof head.signature !== 'string' ||
-    head.signature.length !== 4 * Math.ceil(KEY_TRANSPARENCY_ML_DSA_SIGNATURE_BYTES / 3) ||
+    head.signature.length !== 4 * Math.ceil(ML_DSA_87_SIGNATURE_BYTES / 3) ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(head.signature)
   ) return null;
   return { ...head };
@@ -382,7 +383,7 @@ class KeyTransparencyClient {
     toEpoch: number;
   }): Promise<ReturnType<typeof verifyKeyTransparencyDelta>> {
     this.assertGeneration(input.generation);
-    const trustedNow = websocketClient.getAuthenticatedServerNow();
+    const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const powEpoch = keyTransparencyPowEpoch(trustedNow);
     const fromEpoch = input.checkpoint.epoch;
@@ -392,7 +393,7 @@ class KeyTransparencyClient {
       [String(fromEpoch), String(input.toEpoch)],
       KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
     );
-    const currentTrustedNow = websocketClient.getAuthenticatedServerNow();
+    const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
     if (currentTrustedNow === null || powEpoch !== keyTransparencyPowEpoch(currentTrustedNow)) {
       throw new Error('Key-transparency proof-of-work epoch changed');
     }
@@ -437,7 +438,7 @@ class KeyTransparencyClient {
     generation: number,
   ): Promise<KeyTransparencyLogHead> {
     this.assertGeneration(generation);
-    const trustedNow = websocketClient.getAuthenticatedServerNow();
+    const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const powEpoch = keyTransparencyPowEpoch(trustedNow);
     const epoch = keyTransparencyCurrentEpoch(trustedNow);
@@ -484,7 +485,7 @@ class KeyTransparencyClient {
     const context = await captureCurrentServerContext();
     await this.assertNoIncident(context);
 
-    const trustedNow = websocketClient.getAuthenticatedServerNow();
+    const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const nowEpoch = keyTransparencyCurrentEpoch(trustedNow);
     let checkpoint = await loadKeyTransparencyCheckpoint(context, ownerUsername);
@@ -495,7 +496,7 @@ class KeyTransparencyClient {
       const probe = await this.requestHead(context, generation);
       checkpoint = keyTransparencyGenesisCheckpoint(probe.genesisEpoch);
     }
-    const currentTrustedNow = websocketClient.getAuthenticatedServerNow();
+    const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
     if (currentTrustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const currentEpoch = keyTransparencyCurrentEpoch(currentTrustedNow);
 
@@ -819,7 +820,7 @@ class KeyTransparencyClient {
     let redemption: Awaited<ReturnType<PrivacyPassClient['prepareRedemption']>> | null = null;
     try {
       this.assertGeneration(generation);
-      const trustedNow = websocketClient.getAuthenticatedServerNow();
+      const trustedNow = websocketClient.getAnonymousHttpServerNow();
       if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
       const powEpoch = keyTransparencyPowEpoch(trustedNow);
       const epoch = keyTransparencyCurrentEpoch(trustedNow);
@@ -831,7 +832,7 @@ class KeyTransparencyClient {
         [epochLabel, String(signedUpdate.version), recordHash],
         KEY_TRANSPARENCY_APPEND_POW_DIFFICULTY,
       );
-      const currentTrustedNow = websocketClient.getAuthenticatedServerNow();
+      const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
       if (currentTrustedNow === null || powEpoch !== keyTransparencyPowEpoch(currentTrustedNow)) {
         throw new Error('Key-transparency proof-of-work epoch changed');
       }
@@ -926,7 +927,7 @@ class KeyTransparencyClient {
     if (keyTransparencyPublicKeyCommitment(recovery.publicKey) !== current.recoveryCommitment) {
       throw new Error('Password-derived recovery key does not match the transparency log');
     }
-    const trustedNow = websocketClient.getAuthenticatedServerNow();
+    const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const recoveryRequestEpoch = keyTransparencyCurrentEpoch(trustedNow);
     const signedUpdate: KeyTransparencySignedUpdate = {
@@ -1229,7 +1230,7 @@ class KeyTransparencyClient {
       if (targets.length === 0) return 0;
       let oldest = Number.MAX_SAFE_INTEGER;
       for (const target of targets) oldest = Math.min(oldest, target.lastCheckedAt);
-      const authenticatedNow = websocketClient.getAuthenticatedServerNow();
+      const authenticatedNow = websocketClient.getAnonymousHttpServerNow();
       if (authenticatedNow === null) {
         throw new Error('Authenticated key-transparency time is unavailable');
       }
@@ -1260,7 +1261,7 @@ class KeyTransparencyClient {
           contact,
         ),
       );
-      const checkedAt = websocketClient.getAuthenticatedServerNow();
+      const checkedAt = websocketClient.getAnonymousHttpServerNow();
       if (checkedAt === null) throw new Error('Authenticated key-transparency time is unavailable');
       await this.runMonitorStoreOperation(
         verified.context,
@@ -1309,7 +1310,7 @@ class KeyTransparencyClient {
             contact,
           ),
         );
-        const checkedAt = websocketClient.getAuthenticatedServerNow();
+        const checkedAt = websocketClient.getAnonymousHttpServerNow();
         if (checkedAt === null) throw new Error('Authenticated key-transparency time is unavailable');
         await this.runMonitorStoreOperation(
           verified.context,

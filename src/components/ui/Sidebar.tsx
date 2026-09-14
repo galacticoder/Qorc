@@ -247,18 +247,6 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
             <div className="qorc-rail-foot">
                 <button
                     type="button"
-                    className="qorc-rail-row qorc-rail-theme theme-toggle-btn"
-                    onClick={() => setTheme(activeTheme === 'dark' ? 'light' : 'dark')}
-                    aria-label={activeTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                >
-                    <span className="qorc-rail-icon-slot">
-                        {themeIcon}
-                    </span>
-                    <span className="qorc-rail-label">Theme</span>
-                </button>
-
-                <button
-                    type="button"
                     onClick={() => onTabChange('settings')}
                     className={cn(
                         "qorc-rail-row qorc-rail-button",
@@ -279,6 +267,18 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         />
                     </span>
                     <span className="qorc-rail-label">Settings</span>
+                </button>
+
+                <button
+                    type="button"
+                    className="qorc-rail-row qorc-rail-theme theme-toggle-btn"
+                    onClick={() => setTheme(activeTheme === 'dark' ? 'light' : 'dark')}
+                    aria-label={activeTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                >
+                    <span className="qorc-rail-icon-slot">
+                        {themeIcon}
+                    </span>
+                    <span className="qorc-rail-label">Theme</span>
                 </button>
 
                 {currentUser && (

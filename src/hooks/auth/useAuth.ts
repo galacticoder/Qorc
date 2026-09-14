@@ -534,7 +534,7 @@ export const useAuth = () => {
 
   return {
     username, setUsername, pseudonym, setPseudonym, tokenValidationInProgress, setTokenValidationInProgress,
-    setServerHybridPublic, isLoggedIn, setIsLoggedIn, isGeneratingKeys, isSubmittingAuth,
+    setServerHybridPublic, isLoggedIn, setIsLoggedIn, isGeneratingKeys, isSubmittingAuth, setIsSubmittingAuth,
     authStatus, setAuthStatus, loginError, accountAuthenticated, isRegistrationMode, setIsRegistrationMode,
     loginUsernameRef, originalUsernameRef, initializeKeys,
     handleAccountSubmit, handleAuthSuccess, setAccountAuthenticated, passwordRef, setLoginError,

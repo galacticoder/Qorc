@@ -18,20 +18,14 @@ import {
 } from '../authentication/auth-utils.js';
 import { createAbortableAdmissionGate } from '../utils/admission-gate.js';
 import { envInt } from '../utils/env.js';
-import {
-  POW_SEED_BASE64_CHARS,
-  POW_SEED_BYTES,
-  POW_SOLUTION_BASE64_CHARS,
-  POW_SOLUTION_BYTES
-} from '../utils/crypto-consts.js';
 import { REDIS_KEYS } from '../config/redis-keys.js';
+import { POW_SEED_BASE64_CHARS, POW_SEED_BYTES, POW_SOLUTION_BASE64_CHARS, POW_SOLUTION_BYTES } from '../../shared/crypto-sizes.js';
 
 const WINDOW_MS = envInt('AUTH_THROTTLE_WINDOW_MS', 60_000, 5_000, 600_000);
 const FREE_FAILURES = envInt('AUTH_THROTTLE_FREE_FAILURES', 30, 0, 1_000_000);
 const MS_PER_FAILURE = envInt('AUTH_THROTTLE_MS_PER_FAILURE', 150, 0, 60_000);
 const MAX_DELAY_MS = envInt('AUTH_THROTTLE_MAX_DELAY_MS', 8_000, 0, 120_000);
 
-const KEY_PREFIX = REDIS_KEYS.AUTH_FAILURE_PREFIX;
 
 function currentBucket() {
   return Math.floor(Date.now() / WINDOW_MS);
@@ -80,12 +74,12 @@ async function getRecentCount(prefix) {
 
 // Record one failed auth proof
 export async function recordAuthFailure() {
-  return recordEvent(KEY_PREFIX);
+  return recordEvent(REDIS_KEYS.AUTH_FAILURE_PREFIX);
 }
 
 // Recent global failure count (current + previous bucket)
 export async function getRecentFailureCount() {
-  return getRecentCount(KEY_PREFIX);
+  return getRecentCount(REDIS_KEYS.AUTH_FAILURE_PREFIX);
 }
 
 export function computeDelayMs(recentFailures) {
@@ -202,7 +196,6 @@ export function verifyPowSolution(seedB64, difficulty, solutionB64) {
   }
 }
 
-const PIR_KEY_PREFIX = REDIS_KEYS.AUTH_PIR_REQUEST_PREFIX;
 const AUTH_PREFLIGHT_BASE_BITS = envInt('AUTH_PREFLIGHT_POW_BITS', 20, 18, POW_MAX_BITS);
 const AUTH_FINALIZE_BASE_BITS = envInt('AUTH_FINALIZE_POW_BITS', 22, 22, POW_MAX_BITS);
 const AUTH_PREFLIGHT_STEP_REQUESTS = envInt('AUTH_PREFLIGHT_STEP_REQUESTS', 32, 1, 1_000_000);
@@ -229,7 +222,7 @@ function acquireExpensiveAuthSlot(signal) {
 
 // Baseline work always required before private PIR retrieval
 export async function getAuthPreflightDifficulty() {
-  const recent = await getRecentCount(PIR_KEY_PREFIX);
+  const recent = await getRecentCount(REDIS_KEYS.AUTH_PIR_REQUEST_PREFIX);
   const extra = Math.floor(Math.log2(1 + Math.max(0, recent) / AUTH_PREFLIGHT_STEP_REQUESTS));
   return Math.min(POW_MAX_BITS, AUTH_PREFLIGHT_BASE_BITS + extra);
 }
@@ -240,7 +233,7 @@ export async function getAuthVerificationDifficulty() {
 }
 
 export async function recordAuthPreflightCompletion() {
-  return recordEvent(PIR_KEY_PREFIX);
+  return recordEvent(REDIS_KEYS.AUTH_PIR_REQUEST_PREFIX);
 }
 
 // Record the work-backed PIR request and acquire a bounded execution slot

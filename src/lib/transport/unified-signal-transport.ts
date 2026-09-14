@@ -11,29 +11,26 @@ import {
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { EventType } from '../types/event-types';
 import {
-    AUTH_USERNAME_REGEX,
-    CERT_CLOCK_SKEW_MS,
-    HYBRID_ENVELOPE_MAX_AGE_MS,
-    FILE_RETRANSMIT_RETENTION_MS,
-    MAX_BLOCK_LIST_SIZE,
-    OUTBOUND_RETRY_MAX_AGE_MS,
-    PQ_KEM_PUBLIC_KEY_SIZE,
+  AUTH_USERNAME_REGEX,
+  CERT_CLOCK_SKEW_MS,
+  HYBRID_ENVELOPE_MAX_AGE_MS,
+  FILE_RETRANSMIT_RETENTION_MS,
+  MAX_BLOCK_LIST_SIZE,
+  OUTBOUND_RETRY_MAX_AGE_MS,
+  WS_CONTROL_RESPONSE_TIMEOUT_MS,
+  WS_CONTROL_SEND_TIMEOUT_MS,
 } from '../constants';
-import {
-    hasExactObjectKeys as exactObjectKeys,
-    isCanonicalAuthUsername as isCanonicalUsername,
-    sanitizeMessageId,
-} from '../sanitizers';
+import { hasExactObjectKeys, isCanonicalAuthUsername, sanitizeMessageId } from '../sanitizers';
 import { blockingSystem } from '../blocking/blocking-system';
-import { canonicalBase64Shape, isHybridEnvelopeWireShape } from './envelope-shape';
+import { isHybridEnvelopeWireShape } from './envelope-shape';
+import { ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
+import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 
 const ENCRYPTION_DENIAL_FRESH_MS = 60_000;
-const REDELIVER_MAX_AGE_MS = OUTBOUND_RETRY_MAX_AGE_MS;
 const CALL_SIGNAL_QUEUE_MAX_WAIT_MS = 5_000;
 const REDELIVER_FLUSH_INTERVAL_MS = 3000;
 const REDELIVER_MAX_PENDING = 400;
 const DELIVERY_ACK_TIMEOUT_MS = 25_000;
-const BLIND_ROUTE_ACK_TIMEOUT_MS = 45_000;
 const BLIND_ROUTE_ACK_LIVENESS_POLL_MS = 1_000;
 const MAX_AWAITING_ACK = 500;
 const MAX_EARLY_ACKS_PER_PEER = 32;
@@ -47,7 +44,6 @@ const MAX_TOTAL_SEND_TASKS = 512;
 const MAX_CONCURRENT_SEND_TASKS = 8;
 const MAX_CONCURRENT_ACK_SPOOLS = 4;
 const MAX_BLIND_ACK_WAITERS = 512;
-const MAX_ACK_SPOOL_QUEUE = MAX_AWAITING_ACK;
 const MAX_PRIORITY_BURST = 4;
 const MAX_DURABLE_ACK_BYTES = 16 * 1024 * 1024;
 const DURABLE_ACK_RETRY_MS = 30_000;
@@ -174,7 +170,7 @@ class UnifiedSignalTransport {
     private readonly userBlockedListener = (event: Event): void => {
         if (!(event instanceof CustomEvent)) return;
         const detail = event.detail;
-        if (!exactObjectKeys(detail, ['username']) || !isCanonicalUsername(detail.username)) return;
+        if (!hasExactObjectKeys(detail, ['username']) || !isCanonicalAuthUsername(detail.username)) return;
         this.registerRecipientBlock(detail.username);
     };
 
@@ -338,7 +334,7 @@ class UnifiedSignalTransport {
     }
 
     preparePeer(to: string): void {
-        if (!isCanonicalUsername(to) || to === 'server' || this.recipientPolicyError(to)) return;
+        if (!isCanonicalAuthUsername(to) || to === 'server' || this.recipientPolicyError(to)) return;
         try {
             void this.peerPreparer?.(to).catch(() => { });
         } catch { }
@@ -453,20 +449,20 @@ class UnifiedSignalTransport {
 
     private validDurableAckEntry(value: unknown): value is DurableAckEntry {
         if (
-            !exactObjectKeys(value, ['createdAt', 'envelopeToSend', 'messageId', 'to', 'type'])
+            !hasExactObjectKeys(value, ['createdAt', 'envelopeToSend', 'messageId', 'to', 'type'])
         ) return false;
         const entry = value as DurableAckEntry;
         if (
             sanitizeMessageId(entry.messageId) !== entry.messageId ||
-            !isCanonicalUsername(entry.to) ||
+            !isCanonicalAuthUsername(entry.to) ||
             !isAckTrackedSignalType(entry.type) ||
             !Number.isSafeInteger(entry.createdAt) || entry.createdAt <= 0
         ) return false;
         const envelope = entry.envelopeToSend;
         const isFileChunk = entry.type === SignalType.FILE_MESSAGE_CHUNK;
         if (isFileChunk
-            ? !exactObjectKeys(envelope, ['type', 'messageId', 'fileTransferId', 'envelope', 'recipientKyberPublicBase64'])
-            : !exactObjectKeys(envelope, ['type', 'messageId', 'envelope', 'recipientKyberPublicBase64'])) return false;
+            ? !hasExactObjectKeys(envelope, ['type', 'messageId', 'fileTransferId', 'envelope', 'recipientKyberPublicBase64'])
+            : !hasExactObjectKeys(envelope, ['type', 'messageId', 'envelope', 'recipientKyberPublicBase64'])) return false;
         return envelope.type === SignalType.SEALED_ENVELOPE &&
             envelope.messageId === entry.messageId &&
             sanitizeMessageId(envelope.messageId) === envelope.messageId &&
@@ -474,20 +470,20 @@ class UnifiedSignalTransport {
                 sanitizeMessageId(envelope.fileTransferId) === envelope.fileTransferId &&
                 this.fileTransferIdFromChunkMessageId(entry.messageId) === envelope.fileTransferId
             )) &&
-            canonicalBase64Shape(envelope.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }) &&
+            canonicalBase64Shape(envelope.recipientKyberPublicBase64, { exactBytes: ML_KEM_1024_PUBLIC_KEY_BYTES }) &&
             isHybridEnvelopeWireShape(envelope.envelope, 'libsignal-message');
     }
 
     private validOutboundEnvelope(envelope: unknown, applicationType: SignalType): boolean {
         const isFileChunk = applicationType === SignalType.FILE_MESSAGE_CHUNK;
         if (isFileChunk
-            ? !exactObjectKeys(envelope, ['type', 'messageId', 'fileTransferId', 'envelope', 'recipientKyberPublicBase64'])
-            : !exactObjectKeys(envelope, ['type', 'messageId', 'envelope', 'recipientKyberPublicBase64'])) return false;
+            ? !hasExactObjectKeys(envelope, ['type', 'messageId', 'fileTransferId', 'envelope', 'recipientKyberPublicBase64'])
+            : !hasExactObjectKeys(envelope, ['type', 'messageId', 'envelope', 'recipientKyberPublicBase64'])) return false;
         const candidate = envelope as Record<string, any>;
         if (
             candidate.type !== SignalType.SEALED_ENVELOPE ||
             sanitizeMessageId(candidate.messageId) !== candidate.messageId ||
-            !canonicalBase64Shape(candidate.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }) ||
+            !canonicalBase64Shape(candidate.recipientKyberPublicBase64, { exactBytes: ML_KEM_1024_PUBLIC_KEY_BYTES }) ||
             !isHybridEnvelopeWireShape(candidate.envelope, 'libsignal-message')
         ) return false;
         if (
@@ -936,7 +932,7 @@ class UnifiedSignalTransport {
         envelopeToSend: any,
         peer: string
     ): Promise<{ sealed: any; tag: string }> {
-        if (!canonicalBase64Shape(envelopeToSend?.recipientKyberPublicBase64, { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE })) {
+        if (!canonicalBase64Shape(envelopeToSend?.recipientKyberPublicBase64, { exactBytes: ML_KEM_1024_PUBLIC_KEY_BYTES })) {
             throw new Error('Invalid recipient ML-KEM routing key');
         }
         const client = getBlindRoutingClient();
@@ -1004,7 +1000,7 @@ class UnifiedSignalTransport {
                 
             const deferred = reason.startsWith('deferrable-signal-');
             const report = deferred ? console.warn : console.error;
-            report('[MSG-SEND] encryption produced no envelope', { reason });
+            report('[MSG-SEND] encryption produced no envelope', { type: String(type), reason });
             return { success: false, transport: 'server', error: 'Encryption failed' };
         }
 
@@ -1039,9 +1035,9 @@ class UnifiedSignalTransport {
                 const p2pPolicyFailure = policyFailure();
                 if (p2pPolicyFailure) return p2pPolicyFailure;
                 const errorMessage = error instanceof Error ? error.message : String(error);
-                if (!/not ready|not connected|no active p2p connection/i.test(errorMessage)) {
-                    console.warn('[MSG-SEND] P2P send failed, using sealed server route', { error: errorMessage });
-                }
+                console.warn('[MSG-SEND] P2P send failed, using sealed server route', {
+                    type: String(type), error: errorMessage,
+                });
             }
         }
 
@@ -1052,7 +1048,7 @@ class UnifiedSignalTransport {
 
             if (!canonicalBase64Shape(
                 envelopeToSend.recipientKyberPublicBase64,
-                { exactBytes: PQ_KEM_PUBLIC_KEY_SIZE }
+                { exactBytes: ML_KEM_1024_PUBLIC_KEY_BYTES }
             )) {
                 console.warn('[UnifiedTransport] Cannot blind-route without recipient Kyber key');
                 return { success: false, transport: 'server', error: 'valid recipientKyberPublicBase64 required' };
@@ -1064,44 +1060,21 @@ class UnifiedSignalTransport {
 
             const requestId = crypto.randomUUID();
             activeRequestId = requestId;
-            const ackPromise = this.awaitBlindRouteAck(requestId, BLIND_ROUTE_ACK_TIMEOUT_MS);
-            const preServerWritePolicyFailure = policyFailure();
-            if (preServerWritePolicyFailure) {
-                this.cancelBlindRouteAck(requestId);
-                activeRequestId = null;
-                return preServerWritePolicyFailure;
-            }
-
-            const deliveryReady = await websocketClient.checkDeliveryReadyForSend();
-            if (!deliveryReady) {
-                this.cancelBlindRouteAck(requestId);
-                activeRequestId = null;
-                this.scheduleP2PRecoveryRedelivery(to, { ...envelopeToSend }, type);
-                return { success: false, transport: 'server', error: 'delivery-not-activated' };
-            }
-            const serverTransmitted = await websocketClient.sendReliable(JSON.stringify({
-                type: SignalType.BLIND_ROUTE,
-                requestId,
-                sealedEnvelope,
-                ...(isLiveOnlySignalType(type)
-                    ? { deliveryPolicy: LIVE_ONLY_DELIVERY_POLICY }
-                    : {})
-            }), { queueOnFailure: !isLiveOnlySignalType(type) });
-            const postServerWritePolicyFailure = policyFailure();
-            if (postServerWritePolicyFailure) {
-                this.cancelBlindRouteAck(requestId);
-                activeRequestId = null;
-                return postServerWritePolicyFailure;
-            }
-
-            if (!serverTransmitted) {
-                this.cancelBlindRouteAck(requestId);
-                activeRequestId = null;
-                this.scheduleP2PRecoveryRedelivery(to, { ...envelopeToSend }, type);
-                return { success: false, transport: 'server', error: 'server send not confirmed (queued)' };
-            }
-
-            const ackResult = await ackPromise;
+            const ackResult = await this.awaitBlindRouteAck(requestId, WS_CONTROL_RESPONSE_TIMEOUT_MS, async (signal) => {
+                const deliveryReady = await websocketClient.checkDeliveryReadyForSend();
+                signal.throwIfAborted();
+                const preWritePolicyFailure = policyFailure();
+                if (preWritePolicyFailure) throw new Error(preWritePolicyFailure.error);
+                if (!deliveryReady) throw new Error('delivery-not-activated');
+                return websocketClient.sendReliable(JSON.stringify({
+                    type: SignalType.BLIND_ROUTE,
+                    requestId,
+                    sealedEnvelope,
+                    ...(isLiveOnlySignalType(type)
+                        ? { deliveryPolicy: LIVE_ONLY_DELIVERY_POLICY }
+                        : {})
+                }), { queueOnFailure: false, signal });
+            });
             activeRequestId = null;
             const postAckPolicyFailure = policyFailure();
             if (postAckPolicyFailure) return postAckPolicyFailure;
@@ -1138,8 +1111,8 @@ class UnifiedSignalTransport {
     private blindAckWaiters = new Map<string, (r: { acked: boolean; success?: boolean; error?: string }) => void>();
     private blindAckHandlerRegistered = false;
     private readonly blindAckHandler = (msg: any): void => {
-        if (!exactObjectKeys(msg, ['type', 'requestId', 'success']) &&
-            !exactObjectKeys(msg, ['type', 'requestId', 'success', 'error'])) return;
+        if (!hasExactObjectKeys(msg, ['type', 'requestId', 'success']) &&
+            !hasExactObjectKeys(msg, ['type', 'requestId', 'success', 'error'])) return;
         if (
             msg.type !== SignalType.BLIND_ROUTE_ACK ||
             typeof msg.success !== 'boolean' ||
@@ -1173,23 +1146,55 @@ class UnifiedSignalTransport {
         }
     }
 
-    private awaitBlindRouteAck(requestId: string, timeoutMs: number): Promise<{ acked: boolean; success?: boolean; error?: string }> {
+    private awaitBlindRouteAck(
+        requestId: string,
+        timeoutMs: number,
+        send: (signal: AbortSignal) => Promise<boolean>,
+    ): Promise<{ acked: boolean; success?: boolean; error?: string }> {
         if (!this.checkBlindAckHandler()) throw new Error('Blind-route acknowledgement handler unavailable');
         if (this.blindAckWaiters.size >= MAX_BLIND_ACK_WAITERS || this.blindAckWaiters.has(requestId)) {
             throw new Error('Blind-route acknowledgement capacity reached');
         }
+        const connectionEpoch = websocketClient.captureConnectionPrivacyEpoch();
         return new Promise((resolve) => {
+            const controller = new AbortController();
+            let settled = false;
+            let unregisterConnectionCancel = () => {};
             const settle = (r: { acked: boolean; success?: boolean; error?: string }) => {
+                if (settled) return;
+                settled = true;
                 clearTimeout(timeout);
                 clearInterval(liveness);
                 this.blindAckWaiters.delete(requestId);
+                unregisterConnectionCancel();
+                controller.abort();
                 resolve(r);
             };
-            const timeout = setTimeout(() => settle({ acked: false, error: 'timeout' }), timeoutMs);
+            let timeout = setTimeout(() => settle({ acked: false, error: 'send-timeout' }), WS_CONTROL_SEND_TIMEOUT_MS);
             const liveness = setInterval(() => {
-                if (!websocketClient.isConnectedToServer()) settle({ acked: false, error: 'disconnected' });
+                if (!websocketClient.isConnectedToServer() ||
+                    websocketClient.captureConnectionPrivacyEpoch() !== connectionEpoch) {
+                    settle({ acked: false, error: 'disconnected' });
+                }
             }, BLIND_ROUTE_ACK_LIVENESS_POLL_MS);
             this.blindAckWaiters.set(requestId, settle);
+            unregisterConnectionCancel = websocketClient.registerConnectionWaiterCancel(() => {
+                settle({ acked: false, error: 'disconnected' });
+            });
+            void Promise.resolve().then(() => {
+                if (settled) return;
+                return send(controller.signal);
+            }).then((written) => {
+                if (settled) return;
+                if (!written) {
+                    settle({ acked: false, error: 'server-send-failed' });
+                    return;
+                }
+                clearTimeout(timeout);
+                timeout = setTimeout(() => settle({ acked: false, error: 'timeout' }), timeoutMs);
+            }).catch((error) => {
+                settle({ acked: false, error: error instanceof Error ? error.message : String(error) });
+            });
         });
     }
 
@@ -1208,7 +1213,7 @@ class UnifiedSignalTransport {
 
     // Queue a failed server route or an unacknowledged direct write for P2P recovery.
     private scheduleP2PRecoveryRedelivery(to: string, envelopeToSend: any, type: SignalType, opts?: { reconnectOnly?: boolean }): void {
-        if (!this.p2pSender || !isCanonicalUsername(to) || to === 'server') return;
+        if (!this.p2pSender || !isCanonicalAuthUsername(to) || to === 'server') return;
         if (this.recipientPolicyError(to)) return;
         if (!UnifiedSignalTransport.P2P_RECOVERY_REDELIVER_TYPES.has(type)) return;
         const messageId = envelopeToSend?.messageId;
@@ -1238,10 +1243,10 @@ class UnifiedSignalTransport {
             window.addEventListener(EventType.P2P_PEER_CONNECTED, (evt: Event) => {
                 if (!(evt instanceof CustomEvent)) return;
                 const detail = evt.detail;
-                if (!exactObjectKeys(detail, ['account', 'peer'])) return;
+                if (!hasExactObjectKeys(detail, ['account', 'peer'])) return;
                 if (detail.account !== p2pTransport.getLocalUsername()) return;
                 const peer = detail.peer;
-                if (isCanonicalUsername(peer)) {
+                if (isCanonicalAuthUsername(peer)) {
                     void this.flushRedeliveries(peer, true);
                 }
             });
@@ -1261,12 +1266,12 @@ class UnifiedSignalTransport {
         }
 
         if (fromReconnect) {
-            if (!isCanonicalUsername(onlyPeer)) return Promise.resolve();
+            if (!isCanonicalAuthUsername(onlyPeer)) return Promise.resolve();
             this.redeliveryReconnectFlushRequested = true;
             this.redeliveryReconnectPeerRequests.add(onlyPeer);
         } else {
             this.redeliveryNormalFlushRequested = true;
-            if (isCanonicalUsername(onlyPeer)) {
+            if (isCanonicalAuthUsername(onlyPeer)) {
                 this.redeliveryNormalPeerRequests.add(onlyPeer);
             } else {
                 this.redeliveryNormalAllRequested = true;
@@ -1330,7 +1335,7 @@ class UnifiedSignalTransport {
                 this.pendingRedelivery.delete(trackingKey);
                 continue;
             }
-            if (now - entry.firstAt >= REDELIVER_MAX_AGE_MS) {
+            if (now - entry.firstAt >= OUTBOUND_RETRY_MAX_AGE_MS) {
                 this.pendingRedelivery.delete(trackingKey);
                 console.warn('[MSG-SEND] P2P re-delivery gave up (max age)');
                 continue;
@@ -1512,7 +1517,7 @@ class UnifiedSignalTransport {
 
     private enqueueAckSpool(to: string, envelopeToSend: any): void {
         const messageId = envelopeToSend?.messageId;
-        if (typeof messageId !== 'string' || !messageId || !isCanonicalUsername(to)) return;
+        if (typeof messageId !== 'string' || !messageId || !isCanonicalAuthUsername(to)) return;
         const trackingKey = this.deliveryTrackingKey(to, messageId);
         const policyError = this.recipientPolicyError(to);
         if (policyError) {
@@ -1526,7 +1531,7 @@ class UnifiedSignalTransport {
             return;
         }
         if (this.ackSpoolQueuedIds.has(trackingKey) || this.ackSpoolInFlightIds.has(trackingKey)) return;
-        if (this.ackSpoolQueue.length >= MAX_ACK_SPOOL_QUEUE) {
+        if (this.ackSpoolQueue.length >= MAX_AWAITING_ACK) {
             this.scheduleDurableAckRetry(trackingKey);
             return;
         }
@@ -1622,7 +1627,7 @@ class UnifiedSignalTransport {
     }
 
     markDelivered(messageId: string, from: string, expectedType?: SignalType): void {
-        if (sanitizeMessageId(messageId) !== messageId || !isCanonicalUsername(from)) return;
+        if (sanitizeMessageId(messageId) !== messageId || !isCanonicalAuthUsername(from)) return;
         const trackingKey = this.deliveryTrackingKey(from, messageId);
         const entry = this.awaitingDeliveryAck.get(trackingKey);
         const pending = this.pendingRedelivery.get(trackingKey);
@@ -1781,45 +1786,21 @@ class UnifiedSignalTransport {
                     return;
                 }
                 const requestId = crypto.randomUUID();
-                const ackPromise = this.awaitBlindRouteAck(requestId, BLIND_ROUTE_ACK_TIMEOUT_MS);
-                let written = false;
-                try {
+                const ack = await this.awaitBlindRouteAck(requestId, WS_CONTROL_RESPONSE_TIMEOUT_MS, async (signal) => {
+                    const deliveryReady = await websocketClient.checkDeliveryReadyForSend();
+                    signal.throwIfAborted();
+                    if (generation !== this.accountGeneration || deliveryGeneration !== this.deliveryAckGeneration) {
+                        throw new Error('account-transition');
+                    }
                     const preWritePolicyError = this.recipientPolicyError(to);
-                    if (preWritePolicyError) {
-                        this.cancelBlindRouteAck(requestId);
-                        if (preWritePolicyError === 'recipient-blocked' && trackingKey) {
-                            await this.completeDurableAck(trackingKey);
-                        } else if (trackingKey) {
-                            this.scheduleDurableAckRetry(trackingKey);
-                        }
-                        return;
-                    }
-                    
-                    if (!(await websocketClient.checkDeliveryReadyForSend())) {
-                        this.cancelBlindRouteAck(requestId);
-                        continue;
-                    }
-                    written = await websocketClient.sendReliable(JSON.stringify({
+                    if (preWritePolicyError) throw new Error(preWritePolicyError);
+                    if (!deliveryReady) throw new Error('delivery-not-activated');
+                    return websocketClient.sendReliable(JSON.stringify({
                         type: SignalType.BLIND_ROUTE,
                         requestId,
                         sealedEnvelope
-                    }));
-                } catch {
-                    this.cancelBlindRouteAck(requestId);
-                    continue;
-                }
-                if (
-                    generation !== this.accountGeneration ||
-                    deliveryGeneration !== this.deliveryAckGeneration
-                ) {
-                    this.cancelBlindRouteAck(requestId);
-                    return;
-                }
-                if (!written) {
-                    this.cancelBlindRouteAck(requestId);
-                    continue;
-                }
-                const ack = await ackPromise;
+                    }), { queueOnFailure: false, signal });
+                });
                 if (
                     generation !== this.accountGeneration ||
                     deliveryGeneration !== this.deliveryAckGeneration

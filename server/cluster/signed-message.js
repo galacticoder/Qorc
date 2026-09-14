@@ -5,8 +5,8 @@ import {
   ML_DSA_87_SECRET_KEY_BYTES,
   ML_DSA_87_SIGNATURE_BYTES,
 } from '../../shared/crypto-sizes.js';
-import { UUID_V4_RE } from '../utils/patterns.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
+import { UUID_V4_RE } from '../../shared/patterns.js';
 
 export const CLUSTER_MESSAGE_MAX_WIRE_CHARS = 32 * 1024;
 export const CLUSTER_MESSAGE_MAX_PAYLOAD_BYTES = 16 * 1024;

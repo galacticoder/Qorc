@@ -1,6 +1,6 @@
-import { CANONICAL_BASE64_RE } from './patterns.js';
 import { wipeByteArrays } from './wipe.js';
 import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
+import { CANONICAL_BASE64_RE } from '../../shared/patterns.js';
 
 export const UTF8_ENCODER = new TextEncoder();
 

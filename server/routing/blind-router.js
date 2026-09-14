@@ -8,27 +8,21 @@ import crypto from 'crypto';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { withRedisClient, createSubscriber, closeSubscriber } from '../session/redis-client.js';
 import { envInt } from '../utils/env.js';
-import { BASE64URL_32_RE } from '../utils/patterns.js';
 import { randomDelay } from '../utils/random.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
 import { exactRedisScoreArgument } from '../utils/redis-args.js';
+import { awaitMessageHandlerWithDeadline } from '../websocket/message-handler-deadline.js';
+import { hasPendingBroadcast, sendFlowControlledBroadcast } from './broadcast-flow-control.js';
 import {
   moveRedisSortedSetLease,
   REDIS_SORTED_SET_LEASE_RELEASE_GUARD
 } from '../utils/redis-lease.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
-import { HASH_OUTPUT_BYTES } from '../utils/crypto-consts.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { recordDeliveryExpired, recordDeliveryRetry, withoutStorageTelemetry } from '../telemetry/server-telemetry.js';
 
 import { SignalType } from '../signals.js';
-import {
-  SEALED_ENVELOPE_PROTOCOL,
-  SEALED_STANDARD_CIPHERTEXT_BYTES,
-  SEALED_KEM_CIPHERTEXT_BYTES,
-  SEALED_NONCE_BYTES,
-  validateSealedEnvelope
-} from './sealed-sender.js';
+import { SEALED_STANDARD_CIPHERTEXT_BYTES, validateSealedEnvelope } from './sealed-sender.js';
 import { SPOOL_DETECTION_PROBE_BYTES, SPOOL_TAG_BYTES,
   untargetedProbeHex,
 } from '../../shared/spool-tag-protocol.js';
@@ -38,6 +32,12 @@ import {
   initializeGlobalMixAuthentication,
   validateGlobalMixPublication,
 } from './global-mix-publication.js';
+import {
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  HASH_OUTPUT_BYTES,
+  SEALED_NONCE_BYTES,
+} from '../../shared/crypto-sizes.js';
+import { BASE64URL_32_RE } from '../../shared/patterns.js';
 
 export {
   createSignedGlobalMixPublication,
@@ -51,14 +51,6 @@ const DELIVERY_JITTER_MIN_MS = 10;
 const DELIVERY_JITTER_MAX_MS = 100;
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
 const DEDUP_MAX_ENTRIES = 20_000;
-const MIXNET_DELAY_POOL_KEY = PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS;
-const MIXNET_PROCESSING_POOL_KEY = PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS;
-const MIXNET_PENDING_BYTES_KEY = PROTOCOL_KEYS.MIXNET_PENDING_BYTES_REDIS;
-const MIXNET_ENTRY_KEY_PREFIX = PROTOCOL_KEYS.MIXNET_ENTRY_REDIS_PREFIX;
-const GLOBAL_MIX_SPOOL_KEY = PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS;
-const GLOBAL_MIX_SPOOL_BYTES_KEY = PROTOCOL_KEYS.MIXNET_SPOOL_BYTES_REDIS;
-const GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX = PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX;
-const GLOBAL_MIX_CHANNEL = PROTOCOL_KEYS.GLOBAL_MIX_CHANNEL;
 const MIXNET_DELAY_MIN_MS = envInt('MIXNET_DELAY_MIN_MS', 1500, 250, 120000);
 const MIXNET_DELAY_MAX_MS = envInt('MIXNET_DELAY_MAX_MS', 9000, MIXNET_DELAY_MIN_MS, 300000);
 const MIXNET_FLUSH_MIN_MS = envInt('MIXNET_FLUSH_MIN_MS', 700, 100, 60000);
@@ -87,7 +79,7 @@ const LOCAL_BROADCAST_BACKPRESSURE_SUSPEND_MS = envInt('LOCAL_BROADCAST_BACKPRES
 const LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS = envInt('LOCAL_BROADCAST_MIN_SEND_INTERVAL_MS', 0, 0, 5 * 60 * 1000);
 const LOCAL_BROADCAST_CONCURRENCY = envInt('LOCAL_BROADCAST_CONCURRENCY', 8, 1, 64);
 const LOCAL_BROADCAST_DRAIN_BUDGET_MS = 5_000;
-const LOCAL_BROADCAST_SEND_TIMEOUT_MS = 2_000;
+const LOCAL_BROADCAST_WAIT_BUDGET_MS = 2_000;
 const BLIND_ROUTE_MAX_LOCAL_SOCKETS = envInt('BLIND_ROUTE_MAX_LOCAL_SOCKETS', 2048, 64, 100_000);
 const BLIND_DELIVERY_RETRY_MIN_MS = envInt('BLIND_DELIVERY_RETRY_MIN_MS', 5000, 1000, 60_000);
 const BLIND_DELIVERY_RETRY_MAX_MS = envInt(
@@ -98,12 +90,12 @@ const BLIND_DELIVERY_RETRY_MAX_MS = envInt(
 );
 const GLOBAL_MIX_SPOOL_TRIM_BATCH = 256;
 const SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS = Math.ceil(SEALED_STANDARD_CIPHERTEXT_BYTES / 3) * 4;
-const SEALED_KEM_CIPHERTEXT_BASE64_CHARS = Math.ceil(SEALED_KEM_CIPHERTEXT_BYTES / 3) * 4;
+const SEALED_KEM_CIPHERTEXT_BASE64_CHARS = Math.ceil(ML_KEM_1024_CIPHERTEXT_BYTES / 3) * 4;
 const SEALED_NONCE_BASE64_CHARS = Math.ceil(SEALED_NONCE_BYTES / 3) * 4;
 const GLOBAL_MIX_SPOOL_MEMBER_BYTES = Buffer.byteLength(JSON.stringify({
   id: 'A'.repeat(43),
   envelope: {
-    version: SEALED_ENVELOPE_PROTOCOL,
+    version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
     ciphertext: 'A'.repeat(SEALED_STANDARD_CIPHERTEXT_BASE64_CHARS),
     ephemeralKey: 'A'.repeat(SEALED_KEM_CIPHERTEXT_BASE64_CHARS),
     nonce: 'A'.repeat(SEALED_NONCE_BASE64_CHARS),
@@ -263,9 +255,9 @@ function getEnvelopeHash(sealedEnvelope) {
 
 function createCoverSealedEnvelope() {
   return {
-    version: SEALED_ENVELOPE_PROTOCOL,
+    version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
     ciphertext: crypto.randomBytes(SEALED_STANDARD_CIPHERTEXT_BYTES).toString('base64'),
-    ephemeralKey: crypto.randomBytes(SEALED_KEM_CIPHERTEXT_BYTES).toString('base64'),
+    ephemeralKey: crypto.randomBytes(ML_KEM_1024_CIPHERTEXT_BYTES).toString('base64'),
     nonce: crypto.randomBytes(SEALED_NONCE_BYTES).toString('base64'),
     tag: crypto.randomBytes(SPOOL_TAG_BYTES).toString('hex'),
     probe: untargetedProbeHex()
@@ -561,7 +553,7 @@ async function enqueueValidatedMixnetRelay(sealedEnvelope, options = {}) {
     return { queued: false, delivered: 0, error: 'mixnet_entry_too_large' };
   }
   const indexMember = `${entry.id}:${entryBytes}`;
-  const entryKey = `${MIXNET_ENTRY_KEY_PREFIX}${entry.id}`;
+  const entryKey = `${PROTOCOL_KEYS.MIXNET_ENTRY_REDIS_PREFIX}${entry.id}`;
   const pendingMessageLimit = isCover
     ? Math.max(1, Math.floor(MIXNET_PENDING_MAX_MESSAGES / 2))
     : MIXNET_PENDING_MAX_MESSAGES;
@@ -573,9 +565,9 @@ async function enqueueValidatedMixnetRelay(sealedEnvelope, options = {}) {
     const queued = await withRedisClient((client) => client.eval(
       ENQUEUE_MIX_MEMBER_SCRIPT,
       4,
-      MIXNET_DELAY_POOL_KEY,
-      MIXNET_PROCESSING_POOL_KEY,
-      MIXNET_PENDING_BYTES_KEY,
+      PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
+      PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
+      PROTOCOL_KEYS.MIXNET_PENDING_BYTES_REDIS,
       entryKey,
       entry.releaseAt,
       indexMember,
@@ -741,14 +733,14 @@ ${REDIS_SORTED_SET_LEASE_RELEASE_GUARD}
 async function removeMixMember(client, poolKey, raw, expectedSourceScore) {
   const sourceScore = exactRedisScoreArgument(expectedSourceScore);
   const indexEntry = parseMixnetIndexMember(raw);
-  const entryKey = `${MIXNET_ENTRY_KEY_PREFIX}${indexEntry?.id || 'invalid'}`;
+  const entryKey = `${PROTOCOL_KEYS.MIXNET_ENTRY_REDIS_PREFIX}${indexEntry?.id || 'invalid'}`;
   return Number(await client.eval(
     REMOVE_MIX_MEMBER_SCRIPT,
     5,
     poolKey,
-    MIXNET_PENDING_BYTES_KEY,
-    MIXNET_DELAY_POOL_KEY,
-    MIXNET_PROCESSING_POOL_KEY,
+    PROTOCOL_KEYS.MIXNET_PENDING_BYTES_REDIS,
+    PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
+    PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
     entryKey,
     raw,
     MIXNET_INDEX_TTL_SECONDS,
@@ -759,7 +751,7 @@ async function removeMixMember(client, poolKey, raw, expectedSourceScore) {
 async function loadMixnetEntry(client, indexMember) {
   const indexEntry = parseMixnetIndexMember(indexMember);
   if (!indexEntry) return null;
-  const raw = await client.get(`${MIXNET_ENTRY_KEY_PREFIX}${indexEntry.id}`);
+  const raw = await client.get(`${PROTOCOL_KEYS.MIXNET_ENTRY_REDIS_PREFIX}${indexEntry.id}`);
   if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') !== indexEntry.bytes) {
     return null;
   }
@@ -776,7 +768,7 @@ async function loadMixnetEntry(client, indexMember) {
 async function recoverStaleMixnetClaims(client) {
   const now = Date.now();
   const stale = await client.zrangebyscore(
-    MIXNET_PROCESSING_POOL_KEY,
+    PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
     '-inf',
     now,
     'LIMIT',
@@ -784,11 +776,11 @@ async function recoverStaleMixnetClaims(client) {
     MIXNET_BATCH_MAX_MESSAGES
   );
   for (const indexMember of stale || []) {
-    const currentScore = await client.zscore(MIXNET_PROCESSING_POOL_KEY, indexMember);
+    const currentScore = await client.zscore(PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS, indexMember);
     if (currentScore === null || Number(currentScore) > now) continue;
     const entry = await loadMixnetEntry(client, indexMember);
     if (!entry || entry.expiresAt <= now) {
-      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, currentScore);
+      await removeMixMember(client, PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS, indexMember, currentScore);
       recordDeliveryExpired();
       continue;
     }
@@ -798,8 +790,8 @@ async function recoverStaleMixnetClaims(client) {
     );
     await moveMixMember(
       client,
-      MIXNET_PROCESSING_POOL_KEY,
-      MIXNET_DELAY_POOL_KEY,
+      PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
+      PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
       indexMember,
       retryAt,
       currentScore
@@ -812,12 +804,12 @@ async function finalizeMixnetClaim(indexMember, entry, claimUntil, succeeded) {
   if (typeof indexMember !== 'string') return;
   await withRedisClient(async (client) => {
     if (succeeded) {
-      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, claimUntil);
+      await removeMixMember(client, PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS, indexMember, claimUntil);
       return;
     }
     const now = Date.now();
     if (!hasValidMixnetLifetime(entry) || entry.expiresAt <= now) {
-      await removeMixMember(client, MIXNET_PROCESSING_POOL_KEY, indexMember, claimUntil);
+      await removeMixMember(client, PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS, indexMember, claimUntil);
       recordDeliveryExpired();
       return;
     }
@@ -827,8 +819,8 @@ async function finalizeMixnetClaim(indexMember, entry, claimUntil, succeeded) {
     );
     await moveMixMember(
       client,
-      MIXNET_PROCESSING_POOL_KEY,
-      MIXNET_DELAY_POOL_KEY,
+      PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
+      PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
       indexMember,
       retryAt,
       claimUntil
@@ -850,7 +842,7 @@ async function flushMixnetDelayPool() {
       await trimExpiredGlobalMixSpool(client);
       await recoverStaleMixnetClaims(client);
       const dueMembers = await client.zrangebyscore(
-        MIXNET_DELAY_POOL_KEY,
+        PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
         '-inf',
         Date.now(),
         'LIMIT',
@@ -859,7 +851,7 @@ async function flushMixnetDelayPool() {
       );
 
       for (const indexMember of dueMembers || []) {
-        const currentScore = await client.zscore(MIXNET_DELAY_POOL_KEY, indexMember);
+        const currentScore = await client.zscore(PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS, indexMember);
         if (currentScore === null || Number(currentScore) > Date.now()) continue;
         const entry = await loadMixnetEntry(client, indexMember);
         const claimStartedAt = Date.now();
@@ -867,7 +859,7 @@ async function flushMixnetDelayPool() {
           !entry ||
           entry.expiresAt <= claimStartedAt
         ) {
-          await removeMixMember(client, MIXNET_DELAY_POOL_KEY, indexMember, currentScore);
+          await removeMixMember(client, PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS, indexMember, currentScore);
           recordDeliveryExpired();
           continue;
         }
@@ -878,8 +870,8 @@ async function flushMixnetDelayPool() {
         );
         const moved = await moveMixMember(
           client,
-          MIXNET_DELAY_POOL_KEY,
-          MIXNET_PROCESSING_POOL_KEY,
+          PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS,
+          PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS,
           indexMember,
           claimUntil,
           currentScore
@@ -987,14 +979,14 @@ async function queueGlobalMixMessage(sealedEnvelope) {
         throw new Error('global_mix_spool_unsupported_size');
       }
       const indexMember = `${id}:${memberBytes}:${sealedEnvelope.tag}:${sealedEnvelope.probe}`;
-      const entryKey = `${GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX}${id}`;
+      const entryKey = `${PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX}${id}`;
       const ttlMilliseconds = GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000;
       const oldestAllowed = ((now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000)) * 1000);
       const appendResult = await client.eval(
         APPEND_AND_TRIM_GLOBAL_SPOOL_SCRIPT,
         3,
-        GLOBAL_MIX_SPOOL_KEY,
-        GLOBAL_MIX_SPOOL_BYTES_KEY,
+        PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS,
+        PROTOCOL_KEYS.MIXNET_SPOOL_BYTES_REDIS,
         entryKey,
         score,
         indexMember,
@@ -1141,8 +1133,8 @@ async function trimExpiredGlobalMixSpool(client, now = Date.now()) {
   const result = await client.eval(
     TRIM_EXPIRED_GLOBAL_SPOOL_SCRIPT,
     2,
-    GLOBAL_MIX_SPOOL_KEY,
-    GLOBAL_MIX_SPOOL_BYTES_KEY,
+    PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS,
+    PROTOCOL_KEYS.MIXNET_SPOOL_BYTES_REDIS,
     oldestAllowed,
     GLOBAL_MIX_SPOOL_TRIM_BATCH,
     GLOBAL_MIX_SPOOL_TTL_SECONDS + 60
@@ -1155,12 +1147,12 @@ async function trimExpiredGlobalMixSpool(client, now = Date.now()) {
 export async function getBlindRouterTelemetry() {
   return withoutStorageTelemetry(() => withRedisClient(async (client) => {
     const [delayCount, processingCount, pendingBytes, spoolCount, spoolBytes, oldestSpool] = await Promise.all([
-      client.zcard(MIXNET_DELAY_POOL_KEY),
-      client.zcard(MIXNET_PROCESSING_POOL_KEY),
-      client.get(MIXNET_PENDING_BYTES_KEY),
-      client.zcard(GLOBAL_MIX_SPOOL_KEY),
-      client.get(GLOBAL_MIX_SPOOL_BYTES_KEY),
-      client.zrange(GLOBAL_MIX_SPOOL_KEY, 0, 0, 'WITHSCORES')
+      client.zcard(PROTOCOL_KEYS.MIXNET_DELAY_POOL_REDIS),
+      client.zcard(PROTOCOL_KEYS.MIXNET_PROCESSING_POOL_REDIS),
+      client.get(PROTOCOL_KEYS.MIXNET_PENDING_BYTES_REDIS),
+      client.zcard(PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS),
+      client.get(PROTOCOL_KEYS.MIXNET_SPOOL_BYTES_REDIS),
+      client.zrange(PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS, 0, 0, 'WITHSCORES')
     ]);
     const oldestScore = Array.isArray(oldestSpool) && oldestSpool.length >= 2
       ? Number(oldestSpool[1]) / 1000
@@ -1208,13 +1200,14 @@ async function tryLocalBroadcastDelivery(sealedEnvelope, generation) {
       if (Number(ws._blindBroadcastSuspendedUntil || 0) > now) {
         return;
       }
-      if (!ws._pqSessionId || !isBroadcastDeliveryReady(ws)) {
+      if (ws._connectionAbortSignal?.aborted || !ws._pqSessionId || !isBroadcastDeliveryReady(ws)) {
         return;
       }
       const pqSession = ws._pqSessionData;
       if (
         pqSession?.sessionId !== ws._pqSessionId ||
-        Number(pqSession.sendQueueCount || 0) > 0
+        Number(pqSession.sendQueueCount || 0) > 0 ||
+        hasPendingBroadcast(ws)
       ) {
         return;
       }
@@ -1245,13 +1238,21 @@ async function tryLocalBroadcastDelivery(sealedEnvelope, generation) {
       }
       ws._blindBroadcastBackpressureSince = 0;
       try {
-        const sendBudgetMs = Math.min(
-          LOCAL_BROADCAST_SEND_TIMEOUT_MS,
+        const waitBudgetMs = Math.min(
+          LOCAL_BROADCAST_WAIT_BUDGET_MS,
           Math.max(1, drainDeadline - Date.now())
         );
-        const didDeliver = await sendToSocket(ws, sealedEnvelope, sendBudgetMs);
+        const delivery = sendFlowControlledBroadcast(ws, () => sendToSocket(ws, sealedEnvelope)).then((didDeliver) => {
+          if (didDeliver && generation === globalMixDeliveryGeneration && ws.readyState === 1) {
+            ws._lastBlindBroadcastSentAt = Date.now();
+          }
+          return didDeliver;
+        });
+        const didDeliver = await awaitMessageHandlerWithDeadline(delivery, {
+          signal: ws._connectionAbortSignal,
+          timeoutMs: waitBudgetMs
+        });
         if (!didDeliver) return;
-        ws._lastBlindBroadcastSentAt = Date.now();
         delivered += 1;
       } catch { }
     }));
@@ -1277,7 +1278,7 @@ function shouldLogLocalBroadcastBackpressure(ws) {
 
 async function publishGlobalMixDelivery(publicationWire) {
   await withRedisClient(async (client) => {
-    await client.publish(GLOBAL_MIX_CHANNEL, publicationWire);
+    await client.publish(PROTOCOL_KEYS.GLOBAL_MIX_CHANNEL, publicationWire);
   });
 }
 
@@ -1343,7 +1344,7 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
       now - (GLOBAL_MIX_SPOOL_TTL_SECONDS * 1000) + GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS
     ) * 1000;
     const members = await client.zrangebyscore(
-      GLOBAL_MIX_SPOOL_KEY,
+      PROTOCOL_KEYS.MIXNET_SPOOL_INDEX_REDIS,
       `(${oldestReadable}`,
       '+inf'
     );
@@ -1359,7 +1360,7 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
     }
 
     const raw = await client.mget(
-      ...rows.map((row) => `${GLOBAL_MIX_SPOOL_ENTRY_KEY_PREFIX}${row.id}`)
+      ...rows.map((row) => `${PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX}${row.id}`)
     );
     if (!Array.isArray(raw) || raw.length !== rows.length) {
       throw new Error('invalid_global_mix_spool_read');
@@ -1389,7 +1390,7 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
 }
 
 // Send envelope to socket
-async function sendToSocket(ws, sealedEnvelope, deliveryTimeoutMs) {
+async function sendToSocket(ws, sealedEnvelope) {
   const pqSessionId = ws._pqSessionId;
 
   if (pqSessionId) {
@@ -1401,9 +1402,7 @@ async function sendToSocket(ws, sealedEnvelope, deliveryTimeoutMs) {
         type: SignalType.SEALED_ENVELOPE,
         envelope: sealedEnvelope
       };
-      return sendPQEncryptedResponse(ws, session, messageWrapper, {
-        deliveryTimeoutMs
-      });
+      return sendPQEncryptedResponse(ws, session, messageWrapper);
     }
   }
 
@@ -1504,7 +1503,7 @@ export async function subscribeToBlindDelivery() {
         ? Buffer.byteLength(message, 'utf8')
         : 0;
       if (
-        channel !== GLOBAL_MIX_CHANNEL ||
+        channel !== PROTOCOL_KEYS.GLOBAL_MIX_CHANNEL ||
         typeof message !== 'string' ||
         wireBytes <= 0 ||
         wireBytes > GLOBAL_MIX_PUBLICATION_MAX_BYTES ||
@@ -1530,7 +1529,7 @@ export async function subscribeToBlindDelivery() {
       blindDeliverySubscriber = null;
       scheduleBlindDeliveryRetry();
     });
-    await subscriber.subscribe(GLOBAL_MIX_CHANNEL);
+    await subscriber.subscribe(PROTOCOL_KEYS.GLOBAL_MIX_CHANNEL);
     if (!blindDeliverySubscriptionDesired || generation !== blindDeliverySubscriptionGeneration) {
       throw new Error('Blind delivery subscription cancelled');
     }

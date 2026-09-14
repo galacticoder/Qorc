@@ -4,11 +4,6 @@ import { EventType } from '../../lib/types/event-types';
 import {
   AUTH_USERNAME_REGEX,
   MAX_CONCURRENT_P2P_CONNECTS,
-  P2P_PEER_TRUST_REFRESH_INITIAL_JITTER_MS,
-  P2P_PEER_TRUST_REFRESH_INITIAL_MIN_MS,
-  P2P_PEER_TRUST_REFRESH_INTERVAL_MS,
-  P2P_PEER_TRUST_REFRESH_LEAD_MS,
-  P2P_PEER_TRUST_REFRESH_MAX_AGE_MS,
 } from '../../lib/constants';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
 import { hasPrototypePollutionKeys, isPlainObject } from '../../lib/sanitizers';
@@ -40,12 +35,11 @@ import {
   isKeyTransparencyHash,
 } from '../../../shared/key-transparency-protocol.js';
 import {
-  getKeyTransparencyAuthorizedPeerVerifiedAt,
   isKeyTransparencyPeerRevoked,
 } from '../../lib/key-transparency/verified-material';
 import { awaitPeerIdentityRevocation } from '../../lib/key-transparency/revocation';
 import { keyTransparencyClient } from '../../lib/key-transparency/client';
-import { loadPersistedPeerCert, loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
+import { loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
 
 const MAX_P2P_FAILURE_CACHE_ENTRIES = 512;
 const ENDPOINT_UNAVAILABLE_COOLDOWN_MS = 60_000;
@@ -79,12 +73,12 @@ export function useP2PMessaging(
   const peerCertificateCacheRef = useRef(new Map<string, CertCacheEntry>());
   const peerCertFailureRef = useRef(new Map<string, { until: number; failures: number }>());
   const peerCertInFlightRef = useRef(new Map<string, Promise<PeerCertificateBundle | null>>());
-  const peerTrustRefreshDueRef = useRef(new Map<string, number>());
   const channelSequenceRef = useRef(new Map<string, number>());
   const handleIncomingP2PMessageRef = useRef<((message: P2PMessage) => Promise<boolean>) | null>(null);
   const handleEncryptedMessagePayloadRef = useRef<((message: any) => Promise<boolean | void>) | null>(null);
 
   const connectInFlightRef = useRef(new Map<string, Promise<void>>());
+  const receivedEndpointAttemptsRef = useRef(new Map<string, string>());
   const connectBackoffRef = useRef(new Map<string, { until: number; failures: number; endpointUnavailable: boolean }>());
   const initInFlightRef = useRef<Promise<void> | null>(null);
   const accountGenerationRef = useRef(0);
@@ -184,10 +178,10 @@ export function useP2PMessaging(
     [getPeerCertificateBase]
   );
 
-  const refreshPeerCertificateInBackground = useCallback(
+  const preparePeerCertificateInBackground = useCallback(
     async (peer: string): Promise<PeerCertificateBundle | null> => {
       const generation = accountGenerationRef.current;
-      const cert = await getPeerCertificate(peer, true);
+      const cert = await getPeerCertificate(peer);
       if (
         !cert ||
         generation !== accountGenerationRef.current ||
@@ -223,10 +217,10 @@ export function useP2PMessaging(
         peerCertFailureRef.current.delete(normalizedPeer);
         return cert;
       }
-      void refreshPeerCertificateInBackground(normalizedPeer);
+      void preparePeerCertificateInBackground(normalizedPeer).catch(() => { });
       return null;
     },
-    [getPeerCertificateBase, refreshPeerCertificateInBackground, username]
+    [getPeerCertificateBase, preparePeerCertificateInBackground, username]
   );
 
   const destroyService = useCallback(
@@ -287,18 +281,18 @@ export function useP2PMessaging(
       throw createP2PError('SERVICE_UNINITIALIZED');
     }
 
+    const inflight = connectInFlightRef.current.get(peer);
+    if (inflight) return inflight;
     const now = Date.now();
     const cooldown = connectBackoffRef.current.get(peer);
     if (cooldown && cooldown.until > now) {
       if (cooldown.endpointUnavailable && p2pTransport.hasAuthenticatedEndpoint(peer)) {
         connectBackoffRef.current.delete(peer);
       } else {
-        return;
+        throw new Error('P2P connection attempt is cooling down after a failed dial');
       }
     }
 
-    const inflight = connectInFlightRef.current.get(peer);
-    if (inflight) return inflight;
     if (connectInFlightRef.current.size >= MAX_CONCURRENT_P2P_CONNECTS) {
       throw createP2PError('TOO_MANY_CONNECTIONS');
     }
@@ -471,9 +465,9 @@ export function useP2PMessaging(
     peerCertificateCacheRef.current.clear();
     peerCertFailureRef.current.clear();
     peerCertInFlightRef.current.clear();
-    peerTrustRefreshDueRef.current.clear();
     channelSequenceRef.current.clear();
     connectInFlightRef.current.clear();
+    receivedEndpointAttemptsRef.current.clear();
     connectBackoffRef.current.clear();
     inFlightP2PRetriesRef.current = { generation: accountGenerationRef.current, count: 0, bytes: 0 };
     initInFlightRef.current = null;
@@ -525,9 +519,9 @@ export function useP2PMessaging(
       while (isCurrent()) {
         const peer = knownPeers[cursor++];
         if (!peer) return;
-        const cert = await loadPersistedPeerCert(username, peer, true);
-        if (!isCurrent() || !cert) continue;
         try {
+          const cert = await getPeerCertificateBase(peer, false, true);
+          if (!isCurrent() || !cert) continue;
           await p2pTransport.registerPeerCertificate(peer, cert);
           if (!isCurrent()) return;
           const endpoint = await loadPersistedPeerEndpoint(username, peer);
@@ -540,7 +534,6 @@ export function useP2PMessaging(
           );
         } catch (error) {
           console.error('[P2P] Persisted peer state could not be restored', error);
-          return;
         }
       }
     };
@@ -554,89 +547,7 @@ export function useP2PMessaging(
     return () => {
       cancelled = true;
     };
-  }, [knownPeers, p2pStatus.isInitialized, username]);
-
-  useEffect(() => {
-    if (!username || knownPeers.length === 0) return;
-    const generation = accountGenerationRef.current;
-    let cancelled = false;
-    let timer: number | null = null;
-    const isCurrent = () => (
-      !cancelled &&
-      generation === accountGenerationRef.current &&
-      activeUsernameRef.current === username
-    );
-    const schedule = (delayMs: number) => {
-      if (!isCurrent()) return;
-      timer = window.setTimeout(() => {
-        timer = null;
-        void run();
-      }, delayMs);
-    };
-    const run = async () => {
-      await keyTransparencyClient.restorePersistedAuthorizations(username);
-      if (!isCurrent()) return;
-      for (const peer of knownPeers) {
-        if (!isCurrent()) return;
-        const now = Date.now();
-        const refreshDueAt = peerTrustRefreshDueRef.current.get(peer);
-        if (refreshDueAt !== undefined && refreshDueAt > now) continue;
-        const cert = await loadPersistedPeerCert(username, peer, true);
-        if (!isCurrent()) return;
-        const authorizationVerifiedAt = getKeyTransparencyAuthorizedPeerVerifiedAt(username, peer);
-        const authorizationRefreshAt = authorizationVerifiedAt === null
-          ? 0
-          : authorizationVerifiedAt + P2P_PEER_TRUST_REFRESH_MAX_AGE_MS;
-        const certificateRefreshAt = cert && Number.isSafeInteger(cert.expiresAt)
-          ? cert.expiresAt - P2P_PEER_TRUST_REFRESH_LEAD_MS
-          : 0;
-        if (
-          authorizationVerifiedAt !== null &&
-          cert &&
-          authorizationRefreshAt > now &&
-          certificateRefreshAt > now
-        ) {
-          peerTrustRefreshDueRef.current.set(
-            peer,
-            Math.min(authorizationRefreshAt, certificateRefreshAt),
-          );
-          continue;
-        }
-        const refreshed = await refreshPeerCertificateInBackground(peer);
-        if (!isCurrent()) return;
-        const refreshedAuthorizationVerifiedAt = getKeyTransparencyAuthorizedPeerVerifiedAt(username, peer);
-        const nextDueAt = refreshed && refreshedAuthorizationVerifiedAt !== null
-          ? Math.min(
-            refreshedAuthorizationVerifiedAt + P2P_PEER_TRUST_REFRESH_MAX_AGE_MS,
-            refreshed.expiresAt - P2P_PEER_TRUST_REFRESH_LEAD_MS,
-          )
-          : now + P2P_PEER_TRUST_REFRESH_INTERVAL_MS;
-        peerTrustRefreshDueRef.current.set(
-          peer,
-          Math.max(now + P2P_PEER_TRUST_REFRESH_INTERVAL_MS, nextDueAt),
-        );
-      }
-      if (isCurrent()) schedule(P2P_PEER_TRUST_REFRESH_INTERVAL_MS);
-    };
-    const random = new Uint32Array(1);
-    crypto.getRandomValues(random);
-    const initialDelay = P2P_PEER_TRUST_REFRESH_INITIAL_MIN_MS +
-      (random[0] % (P2P_PEER_TRUST_REFRESH_INITIAL_JITTER_MS + 1));
-    random.fill(0);
-    const knownPeerSet = new Set(knownPeers);
-    for (const peer of peerTrustRefreshDueRef.current.keys()) {
-      if (!knownPeerSet.has(peer)) peerTrustRefreshDueRef.current.delete(peer);
-    }
-    schedule(initialDelay);
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [
-    knownPeers,
-    refreshPeerCertificateInBackground,
-    username,
-  ]);
+  }, [knownPeers, p2pStatus.isInitialized, username, getPeerCertificateBase]);
 
   useEffect(() => {
     const onPeerConnected = (evt: Event) => {
@@ -659,6 +570,38 @@ export function useP2PMessaging(
       } catch { }
     };
   }, [username]);
+
+  useEffect(() => {
+    const onEndpointReceived = (evt: Event) => {
+      if (!(evt instanceof CustomEvent)) return;
+      const detail = evt.detail;
+      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+      if (Object.keys(detail).sort().join(',') !== 'account,peer') return;
+      if (detail.account !== username || activeUsernameRef.current !== username) return;
+      if (typeof detail.peer !== 'string' || !AUTH_USERNAME_REGEX.test(detail.peer)) return;
+      const peer = detail.peer;
+      const endpoint = p2pTransport.getAuthenticatedEndpoint(peer);
+      if (!endpoint || receivedEndpointAttemptsRef.current.get(peer) === endpoint) return;
+      setBoundedFailure(receivedEndpointAttemptsRef.current, peer, endpoint);
+      const generation = accountGenerationRef.current;
+      void (async () => {
+        await connectInFlightRef.current.get(peer)?.catch(() => { });
+        if (
+          generation !== accountGenerationRef.current ||
+          activeUsernameRef.current !== username ||
+          p2pTransport.getAuthenticatedEndpoint(peer) !== endpoint
+        ) return;
+        connectBackoffRef.current.delete(peer);
+        await connectToPeer(peer);
+      })().catch((error) => {
+        console.warn('[P2P] Authenticated endpoint connection failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    };
+    window.addEventListener(EventType.P2P_ENDPOINT_RECEIVED, onEndpointReceived);
+    return () => window.removeEventListener(EventType.P2P_ENDPOINT_RECEIVED, onEndpointReceived);
+  }, [username, connectToPeer]);
 
   useEffect(() => {
     const onFetchPeerCert = (evt: Event) => {
@@ -710,8 +653,8 @@ export function useP2PMessaging(
         peerCertificateCacheRef.current.delete(peer);
         peerCertFailureRef.current.delete(peer);
         peerCertInFlightRef.current.clear();
-        peerTrustRefreshDueRef.current.delete(peer);
         connectInFlightRef.current.delete(peer);
+        receivedEndpointAttemptsRef.current.delete(peer);
         connectBackoffRef.current.delete(peer);
         invalidateDiscoveryCache(peer);
 
@@ -747,8 +690,8 @@ export function useP2PMessaging(
       peerCertificateCacheRef.current.clear();
       peerCertFailureRef.current.clear();
       peerCertInFlightRef.current.clear();
-      peerTrustRefreshDueRef.current.clear();
       connectBackoffRef.current.clear();
+      receivedEndpointAttemptsRef.current.clear();
     };
     try {
       window.addEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);

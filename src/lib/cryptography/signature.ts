@@ -3,18 +3,14 @@
  */
 
 import { PostQuantumWorker } from './worker-bridge';
-import {
-  PQ_SIG_PUBLIC_KEY_SIZE,
-  PQ_SIG_SECRET_KEY_SIZE,
-  PQ_SIG_SIGNATURE_SIZE
-} from '../constants';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SECRET_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
 
 export class PostQuantumSignature {
   static async generateKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
     const result = await PostQuantumWorker.generateSigKeyPair();
     if (
-      result.publicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE ||
-      result.secretKey.length !== PQ_SIG_SECRET_KEY_SIZE
+      result.publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
+      result.secretKey.length !== ML_DSA_87_SECRET_KEY_BYTES
     ) {
       result.publicKey.fill(0);
       result.secretKey.fill(0);
@@ -50,9 +46,9 @@ export class PostQuantumSignature {
 
   static get sizes() {
     return {
-      publicKey: PQ_SIG_PUBLIC_KEY_SIZE,
-      secretKey: PQ_SIG_SECRET_KEY_SIZE,
-      signature: PQ_SIG_SIGNATURE_SIZE
+      publicKey: ML_DSA_87_PUBLIC_KEY_BYTES,
+      secretKey: ML_DSA_87_SECRET_KEY_BYTES,
+      signature: ML_DSA_87_SIGNATURE_BYTES
     };
   }
 }

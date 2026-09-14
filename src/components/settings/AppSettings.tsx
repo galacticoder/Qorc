@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { blockingSystem, type BlockedUser } from '../../lib/blocking/blocking-system';
+import { blockingSystem } from '../../lib/blocking/blocking-system';
 import { nativeCamera, nativeMicrophone, notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
 import { copyTextToClipboard } from '../../lib/clipboard';
 import {
@@ -53,6 +53,7 @@ import {
 } from '../../lib/ui/navigation-layout';
 import { SettingsSkeleton } from '../ui/ViewSkeletons';
 import { SettingsIcon } from '../chat/assets/icons';
+import { type BlockedUser } from '../../lib/types/blocking-types';
 
 installAppSettingsStyles();
 
@@ -556,13 +557,12 @@ export const AppSettings = React.memo(function AppSettings({
     <>
       <div className={`qorc-settings-host ${themeClass}`}>
         <main className="settings-screen">
+          <h1 className="settings-brand">
+            <SettingsIcon className="settings-brand-icon" aria-hidden="true" />
+            <strong>Settings</strong>
+          </h1>
           <section className="settings-content">
-            <h1 className="settings-brand">
-              <SettingsIcon className="settings-brand-icon" aria-hidden="true" />
-              <strong>Settings</strong>
-            </h1>
-
-            <section className="pane account-pane" data-settings-pane="account">
+            <section className="pane account-pane" data-settings-pane="account" aria-label="Account">
               <header className="pane-head">
                 <div className="pane-heading">
                   <div className="pane-title-row">

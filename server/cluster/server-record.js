@@ -2,8 +2,8 @@ import { canonicalBase64Shape } from '../../shared/canonical-base64.js';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_KEM_1024_PUBLIC_KEY_BYTES,
+  X25519_KEY_BYTES,
 } from '../../shared/crypto-sizes.js';
-import { X25519_KEY_BYTES } from '../utils/crypto-consts.js';
 import { hasExactPlainObjectKeys } from '../utils/validation.js';
 import { CLUSTER_SERVER_ID_RE } from './signed-message.js';
 

@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
-import { sanitizeEventText } from '../../lib/sanitizers';
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventText } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
 import { generateDefaultAvatar } from '../../lib/utils/avatar-utils';
 import {

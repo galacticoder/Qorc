@@ -1,15 +1,14 @@
-import { DiscoveryDB } from '../database/database.js';
 
 import {
   buildDiscoveryBucketIndex,
-  DISCOVERY_BUCKET_QUERY_COUNT,
-  DISCOVERY_DATABASE_KIND,
   DISCOVERY_MAX_SOURCE_BYTES,
   DISCOVERY_MAX_SOURCE_PUBLICATIONS,
-  padDiscoveryBucket
+  padDiscoveryBucket,
 } from './bucket-layout.js';
 import { DISCOVERY_EPOCH_EXPIRED } from '../config/error-codes.js';
 import { currentDiscoveryEpochId } from './epoch.js';
+import { DiscoveryDB } from '../database/discovery-db.js';
+import { DISCOVERY_BUCKET_QUERY_COUNT, DISCOVERY_DATABASE_KIND } from '../../shared/discovery-constants.js';
 
 const paddedCacheSizeParsed = Number.parseInt(process.env.DISCOVERY_PADDED_BUCKET_CACHE_SIZE || '4', 10);
 const PADDED_BUCKET_CACHE_SIZE = Number.isFinite(paddedCacheSizeParsed)

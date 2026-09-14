@@ -731,6 +731,7 @@ pub struct TorManager {
     config_path: PathBuf,
     tor_process: RwLock<Option<Child>>,
     operation_lock: tokio::sync::Mutex<()>,
+    mirrored_start_lock: tokio::sync::Mutex<()>,
     platform: String,
     arch: String,
     effective_socks_port: AtomicU16,
@@ -968,6 +969,7 @@ impl TorManager {
             config_path,
             tor_process: RwLock::new(None),
             operation_lock: tokio::sync::Mutex::new(()),
+            mirrored_start_lock: tokio::sync::Mutex::new(()),
             platform,
             arch,
             effective_socks_port: AtomicU16::new(DEFAULT_SOCKS_PORT),
@@ -1826,7 +1828,16 @@ impl TorManager {
         Ok(true)
     }
 
-    pub async fn mirror_configuration_from(&self, source: &TorManager) -> QorcResult<bool> {
+    pub async fn ensure_started_from(&self, source: &TorManager) -> QorcResult<TorStartResult> {
+        let _start_guard = self.mirrored_start_lock.lock().await;
+        self.reap_exited_process();
+        if !self.is_running() {
+            self.mirror_configuration_from(source).await?;
+        }
+        self.start().await
+    }
+
+    async fn mirror_configuration_from(&self, source: &TorManager) -> QorcResult<bool> {
         let source_config = fs::read_to_string(&source.config_path).await.map_err(|_| {
             QorcError::TorProcess("Primary Tor configuration is unavailable".to_string())
         })?;
@@ -2379,6 +2390,43 @@ pub async fn init(app_data_path: PathBuf) -> QorcResult<Arc<TorManager>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_bulk_requests_preserve_the_running_tor_process() {
+        let root = std::env::temp_dir().join(format!(
+            "qorc-bulk-start-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let primary = TorManager::new(root.join("primary"));
+        let bulk = TorManager::new(root.join("bulk"));
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let original_pid = child.id();
+        *bulk.tor_process.write() = Some(child);
+        let results = tokio::join!(
+            bulk.ensure_started_from(&primary),
+            bulk.ensure_started_from(&primary),
+            bulk.ensure_started_from(&primary),
+        );
+        let mut child = bulk.tor_process.write().take().unwrap();
+        let current_pid = child.id();
+        let _ = child.kill();
+        let _ = child.wait();
+        for result in [results.0, results.1, results.2] {
+            let started = result.unwrap();
+            assert!(started.success);
+            assert_eq!(started.starting, Some(false));
+        }
+        assert_eq!(current_pid, original_pid);
+        assert!(!primary.config_path.exists());
+        assert!(!bulk.config_path.exists());
+    }
 
     #[tokio::test]
     async fn pir_manager_uses_distinct_runtime_and_mirrored_configuration() {

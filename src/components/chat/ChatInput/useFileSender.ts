@@ -3,7 +3,24 @@ import { CryptoUtils } from "../../../lib/utils/crypto-utils";
 import { SignalType } from "../../../lib/types/signal-types";
 import { EventType } from "../../../lib/types/event-types";
 import { exactEventDetail, sanitizeFilename, sanitizeMessageId } from "../../../lib/sanitizers";
-import { AUTH_USERNAME_REGEX, DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, SESSION_FRESH_COOLDOWN_MS, FILE_RETRANSMIT_RETENTION_MS, MAX_RETAINED_TRANSFERS, MAX_RETRANSMIT_CHUNKS_PER_REQUEST, RETRANSMIT_MIN_INTERVAL_MS, MAX_FILE_SIZE } from "../../../lib/constants";
+import {
+  AUTH_USERNAME_REGEX,
+  DEFAULT_CHUNK_SIZE_SMALL,
+  MAX_CHUNKS_PER_SECOND,
+  INACTIVITY_TIMEOUT_MS,
+  RATE_LIMITER_SLEEP_MS,
+  YIELD_INTERVAL,
+  MAC_SALT,
+  SESSION_WAIT_MS,
+  SESSION_POLL_BASE_MS,
+  SESSION_POLL_MAX_MS,
+  SESSION_FRESH_COOLDOWN_MS,
+  FILE_RETRANSMIT_RETENTION_MS,
+  MAX_RETAINED_TRANSFERS,
+  MAX_RETRANSMIT_CHUNKS_PER_REQUEST,
+  RETRANSMIT_MIN_INTERVAL_MS,
+  MAX_FILE_SIZE,
+} from '../../../lib/constants';
 import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
 import { account, signal } from "../../../lib/tauri-bindings";
 import { stripImageMetadata } from "../../../lib/utils/file-utils";
@@ -16,7 +33,7 @@ import {
   isKeyTransparencyAuthorizedPeerKeySet,
   isKeyTransparencyPeerRevoked,
 } from "../../../lib/key-transparency/verified-material";
-import type { HybridKeys as NativeAccountKeys } from "../../../lib/types/auth-types";
+import type { HybridKeys } from '../../../lib/types/auth-types';
 import type { UserWithKeys } from '../../../lib/types/message-sending-types';
 import { PROTOCOL_KEYS } from '../../../lib/config/protocol-keys';
 import type { SecureDB } from '../../../lib/database/secureDB';
@@ -36,7 +53,7 @@ interface TransferState {
   readonly recipientUsername: string;
 }
 
-type LocalKeys = NativeAccountKeys;
+type LocalKeys = HybridKeys;
 
 interface UserKeyEnvelope {
   readonly username: string;
@@ -933,8 +950,7 @@ export function useFileSender(
       }
       currentFileRef.current = file;
 
-      const chunkSize = file.size > LARGE_FILE_THRESHOLD ? DEFAULT_CHUNK_SIZE_LARGE : DEFAULT_CHUNK_SIZE_SMALL;
-      const totalChunks = Math.ceil(file.size / chunkSize);
+      const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE_SMALL);
       const fileId = crypto.randomUUID();
 
       const safeName = sanitizeFilename(file.name || SignalType.FILE);
@@ -943,7 +959,7 @@ export function useFileSender(
         fileId,
         fileName: safeName,
         fileSize: file.size,
-        chunkSize,
+        chunkSize: DEFAULT_CHUNK_SIZE_SMALL,
         totalChunks,
         lastSentIndex: -1,
         canceled: false,
@@ -1117,7 +1133,7 @@ export function useFileSender(
         macKey: currentMacKeyRef.current!.slice(),
         userKeys,
         totalChunks,
-        chunkSize,
+        chunkSize: DEFAULT_CHUNK_SIZE_SMALL,
         fileName: safeName,
         fileSize: file.size,
         retainedAt: 0,

@@ -1,6 +1,15 @@
 import React, { useRef, useCallback, useEffect } from "react";
 import { Message } from '../../components/chat/messaging/types';
-import { INACTIVITY_TIMEOUT_MS, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS, MAX_FILE_SIZE_BYTES, GLOBAL_INBOUND_FILE_MEMORY_BUDGET, FILE_NACK_STALL_MS, MAX_NACK_ATTEMPTS, MAX_RETRANSMIT_CHUNKS_PER_REQUEST } from "../../lib/constants";
+import {
+  INACTIVITY_TIMEOUT_MS,
+  RATE_LIMIT_MAX_EVENTS,
+  RATE_LIMIT_WINDOW_MS,
+  GLOBAL_INBOUND_FILE_MEMORY_BUDGET,
+  FILE_NACK_STALL_MS,
+  MAX_NACK_ATTEMPTS,
+  MAX_RETRANSMIT_CHUNKS_PER_REQUEST,
+  MAX_FILE_SIZE,
+} from '../../lib/constants';
 import { dispatchProgressEvent, dispatchCanceledEvent, totalInboundFileBytes, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 import { shouldQueueFileTransportAck } from './transport-ack';
@@ -499,7 +508,7 @@ export function useFileHandler(
           nackAttemptsRef.current.delete(fileKey);
 
           if (fileEntry.bytesReceivedApprox > fileEntry.fileSize! ||
-            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE_BYTES) {
+            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE) {
             failTransfer(fileEntry, 'size-exceeded', 'File transfer rejected (size exceeded)');
             return;
           }

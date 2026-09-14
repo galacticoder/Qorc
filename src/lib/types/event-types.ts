@@ -7,6 +7,7 @@ export const EventType = {
   P2P_SESSION_RESET: 'p2p-session-reset',
   P2P_SESSION_RESET_REQUEST: 'p2p-session-reset-request',
   P2P_PEER_CONNECTED: 'p2p-peer-connected',
+  P2P_ENDPOINT_RECEIVED: 'p2p-endpoint-received',
   P2P_FETCH_PEER_CERT: 'p2p-fetch-peer-cert',
   KEY_TRANSPARENCY_ROOT_CHANGED: 'key-transparency-root-changed',
   KEY_TRANSPARENCY_SECURITY_INCIDENT: 'key-transparency-security-incident',

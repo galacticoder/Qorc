@@ -7,6 +7,8 @@ import {
 } from '../security/local-account-scope';
 import { canonicalAuthUsername } from '../sanitizers';
 import { STORAGE_PREFIXES } from '../database/storage-keys';
+import { Base64 } from '../cryptography/base64';
+import { PostQuantumRandom } from '../cryptography/random';
 
 const attemptLocks = new Map<string, Promise<void>>();
 
@@ -40,7 +42,7 @@ function validateAttemptId(value: unknown): string {
   try {
     if (
       decoded.length !== 32 ||
-      PostQuantumUtils.uint8ArrayToBase64(decoded) !== value
+      Base64.arrayBufferToBase64(decoded) !== value
     ) {
       throw new Error('Stored registration attempt is invalid');
     }
@@ -64,10 +66,10 @@ export async function getOrCreateRegistrationAttempt(username: string): Promise<
     await assertCurrentServerContext(context);
     if (existing !== null) return validateAttemptId(existing);
 
-    const random = PostQuantumUtils.randomBytes(32);
+    const random = PostQuantumRandom.randomBytes(32);
     let attemptId: string | null = null;
     try {
-      attemptId = PostQuantumUtils.uint8ArrayToBase64(random);
+      attemptId = Base64.arrayBufferToBase64(random);
       if (!await storage.set(key, attemptId)) {
         throw new Error('Registration retry state could not be persisted');
       }

@@ -238,7 +238,7 @@ const ChatApp: React.FC = () => {
     });
 
     return cert;
-  }, [findUser, Database.users, Database.setUsers]);
+  }, [findUser, Database.setUsers]);
 
   const startupBeganRef = useRef(false);
   useEffect(() => {
@@ -1005,8 +1005,8 @@ const ChatApp: React.FC = () => {
                     conversations={conversations}
                     selectedConversation={selectedConversation || undefined}
                     onSelectConversation={handleSelectConversation}
-                    onAddConversation={async (username, signal) => {
-                      await addConversation(username, true, signal);
+                    onAddConversation={async (username, signal, onProgress) => {
+                      await addConversation(username, true, signal, onProgress);
                       handleConversationDialogOpenChange(false);
                     }}
                     showNewChatInput={showNewChatInput}

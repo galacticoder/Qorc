@@ -5,31 +5,30 @@
 import { blake3 } from '@noble/hashes/blake3.js';
 import { SignalType } from '../types/signal-types';
 import { PostQuantumRandom } from '../cryptography/random';
-import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { account } from '../tauri-bindings';
 import { MessageFraming, FrameSize } from './message-framing';
-import {
-  AUTH_USERNAME_REGEX,
-  PQ_KEM_CIPHERTEXT_SIZE,
-  PQ_KEM_PUBLIC_KEY_SIZE
-} from '../constants';
+import { AUTH_USERNAME_REGEX } from '../constants';
 import {
   SPOOL_TAG_BYTES,
   encodeSpoolTag,
   untargetedProbeHex,
 } from '../../../shared/spool-tag-protocol.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import {
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  SEALED_NONCE_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { concatUint8Arrays } from '../../../shared/bytes.js';
+import { Base64 } from '../cryptography/base64';
 
-const SEALED_NONCE_BYTES = 12;
 const SEALED_KDF_CONTEXT = new TextEncoder().encode(PROTOCOL_KEYS.SEALED_SENDER_KDF);
 const SEALED_AAD_CONTEXT = new TextEncoder().encode(PROTOCOL_KEYS.SEALED_SENDER_AAD);
 const COVER_CIPHERTEXT_BYTES = FrameSize.STANDARD + 16;
-const COVER_EPHEMERAL_BYTES = PQ_KEM_CIPHERTEXT_SIZE;
-const COVER_NONCE_BYTES = SEALED_NONCE_BYTES;
 
 function deriveSealedSenderKey(sharedSecret: Uint8Array): Uint8Array {
-  const input = PostQuantumUtils.concatBytes(
+  const input = concatUint8Arrays(
     SEALED_KDF_CONTEXT,
     new Uint8Array([0]),
     sharedSecret
@@ -42,7 +41,7 @@ function deriveSealedSenderKey(sharedSecret: Uint8Array): Uint8Array {
 }
 
 function sealedSenderAdditionalData(kemCiphertext: Uint8Array): Uint8Array {
-  return PostQuantumUtils.concatBytes(
+  return concatUint8Arrays(
     SEALED_AAD_CONTEXT,
     new Uint8Array([0]),
     kemCiphertext
@@ -122,7 +121,7 @@ export class BlindRoutingClient {
     if (!AUTH_USERNAME_REGEX.test(this.localUsername)) {
       throw new Error('Local routing identity is unavailable');
     }
-    if (!(recipientKyberPublicKey instanceof Uint8Array) || recipientKyberPublicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
+    if (!(recipientKyberPublicKey instanceof Uint8Array) || recipientKyberPublicKey.length !== ML_KEM_1024_PUBLIC_KEY_BYTES) {
       throw new Error('Invalid recipient ML-KEM public key');
     }
 
@@ -168,9 +167,9 @@ export class BlindRoutingClient {
 
       return {
         version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
-        ciphertext: PostQuantumUtils.uint8ArrayToBase64(encryptedData),
-        ephemeralKey: PostQuantumUtils.uint8ArrayToBase64(kemCiphertext),
-        nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),
+        ciphertext: Base64.arrayBufferToBase64(encryptedData),
+        ephemeralKey: Base64.arrayBufferToBase64(kemCiphertext),
+        nonce: Base64.arrayBufferToBase64(nonce),
         tag: options.tag ?? randomSpoolTag(),
         probe: options.probe ?? randomProbe()
       };
@@ -188,14 +187,14 @@ export class BlindRoutingClient {
 
   createCoverSealedEnvelope(): SealedEnvelope {
     const ciphertext = PostQuantumRandom.randomBytes(COVER_CIPHERTEXT_BYTES);
-    const ephemeralKey = PostQuantumRandom.randomBytes(COVER_EPHEMERAL_BYTES);
-    const nonce = PostQuantumRandom.randomBytes(COVER_NONCE_BYTES);
+    const ephemeralKey = PostQuantumRandom.randomBytes(ML_KEM_1024_CIPHERTEXT_BYTES);
+    const nonce = PostQuantumRandom.randomBytes(SEALED_NONCE_BYTES);
     try {
       return {
         version: PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL,
-        ciphertext: PostQuantumUtils.uint8ArrayToBase64(ciphertext),
-        ephemeralKey: PostQuantumUtils.uint8ArrayToBase64(ephemeralKey),
-        nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),
+        ciphertext: Base64.arrayBufferToBase64(ciphertext),
+        ephemeralKey: Base64.arrayBufferToBase64(ephemeralKey),
+        nonce: Base64.arrayBufferToBase64(nonce),
         tag: randomSpoolTag(),
         probe: randomProbe()
       };

@@ -16,9 +16,6 @@ export const NEWLINE_REGEX = /[\r\n]+/g;
 
 export const ID_CACHE_TTL_MS = 5 * 60 * 1000;
 export const MAX_ID_CACHE_SIZE = 4_096;
-export const KYBER_PUBLIC_KEY_LENGTH = 1_568;
-export const DILITHIUM_PUBLIC_KEY_LENGTH = 2_592;
-export const X25519_PUBLIC_KEY_LENGTH = 32;
 
 export const MAX_EVENT_TYPE_LENGTH = 32;
 export const MAX_EVENT_USERNAME_LENGTH = 256;
@@ -59,10 +56,8 @@ export const NEAR_BOTTOM_THRESHOLD = 100;
 export const CONVERSATION_SEGMENT_SIZE = 50;
 export const CONVERSATION_WARM_MESSAGE_COUNT = 20;
 export const CALL_LOG_SEGMENT_SIZE = 50;
-export const MAX_BACKGROUND_MESSAGES = CONVERSATION_SEGMENT_SIZE;
 export const SEGMENT_UNLOAD_IDLE_MS = 3 * 60 * 1000;
 export const INITIAL_LOAD_DELAY_MS = 500;
-export const MAX_UI_MESSAGES_PER_CONVERSATION = MAX_BACKGROUND_MESSAGES;
 export const MAX_UI_MESSAGES_TOTAL = 2_048;
 export const MAX_CONVERSATION_STORED_MESSAGES = 10_000;
 export const MAX_KNOWN_PEERS = 2_048;
@@ -75,8 +70,6 @@ export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv
 export const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
 
 export const DEFAULT_CHUNK_SIZE_SMALL = 29 * 1024;
-export const DEFAULT_CHUNK_SIZE_LARGE = DEFAULT_CHUNK_SIZE_SMALL;
-export const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
 export const MAX_CHUNKS_PER_SECOND = 80;
 export const INACTIVITY_TIMEOUT_MS = 120000;
 export const RATE_LIMITER_SLEEP_MS = 10;
@@ -113,11 +106,7 @@ export {
 
 export const P2P_PEER_CACHE_TTL_MS = 5 * 60 * 1000;
 export const P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS = 8 * 60 * 60 * 1000;
-export const P2P_PEER_TRUST_REFRESH_LEAD_MS = 6 * 60 * 60 * 1000;
-export const P2P_PEER_TRUST_REFRESH_MAX_AGE_MS = 18 * 60 * 60 * 1000;
-export const P2P_PEER_TRUST_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
-export const P2P_PEER_TRUST_REFRESH_INITIAL_MIN_MS = 30 * 1000;
-export const P2P_PEER_TRUST_REFRESH_INITIAL_JITTER_MS = 60 * 1000;
+export const P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 export const P2P_ROUTE_PROOF_TTL_MS = 60 * 1000;
 export const MAX_P2P_CERT_CACHE_SIZE = 128;
 export const MAX_USERNAME_LENGTH = 96;
@@ -156,14 +145,12 @@ export const REPLY_RATE_LIMIT_MAX_EVENTS = 100;
 export const WEBSOCKET_RATE_LIMIT_WINDOW_MS = 1_000;
 export const WEBSOCKET_RATE_LIMIT_MAX_MESSAGES = 500;
 
-export const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE;
 export const MAX_TOTAL_CHUNKS = 10_000;
-export const MAX_CHUNK_SIZE_BYTES = DEFAULT_CHUNK_SIZE_SMALL;
 export const MAX_CONCURRENT_TRANSFERS = 16;
 export const MAX_CONCURRENT_TRANSFERS_PER_PEER = 4;
 export const P2P_GLOBAL_FILE_CHUNK_RATE_LIMIT = P2P_FILE_CHUNK_RATE_LIMIT * MAX_CONCURRENT_TRANSFERS_PER_PEER;
 export const GLOBAL_INBOUND_FILE_MEMORY_BUDGET = 192 * 1024 * 1024;
-export const MAX_BASE64_CHARS = 4 * Math.ceil((MAX_CHUNK_SIZE_BYTES + 35) / 3);
+export const MAX_BASE64_CHARS = 4 * Math.ceil((DEFAULT_CHUNK_SIZE_SMALL + 35) / 3);
 export const RATE_LIMIT_MAX_EVENTS = 6_000;
 
 export const DB_MAX_PENDING_MESSAGES = 500;
@@ -188,7 +175,6 @@ export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
   'isOutgoing'
 ]);
 export const CALL_RING_TIMEOUT = 20_000;
-export const CALL_TIMEOUT = CALL_RING_TIMEOUT;
 export const CALL_DEVICE_SETTLE_MS = 800;
 export const MAX_BLOCK_LIST_SIZE = 10000;
 export const BLOCK_STATUS_CACHE_TTL_MS = 30000;
@@ -215,22 +201,9 @@ export const RESET_WINDOW_MS = 60_000;
 export const PQ_RANDOM_MAX_BYTES_LIMIT = 100 * 1024 * 1024;
 export const PQ_RANDOM_DEFAULT_MAX_BYTES = 1_048_576;
 export const PQ_UTILS_MAX_DATA_SIZE = 10 * 1024 * 1024;
-export const PQ_AEAD_NONCE_SIZE = 36;
-export const PQ_AEAD_GCM_IV_SIZE = 12;
-export const PQ_AEAD_MAC_SIZE = 32;
-export const PQ_AEAD_CIPHERTEXT_OVERHEAD = 32;
-export const PQ_KEM_PUBLIC_KEY_SIZE = 1568;
-export const PQ_KEM_SECRET_KEY_SIZE = 3168;
-export const PQ_KEM_CIPHERTEXT_SIZE = 1568;
-export const PQ_KEM_SHARED_SECRET_SIZE = 32;
-export const PQ_SIG_PUBLIC_KEY_SIZE = 2592;
-export const PQ_SIG_SECRET_KEY_SIZE = 4896;
-export const PQ_SIG_SIGNATURE_SIZE = 4627;
 export const PQ_WORKER_MAX_RESTART_ATTEMPTS = 5;
 
 export const CRYPTO_AES_KEY_SIZE = 256;
-export const CRYPTO_IV_LENGTH = 12;
-export const CRYPTO_AUTH_TAG_LENGTH = 16;
 export const CRYPTO_HKDF_HASH = 'SHA-256';
 export const CRYPTO_X25519_DERIVE_BITS = 256;
 
@@ -252,7 +225,6 @@ export const STORAGE_RATE_LIMIT_MAX_OPS = 100;
 export const SECURE_DB_MAX_VALUE_SIZE = 100 * 1024 * 1024;
 export const SECURE_DB_MIN_CLEANUP_INTERVAL = 60_000;
 export const SECURE_DB_MAX_EPHEMERAL_BATCH = 1000;
-export const SECURE_DB_MAX_FILE_SIZE = MAX_FILE_SIZE;
 export const SECURE_DB_BLOCKED_MIME_TYPES = [
     'application/x-msdownload',
     'application/x-msdos-program',
@@ -279,6 +251,8 @@ export const MAX_BURST_MESSAGES = 20;
 
 export const HEARTBEAT_INTERVAL_MS = 35_000;
 export const HEARTBEAT_TIMEOUT_MS = 90_000;
+export const WS_CONTROL_SEND_TIMEOUT_MS = 60_000;
+export const WS_CONTROL_RESPONSE_TIMEOUT_MS = 180_000;
 export const MAX_MISSED_HEARTBEATS = 4;
 
 

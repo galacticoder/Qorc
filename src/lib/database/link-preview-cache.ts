@@ -1,9 +1,9 @@
 import { blake3 } from '@noble/hashes/blake3.js';
 import type { NativeLinkPreview } from '../tauri-bindings';
-import { bytesToHex } from '../utils/byte-utils';
 import { hasExactObjectKeys } from '../sanitizers';
 import type { SecureDB } from './secureDB';
 import { STORAGE_KEYS, STORAGE_KEY_DOMAINS, STORAGE_STORES } from './storage-keys';
+import { bytesToHex } from '../../../shared/bytes.js';
 
 interface LinkPreviewCacheRecord {
   version: 1;

@@ -6,15 +6,17 @@ import { PQSession, clearNoiseHandshakeReplayCache } from '../cryptography/noise
 import { PeerKeys, OwnKeys, HandshakeMessage, EncryptedFrame } from '../types/noise-types';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { encodeFrame, decodeFrame, MAX_MESSAGE_FRAME_SIZE } from './secure-transport';
-import {
-    PQ_KEM_CIPHERTEXT_SIZE,
-    PQ_KEM_PUBLIC_KEY_SIZE,
-    PQ_SIG_PUBLIC_KEY_SIZE,
-    PQ_SIG_SIGNATURE_SIZE,
-    X25519_PUBLIC_KEY_LENGTH
-} from '../constants';
-import { wipeHandshakeBytes as clearHandshakeBytes } from '../cryptography/wipe';
+import { wipeHandshakeBytes } from '../cryptography/wipe';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
+import {
+  ML_DSA_87_PUBLIC_KEY_BYTES,
+  ML_DSA_87_SIGNATURE_BYTES,
+  ML_KEM_1024_CIPHERTEXT_BYTES,
+  ML_KEM_1024_PUBLIC_KEY_BYTES,
+  X25519_KEY_BYTES,
+} from '../../../shared/crypto-sizes.js';
+import { SecureMemory } from '../cryptography/secure-memory';
+import { Base64 } from '../cryptography/base64';
 
 const confirmationEncoder = new TextEncoder();
 const MAX_PENDING_ENCRYPT_OPERATIONS = 128;
@@ -84,7 +86,7 @@ export class PQNoiseSession {
             wrappedSession.destroy();
             throw error;
         } finally {
-            clearHandshakeBytes(message);
+            wipeHandshakeBytes(message);
         }
     }
 
@@ -117,8 +119,8 @@ export class PQNoiseSession {
             wrappedSession?.destroy();
             throw error;
         } finally {
-            clearHandshakeBytes(parsed);
-            if (response) clearHandshakeBytes(response);
+            wipeHandshakeBytes(parsed);
+            if (response) wipeHandshakeBytes(response);
         }
     }
 
@@ -132,7 +134,7 @@ export class PQNoiseSession {
             this.destroy();
             throw error;
         } finally {
-            if (parsed) clearHandshakeBytes(parsed);
+            if (parsed) wipeHandshakeBytes(parsed);
         }
     }
 
@@ -384,7 +386,7 @@ export class PQNoiseSession {
         let plaintext: Uint8Array | null = null;
         try {
             plaintext = await this.decrypt(frame, aad);
-            if (!PostQuantumUtils.timingSafeEqual(plaintext, expected)) {
+            if (!SecureMemory.constantTimeCompare(plaintext, expected)) {
                 throw new Error('Invalid P2P key confirmation');
             }
         } finally {
@@ -452,13 +454,13 @@ function serializeHandshake(msg: HandshakeMessage): PQNoiseHandshakeMessage {
         timestamp: msg.timestamp,
         ...(msg.ephemeralKyberPublic?.length
             ? {
-                  ephemeralKyberPublic: PostQuantumUtils.uint8ArrayToBase64(msg.ephemeralKyberPublic)
+                  ephemeralKyberPublic: Base64.arrayBufferToBase64(msg.ephemeralKyberPublic)
               }
             : {}),
-        kemCiphertext: PostQuantumUtils.uint8ArrayToBase64(msg.kemCiphertext),
-        ephemeralX25519Public: PostQuantumUtils.uint8ArrayToBase64(msg.ephemeralX25519Public),
-        signature: PostQuantumUtils.uint8ArrayToBase64(msg.signature),
-        signerPublicKey: PostQuantumUtils.uint8ArrayToBase64(msg.signerPublicKey)
+        kemCiphertext: Base64.arrayBufferToBase64(msg.kemCiphertext),
+        ephemeralX25519Public: Base64.arrayBufferToBase64(msg.ephemeralX25519Public),
+        signature: Base64.arrayBufferToBase64(msg.signature),
+        signerPublicKey: Base64.arrayBufferToBase64(msg.signerPublicKey)
     };
 }
 
@@ -477,7 +479,7 @@ function deserializeHandshake(msg: PQNoiseHandshakeMessage | HandshakeMessage): 
             throw new Error('Invalid Noise handshake encoding length');
         }
         const decoded = PostQuantumUtils.base64ToUint8Array(val);
-        if (decoded.length !== expectedLength || PostQuantumUtils.uint8ArrayToBase64(decoded) !== val) {
+        if (decoded.length !== expectedLength || Base64.arrayBufferToBase64(decoded) !== val) {
             decoded.fill(0);
             throw new Error('Non-canonical Noise handshake encoding');
         }
@@ -543,18 +545,18 @@ function deserializeHandshake(msg: PQNoiseHandshakeMessage | HandshakeMessage): 
     let signerPublicKey: Uint8Array | null = null;
     try {
         if (msg.type === 'init') {
-            ephemeralKyberPublic = toUint8(msg.ephemeralKyberPublic, PQ_KEM_PUBLIC_KEY_SIZE);
+            ephemeralKyberPublic = toUint8(msg.ephemeralKyberPublic, ML_KEM_1024_PUBLIC_KEY_BYTES);
         }
-        kemCiphertext = toUint8(msg.kemCiphertext, PQ_KEM_CIPHERTEXT_SIZE);
-        ephemeralX25519Public = toUint8(msg.ephemeralX25519Public, X25519_PUBLIC_KEY_LENGTH);
-        signature = toUint8(msg.signature, PQ_SIG_SIGNATURE_SIZE);
-        signerPublicKey = toUint8(msg.signerPublicKey, PQ_SIG_PUBLIC_KEY_SIZE);
+        kemCiphertext = toUint8(msg.kemCiphertext, ML_KEM_1024_CIPHERTEXT_BYTES);
+        ephemeralX25519Public = toUint8(msg.ephemeralX25519Public, X25519_KEY_BYTES);
+        signature = toUint8(msg.signature, ML_DSA_87_SIGNATURE_BYTES);
+        signerPublicKey = toUint8(msg.signerPublicKey, ML_DSA_87_PUBLIC_KEY_BYTES);
         if (
-            (msg.type === 'init' && ephemeralKyberPublic?.length !== PQ_KEM_PUBLIC_KEY_SIZE) ||
-            kemCiphertext.length !== PQ_KEM_CIPHERTEXT_SIZE ||
-            ephemeralX25519Public.length !== X25519_PUBLIC_KEY_LENGTH ||
-            signature.length !== PQ_SIG_SIGNATURE_SIZE ||
-            signerPublicKey.length !== PQ_SIG_PUBLIC_KEY_SIZE
+            (msg.type === 'init' && ephemeralKyberPublic?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES) ||
+            kemCiphertext.length !== ML_KEM_1024_CIPHERTEXT_BYTES ||
+            ephemeralX25519Public.length !== X25519_KEY_BYTES ||
+            signature.length !== ML_DSA_87_SIGNATURE_BYTES ||
+            signerPublicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES
         ) {
             throw new Error('Invalid Noise handshake key material');
         }
