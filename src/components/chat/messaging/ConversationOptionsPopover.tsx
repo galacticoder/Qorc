@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Ban, Loader2, MoreVertical } from 'lucide-react';
 import { Button } from '../../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
+import { ConversationNotificationControls } from './ConversationNotifications';
 
 interface ConversationOptionsPopoverProps {
   readonly username: string;
@@ -60,6 +61,7 @@ export function ConversationOptionsPopover({
       </PopoverTrigger>
       <PopoverContent className="qorc-conversation-options-popover select-none" align="end">
         <div className="qorc-conversation-options-menu">
+          <ConversationNotificationControls username={username} />
           <div className="qorc-conversation-options-title">Options</div>
           <button
             type="button"

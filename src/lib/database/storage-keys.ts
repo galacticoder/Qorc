@@ -1,5 +1,6 @@
 export const STORAGE_KEYS = {
     APP_SETTINGS: 'app_settings',
+    NOTIFICATION_PREFERENCES: 'notification_preferences',
     AVATAR_CACHE: 'cache',
     AVATAR_OWN: 'own',
     AUTH_ORIGINAL_USERNAME: 'original_username',

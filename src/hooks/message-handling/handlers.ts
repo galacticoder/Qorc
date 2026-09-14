@@ -4,6 +4,7 @@ import { sanitizeNonEmptyText, isUnsafeObjectKey, sanitizeMessageId } from '../.
 import { MAX_LOCAL_EMOJI_LENGTH } from '../../lib/constants';
 import type { Message } from '../../components/chat/messaging/types';
 import { nativeMessageContent, notifications, tray } from '../../lib/tauri-bindings';
+import { getNotificationMutes } from '../../lib/ui/notification-preferences';
 import {
   applyDeleteControl,
   applyEditControl,
@@ -217,6 +218,7 @@ export const showNotification = (
   if (payload.from === loginUsername) return;
 
   try {
+    if (getNotificationMutes(payload.from).messages) return;
     // Check if window is hidden or unfocused
     const isHidden = document.hidden;
     const isFocused = document.hasFocus();

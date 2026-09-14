@@ -54,6 +54,8 @@ import {
 import { SettingsSkeleton } from '../ui/ViewSkeletons';
 import { SettingsIcon } from '../chat/assets/icons';
 import { type BlockedUser } from '../../lib/types/blocking-types';
+import { useNotificationPreferences } from '../../hooks/useNotificationPreferences';
+import { setDoNotDisturb, type NotificationMutes } from '../../lib/ui/notification-preferences';
 
 installAppSettingsStyles();
 
@@ -83,6 +85,8 @@ function SwitchButton({
     <button
       className={`switch ${checked ? 'on' : ''}`}
       type="button"
+      role="switch"
+      aria-checked={checked}
       disabled={disabled}
       aria-label={`${label} ${checked ? 'enabled' : 'disabled'}`}
       onClick={() => onChange(!checked)}
@@ -189,6 +193,7 @@ export const AppSettings = React.memo(function AppSettings({
   const [logoutArmed, setLogoutArmed] = useState(false);
   const logoutTimerRef = useRef<number | null>(null);
   const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true });
+  const { doNotDisturb } = useNotificationPreferences();
   const [navigationLayout, setNavigationLayout] = useState<NavigationLayout>(readNavigationLayout);
   const [closeToTray, setCloseToTray] = useState(true);
   const [isTrayLoading, setIsTrayLoading] = useState(true);
@@ -427,6 +432,14 @@ export const AppSettings = React.memo(function AppSettings({
     setNotifications(updated);
     saveSettings({ notifications: updated });
     tauriNotifications.setEnabled(checked).catch(() => { });
+  };
+
+  const handleDoNotDisturb = (type: keyof NotificationMutes, checked: boolean) => {
+    try {
+      setDoNotDisturb(type, checked);
+    } catch {
+      toast.error('Failed to update do not disturb');
+    }
   };
 
   const handleNavigationLayoutChange = (layout: NavigationLayout) => {
@@ -697,6 +710,20 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-description">Show a notification popup when a new message arrives.</div>
                     </div>
                     <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">Do not disturb · Messages</div>
+                      <div className="setting-description">Silence message notifications. Messages still arrive in your chats.</div>
+                    </div>
+                    <SwitchButton checked={doNotDisturb.messages} label="Do not disturb for messages" onChange={checked => handleDoNotDisturb('messages', checked)} />
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">Do not disturb · Calls</div>
+                      <div className="setting-description">Hide incoming call popups and alerts. Missed calls remain in your call history.</div>
+                    </div>
+                    <SwitchButton checked={doNotDisturb.calls} label="Do not disturb for calls" onChange={checked => handleDoNotDisturb('calls', checked)} />
                   </div>
                 </div>
               </div>

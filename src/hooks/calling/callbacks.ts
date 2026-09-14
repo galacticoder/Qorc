@@ -5,6 +5,7 @@ import { EventType } from '../../lib/types/event-types';
 import { clearCallMediaState, releaseVisualCanvas, EventDebouncer } from '../../lib/utils/calling-utils';
 import { notifications, power, tray } from '../../lib/tauri-bindings';
 import { CallState } from '../../lib/types/calling-types';
+import { getNotificationMutes } from '../../lib/ui/notification-preferences';
 
 export interface CallbackRefs {
   localMediaActiveRef: React.RefObject<boolean>;
@@ -38,7 +39,7 @@ export const setupIncomingCallCallback = (
         ? previous.map(candidate => candidate.id === call.id ? { ...call } : candidate)
         : [...previous, { ...call }]
     ));
-    if (document.hidden || !document.hasFocus()) {
+    if (!getNotificationMutes(call.peer).calls && (document.hidden || !document.hasFocus())) {
       void notifications.show().catch(() => { });
       void tray.incrementUnread().catch(() => { });
     }

@@ -224,6 +224,7 @@ class SyncEncryptedStorageAdapter {
 
     const syncAccessKeys = [
       STORAGE_KEYS.CALL_HISTORY,
+      STORAGE_KEYS.NOTIFICATION_PREFERENCES,
       STORAGE_KEYS.APP_SETTINGS
     ];
     const loaded = new Map<string, any>();

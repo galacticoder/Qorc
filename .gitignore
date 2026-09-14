@@ -144,5 +144,6 @@ server/test/*
 !server/test/protocol-keys.test.js
 !server/test/client-key-centralization.test.js
 !server/test/constant-ownership.test.js
+!server/test/notification-preferences.test.js
 !server/test/hybrid-recipient-binding.test.js
 !server/test/unversioned-protocols.test.js

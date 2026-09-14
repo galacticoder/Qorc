@@ -2231,6 +2231,8 @@ html.light .qorc-conversation-empty-lines span,
 
 .qorc-conversation-item:hover .qorc-conversation-action-pill,
 .qorc-conversation-action-pill:focus-within,
+.qorc-conversation-action-pill:has([data-state="open"]),
+.qorc-conversation-action-pill.is-muted,
 .qorc-conversation-action-pill.is-pinned {
   opacity: 1;
 }
@@ -2644,7 +2646,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 }
 
 .qorc-conversation-options-popover {
-  width: 108px !important;
+  width: 236px !important;
   overflow: hidden;
   border: 0 !important;
   border-radius: 10px !important;
@@ -2710,6 +2712,81 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
+}
+
+.qorc-notification-controls {
+  padding: 4px;
+}
+
+.qorc-notification-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--qorc-text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qorc-notification-option:hover {
+  background: var(--qorc-control-hover);
+}
+
+.qorc-notification-option:focus-visible {
+  outline: 2px solid var(--qorc-accent, #7057c8);
+  outline-offset: -2px;
+}
+
+.qorc-notification-option > svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--qorc-muted-text);
+}
+
+.qorc-notification-switch {
+  width: 30px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 3px;
+  border-radius: 999px;
+  background: #cacbd0;
+  transition: background .16s ease;
+}
+
+.dark .qorc-notification-switch {
+  background: #303034;
+}
+
+.qorc-notification-switch::before {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .16s ease;
+}
+
+.qorc-notification-option[aria-checked="true"] .qorc-notification-switch {
+  background: var(--qorc-accent, #7057c8);
+}
+
+.qorc-notification-option[aria-checked="true"] .qorc-notification-switch::before {
+  transform: translateX(12px);
+}
+
+.qorc-notification-hint {
+  margin: 4px 8px 8px;
+  color: var(--qorc-muted-text);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 /* "Start chat with <typed>" row */

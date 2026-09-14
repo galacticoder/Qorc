@@ -14,17 +14,17 @@ use crate::state::AppState;
 
 const WARM_POOL_TARGET: usize = 4;
 const WARM_ENTRY_MAX_AGE: Duration = Duration::from_secs(240);
-const WARM_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct WarmEntry {
     isolation_user: String,
     warmed_at: Instant,
     target: String,
     socks_port: u16,
+    destination_port: u16,
 }
 
 static WARM_POOL: Mutex<VecDeque<WarmEntry>> = Mutex::new(VecDeque::new());
-static WARM_REFILL_RUNNING: LazyLock<Mutex<HashSet<(u16, String)>>> =
+static WARM_REFILL_RUNNING: LazyLock<Mutex<HashSet<(u16, String, u16)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn new_isolation_user() -> String {
@@ -35,13 +35,19 @@ fn new_isolation_user() -> String {
     )
 }
 
-fn take_warm_isolation_user(socks_port: u16, target: &str) -> Option<String> {
+fn take_warm_isolation_user(
+    socks_port: u16,
+    target: &str,
+    destination_port: u16,
+) -> Option<String> {
     let mut pool = WARM_POOL.lock().ok()?;
     let now = Instant::now();
     pool.retain(|entry| now.duration_since(entry.warmed_at) < WARM_ENTRY_MAX_AGE);
-    let index = pool
-        .iter()
-        .position(|entry| entry.socks_port == socks_port && entry.target == target)?;
+    let index = pool.iter().position(|entry| {
+        entry.socks_port == socks_port
+            && entry.target == target
+            && entry.destination_port == destination_port
+    })?;
     pool.remove(index).map(|entry| entry.isolation_user)
 }
 
@@ -49,7 +55,7 @@ async fn warm_one_circuit(socks_port: u16, host: &str, port: u16) -> Option<Stri
     let isolation_user = new_isolation_user();
     let proxy = format!("127.0.0.1:{}", socks_port);
     let stream = tokio::time::timeout(
-        WARM_CONNECT_TIMEOUT,
+        CONNECT_TIMEOUT,
         tokio_socks::tcp::Socks5Stream::connect_with_password(
             proxy.as_str(),
             (host, port),
@@ -65,7 +71,7 @@ async fn warm_one_circuit(socks_port: u16, host: &str, port: u16) -> Option<Stri
 }
 
 fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
-    let refill_key = (socks_port, host.clone());
+    let refill_key = (socks_port, host.clone(), port);
     {
         let Ok(mut running) = WARM_REFILL_RUNNING.lock() else {
             return;
@@ -86,9 +92,15 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
                         });
                         let matching = pool
                             .iter()
-                            .filter(|entry| entry.socks_port == socks_port && entry.target == host)
+                            .filter(|entry| {
+                                entry.socks_port == socks_port
+                                    && entry.target == host
+                                    && entry.destination_port == port
+                            })
                             .count();
-                        WARM_POOL_TARGET.saturating_sub(matching)
+                        WARM_POOL_TARGET
+                            .saturating_sub(matching)
+                            .min((WARM_POOL_TARGET * 4).saturating_sub(pool.len()))
                     }
                     Err(_) => 0,
                 }
@@ -106,8 +118,13 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
                                 warmed_at: Instant::now(),
                                 target: host.clone(),
                                 socks_port,
+                                destination_port: port,
                             });
+                        } else {
+                            break;
                         }
+                    } else {
+                        break;
                     }
                 }
                 None => break,
@@ -224,12 +241,81 @@ fn body_timeout(bytes: usize) -> Duration {
 fn anonymous_http_client_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .http1_only()
         .no_gzip()
         .connect_timeout(CONNECT_TIMEOUT);
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     let builder = builder.tcp_user_timeout(None);
     builder
+}
+
+async fn send_anonymous_request(
+    socks_port: u16,
+    api_url: url::Url,
+    request_body: Vec<u8>,
+    header_timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let proxy_url = format!("socks5h://127.0.0.1:{socks_port}");
+    let request_host = api_url.host_str().ok_or("invalid anonymous request host")?;
+    let request_port = api_url
+        .port_or_known_default()
+        .ok_or("invalid anonymous request port")?;
+    let host_is_onion = request_host.to_ascii_lowercase().ends_with(".onion");
+    let started_at = Instant::now();
+    let deadline = tokio::time::Instant::now() + header_timeout;
+    let request_bytes = request_body.len();
+
+    for attempt in 1..=2 {
+        let isolation_user = take_warm_isolation_user(socks_port, request_host, request_port)
+            .unwrap_or_else(new_isolation_user);
+        let proxy = reqwest::Proxy::all(&proxy_url)
+            .map_err(|_| "failed to configure anonymous transport".to_string())?
+            .basic_auth(&isolation_user, "isolate");
+        let mut builder = anonymous_http_client_builder().proxy(proxy);
+        if host_is_onion {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let client = builder
+            .build()
+            .map_err(|_| "failed to create anonymous transport".to_string())?;
+        let response = tokio::time::timeout_at(
+            deadline,
+            client
+                .post(api_url.clone())
+                .header("Accept", "application/octet-stream")
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CACHE_CONTROL, "no-store")
+                .header(reqwest::header::CONNECTION, "close")
+                .body(request_body.clone())
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "anonymous response header timeout after {} ms (request bytes: {request_bytes})",
+                started_at.elapsed().as_millis(),
+            )
+        })?;
+        match response {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt == 1 && error.is_connect() => {
+                tracing::warn!(
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    error = ?error.without_url(),
+                    "[ANON-HTTP] connection establishment failed before HTTP delivery; trying another isolated connection"
+                );
+            }
+            Err(error) => {
+                return Err(format!(
+                    "anonymous request failed before response headers after {} ms (request bytes: {request_bytes}): {:?}",
+                    started_at.elapsed().as_millis(),
+                    error.without_url(),
+                ));
+            }
+        }
+    }
+    unreachable!()
 }
 
 async fn wait_for_bootstrap(tor: &Arc<crate::tor::TorManager>) -> bool {
@@ -498,10 +584,6 @@ async fn execute_anonymous_api_fetch(
     }
 
     let api_url = anonymous_api_url(&expected_server_url)?;
-    let host_is_onion = api_url
-        .host_str()
-        .map(|host| host.to_ascii_lowercase().ends_with(".onion"))
-        .unwrap_or(false);
     let tor = if use_bulk_tor {
         let primary = state
             .inner()
@@ -534,50 +616,14 @@ async fn execute_anonymous_api_fetch(
     };
 
     let socks_port = tor.get_socks_port();
-    let proxy_url = format!("socks5h://127.0.0.1:{}", socks_port);
     let request_host = api_url.host_str().unwrap_or_default().to_string();
     let request_port = api_url.port_or_known_default().unwrap_or(443);
-    let isolation_user =
-        take_warm_isolation_user(socks_port, &request_host).unwrap_or_else(new_isolation_user);
     if !request_host.is_empty() {
         spawn_warm_refill(socks_port, request_host.clone(), request_port);
     }
-    let proxy = reqwest::Proxy::all(&proxy_url)
-        .map_err(|_| "failed to configure anonymous transport".to_string())?
-        .basic_auth(&isolation_user, "isolate");
-    let mut builder = anonymous_http_client_builder().proxy(proxy);
-    if host_is_onion {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| "failed to create anonymous transport".to_string())?;
-
     let started_at = Instant::now();
-    let request_bytes = request_body.len();
-    let mut response = tokio::time::timeout(
-        HEADER_TIMEOUT,
-        client
-            .post(api_url)
-            .header("Accept", "application/octet-stream")
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .header(reqwest::header::CACHE_CONTROL, "no-store")
-            .header(reqwest::header::CONNECTION, "close")
-            .body(request_body)
-            .send(),
-    )
-    .await
-    .map_err(|_| format!(
-        "anonymous response header timeout after {} ms (request bytes: {request_bytes})",
-        started_at.elapsed().as_millis(),
-    ))?
-    .map_err(|error| {
-        format!(
-            "anonymous request failed before response headers after {} ms (request bytes: {request_bytes}): {:?}",
-            started_at.elapsed().as_millis(),
-            error.without_url()
-        )
-    })?;
+    let mut response =
+        send_anonymous_request(socks_port, api_url, request_body, HEADER_TIMEOUT).await?;
     if !response.status().is_success() {
         return Err(format!(
             "anonymous request failed with HTTP status {}",
@@ -647,6 +693,211 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use uuid::Uuid;
+
+    async fn accept_anonymous_socks(
+        listener: &tokio::net::TcpListener,
+        reply: u8,
+    ) -> (tokio::net::TcpStream, Vec<u8>) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        assert_eq!(socket.read_u8().await.unwrap(), 5);
+        let methods_len = socket.read_u8().await.unwrap() as usize;
+        let mut methods = vec![0; methods_len];
+        socket.read_exact(&mut methods).await.unwrap();
+        assert!(methods.contains(&2));
+        socket.write_all(&[5, 2]).await.unwrap();
+        assert_eq!(socket.read_u8().await.unwrap(), 1);
+        let username_len = socket.read_u8().await.unwrap() as usize;
+        let mut username = vec![0; username_len];
+        socket.read_exact(&mut username).await.unwrap();
+        let password_len = socket.read_u8().await.unwrap() as usize;
+        let mut password = vec![0; password_len];
+        socket.read_exact(&mut password).await.unwrap();
+        assert_eq!(password, b"isolate");
+        socket.write_all(&[1, 0]).await.unwrap();
+        let mut connect = [0; 4];
+        socket.read_exact(&mut connect).await.unwrap();
+        assert_eq!(connect, [5, 1, 0, 3]);
+        let host_len = socket.read_u8().await.unwrap() as usize;
+        let mut host = vec![0; host_len];
+        socket.read_exact(&mut host).await.unwrap();
+        assert_eq!(host, b"test.onion");
+        assert_eq!(socket.read_u16().await.unwrap(), 80);
+        socket
+            .write_all(&[5, reply, 0, 1, 127, 0, 0, 1, 0, 80])
+            .await
+            .unwrap();
+        (socket, username)
+    }
+
+    async fn receive_anonymous_upload(socket: &mut tokio::net::TcpStream) {
+        let mut received = Vec::new();
+        let mut buffer = [0; 16 * 1024];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            received.extend_from_slice(&buffer[..count]);
+            if let Some(end) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                if received.len() >= end + 4 + super::REQUEST_LARGE_BYTES {
+                    assert_eq!(received.len(), end + 4 + super::REQUEST_LARGE_BYTES);
+                    assert!(received[end + 4..].iter().all(|byte| *byte == 7));
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn anonymous_test_upload(
+        port: u16,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, String> {
+        crate::install_rustls_provider();
+        super::send_anonymous_request(
+            port,
+            "http://test.onion/api/anonymous".parse().unwrap(),
+            vec![7; super::REQUEST_LARGE_BYTES],
+            timeout,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn socks_ttl_expiry_reconnects_with_new_isolation_before_uploading() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            let (mut failed, first_user) = accept_anonymous_socks(&listener, 6).await;
+            assert_eq!(failed.read(&mut [0; 1]).await.unwrap(), 0);
+            let (mut connected, second_user) = accept_anonymous_socks(&listener, 0).await;
+            assert_ne!(first_user, second_user);
+            receive_anonymous_upload(&mut connected).await;
+            connected
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
+                .await
+                .unwrap();
+        });
+        let response = anonymous_test_upload(port, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"test");
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_socks_failures_stop_after_two_connections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut failed, _) = accept_anonymous_socks(&listener, 6).await;
+                assert_eq!(failed.read(&mut [0; 1]).await.unwrap(), 0);
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let error = anonymous_test_upload(port, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(error.contains("TtlExpired"), "{error}");
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivered_upload_is_not_replayed_when_response_connection_closes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
+            receive_anonymous_upload(&mut connected).await;
+            drop(connected);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        assert!(
+            anonymous_test_upload(port, Duration::from_secs(5))
+                .await
+                .is_err()
+        );
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_error_response_is_not_replayed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
+            receive_anonymous_upload(&mut connected).await;
+            connected.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let response = anonymous_test_upload(port, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_uses_the_original_header_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let (failed, _) = accept_anonymous_socks(&listener, 6).await;
+            drop(failed);
+            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
+            receive_anonymous_upload(&mut connected).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let _ = connected
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+        let error = anonymous_test_upload(port, Duration::from_millis(600))
+            .await
+            .unwrap_err();
+        assert!(error.contains("response header timeout"), "{error}");
+        proxy.await.unwrap();
+    }
+
+    #[test]
+    fn warm_entries_are_single_use_port_scoped_and_expiring() {
+        let host = Uuid::new_v4().to_string();
+        {
+            let mut pool = super::WARM_POOL.lock().unwrap();
+            for (destination_port, age, user) in [
+                (443, super::WARM_ENTRY_MAX_AGE, "expired"),
+                (8443, Duration::ZERO, "other-port"),
+                (443, Duration::ZERO, "ready"),
+            ] {
+                pool.push_back(super::WarmEntry {
+                    isolation_user: user.to_string(),
+                    warmed_at: std::time::Instant::now() - age,
+                    target: host.clone(),
+                    socks_port: 9150,
+                    destination_port,
+                });
+            }
+        }
+        assert_eq!(
+            super::take_warm_isolation_user(9150, &host, 443).as_deref(),
+            Some("ready")
+        );
+        assert_eq!(super::take_warm_isolation_user(9150, &host, 443), None);
+        assert_eq!(
+            super::take_warm_isolation_user(9150, &host, 8443).as_deref(),
+            Some("other-port")
+        );
+    }
 
     #[cfg(target_os = "linux")]
     async fn paused_socks_upload(

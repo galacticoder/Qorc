@@ -17,6 +17,7 @@ import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
 import { ConversationOptionsPopover } from './ConversationOptionsPopover';
+import { ConversationNotifications } from './ConversationNotifications';
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { useBlockStatus } from '@/hooks/useBlockStatus';
 import {
@@ -642,6 +643,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   </Button>
                 </>
               )}
+              <ConversationNotifications username={selectedConversation} />
               <ConversationOptionsPopover
                 username={selectedConversation}
                 blocked={isUserBlocked}

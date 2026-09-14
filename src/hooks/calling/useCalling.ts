@@ -28,6 +28,8 @@ import {
   type ActionSetters
 } from './actions';
 import { CallState } from '../../lib/types/calling-types';
+import { useNotificationPreferences } from '../useNotificationPreferences';
+import { getNotificationMutes } from '../../lib/ui/notification-preferences';
 
 // Hook wiring the calling service to the auth context
 export const useCalling = (
@@ -53,6 +55,7 @@ export const useCalling = (
   const [callingService, setCallingService] = useState<SecureCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [pendingIncomingCalls, setPendingIncomingCalls] = useState<CallState[]>([]);
+  const notificationPreferences = useNotificationPreferences();
   const [localMediaActive, setLocalMediaActive] = useState(false);
   const [localVideoCanvas, setLocalVideoCanvas] = useState<HTMLCanvasElement | null>(null);
   const [localScreenCanvas, setLocalScreenCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -223,7 +226,7 @@ export const useCalling = (
 
   return {
     currentCall,
-    pendingIncomingCalls,
+    pendingIncomingCalls: pendingIncomingCalls.filter(call => !getNotificationMutes(call.peer, notificationPreferences).calls),
     localMediaActive,
     localVideoCanvas,
     localScreenCanvas,

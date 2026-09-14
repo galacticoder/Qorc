@@ -25,6 +25,9 @@ import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
 import { CallIcon } from "../assets/icons";
 import { ConversationOptionsPopover } from "./ConversationOptionsPopover";
+import { ConversationNotifications } from './ConversationNotifications';
+import { useNotificationPreferences } from '../../../hooks/useNotificationPreferences';
+import { getNotificationMutes } from '../../../lib/ui/notification-preferences';
 import type { DiscoveryProgress, DiscoveryProgressObserver } from "../../../lib/discovery/progress";
 
 export interface Conversation {
@@ -59,7 +62,7 @@ interface ConversationListProps {
 }
 
 // Call status type
-type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean } | null;
+type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean; incoming: boolean } | null;
 
 interface ConversationItemProps {
   readonly conversation: Conversation;
@@ -76,11 +79,14 @@ const ConversationItem = memo<ConversationItemProps>(({
   isSelected,
   onSelect,
   onRemove,
-  callStatus,
+  callStatus: receivedCallStatus,
   isTyping,
   onTogglePin,
 }) => {
   const displayName = useDisplayUsername({ username: conversation.username });
+  const preferences = useNotificationPreferences();
+  const muted = getNotificationMutes(conversation.username, preferences);
+  const callStatus = muted.calls && receivedCallStatus?.incoming && receivedCallStatus.status === 'ringing' ? null : receivedCallStatus;
 
   // Handle conversation selection
   const handleClick = useCallback(() => {
@@ -108,6 +114,7 @@ const ConversationItem = memo<ConversationItemProps>(({
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           handleClick();
@@ -136,9 +143,11 @@ const ConversationItem = memo<ConversationItemProps>(({
           <div
             className={cn(
               "qorc-conversation-action-pill",
-              conversation.isPinned && "is-pinned"
+              conversation.isPinned && "is-pinned",
+              (muted.messages || muted.calls) && "is-muted"
             )}
           >
+            <ConversationNotifications username={conversation.username} compact />
             <Button
               variant="ghost"
               size="sm"
@@ -327,6 +336,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
           >
             <Video className="w-4 h-4" aria-hidden="true" />
           </Button>
+          <ConversationNotifications username={username} />
           <ConversationOptionsPopover
             username={username}
             blocked={blocked}
@@ -499,7 +509,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
       if (status === 'ringing' || status === 'connecting' || status === 'connected') {
         setActivePeer(peer);
-        setActiveStatus({ status: status as CallStatus['status'], isVideo });
+        setActiveStatus({ status: status as CallStatus['status'], isVideo, incoming: detail.direction === 'incoming' });
       } else {
         setActivePeer(prev => (prev === peer ? null : prev));
         setActiveStatus(null);
