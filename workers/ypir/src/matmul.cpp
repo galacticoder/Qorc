@@ -686,7 +686,7 @@ void matMulVecPacked4(Elem *out, const Elem *a, const Elem *b_full,
   #endif
 }
 
-void matMulVecPacked6(Elem *__restrict__ out, const Elem *__restrict__ a, const Elem *__restrict__ b_full,
+void matMulVecPacked6(Elem *__restrict out, const Elem *__restrict a, const Elem *__restrict b_full,
     size_t aRows, size_t aCols)
 {
   // in this variant, b has 6 columns
@@ -1062,15 +1062,15 @@ void matMulVecPacked6(Elem *__restrict__ out, const Elem *__restrict__ a, const 
   }
 }
 
-void trueMatMulVecPacked8(Elem *__restrict__ out, const Elem *__restrict__ a, 
-    const Elem *__restrict__ b,
-    const Elem *__restrict__ b2,
-    const Elem *__restrict__ b3,
-    const Elem *__restrict__ b4,
-    const Elem *__restrict__ b5,
-    const Elem *__restrict__ b6,
-    const Elem *__restrict__ b7,
-    const Elem *__restrict__ b8,
+void trueMatMulVecPacked8(Elem *__restrict out, const Elem *__restrict a,
+    const Elem *__restrict b,
+    const Elem *__restrict b2,
+    const Elem *__restrict b3,
+    const Elem *__restrict b4,
+    const Elem *__restrict b5,
+    const Elem *__restrict b6,
+    const Elem *__restrict b7,
+    const Elem *__restrict b8,
     size_t aRows, size_t aCols)
 {
   // in this variant, b has 8 columns
@@ -1544,7 +1544,7 @@ void trueMatMulVecPacked8(Elem *__restrict__ out, const Elem *__restrict__ a,
   }
 }
 
-void matMulVecPacked8(Elem *__restrict__ out, const Elem *__restrict__ a, const Elem *__restrict__ b_full,
+void matMulVecPacked8(Elem *__restrict out, const Elem *__restrict a, const Elem *__restrict b_full,
     size_t aRows, size_t aCols)
 {
   #ifdef PROFILE

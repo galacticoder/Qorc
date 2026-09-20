@@ -44,6 +44,18 @@ test('all vendored PIR checksum inputs are included and match their original byt
   assert.ok(checked > 1000);
 });
 
+test('PIR native sources use compiler-specific flags and a shared restrict spelling', () => {
+  const build = fs.readFileSync(path.join(root, 'workers/ypir/build.rs'), 'utf8');
+  const source = fs.readFileSync(path.join(root, 'workers/ypir/src/matmul.cpp'), 'utf8');
+  assert.match(build, /\.opt_level\(3\)/);
+  assert.match(build, /\.get_compiler\(\)\.is_like_msvc\(\)/);
+  assert.match(build, /\.std\(if msvc \{ "c\+\+14" \} else \{ "c\+\+11" \}\)/);
+  assert.match(build, /CARGO_CFG_TARGET_ARCH[\s\S]*?Ok\("x86_64"\)[\s\S]*?if msvc\s*\{\s*"\/arch:AVX2"\s*\} else\s*\{\s*"-march=x86-64-v3"\s*\}/);
+  assert.doesNotMatch(build, /\.flag\("-(?:O3|std=)/);
+  assert.doesNotMatch(source, /\b__restrict__\b/);
+  assert.match(source, /\b__restrict\b/);
+});
+
 test('Windows-style Git checkout preserves Cargo vendor checksums', () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'qorc-vendor-checkout-'));
   try {

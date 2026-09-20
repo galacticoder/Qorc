@@ -73,6 +73,36 @@ mod test {
     use super::*;
 
     #[test]
+    fn packed_kernels_match_scalar_multiplication() {
+        let a_rows = 16;
+        let a_cols = 7;
+        let b_rows = a_cols * 4;
+        let a: Vec<u32> = (0..a_rows * a_cols)
+            .map(|i| (i as u32).wrapping_mul(0x9e3779b9))
+            .collect();
+
+        for b_cols in [1, 2, 4, 8] {
+            let b: Vec<u32> = (0..b_rows * b_cols)
+                .map(|i| (i as u32).wrapping_mul(0x85ebca6b))
+                .collect();
+            let mut out = vec![0; (a_rows + 8) * b_cols];
+            matmul_vec_packed(&mut out, &a, &b, a_rows, a_cols, b_rows, b_cols);
+
+            for row in 0..a_rows {
+                for column in 0..b_cols {
+                    let mut expected = 0u32;
+                    for k in 0..b_rows {
+                        let value = (a[row * a_cols + k / 4] >> ((k % 4) * 8)) & 0xff;
+                        expected =
+                            expected.wrapping_add(value.wrapping_mul(b[column * b_rows + k]));
+                    }
+                    assert_eq!(out[row * b_cols + column], expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore]
     fn test_matmul_vec_packed() {
         let a_rows = 32768;
