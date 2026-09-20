@@ -17,7 +17,6 @@ import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
 import { ConversationOptionsPopover } from './ConversationOptionsPopover';
-import { ConversationNotifications } from './ConversationNotifications';
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { useBlockStatus } from '@/hooks/useBlockStatus';
 import {
@@ -37,6 +36,8 @@ import { ChatInput } from '../ChatInput';
 import type { CallState } from '../../../lib/types/calling-types';
 
 interface ChatInterfaceProps {
+  readonly isPinned: boolean;
+  readonly onTogglePin: (username: string) => void;
   readonly onSendMessage: (
     messageId: string,
     content: string,
@@ -105,6 +106,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   currentCall,
   startCall,
   onToggleBlock,
+  isPinned,
+  onTogglePin,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -643,9 +646,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                   </Button>
                 </>
               )}
-              <ConversationNotifications username={selectedConversation} />
               <ConversationOptionsPopover
                 username={selectedConversation}
+                isPinned={isPinned}
+                onTogglePin={onTogglePin}
                 blocked={isUserBlocked}
                 onToggleBlock={onToggleBlock}
               />

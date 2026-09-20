@@ -1025,6 +1025,8 @@ const ChatApp: React.FC = () => {
                 {selectedConversation ? (
                   <EmojiPickerProvider>
                     <ChatInterface
+                      isPinned={conversations.some(conversation => conversation.username === selectedConversation && conversation.isPinned)}
+                      onTogglePin={toggleConversationPin}
                       messages={conversationMessages}
                       setMessages={setMessages}
                       currentCall={currentCall}

@@ -2002,6 +2002,9 @@ html.light .qorc-conversation-empty-lines span,
 }
 
 .qorc-conversation-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 8px;
   padding: 6px 8px 2px;
   color: var(--qorc-muted-text);
@@ -2231,15 +2234,13 @@ html.light .qorc-conversation-empty-lines span,
 
 .qorc-conversation-item:hover .qorc-conversation-action-pill,
 .qorc-conversation-action-pill:focus-within,
-.qorc-conversation-action-pill:has([data-state="open"]),
-.qorc-conversation-action-pill.is-muted,
-.qorc-conversation-action-pill.is-pinned {
+.qorc-conversation-action-pill:has([data-state="open"]) {
   opacity: 1;
 }
 
 .qorc-conversation-item.is-selected .qorc-conversation-action-pill {
-  background: var(--qorc-conversation-card-bg);
-  color: var(--qorc-text);
+  background: rgba(255, 255, 255, .14);
+  color: inherit;
 }
 
 .qorc-conversation-tiny-btn {
@@ -2265,12 +2266,12 @@ html.light .qorc-conversation-empty-lines span,
   background: rgba(255, 255, 255, .18) !important;
 }
 
-.dark .qorc-conversation-item.is-selected .qorc-conversation-tiny-btn:hover {
-  background: var(--qorc-conversation-card-hover-bg) !important;
-}
-
 .qorc-conversation-tiny-btn.danger {
   color: #e3616a !important;
+}
+
+.qorc-conversation-item.is-selected .qorc-conversation-tiny-btn {
+  color: #fff !important;
 }
 
 /* add conversation modal */
@@ -2646,7 +2647,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 }
 
 .qorc-conversation-options-popover {
-  width: 236px !important;
+  width: 148px !important;
   overflow: hidden;
   border: 0 !important;
   border-radius: 10px !important;
@@ -2663,29 +2664,31 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-conversation-options-menu {
   display: grid;
+  padding: 4px;
 }
 
 .qorc-conversation-options-title {
-  padding: 8px 10px 6px;
+  padding: 4px 6px 6px;
   color: var(--qorc-muted-text);
   font-size: 12px;
   font-weight: 500;
-  text-align: center;
+  text-align: left;
 }
 
 .qorc-conversation-options-action {
   width: 100%;
-  height: 38px;
+  height: 32px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
   border: 0;
-  border-radius: 0 0 10px 10px;
+  border-radius: 6px;
   padding: 0 6px;
   background: transparent;
-  color: #e3616a;
-  font-size: 13px;
+  color: var(--qorc-text);
+  font-size: 12px;
+  white-space: nowrap;
   font-weight: 500;
   text-align: center;
   cursor: pointer;
@@ -2696,6 +2699,10 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 .qorc-conversation-options-action:focus-visible {
   outline: none;
   background: #e5e5e9;
+}
+
+.qorc-conversation-options-action.danger {
+  color: #e3616a;
 }
 
 .dark .qorc-conversation-options-action:hover,
@@ -2714,79 +2721,38 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   flex: 0 0 auto;
 }
 
-.qorc-notification-controls {
-  padding: 4px;
-}
-
-.qorc-notification-option {
-  display: flex;
+.qorc-conversation-status-icons {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+  flex-shrink: 0;
+  color: var(--qorc-muted-text);
+}
+
+.qorc-conversation-item.is-selected .qorc-conversation-status-icons {
+  color: inherit;
+}
+
+.qorc-notification-state-icon {
+  position: relative;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.qorc-notification-state-icon svg {
   width: 100%;
-  padding: 10px 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--qorc-text);
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
+  height: 100%;
 }
 
-.qorc-notification-option:hover {
-  background: var(--qorc-control-hover);
-}
-
-.qorc-notification-option:focus-visible {
-  outline: 2px solid var(--qorc-accent, #7057c8);
-  outline-offset: -2px;
-}
-
-.qorc-notification-option > svg {
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-  color: var(--qorc-muted-text);
-}
-
-.qorc-notification-switch {
-  width: 30px;
-  height: 18px;
-  flex-shrink: 0;
-  margin-left: auto;
-  padding: 3px;
-  border-radius: 999px;
-  background: #cacbd0;
-  transition: background .16s ease;
-}
-
-.dark .qorc-notification-switch {
-  background: #303034;
-}
-
-.qorc-notification-switch::before {
+.qorc-notification-state-icon.is-muted::after {
   content: "";
-  display: block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform .16s ease;
-}
-
-.qorc-notification-option[aria-checked="true"] .qorc-notification-switch {
-  background: var(--qorc-accent, #7057c8);
-}
-
-.qorc-notification-option[aria-checked="true"] .qorc-notification-switch::before {
-  transform: translateX(12px);
-}
-
-.qorc-notification-hint {
-  margin: 4px 8px 8px;
-  color: var(--qorc-muted-text);
-  font-size: 11px;
-  line-height: 1.5;
+  position: absolute;
+  inset: 50% 0 auto;
+  height: 1.5px;
+  background: currentColor;
+  transform: rotate(-45deg);
 }
 
 /* "Start chat with <typed>" row */

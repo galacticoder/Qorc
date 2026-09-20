@@ -4,6 +4,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { toast } from 'sonner';
 import {
   Ban,
+  Bell,
   Camera,
   Check,
   ChevronDown,
@@ -283,9 +284,6 @@ export const AppSettings = React.memo(function AppSettings({
     const storedSettings = readAppSettings();
     if (storedSettings.notifications) {
       setNotifications(storedSettings.notifications);
-      void tauriNotifications.setEnabled(storedSettings.notifications.desktop).catch((error) => {
-        console.error('[AppSettings] Failed to apply notification setting', error);
-      });
     }
     if (storedSettings.preferredCallMicId !== undefined) setPreferredMicId(storedSettings.preferredCallMicId);
     if (storedSettings.preferredSpeakerId !== undefined) setPreferredSpeakerId(storedSettings.preferredSpeakerId);
@@ -431,7 +429,7 @@ export const AppSettings = React.memo(function AppSettings({
     const updated = { ...notifications, desktop: checked };
     setNotifications(updated);
     saveSettings({ notifications: updated });
-    tauriNotifications.setEnabled(checked).catch(() => { });
+    tauriNotifications.setEnabled(checked && !(doNotDisturb.messages && doNotDisturb.calls)).catch(() => { });
   };
 
   const handleDoNotDisturb = (type: keyof NotificationMutes, checked: boolean) => {
@@ -704,26 +702,41 @@ export const AppSettings = React.memo(function AppSettings({
                     </div>
                     <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
                   </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="pane" data-settings-pane="notifications">
+              <header className="pane-head">
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <Bell className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">Notifications</h2>
+                  </div>
+                </div>
+              </header>
+              <div className="settings-section">
+                <div className="settings-list">
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Desktop Notifications</div>
-                      <div className="setting-description">Show a notification popup when a new message arrives.</div>
+                      <div className="setting-description">Show desktop alerts for unmuted messages and calls.</div>
                     </div>
-                    <SwitchButton checked={notifications.desktop} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
+                    <SwitchButton checked={notifications.desktop && !(doNotDisturb.messages && doNotDisturb.calls)} disabled={doNotDisturb.messages && doNotDisturb.calls} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
                   </div>
                   <div className="setting-row">
                     <div>
-                      <div className="setting-label">Do not disturb · Messages</div>
-                      <div className="setting-description">Silence message notifications. Messages still arrive in your chats.</div>
+                      <div className="setting-label">Mute message alerts</div>
+                      <div className="setting-description">Mute all notification alerts for messages.</div>
                     </div>
-                    <SwitchButton checked={doNotDisturb.messages} label="Do not disturb for messages" onChange={checked => handleDoNotDisturb('messages', checked)} />
+                    <SwitchButton checked={doNotDisturb.messages} label="Mute message alerts" onChange={checked => handleDoNotDisturb('messages', checked)} />
                   </div>
                   <div className="setting-row">
                     <div>
-                      <div className="setting-label">Do not disturb · Calls</div>
-                      <div className="setting-description">Hide incoming call popups and alerts. Missed calls remain in your call history.</div>
+                      <div className="setting-label">Mute call alerts</div>
+                      <div className="setting-description">Mute all notification alerts for calls.</div>
                     </div>
-                    <SwitchButton checked={doNotDisturb.calls} label="Do not disturb for calls" onChange={checked => handleDoNotDisturb('calls', checked)} />
+                    <SwitchButton checked={doNotDisturb.calls} label="Mute call alerts" onChange={checked => handleDoNotDisturb('calls', checked)} />
                   </div>
                 </div>
               </div>

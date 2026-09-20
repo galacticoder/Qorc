@@ -205,3 +205,30 @@ test('calling UI filters muted ringing peers reactively without ending the activ
   f.setDoNotDisturb('calls', false);
   assert.deepEqual(render().pendingIncomingCalls.map(call => call.peer), ['bobby']);
 });
+
+test('native desktop notifications follow global mutes without disabling the other alert type', async () => {
+  const f = await fixture();
+  const effects = [];
+  const enabled = [];
+  const { useAppInitialization } = load('src/hooks/app/useAppInitialization.ts', {
+    ...f,
+    useEffect: effect => effects.push(effect),
+    useState: value => [value, () => {}],
+    useRef: current => ({ current }),
+    readAppSettings: () => ({ notifications: { desktop: true } }),
+    notifications: { setEnabled: async value => { enabled.push(value); } },
+  });
+  useAppInitialization({
+    Authentication: {}, Database: { secureDBRef: { current: null } },
+    flushPendingSaves: async () => {}, setShowSettings: () => {},
+  });
+  const unsubscribe = effects[2]();
+  assert.equal(enabled.at(-1), true);
+  f.setDoNotDisturb('messages', true);
+  assert.equal(enabled.at(-1), true);
+  f.setDoNotDisturb('calls', true);
+  assert.equal(enabled.at(-1), false);
+  f.setDoNotDisturb('messages', false);
+  assert.equal(enabled.at(-1), true);
+  unsubscribe();
+});

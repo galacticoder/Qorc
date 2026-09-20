@@ -106,6 +106,7 @@ const APP_SETTINGS_CSS = `
       grid-template-areas:
         "account"
         "general"
+        "notifications"
         "devices"
         "privacy";
       align-content: start;
@@ -175,6 +176,10 @@ const APP_SETTINGS_CSS = `
 
     .pane[data-settings-pane="general"] {
       grid-area: general;
+    }
+
+    .pane[data-settings-pane="notifications"] {
+      grid-area: notifications;
     }
 
     .pane[data-settings-pane="devices"] {

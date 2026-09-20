@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { EventType } from '../../lib/types/event-types';
-import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { torNetworkManager } from '../../lib/transport/tor-network';
 import { notifications, session } from '../../lib/tauri-bindings';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { readAppSettings } from '../../lib/ui/app-settings';
+import { readNotificationPreferences, subscribeNotificationPreferences } from '../../lib/ui/notification-preferences';
 
 interface AppInitializationProps {
   Authentication: {
@@ -64,14 +64,13 @@ export function useAppInitialization({
   useEffect(() => {
     const applyNotificationSettings = () => {
       const settings = readAppSettings();
-      if (settings.notifications) {
-        void notifications.setEnabled(settings.notifications.desktop).catch((error) => {
-          console.error('[App] Failed to apply notification setting', error);
-        });
-      }
+      const { doNotDisturb } = readNotificationPreferences();
+      void notifications.setEnabled((settings.notifications?.desktop ?? true) && !(doNotDisturb.messages && doNotDisturb.calls)).catch((error) => {
+        console.error('[App] Failed to apply notification setting', error);
+      });
     };
     applyNotificationSettings();
-    return syncEncryptedStorage.subscribe(applyNotificationSettings);
+    return subscribeNotificationPreferences(applyNotificationSettings);
   }, []);
 
   // Handle entering background

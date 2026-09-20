@@ -4,7 +4,7 @@ import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { Ban, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
+import { Ban, BellOff, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -25,7 +25,6 @@ import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { useTypingIndicatorContext } from "../../../contexts/TypingIndicatorContext";
 import { CallIcon } from "../assets/icons";
 import { ConversationOptionsPopover } from "./ConversationOptionsPopover";
-import { ConversationNotifications } from './ConversationNotifications';
 import { useNotificationPreferences } from '../../../hooks/useNotificationPreferences';
 import { getNotificationMutes } from '../../../lib/ui/notification-preferences';
 import type { DiscoveryProgress, DiscoveryProgressObserver } from "../../../lib/discovery/progress";
@@ -65,6 +64,8 @@ interface ConversationListProps {
 type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean; incoming: boolean } | null;
 
 interface ConversationItemProps {
+  readonly blocked: boolean;
+  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
   readonly conversation: Conversation;
   readonly isSelected: boolean;
   readonly onSelect: (username: string) => void;
@@ -75,6 +76,8 @@ interface ConversationItemProps {
 }
 
 const ConversationItem = memo<ConversationItemProps>(({
+  blocked,
+  onToggleBlock,
   conversation,
   isSelected,
   onSelect,
@@ -86,6 +89,7 @@ const ConversationItem = memo<ConversationItemProps>(({
   const displayName = useDisplayUsername({ username: conversation.username });
   const preferences = useNotificationPreferences();
   const muted = getNotificationMutes(conversation.username, preferences);
+  const muteLabel = muted.messages && muted.calls ? 'Message and call alerts muted' : muted.messages ? 'Message alerts muted' : 'Call alerts muted';
   const callStatus = muted.calls && receivedCallStatus?.incoming && receivedCallStatus.status === 'ringing' ? null : receivedCallStatus;
 
   // Handle conversation selection
@@ -98,11 +102,6 @@ const ConversationItem = memo<ConversationItemProps>(({
     e.stopPropagation();
     onRemove(conversation.username);
   }, [onRemove, conversation.username]);
-
-  const handleTogglePin = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onTogglePin(conversation.username);
-  }, [onTogglePin, conversation.username]);
 
   return (
     <div
@@ -140,29 +139,22 @@ const ConversationItem = memo<ConversationItemProps>(({
           >
             {displayName}
           </span>
-          <div
-            className={cn(
-              "qorc-conversation-action-pill",
-              conversation.isPinned && "is-pinned",
-              (muted.messages || muted.calls) && "is-muted"
-            )}
-          >
-            <ConversationNotifications username={conversation.username} compact />
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleTogglePin}
-              className="qorc-conversation-tiny-btn"
-              aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
-              aria-pressed={conversation.isPinned}
-            >
-              <Pin
-                className="h-3 w-3"
-                fill={conversation.isPinned ? "currentColor" : "none"}
-              />
-            </Button>
-
-            {!conversation.isPinned && (
+          {(conversation.isPinned || muted.messages || muted.calls) && (
+            <div className="qorc-conversation-status-icons">
+              {conversation.isPinned && <span title="Pinned" aria-label="Pinned"><Pin className="h-3 w-3" fill="currentColor" aria-hidden="true" /></span>}
+              {(muted.messages || muted.calls) && <span title={muteLabel} aria-label={muteLabel}><BellOff className="h-3 w-3" aria-hidden="true" /></span>}
+            </div>
+          )}
+          <div className="qorc-conversation-action-pill">
+            <ConversationOptionsPopover
+              username={conversation.username}
+              blocked={blocked}
+              onToggleBlock={onToggleBlock}
+              compact
+              isPinned={conversation.isPinned}
+              onTogglePin={onTogglePin}
+              ariaLabel={`Conversation options for ${displayName}`}
+            />
               <Button
                 variant="ghost"
                 size="sm"
@@ -172,7 +164,6 @@ const ConversationItem = memo<ConversationItemProps>(({
               >
                 <Trash2 className="h-3 w-3" />
               </Button>
-            )}
           </div>
           {conversation.lastMessageTime && (
             <span
@@ -247,6 +238,8 @@ const ConversationItem = memo<ConversationItemProps>(({
 
 // manageable row inside add conversation modal
 interface ConversationManageRowProps {
+  readonly isPinned: boolean;
+  readonly onTogglePin: (username: string) => void;
   readonly username: string;
   readonly blocked: boolean;
   readonly mode: ConversationDialogMode;
@@ -258,6 +251,8 @@ interface ConversationManageRowProps {
 }
 
 const ConversationManageRow = memo<ConversationManageRowProps>(({
+  isPinned,
+  onTogglePin,
   username,
   blocked,
   mode,
@@ -336,9 +331,10 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
           >
             <Video className="w-4 h-4" aria-hidden="true" />
           </Button>
-          <ConversationNotifications username={username} />
           <ConversationOptionsPopover
             username={username}
+            isPinned={isPinned}
+            onTogglePin={onTogglePin}
             blocked={blocked}
             onToggleBlock={onToggleBlock}
             ariaLabel={`Conversation options for ${displayName}`}
@@ -737,6 +733,8 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                   <div className="qorc-cm-list" data-block-version={blockVersion}>
                     {filteredConversations.map((c) => (
                       <ConversationManageRow
+                        isPinned={c.isPinned === true}
+                        onTogglePin={onTogglePin}
                         key={c.id}
                         username={c.username}
                         blocked={blockingSystem.isBlockedSync(c.username)}
@@ -805,6 +803,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 if (item.type === 'header') {
                   return (
                     <div key={item.id} className="qorc-conversation-section-label">
+                      {item.id === 'header-pinned' && <Pin className="h-3 w-3" aria-hidden="true" />}
                       {item.label}
                     </div>
                   );
@@ -813,6 +812,8 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 const conversation = item.data;
                 return (
                   <ConversationItem
+                    blocked={blockingSystem.isBlockedSync(conversation.username)}
+                    onToggleBlock={onToggleBlock}
                     key={conversation.id}
                     conversation={conversation}
                     isSelected={selectedConversation === conversation.username}
