@@ -14,6 +14,7 @@ out/
 .vscode/
 *.tsbuildinfo
 pnpm-lock.yaml
+!/pnpm-lock.yaml
 package-lock.json
 memory.jsonl
 
@@ -87,12 +88,6 @@ src-tauri/target/
 .yarn/install-state.gz
 yarn-error.log
 
-/postcss.config.js
-/package.json
-/tailwind.config.ts
-/tsconfig.app.json
-/tsconfig.json
-/tsconfig.node.json
 /vite.config.ts
 
 startServer.tls.sh
@@ -119,6 +114,9 @@ scripts/test-*.cjs
 !workers/ypir/src/bin/
 !workers/ypir/src/bin/qorc-pir-client.rs
 !workers/ypir/src/bin/qorc-pir-worker.rs
+!workers/ypir/vendor/cc-1.0.83/src/bin/
+!workers/ypir/vendor/proc-macro2-1.0.78/build/
+!workers/ypir/vendor/typenum-1.17.0/build/
 **/*.test.*
 **/*.spec.*
 commit-message.txt
@@ -145,5 +143,6 @@ server/test/*
 !server/test/client-key-centralization.test.js
 !server/test/constant-ownership.test.js
 !server/test/notification-preferences.test.js
+!server/test/client-source-checkout.test.js
 !server/test/hybrid-recipient-binding.test.js
 !server/test/unversioned-protocols.test.js

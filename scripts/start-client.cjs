@@ -528,6 +528,11 @@ function findUsablePerl(rootDir) {
     return null;
 }
 
+if (!fs.existsSync(path.join(repoRoot, 'package.json'))) {
+    logErr('Client package.json is missing. Use a complete Qorc source checkout before building.');
+    process.exit(1);
+}
+
 const criticalDeps = ['pnpm', 'cargo'];
 const missing = criticalDeps.filter(cmd => {
     try {
