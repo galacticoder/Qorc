@@ -161,9 +161,8 @@ fn release_blocker(mut handle: BlockerHandle) -> QorcResult<()> {
 
 #[cfg(target_os = "windows")]
 fn set_execution_state_windows(enable: bool) -> Result<(), String> {
-    use winapi::um::winbase::{
-        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
-    };
+    use winapi::um::winbase::SetThreadExecutionState;
+    use winapi::um::winnt::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
 
     let flags = if enable {
         ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED

@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 #[cfg(target_os = "windows")]
-use cpal::{Data, Device, SampleFormat, SampleRate, SupportedStreamConfig};
+use cpal::{Data, Device, SampleFormat, SupportedStreamConfig};
 #[cfg(target_os = "linux")]
 use pulseaudio::{Client as PulseClient, RecordSink, protocol};
 use serde::Serialize;
@@ -612,7 +612,7 @@ fn run_capture(
     };
     let config = selected.config();
     let channels = config.channels as usize;
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     tracing::info!(
         sample_rate,
         channels,
@@ -739,17 +739,16 @@ fn select_config(device: &Device) -> Result<SupportedStreamConfig, String> {
     configs
         .filter(|config| {
             config.channels() > 0
-                && config.max_sample_rate().0 > 0
+                && config.max_sample_rate() > 0
                 && supported_sample_format(config.sample_format())
         })
         .map(|config| {
-            let rate =
-                TARGET_SAMPLE_RATE.clamp(config.min_sample_rate().0, config.max_sample_rate().0);
-            config.with_sample_rate(SampleRate(rate))
+            let rate = TARGET_SAMPLE_RATE.clamp(config.min_sample_rate(), config.max_sample_rate());
+            config.with_sample_rate(rate)
         })
         .min_by_key(|config| {
             (
-                config.sample_rate().0.abs_diff(TARGET_SAMPLE_RATE),
+                config.sample_rate().abs_diff(TARGET_SAMPLE_RATE),
                 channel_rank(config.channels()),
                 sample_format_rank(config.sample_format()),
             )
