@@ -3,7 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, execSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -21,7 +21,7 @@ if (process.env.QORC_FRONTEND_PREBUILT === '1') {
     }
     console.log('[frontend] using the separately built frontend bundle');
 } else {
-    execFileSync('pnpm', ['run', 'build'], {
+    execSync('pnpm run build', {
         cwd: repoRoot,
         stdio: 'inherit',
         env: process.env,

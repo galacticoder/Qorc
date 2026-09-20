@@ -814,16 +814,21 @@ if (runOnly) {
     buildPirSidecars();
     removeOldBundleArtifacts();
     const buildCommand = process.platform === 'linux'
-        ? ['tauri', 'build', '--bundles', 'deb,rpm']
-        : ['tauri', 'build'];
-    const buildProc = spawn('pnpm', buildCommand, {
+        ? ['build', '--bundles', 'deb,rpm']
+        : ['build'];
+    const buildProc = spawn(process.execPath, [require.resolve('@tauri-apps/cli/tauri.js'), ...buildCommand], {
         stdio: 'inherit',
         cwd: repoRoot,
         shell: false,
         env: clientRuntimeEnv()
     });
 
-    buildProc.on('exit', code => {
+    buildProc.on('error', error => {
+        logErr(`Failed to start Tauri build: ${error.message}`);
+        process.exit(1);
+    });
+
+    buildProc.on('close', code => {
         if (code !== 0) {
             logErr(`Tauri build failed with code ${code}`);
             process.exit(code || 1);
