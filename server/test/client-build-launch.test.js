@@ -11,6 +11,26 @@ const root = path.resolve(import.meta.dirname, '../..');
 const launcher = fs.readFileSync(path.join(root, 'scripts/start-client.cjs'), 'utf8');
 const buildBranch = launcher.slice(launcher.indexOf('    const buildCommand ='), launcher.lastIndexOf('\n}'));
 
+test('both managed Tor instances and the version probe suppress Windows consoles', () => {
+    const source = fs.readFileSync(path.join(root, 'src-tauri/src/tor/mod.rs'), 'utf8');
+    const spawn = source.slice(source.indexOf('fn spawn_managed_tor('), source.indexOf('impl TorManager {'));
+    const version = source.slice(source.indexOf('pub async fn get_tor_version('), source.indexOf('let stdout = child.stdout'));
+    for (const launch of [spawn, version]) {
+        assert.match(launch, /#\[cfg\(target_os = "windows"\)\]\s*command\.creation_flags\(winapi::um::winbase::CREATE_NO_WINDOW\);[\s\S]*?\.spawn\(\)/);
+    }
+    assert.match(source, /let mut child = spawn_managed_tor\(&mut command\)/);
+    assert.match(version, /\.stdout\(Stdio::piped\(\)\)/);
+    assert.match(version, /\.kill_on_drop\(true\)/);
+});
+
+test('the PIR sidecar stays console-free without removing its IPC pipes', () => {
+    const source = fs.readFileSync(path.join(root, 'src-tauri/src/commands/pir.rs'), 'utf8');
+    const launch = source.slice(source.indexOf('fn validation_started('), source.indexOf('fn call('));
+    assert.match(launch, /#\[cfg\(target_os = "windows"\)\]\s*command\.creation_flags\(winapi::um::winbase::CREATE_NO_WINDOW\);[\s\S]*?\.spawn\(\)/);
+    assert.match(launch, /\.stdin\(Stdio::piped\(\)\)/);
+    assert.match(launch, /\.stdout\(Stdio::piped\(\)\)/);
+});
+
 function launch(platform) {
     const child = new EventEmitter();
     const calls = [];

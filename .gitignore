@@ -145,5 +145,6 @@ server/test/*
 !server/test/notification-preferences.test.js
 !server/test/client-source-checkout.test.js
 !server/test/client-build-launch.test.js
+!server/test/client-icon-resolution.test.js
 !server/test/hybrid-recipient-binding.test.js
 !server/test/unversioned-protocols.test.js

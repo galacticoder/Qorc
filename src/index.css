@@ -551,7 +551,7 @@ html.light .qorc-message-edited,
   color: var(--qorc-muted-text);
   cursor: pointer;
   user-select: none;
-  transition: background .2s ease, color .2s ease;
+  transition: background .2s ease;
 }
 
 .qorc-top-nav-button:focus,
@@ -638,7 +638,7 @@ html.light .qorc-message-edited,
   overflow: hidden;
   cursor: pointer;
   user-select: none;
-  transition: background .2s ease, color .2s ease;
+  transition: background .2s ease;
 }
 
 .qorc-rail-head {
@@ -4835,38 +4835,6 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   opacity: .58;
 }
 
-.login-simple-submit,
-.signup-simple-submit {
-  width: 100%;
-  min-height: 50px;
-  border: 0;
-  border-radius: 8px;
-  margin-top: 6px;
-  background: #7057c8;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 850;
-  cursor: pointer;
-  transition: background .18s ease, color .18s ease;
-}
-
-.login-simple-submit:hover,
-.signup-simple-submit:hover {
-  background: #8069d8;
-}
-
-.login-simple-submit:disabled,
-.signup-simple-submit:disabled {
-  cursor: default;
-  background: #2f245a;
-  color: #9f8ddd;
-}
-
-.login-simple-submit:disabled:hover,
-.signup-simple-submit:disabled:hover {
-  background: #2f245a;
-}
-
 .login-simple a:hover,
 .signup-simple a:hover {
   color: #a991ff;
@@ -4902,18 +4870,6 @@ html.light .signup-simple-form.is-submitting .signup-simple-input,
   border-color: rgba(71, 54, 35, .09);
   background: #f1eadf;
   color: #756e7f;
-}
-
-html.light .login-simple-submit:disabled,
-html.light .login-simple-submit:disabled:hover,
-.light .login-simple-submit:disabled,
-.light .login-simple-submit:disabled:hover,
-html.light .signup-simple-submit:disabled,
-html.light .signup-simple-submit:disabled:hover,
-.light .signup-simple-submit:disabled,
-.light .signup-simple-submit:disabled:hover {
-  background: #2f245a;
-  color: #c9bcff;
 }
 
 html.light .login-simple a:hover,
@@ -4960,6 +4916,17 @@ html.light .signup-simple a:hover,
 
 /* ── Auth screens */
 .screen-login,
+.screen-signup,
+.screen-welcome {
+  --auth-primary-bg: #7057c8;
+  --auth-primary-hover: #8069d8;
+  --auth-primary-active: #644abf;
+  --auth-primary-text: #ffffff;
+  --auth-primary-disabled: #2f245a;
+  --auth-primary-disabled-text: #9f8ddd;
+}
+
+.screen-login,
 .screen-signup {
   --auth-page-bg: var(--qorc-app-bg);
   --auth-control-bg: #0e0e11;
@@ -4971,12 +4938,6 @@ html.light .signup-simple a:hover,
   --auth-input-placeholder: var(--qorc-muted-text);
   --auth-text: #f4f4f5;
   --auth-muted: #92929b;
-  --auth-primary-bg: #7057c8;
-  --auth-primary-hover: #8069d8;
-  --auth-primary-active: #644abf;
-  --auth-primary-text: #ffffff;
-  --auth-primary-disabled: #2f245a;
-  --auth-primary-disabled-text: #9f8ddd;
   --auth-link-hover: #a991ff;
   --auth-disabled-bg: var(--qorc-control-hover);
   --auth-disabled-text: #686870;
@@ -5350,6 +5311,20 @@ html.light .signup-simple a:hover,
 
 html.light .screen-login,
 html.light .screen-signup,
+html.light .screen-welcome,
+.light .screen-login,
+.light .screen-signup,
+.light .screen-welcome {
+  --auth-primary-bg: #a58be2;
+  --auth-primary-hover: #9b7dda;
+  --auth-primary-active: #9577d5;
+  --auth-primary-text: #24163c;
+  --auth-primary-disabled: #d9d2ef;
+  --auth-primary-disabled-text: #7c6aad;
+}
+
+html.light .screen-login,
+html.light .screen-signup,
 .light .screen-login,
 .light .screen-signup {
   --auth-page-bg: var(--qorc-app-bg);
@@ -5362,12 +5337,6 @@ html.light .screen-signup,
   --auth-input-placeholder: var(--qorc-muted-text);
   --auth-text: #101014;
   --auth-muted: #6f6f77;
-  --auth-primary-bg: #7057c8;
-  --auth-primary-hover: #8069d8;
-  --auth-primary-active: #644abf;
-  --auth-primary-text: #ffffff;
-  --auth-primary-disabled: #d9d2ef;
-  --auth-primary-disabled-text: #7c6aad;
   --auth-link-hover: #7057c8;
   --auth-disabled-bg: var(--qorc-control-hover);
   --auth-disabled-text: #98989f;
@@ -5620,8 +5589,8 @@ html.light .screen-signup .auth-simple-message,
   border: 0;
   border-radius: 9px;
   margin: 0;
-  background: #7057c8;
-  color: #ffffff;
+  background: var(--auth-primary-bg);
+  color: var(--auth-primary-text);
   font: inherit;
   font-size: 13px;
   font-weight: 750;
@@ -5630,17 +5599,17 @@ html.light .screen-signup .auth-simple-message,
 }
 
 .screen-welcome .login-simple-submit:hover:not(:disabled) {
-  background: #8069d8;
+  background: var(--auth-primary-hover);
 }
 
 .screen-welcome .login-simple-submit:active:not(:disabled) {
-  background: #644abf;
+  background: var(--auth-primary-active);
 }
 
 .screen-welcome .login-simple-submit:disabled {
   cursor: not-allowed;
-  background: #2f245a;
-  color: #9f8ddd;
+  background: var(--auth-primary-disabled);
+  color: var(--auth-primary-disabled-text);
 }
 
 .screen-welcome .auth-simple-message {
@@ -5830,12 +5799,6 @@ html.light .screen-welcome,
   --welcome-border-focus: rgba(16, 16, 20, .2);
   --welcome-disabled: var(--qorc-control-hover);
   --welcome-disabled-text: #98989f;
-}
-
-html.light .screen-welcome .login-simple-submit:disabled,
-.light .screen-welcome .login-simple-submit:disabled {
-  background: #d9d2ef;
-  color: #7c6aad;
 }
 
 html.light .welcome-toggle-switch,

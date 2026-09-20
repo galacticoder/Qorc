@@ -168,7 +168,8 @@ fn init_logging() {
 /// Main entry point
 pub fn run() {
     configure_linux_webview_rendering();
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    context.set_default_window_icon(Some(tauri::include_image!("icons/icon.png")));
     init_logging();
     std::panic::set_hook(Box::new(|panic_info| {
         let message = panic_info

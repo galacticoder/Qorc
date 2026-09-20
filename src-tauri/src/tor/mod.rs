@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -745,6 +747,8 @@ pub struct TorManager {
 }
 
 fn spawn_managed_tor(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(target_os = "windows")]
+    command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
     command.spawn()
 }
 
@@ -1300,7 +1304,10 @@ impl TorManager {
             ));
         }
 
-        let mut child = tokio::process::Command::new(&self.tor_path)
+        let mut command = tokio::process::Command::new(&self.tor_path);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
+        let mut child = command
             .arg("--version")
             .env_clear()
             .envs(self.get_tor_environment())

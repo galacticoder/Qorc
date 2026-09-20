@@ -2,6 +2,8 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -164,7 +166,10 @@ fn validation_started(app: &tauri::AppHandle) -> QorcResult<()> {
             return Ok(());
         }
     }
-    let child = Command::new(sidecar_path(app)?)
+    let mut command = Command::new(sidecar_path(app)?);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
+    let child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

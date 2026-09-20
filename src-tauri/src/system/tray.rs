@@ -8,12 +8,11 @@ use std::sync::{
 };
 use tauri::{
     AppHandle, Manager,
-    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::error::{QorcError, QorcResult};
+use crate::error::QorcResult;
 
 static UNREAD_COUNT: AtomicU32 = AtomicU32::new(0);
 static UNREAD_MENU_ITEM: OnceLock<MenuItem<tauri::Wry>> = OnceLock::new();
@@ -28,11 +27,10 @@ pub async fn init(app_handle: &AppHandle) -> QorcResult<()> {
         None::<&str>,
     )?;
     let menu = build_tray_menu(&app, &unread_item)?;
-    let icon = load_tray_icon()?;
 
     let app_clone = app.clone();
     let _tray = TrayIconBuilder::with_id("main")
-        .icon(icon)
+        .icon(tauri::include_image!("icons/icon.png"))
         .tooltip("Qorc")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -70,11 +68,6 @@ pub async fn init(app_handle: &AppHandle) -> QorcResult<()> {
 
     tracing::info!("System tray initialized with menu");
     Ok(())
-}
-
-fn load_tray_icon() -> QorcResult<Image<'static>> {
-    Image::from_bytes(include_bytes!("../../icons/tray-icon.png"))
-        .map_err(|_| QorcError::SystemError("Tray icon is invalid".to_string()))
 }
 
 fn unread_label(unread: u32) -> String {
