@@ -625,7 +625,10 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     : 0;
   const displayedDiscoveryPercent = discoveryPercent > 0 && discoveryPercent < 1
     ? Number(discoveryPercent.toFixed(2)) : Math.floor(discoveryPercent);
-  const discoveryLabel = discoveryProgress?.phase === 'verifying' ? 'Verifying'
+  const discoveryLabel = discoveryProgress?.phase === 'checking-keys' ? 'Checking keys'
+    : discoveryProgress?.phase === 'retrying-keys' ? 'Retrying key check'
+    : discoveryProgress?.phase === 'retrying' ? `Retrying (${displayedDiscoveryPercent}%)`
+    : discoveryProgress?.phase === 'verifying' ? 'Verifying'
     : discoveryProgress?.phase === 'downloading' ? `${displayedDiscoveryPercent}%`
     : 'Preparing';
 

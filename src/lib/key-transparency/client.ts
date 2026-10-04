@@ -12,12 +12,14 @@ import {
   KEY_TRANSPARENCY_DELTA_MAX_EPOCHS,
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
   KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
+  KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
   exactPlainObject,
   isKeyTransparencyHash,
   keyTransparencyPowEpoch,
   keyTransparencyRecoveryActivationEpoch,
 } from '../../../shared/key-transparency-protocol.js';
 import { createAnonymousHttpPow } from '../cryptography/anonymous-http-pow';
+import { transferAnonymousRead } from '../transport/read-only-transfer';
 import { Base64 } from '../cryptography/base64';
 import {
   PrivacyPassClient,
@@ -107,6 +109,7 @@ import {
   KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
 } from '../../../shared/protocol-keys.js';
 
+type KeyTransparencyReadOptions = { signal?: AbortSignal; onRetry?: () => void };
 
 const MAX_SYNC_ROUNDS = 64;
 const GOSSIP_AUDIT_ATTEMPTS = 3;
@@ -375,29 +378,55 @@ class KeyTransparencyClient {
     }
   }
 
-  // Fetch one delta and fold it onto the stored checkpoint
+  private async requestSync(
+    context: CurrentServerContext,
+    generation: number,
+    fromEpoch: number,
+    toEpoch: number,
+    options: KeyTransparencyReadOptions,
+  ): Promise<unknown> {
+    return transferAnonymousRead(
+      KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
+      async (signal, onProgress) => {
+        this.assertGeneration(generation);
+        await assertCurrentServerContext(context);
+        const trustedNow = websocketClient.getAnonymousHttpServerNow();
+        if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
+        const powEpoch = keyTransparencyPowEpoch(trustedNow);
+        const work = await createAnonymousHttpPow(
+          KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
+          powEpoch,
+          [String(fromEpoch), String(toEpoch)],
+          KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
+          signal,
+        );
+        const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
+        if (currentTrustedNow === null || powEpoch !== keyTransparencyPowEpoch(currentTrustedNow)) {
+          throw new Error('Key-transparency proof-of-work epoch changed');
+        }
+        this.assertGeneration(generation);
+        return anonymousHttpFetch(
+          KEY_TRANSPARENCY_SYNC_AUDIENCE,
+          { fromEpoch, powEpoch, ...work, toEpoch },
+          context.serverUrl,
+          { signal, onProgress },
+        );
+      },
+      options.signal ?? new AbortController().signal,
+      () => {},
+      options.onRetry,
+    );
+  }
+
   private async requestDelta(input: {
     context: CurrentServerContext;
     checkpoint: KeyTransparencyCheckpoint;
     generation: number;
     toEpoch: number;
+    options: KeyTransparencyReadOptions;
   }): Promise<ReturnType<typeof verifyKeyTransparencyDelta>> {
     this.assertGeneration(input.generation);
-    const trustedNow = websocketClient.getAnonymousHttpServerNow();
-    if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
-    const powEpoch = keyTransparencyPowEpoch(trustedNow);
     const fromEpoch = input.checkpoint.epoch;
-    const work = await createAnonymousHttpPow(
-      KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
-      powEpoch,
-      [String(fromEpoch), String(input.toEpoch)],
-      KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
-    );
-    const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
-    if (currentTrustedNow === null || powEpoch !== keyTransparencyPowEpoch(currentTrustedNow)) {
-      throw new Error('Key-transparency proof-of-work epoch changed');
-    }
-    this.assertGeneration(input.generation);
     const material = websocketClient.getAnonymousHttpServerKeyMaterial();
     if (!material?.dilithiumPublicKey) {
       material?.kyberPublicKey.fill(0);
@@ -406,11 +435,7 @@ class KeyTransparencyClient {
       throw new Error('Authenticated key-transparency signer is unavailable');
     }
     try {
-      const response = await anonymousHttpFetch(
-        KEY_TRANSPARENCY_SYNC_AUDIENCE,
-        { fromEpoch, powEpoch, ...work, toEpoch: input.toEpoch },
-        input.context.serverUrl,
-      );
+      const response = await this.requestSync(input.context, input.generation, fromEpoch, input.toEpoch, input.options);
       await assertCurrentServerContext(input.context);
       this.assertGeneration(input.generation);
       if (!exactQueryWrapper(response)) {
@@ -436,19 +461,12 @@ class KeyTransparencyClient {
   private async requestHead(
     context: CurrentServerContext,
     generation: number,
+    options: KeyTransparencyReadOptions,
   ): Promise<KeyTransparencyLogHead> {
     this.assertGeneration(generation);
     const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
-    const powEpoch = keyTransparencyPowEpoch(trustedNow);
     const epoch = keyTransparencyCurrentEpoch(trustedNow);
-    const work = await createAnonymousHttpPow(
-      KEY_TRANSPARENCY_SYNC_POW_DOMAIN,
-      powEpoch,
-      [String(epoch), String(epoch)],
-      KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY,
-    );
-    this.assertGeneration(generation);
     const material = websocketClient.getAnonymousHttpServerKeyMaterial();
     if (!material?.dilithiumPublicKey) {
       material?.kyberPublicKey.fill(0);
@@ -457,11 +475,7 @@ class KeyTransparencyClient {
       throw new Error('Authenticated key-transparency signer is unavailable');
     }
     try {
-      const response = await anonymousHttpFetch(
-        KEY_TRANSPARENCY_SYNC_AUDIENCE,
-        { fromEpoch: epoch, powEpoch, ...work, toEpoch: epoch },
-        context.serverUrl,
-      );
+      const response = await this.requestSync(context, generation, epoch, epoch, options);
       await assertCurrentServerContext(context);
       this.assertGeneration(generation);
       if (!exactQueryWrapper(response)) {
@@ -480,6 +494,7 @@ class KeyTransparencyClient {
   private async syncLogUnlocked(
     ownerUsername: string,
     generation: number,
+    options: KeyTransparencyReadOptions = {},
   ): Promise<{ context: CurrentServerContext; checkpoint: KeyTransparencyCheckpoint }> {
     this.assertGeneration(generation);
     const context = await captureCurrentServerContext();
@@ -493,7 +508,7 @@ class KeyTransparencyClient {
       throw new Error('Stored key-transparency checkpoint is ahead of authenticated server time');
     }
     if (!checkpoint) {
-      const probe = await this.requestHead(context, generation);
+      const probe = await this.requestHead(context, generation, options);
       checkpoint = keyTransparencyGenesisCheckpoint(probe.genesisEpoch);
     }
     const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
@@ -508,7 +523,7 @@ class KeyTransparencyClient {
       );
       const openEpoch = toEpoch >= currentEpoch;
       const beforeRound = checkpoint;
-      const verified = await this.requestDelta({ context, checkpoint, generation, toEpoch });
+      const verified = await this.requestDelta({ context, checkpoint, generation, toEpoch, options });
       await commitKeyTransparencyDelta(
         context,
         ownerUsername,
@@ -523,7 +538,7 @@ class KeyTransparencyClient {
     }
 
     if (!this.latestHead) {
-      const head = await this.requestHead(context, generation);
+      const head = await this.requestHead(context, generation, options);
       this.assertGeneration(generation);
       await this.persistHead(context, head);
     }
@@ -536,8 +551,9 @@ class KeyTransparencyClient {
     ownerUsername: string,
     discoveryEncryptionKey: Uint8Array,
     generation: number,
+    options: KeyTransparencyReadOptions = {},
   ): Promise<VerifiedQueryState> {
-    let { context, checkpoint } = await this.syncLogUnlocked(ownerUsername, generation);
+    let { context, checkpoint } = await this.syncLogUnlocked(ownerUsername, generation, options);
     let records = await findKeyTransparencyRecordsForContact(
       context,
       ownerUsername,
@@ -547,7 +563,7 @@ class KeyTransparencyClient {
     this.assertGeneration(generation);
 
     if (records.length === 0) {
-      const resynced = await this.syncLogUnlocked(ownerUsername, generation);
+      const resynced = await this.syncLogUnlocked(ownerUsername, generation, options);
       context = resynced.context;
       checkpoint = resynced.checkpoint;
       records = await findKeyTransparencyRecordsForContact(
@@ -625,6 +641,8 @@ class KeyTransparencyClient {
     monitorContact?: boolean;
     discoveryEncryptionKey: Uint8Array;
     accountRootPublicKeyBase64: string;
+    signal?: AbortSignal;
+    onRetry?: () => void;
   }): Promise<VerifiedKeyTransparencyContactState> {
     const generation = this.generation;
     return this.enqueue(async () => {
@@ -633,6 +651,7 @@ class KeyTransparencyClient {
         input.ownerUsername,
         input.discoveryEncryptionKey,
         generation,
+        input,
       );
       const contact = result.contact;
       if (!contact || !keyTransparencyRootMatches(contact, input.accountRootPublicKeyBase64)) {

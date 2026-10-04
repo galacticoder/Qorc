@@ -9,6 +9,7 @@ import { computeX25519SharedSecret, generateX25519KeyPair } from '../utils/noise
 import websocketClient from '../websocket/websocket';
 import { hasExactKeys, isPlainRecord } from '../sanitizers';
 import { AnonymousRequestLane } from './anonymous-request-lane';
+import { DiscoveryTransferDiagnostics } from './discovery-transfer-diagnostics';
 import type { AnonymousServerContext } from './anonymous-server-trust';
 import {
   assertCurrentServerContext,
@@ -215,6 +216,7 @@ async function executeAnonymousHttpRequest(
   authentication: AnonymousServerContext,
   signal: AbortSignal,
   onProgress?: (receivedBytes: number) => void,
+  diagnostics?: DiscoveryTransferDiagnostics,
 ): Promise<unknown> {
   signal?.throwIfAborted();
   const policy = OPERATION_POLICY[operation];
@@ -254,6 +256,7 @@ async function executeAnonymousHttpRequest(
   let signatureDigest: Uint8Array | null = null;
   let plaintextResponse: Uint8Array | null = null;
   try {
+    diagnostics?.phase('key-exchange');
     const staticEncapsulation = await PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
     staticKemCiphertext = staticEncapsulation.ciphertext;
     staticKemSecret = staticEncapsulation.sharedSecret;
@@ -278,6 +281,7 @@ async function executeAnonymousHttpRequest(
     requestPowNonce = PostQuantumRandom.randomBytes(16);
     request.set(requestPowNonce, ANONYMOUS_HTTP_REQUEST_POW_NONCE_OFFSET);
     requestPowSeedBytes = requestPowSeed(request);
+    diagnostics?.phase('admission-pow');
     const requestPowSolutionBase64 = await solvePowChallenge({
       seed: Base64.arrayBufferToBase64(requestPowSeedBytes),
       difficulty: REQUEST_POW_DIFFICULTY,
@@ -290,6 +294,8 @@ async function executeAnonymousHttpRequest(
       throw new Error('Invalid anonymous transport admission work');
     }
     request.set(requestPowSolution, ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET);
+
+    diagnostics?.phase('request-encryption');
 
     requestAad = concatUint8Arrays(REQUEST_AAD_DOMAIN, request.subarray(0, ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES));
     requestSalt = PostQuantumHash.blake3(requestAad);
@@ -329,11 +335,19 @@ async function executeAnonymousHttpRequest(
 
     await assertCurrentServerContext(serverContext);
     signal.throwIfAborted();
+    diagnostics?.phase('connecting-upload-waiting-headers');
     const nativeResponse = await anonymousHttp.fetch(
       request,
       serverContext.serverUrl,
-      { responseBytes: policy.responseBytes, signal, onProgress },
+      {
+        responseBytes: policy.responseBytes, signal, diagnosticId: diagnostics?.id,
+        onProgress: diagnostics ? (bytes) => {
+          diagnostics.progress(bytes);
+          onProgress?.(bytes);
+        } : onProgress,
+      },
     );
+    diagnostics?.phase('response-authentication');
     signal?.throwIfAborted();
     response = decodeRawResponse(nativeResponse);
     await assertCurrentServerContext(serverContext);
@@ -388,6 +402,7 @@ async function executeAnonymousHttpRequest(
       throw new Error('Anonymous transport response authentication failed');
     }
 
+    diagnostics?.phase('response-decryption');
     responseKemCiphertext = new Uint8Array(response.subarray(84, ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES));
     responseSharedSecret = await PostQuantumKEM.decapsulate(
       responseKemCiphertext,
@@ -411,6 +426,7 @@ async function executeAnonymousHttpRequest(
     );
     await assertCurrentServerContext(serverContext);
     signal.throwIfAborted();
+    diagnostics?.phase('response-parse');
     return decodePaddedResponse(plaintextResponse);
   } finally {
     requestId.fill(0);
@@ -465,6 +481,10 @@ export async function anonymousHttpFetch(
   const timer = setTimeout(abort, DISCOVERY_LOOKUP_TIMEOUT_MS);
   let releaseDiscovery: (() => void) | undefined;
   let release: (() => void) | undefined;
+  const diagnostics = operation === DISCOVERY_BUCKET_AUDIENCE || operation === KEY_TRANSPARENCY_SYNC_AUDIENCE
+    ? new DiscoveryTransferDiagnostics(OPERATION_POLICY[operation].responseBytes,
+      operation === DISCOVERY_BUCKET_AUDIENCE ? 'bucket' : 'key-transparency') : undefined;
+  let outcome: 'success' | 'cancelled' | 'error' = 'error';
   try {
     controller.signal.throwIfAborted();
     const serverContext = await captureCurrentServerContext(authentication.material);
@@ -472,20 +492,26 @@ export async function anonymousHttpFetch(
       throw new Error('Authenticated server changed before anonymous request');
     }
     if (operation === DISCOVERY_BUCKET_AUDIENCE) {
+      diagnostics?.phase('discovery-queue');
       releaseDiscovery = await discoveryRequestLane.acquire(controller.signal);
     }
+    diagnostics?.phase('bulk-queue');
     release = await (isBulkTransportOperation(operation) ? bulkRequestLane : primaryRequestLane).acquire(controller.signal);
     await assertCurrentServerContext(serverContext);
     controller.signal.throwIfAborted();
-    return await executeAnonymousHttpRequest(
+    const result = await executeAnonymousHttpRequest(
       operation,
       body,
       serverContext,
       authentication,
       controller.signal,
       options.onProgress,
+      diagnostics,
     );
+    outcome = 'success';
+    return result;
   } finally {
+    diagnostics?.finish(controller.signal.aborted ? 'cancelled' : outcome);
     release?.();
     releaseDiscovery?.();
     clearTimeout(timer);

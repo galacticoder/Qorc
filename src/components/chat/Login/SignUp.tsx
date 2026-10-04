@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo } from "react";
+import { PasswordInput } from '../../ui/PasswordInput';
 import { isValidUsername } from "../../../lib/sanitizers";
 import {
   USERNAME_MIN_LENGTH,
@@ -95,10 +96,9 @@ export function SignUpForm({
 
       <div className="signup-simple-field">
         <label htmlFor="password">Password</label>
-        <input
+        <PasswordInput
           className="signup-simple-input"
           id="password"
-          type="password"
           placeholder="Create password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -115,10 +115,10 @@ export function SignUpForm({
 
       <div className="signup-simple-field">
         <label htmlFor="confirmPassword">Confirm password</label>
-        <input
+        <PasswordInput
           className="signup-simple-input"
           id="confirmPassword"
-          type="password"
+          revealLabel="confirm password"
           placeholder="Confirm password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
@@ -135,10 +135,10 @@ export function SignUpForm({
 
       <div className="signup-simple-field">
         <label htmlFor="passphrase">Passphrase</label>
-        <input
+        <PasswordInput
           className="signup-simple-input"
           id="passphrase"
-          type="password"
+          revealLabel="passphrase"
           placeholder="New passphrase"
           value={passphrase}
           onChange={(e) => setPassphrase(e.target.value)}
@@ -155,10 +155,10 @@ export function SignUpForm({
 
       <div className="signup-simple-field">
         <label htmlFor="confirmPassphrase">Confirm passphrase</label>
-        <input
+        <PasswordInput
           className="signup-simple-input"
           id="confirmPassphrase"
-          type="password"
+          revealLabel="confirm passphrase"
           placeholder="Confirm passphrase"
           value={confirmPassphrase}
           onChange={(e) => setConfirmPassphrase(e.target.value)}

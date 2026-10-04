@@ -23,6 +23,8 @@ let AnonymousRequestLane;
 let runAnonymousRequestBatch;
 let progressModule;
 let AnonymousServerTrust;
+let transferAnonymousRead;
+let DiscoveryTransferDiagnostics;
 
 before(async () => {
   loader = await createServer({
@@ -33,12 +35,267 @@ before(async () => {
   ({ AnonymousRequestLane, runAnonymousRequestBatch } = await loader.ssrLoadModule('/src/lib/transport/anonymous-request-lane.ts'));
   progressModule = await loader.ssrLoadModule('/src/lib/discovery/progress.ts');
   ({ AnonymousServerTrust } = await loader.ssrLoadModule('/src/lib/transport/anonymous-server-trust.ts'));
+  ({ transferAnonymousRead } = await loader.ssrLoadModule('/src/lib/transport/read-only-transfer.ts'));
+  ({ DiscoveryTransferDiagnostics } = await loader.ssrLoadModule('/src/lib/transport/discovery-transfer-diagnostics.ts'));
 });
 after(async () => { await loader?.close(); });
 
 async function flush() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
 }
+
+test('a stalled discovery download is retried after thirty seconds without data', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(console, 'warn', () => {});
+  const controller = new AbortController();
+  const attempts = [];
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, async (signal, progress) => {
+    attempts.push(signal);
+    progress(0);
+    if (attempts.length === 2) return 'verified';
+    progress(800_000);
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  }, controller.signal, () => {});
+  now = 30_000;
+  t.mock.timers.tick(30_000);
+  assert.equal(await result, 'verified');
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].aborted, true);
+  assert.notEqual(attempts[0], attempts[1]);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
+
+test('read-only download retries stop after three stalled attempts', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let attempts = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(console, 'warn', () => {});
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attempts++;
+    progress(0);
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  }, new AbortController().signal, () => {});
+  const rejected = assert.rejects(result, /Anonymous download stalled/);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    now = attempt * 30_000;
+    t.mock.timers.tick(30_000);
+    await flush();
+  }
+  await rejected;
+  assert.equal(attempts, 3);
+});
+
+test('discovery rate checks exclude time waiting for response headers', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {});
+  now = 180_000;
+  t.mock.timers.tick(180_000);
+  assert.equal(attemptSignal.aborted, false);
+  report(0);
+  now = 200_000;
+  t.mock.timers.tick(20_000);
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('a healthy discovery download is not restarted', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {});
+  for (let interval = 1; interval <= 8; interval++) {
+    now = interval * 30_000;
+    report(interval * 30 * 14 * 1024);
+    t.mock.timers.tick(30_000);
+    assert.equal(attemptSignal.aborted, false);
+  }
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('discovery does not retry authentication failures or user cancellation', async () => {
+  for (const cancelled of [false, true]) {
+    let attempts = 0;
+    const controller = new AbortController();
+    await assert.rejects(transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, async () => {
+      attempts++;
+      if (cancelled) controller.abort();
+      throw new Error('Invalid anonymous transport response signature');
+    }, controller.signal, () => {}));
+    assert.equal(attempts, 1);
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  }
+});
+
+test('a completed body is not cancelled while its authentication is being verified', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    progress(0);
+    progress(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {});
+  now = 900_000;
+  t.mock.timers.tick(900_000);
+  assert.equal(attemptSignal.aborted, false);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('an incomplete body error retries only the affected read-only bucket', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  let attempts = 0;
+  const result = await transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, async () => {
+    if (++attempts === 1) throw new Error('anonymous response transfer deadline: received 5062656/8912896 bytes after 724001 ms');
+    return 'verified';
+  }, new AbortController().signal, () => {});
+  assert.equal(result, 'verified');
+  assert.equal(attempts, 2);
+});
+
+test('sustained seven KiB/s is retried using the recent window, not a two-minute grace period', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let attempts = 0;
+  let retries = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(console, 'warn', () => {});
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    if (++attempts === 2) return Promise.resolve('verified');
+    report = progress;
+    progress(0);
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  }, new AbortController().signal, () => {}, () => { retries++; });
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    report(tick * 5 * 7 * 1024);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(await result, 'verified');
+  assert.equal(retries, 1);
+});
+
+test('a recovering transfer survives a low lifetime average when its recent rate is sufficient', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  let bytes = 0;
+  t.mock.method(performance, 'now', () => now);
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {});
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    bytes += 5 * (tick <= 4 ? 1 : 32) * 1024;
+    report(bytes);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('retry progress resets only the interrupted bucket and remains explicit until it finishes', () => {
+  const updates = [];
+  const progress = progressModule.createBucketProgress(4, 100, value => updates.push(value));
+  progress(0, 100);
+  progress(1, 80);
+  progress.retry(1);
+  assert.deepEqual(updates.at(-1), { phase: 'retrying', receivedBytes: 100, totalBytes: 400 });
+  progress(1, 10);
+  progress(2, 100);
+  assert.deepEqual(updates.at(-1), { phase: 'retrying', receivedBytes: 210, totalBytes: 400 });
+  progress(1, 100);
+  assert.equal(updates.at(-1).phase, 'downloading');
+  progress(3, 100);
+  assert.equal(updates.at(-1).phase, 'verifying');
+  const stream = new progressModule.DiscoveryProgressStream();
+  const phases = [];
+  stream.report(updates.at(-1));
+  stream.subscribe(value => phases.push(value));
+  stream.setPhase('checking-keys');
+  stream.setPhase('retrying-keys');
+  assert.deepEqual(phases.at(-1), { phase: 'retrying-keys', receivedBytes: 400, totalBytes: 400 });
+});
+
+test('key-transparency read retries generate fresh work and preserve the exact epoch range', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  const source = fs.readFileSync('src/lib/key-transparency/client.ts', 'utf8');
+  const ast = ts.createSourceFile('client.ts', source, ts.ScriptTarget.Latest, true);
+  const client = ast.statements.find(node => ts.isClassDeclaration(node) && node.members.some(member => member.name?.getText(ast) === 'requestSync'));
+  const method = client.members.find(member => member.name?.getText(ast) === 'requestSync');
+  const code = ts.transpileModule(`class Harness { assertGeneration() {} ${method.getText(ast)} } return new Harness();`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const sent = [];
+  let proofs = 0;
+  const dependencies = {
+    transferAnonymousRead,
+    KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES: 2 * 1024 * 1024,
+    KEY_TRANSPARENCY_SYNC_POW_DOMAIN: 'test', KEY_TRANSPARENCY_SYNC_POW_DIFFICULTY: 1,
+    KEY_TRANSPARENCY_SYNC_AUDIENCE: 'sync',
+    websocketClient: { getAnonymousHttpServerNow: () => 1234 },
+    keyTransparencyPowEpoch: () => 1,
+    assertCurrentServerContext: async () => {},
+    createAnonymousHttpPow: async (_domain, _epoch, range, _difficulty, signal) => {
+      signal.throwIfAborted();
+      assert.deepEqual(range, ['10', '20']);
+      return { powSolution: String(++proofs) };
+    },
+    anonymousHttpFetch: async (_operation, body, _url, options) => {
+      sent.push({ body, signal: options.signal });
+      options.onProgress(0);
+      if (sent.length === 1) throw new Error('anonymous response read idle timeout: test');
+      options.onProgress(2 * 1024 * 1024);
+      return { ok: true };
+    },
+  };
+  const harness = new Function(...Object.keys(dependencies), code)(...Object.values(dependencies));
+  const controller = new AbortController();
+  let retries = 0;
+  assert.deepEqual(await harness.requestSync({ serverUrl: 'test' }, 0, 10, 20, {
+    signal: controller.signal, onRetry: () => { retries++; },
+  }), { ok: true });
+  assert.equal(retries, 1);
+  assert.equal(proofs, 2);
+  assert.notEqual(sent[0].body.powSolution, sent[1].body.powSolution);
+  assert.notEqual(sent[0].signal, sent[1].signal);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+});
 
 class SlowResponse extends EventEmitter {
   destroyed = false;
@@ -530,6 +787,9 @@ function requestFixture(t) {
   let captured;
   const executions = [];
   const fetch = loadFunction('src/lib/transport/pq-anonymous-http.ts', 'anonymousHttpFetch', {
+    DiscoveryTransferDiagnostics, ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+    KEY_TRANSPARENCY_SYNC_AUDIENCE: 'key-transparency',
+    OPERATION_POLICY: { bucket: { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES } },
     websocketClient: { captureAnonymousHttpContext: () => (captured = f.trust.capture()) },
     DISCOVERY_LOOKUP_TIMEOUT_MS,
     DISCOVERY_BUCKET_AUDIENCE: 'bucket',

@@ -8,6 +8,7 @@
     "permissions": [
         "core:event:allow-listen",
         "core:event:allow-unlisten",
+        "core:window:allow-set-theme",
         "dialog:allow-message",
         "notification:allow-is-permission-granted"
     ]

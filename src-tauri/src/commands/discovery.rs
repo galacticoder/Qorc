@@ -356,10 +356,104 @@ fn valid_response_size(size: usize) -> bool {
     )
 }
 
+struct TransferDiagnostics {
+    id: u64,
+    started: Instant,
+    phase_started: Instant,
+    phase: &'static str,
+    expected_bytes: usize,
+    received_bytes: usize,
+    body_started: Option<Instant>,
+    body_finished: Option<Instant>,
+    first_byte_ms: Option<u128>,
+    last_byte_at: Option<Instant>,
+    max_progress_gap_ms: u128,
+    last_sample_at: Instant,
+    last_sample_bytes: usize,
+}
+
+impl TransferDiagnostics {
+    fn new(id: u64, expected_bytes: usize) -> Self {
+        let now = Instant::now();
+        Self {
+            id, started: now, phase_started: now, phase: "native-setup",
+            expected_bytes, received_bytes: 0, body_started: None, body_finished: None,
+            first_byte_ms: None, last_byte_at: None, max_progress_gap_ms: 0,
+            last_sample_at: now, last_sample_bytes: 0,
+        }
+    }
+
+    fn phase(&mut self, phase: &'static str) {
+        let now = Instant::now();
+        tracing::info!(
+            transfer = self.id, event = "phase", completed_phase = self.phase,
+            phase_ms = now.duration_since(self.phase_started).as_millis(),
+            elapsed_ms = now.duration_since(self.started).as_millis(), next_phase = phase,
+            "[DISCOVERY-PERF-NATIVE]"
+        );
+        self.phase = phase;
+        self.phase_started = now;
+    }
+
+    fn progress(&mut self, bytes: usize) {
+        let now = Instant::now();
+        let started = *self.body_started.get_or_insert(now);
+        if self.last_byte_at.is_none() {
+            self.last_byte_at = Some(now);
+            self.last_sample_at = now;
+        }
+        if bytes > self.received_bytes {
+            self.max_progress_gap_ms = self.max_progress_gap_ms.max(
+                now.duration_since(self.last_byte_at.unwrap()).as_millis(),
+            );
+            self.first_byte_ms.get_or_insert(now.duration_since(started).as_millis());
+            self.last_byte_at = Some(now);
+            self.received_bytes = bytes;
+            if bytes == self.expected_bytes {
+                self.body_finished = Some(now);
+            }
+        }
+        let window = now.duration_since(self.last_sample_at).as_secs_f64();
+        if window >= 15.0 {
+            tracing::info!(
+                transfer = self.id, event = "progress", received_bytes = bytes,
+                expected_bytes = self.expected_bytes, body_ms = now.duration_since(started).as_millis(),
+                window_kibps = (bytes - self.last_sample_bytes) as f64 / window / 1024.0,
+                max_progress_gap_ms = self.max_progress_gap_ms,
+                "[DISCOVERY-PERF-NATIVE]"
+            );
+            self.last_sample_at = now;
+            self.last_sample_bytes = bytes;
+        }
+    }
+}
+
+impl Drop for TransferDiagnostics {
+    fn drop(&mut self) {
+        let now = Instant::now();
+        let body_ms = self.body_started.map(|at| self.body_finished.unwrap_or(now).duration_since(at).as_millis()).unwrap_or(0);
+        let trailing_gap = if self.body_finished.is_none() {
+            self.last_byte_at.map(|at| now.duration_since(at).as_millis()).unwrap_or(0)
+        } else { 0 };
+        tracing::info!(
+            transfer = self.id, event = "summary", last_phase = self.phase,
+            elapsed_ms = now.duration_since(self.started).as_millis(),
+            phase_ms = now.duration_since(self.phase_started).as_millis(),
+            received_bytes = self.received_bytes, expected_bytes = self.expected_bytes,
+            body_complete = self.body_finished.is_some(), body_ms,
+            first_body_byte_ms = ?self.first_byte_ms,
+            average_kibps = if body_ms > 0 { self.received_bytes as f64 / body_ms as f64 * 1000.0 / 1024.0 } else { 0.0 },
+            max_progress_gap_ms = self.max_progress_gap_ms.max(trailing_gap),
+            "[DISCOVERY-PERF-NATIVE]"
+        );
+    }
+}
+
 async fn read_capped_body(
     response: &mut reqwest::Response,
     max_bytes: usize,
     progress: Option<&Channel<AnonymousDownloadProgress>>,
+    mut diagnostics: Option<&mut TransferDiagnostics>,
 ) -> Result<Vec<u8>, String> {
     read_capped_body_with_timeouts(
         response,
@@ -367,6 +461,9 @@ async fn read_capped_body(
         BODY_IDLE_TIMEOUT,
         body_timeout(max_bytes),
         |received_bytes| {
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.progress(received_bytes);
+            }
             if let Some(progress) = progress
                 && let Err(error) = progress.send(AnonymousDownloadProgress {
                     received_bytes,
@@ -561,6 +658,11 @@ async fn execute_anonymous_api_fetch(
         InvokeBody::Raw(body) if valid_request_size(body.len()) => body.clone(),
         _ => return Err("invalid anonymous request body".to_string()),
     };
+    let mut diagnostics = request.headers().get("x-qorc-transfer-diagnostic")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|id| *id > 0 && matches!(expected_response_bytes, RESPONSE_DISCOVERY_BYTES | RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES))
+        .map(|id| TransferDiagnostics::new(id, expected_response_bytes));
     let expected_server_url = request
         .headers()
         .get(crate::protocol_keys::EXPECTED_SERVER_HEADER)
@@ -584,6 +686,9 @@ async fn execute_anonymous_api_fetch(
     }
 
     let api_url = anonymous_api_url(&expected_server_url)?;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics.phase("tor-ready-wait");
+    }
     let tor = if use_bulk_tor {
         let primary = state
             .inner()
@@ -622,6 +727,9 @@ async fn execute_anonymous_api_fetch(
         spawn_warm_refill(socks_port, request_host.clone(), request_port);
     }
     let started_at = Instant::now();
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics.phase("connect-upload-wait-headers");
+    }
     let mut response =
         send_anonymous_request(socks_port, api_url, request_body, HEADER_TIMEOUT).await?;
     if !response.status().is_success() {
@@ -644,7 +752,13 @@ async fn execute_anonymous_api_fetch(
         elapsed_ms = started_at.elapsed().as_millis(),
         "[ANON-HTTP] response headers received"
     );
-    let response_body = read_capped_body(&mut response, expected_response_bytes, progress).await?;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics.phase("body-download");
+    }
+    let response_body = read_capped_body(&mut response, expected_response_bytes, progress, diagnostics.as_mut()).await?;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics.phase("returning-to-webview");
+    }
     if !valid_response_size(response_body.len()) {
         return Err("invalid anonymous response".to_string());
     }
@@ -693,6 +807,38 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use uuid::Uuid;
+
+    #[test]
+    fn transfer_diagnostics_measure_native_bytes_and_stalls() {
+        let mut diagnostics = super::TransferDiagnostics::new(1, 1024);
+        diagnostics.progress(0);
+        assert_eq!(diagnostics.first_byte_ms, None);
+        assert_eq!(diagnostics.received_bytes, 0);
+        let earlier = std::time::Instant::now() - Duration::from_secs(2);
+        diagnostics.body_started = Some(earlier);
+        diagnostics.last_byte_at = Some(earlier);
+        diagnostics.progress(512);
+        assert!(diagnostics.first_byte_ms.unwrap() >= 2000);
+        assert!(diagnostics.max_progress_gap_ms >= 2000);
+        assert!(diagnostics.body_finished.is_none());
+        diagnostics.progress(1024);
+        assert_eq!(diagnostics.received_bytes, 1024);
+        assert!(diagnostics.body_finished.is_some());
+    }
+
+    #[test]
+    fn transfer_diagnostics_do_not_count_duplicate_progress_as_new_bytes() {
+        let mut diagnostics = super::TransferDiagnostics::new(2, 1024);
+        diagnostics.progress(0);
+        diagnostics.progress(512);
+        let first_byte_ms = diagnostics.first_byte_ms;
+        let last_byte_at = diagnostics.last_byte_at;
+        diagnostics.progress(512);
+        assert_eq!(diagnostics.received_bytes, 512);
+        assert_eq!(diagnostics.first_byte_ms, first_byte_ms);
+        assert_eq!(diagnostics.last_byte_at, last_byte_at);
+        assert!(diagnostics.body_finished.is_none());
+    }
 
     async fn accept_anonymous_socks(
         listener: &tokio::net::TcpListener,

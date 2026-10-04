@@ -133,6 +133,7 @@ server/test/*
 !server/test/websocket-broadcast-delivery.test.js
 !server/test/discovery-publication-request.test.js
 !server/test/discovery-transfer-lifecycle.test.js
+!server/test/discovery-diagnostics.test.js
 !server/test/auth-connection-lifecycle.test.js
 !server/test/encryption-provider-readiness.test.js
 !server/test/websocket-control-backpressure.test.js

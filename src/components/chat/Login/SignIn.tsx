@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useMemo } from "react";
+import { PasswordInput } from '../../ui/PasswordInput';
 import {
   PASSPHRASE_MAX_LENGTH,
   PASSWORD_MAX_LENGTH,
@@ -72,10 +73,9 @@ export function SignInForm({
 
       <div className="login-simple-field">
         <label htmlFor="password">Password</label>
-        <input
+        <PasswordInput
           className="login-simple-input"
           id="password"
-          type="password"
           placeholder="Enter your password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -88,10 +88,10 @@ export function SignInForm({
 
       <div className="login-simple-field">
         <label htmlFor="passphrase">Passphrase</label>
-        <input
+        <PasswordInput
           className="login-simple-input"
           id="passphrase"
-          type="password"
+          revealLabel="passphrase"
           placeholder="Enter your passphrase"
           value={passphrase}
           onChange={(e) => setPassphrase(e.target.value)}

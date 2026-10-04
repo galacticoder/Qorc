@@ -5147,6 +5147,57 @@ html.light .signup-simple a:hover,
   opacity: .6;
 }
 
+.auth-password-input {
+  position: relative;
+  min-width: 0;
+}
+
+.auth-password-input .login-simple-input,
+.auth-password-input .signup-simple-input {
+  padding-right: 48px;
+}
+
+.auth-password-input input::-ms-reveal,
+.auth-password-input input::-ms-clear {
+  display: none;
+}
+
+.auth-password-reveal {
+  visibility: hidden;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--auth-muted);
+  cursor: pointer;
+}
+
+.auth-password-input:focus-within .auth-password-reveal {
+  visibility: visible;
+}
+
+.auth-password-reveal:hover:not(:disabled) {
+  color: var(--auth-text);
+}
+
+.auth-password-reveal:focus-visible {
+  outline: 2px solid var(--auth-primary-bg);
+  outline-offset: -3px;
+}
+
+.auth-password-reveal:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
 .screen-login .login-simple-submit,
 .screen-signup .signup-simple-submit {
   width: 100%;
@@ -5238,17 +5289,17 @@ html.light .signup-simple a:hover,
 .login-back-setup,
 .signup-back-setup {
   width: auto;
-  min-height: 34px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 11px;
+  padding: 0 16px;
   border: 0;
   border-radius: 9px;
-  background: var(--auth-control-bg);
+  background: var(--auth-field-bg);
   color: var(--auth-muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   transition: background .14s ease, color .14s ease, opacity .14s ease;
@@ -5315,10 +5366,10 @@ html.light .screen-welcome,
 .light .screen-login,
 .light .screen-signup,
 .light .screen-welcome {
-  --auth-primary-bg: #a58be2;
-  --auth-primary-hover: #9b7dda;
-  --auth-primary-active: #9577d5;
-  --auth-primary-text: #24163c;
+  --auth-primary-bg: #8060d0;
+  --auth-primary-hover: #7856ca;
+  --auth-primary-active: #6e4abd;
+  --auth-primary-text: #ffffff;
   --auth-primary-disabled: #d9d2ef;
   --auth-primary-disabled-text: #7c6aad;
 }
@@ -5478,17 +5529,17 @@ html.light .screen-signup .auth-simple-message,
   right: 24px;
   bottom: 24px;
   z-index: 90;
-  min-height: 40px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
   border-radius: 9px;
-  padding: 0 14px;
-  background: var(--welcome-control);
+  padding: 0 16px;
+  background: var(--welcome-field);
   color: var(--welcome-muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   cursor: pointer;
   transition: background .14s ease, color .14s ease, opacity .14s ease;

@@ -1,4 +1,5 @@
 import React from "react";
+import { PasswordInput } from '../../ui/PasswordInput';
 import { SERVER_PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface ServerPasswordFormProps {
@@ -24,10 +25,10 @@ export function ServerPasswordForm({
     >
       <div className="login-simple-field">
         <label htmlFor="serverPassword">Server password</label>
-        <input
+        <PasswordInput
           className="login-simple-input"
           id="serverPassword"
-          type="password"
+          revealLabel="server password"
           placeholder="Enter server password"
           value={serverPassword}
           onChange={(e) => setServerPassword(e.target.value)}

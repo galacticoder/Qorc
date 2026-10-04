@@ -1,5 +1,5 @@
 export interface DiscoveryProgress {
-  phase: 'preparing' | 'downloading' | 'verifying';
+  phase: 'preparing' | 'downloading' | 'retrying' | 'verifying' | 'checking-keys' | 'retrying-keys';
   receivedBytes: number;
   totalBytes: number;
 }
@@ -19,6 +19,10 @@ export class DiscoveryProgressStream {
   report = (progress: DiscoveryProgress): void => {
     this.latest = progress;
     for (const observer of this.observers) observer(progress);
+  };
+
+  setPhase = (phase: DiscoveryProgress['phase']): void => {
+    this.report({ ...this.latest, phase });
   };
 
   subscribe(observer: DiscoveryProgressObserver): () => void {
@@ -42,12 +46,22 @@ export function observeDiscoveryProgress<T>(operation: Promise<T>, observer?: Di
 export function createBucketProgress(count: number, responseBytes: number, report?: DiscoveryProgressObserver) {
   const received = Array<number>(count).fill(0);
   const totalBytes = count * responseBytes;
+  const retrying = new Set<number>();
   report?.({ phase: 'preparing', receivedBytes: 0, totalBytes });
-  return (index: number, bytes: number): void => {
+  const update = (index: number, bytes: number): void => {
     if (!Number.isInteger(index) || index < 0 || index >= count ||
-      !Number.isSafeInteger(bytes) || bytes < received[index] || bytes > responseBytes) return;
+      !Number.isSafeInteger(bytes) || bytes < 0 || bytes > responseBytes) return;
+    if (bytes < received[index]) return;
     received[index] = bytes;
+    if (bytes === responseBytes) retrying.delete(index);
     const receivedBytes = received.reduce((sum, value) => sum + value, 0);
-    report?.({ phase: receivedBytes === totalBytes ? 'verifying' : 'downloading', receivedBytes, totalBytes });
+    report?.({ phase: retrying.size > 0 ? 'retrying' : receivedBytes === totalBytes ? 'verifying' : 'downloading', receivedBytes, totalBytes });
   };
+  update.retry = (index: number): void => {
+    if (!Number.isInteger(index) || index < 0 || index >= count) return;
+    received[index] = 0;
+    retrying.add(index);
+    update(index, 0);
+  };
+  return update;
 }

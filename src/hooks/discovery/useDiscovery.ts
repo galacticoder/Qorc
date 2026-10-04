@@ -1078,7 +1078,9 @@ export const useDiscovery = (
         encryptionKeys: Uint8Array[],
         cacheNegative = true,
         monitorContact = true,
-        isLookupCurrent: () => boolean
+        isLookupCurrent: () => boolean,
+        lookupSignal: AbortSignal,
+        progress: DiscoveryProgressStream,
     ): Promise<OPRFDiscoveryMaterial | null> => {
         const operationOwnerScope = ownerScope;
         const accountOwner = effectiveHandle?.toLowerCase() || null;
@@ -1127,12 +1129,15 @@ export const useDiscovery = (
                     typeof keyTransparencyClient.verifyDiscoveredIdentity
                 >>;
                 try {
+                    progress.setPhase('checking-keys');
                     transparencyContact = await keyTransparencyClient.verifyDiscoveredIdentity({
                         ownerUsername: accountOwner!,
                         peerUsername: String(targetHandle).trim().toLowerCase(),
                         monitorContact,
                         discoveryEncryptionKey: key,
                         accountRootPublicKeyBase64: accountRootPublicKey,
+                        signal: lookupSignal,
+                        onRetry: () => progress.setPhase('retrying-keys'),
                     });
                 } catch (error) {
                     transparencyCheckFailed = true;
@@ -2492,7 +2497,9 @@ export const useDiscovery = (
                                 encryptionKeys,
                                 false,
                                 options?.monitorContact !== false,
-                                isCurrentOwner
+                                isCurrentOwner,
+                                lookupController.signal,
+                                progress,
                             );
                             if (!isCurrentOwner()) return null;
                             if (bucketResult) {

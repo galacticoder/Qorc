@@ -592,7 +592,7 @@ export const anonymousHttp = {
     fetch: async (
         body: Uint8Array,
         expectedServerUrl: string,
-        options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void },
+        options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void; diagnosticId?: number },
     ) => {
         options.signal?.throwIfAborted();
         const requestId = crypto.randomUUID();
@@ -617,6 +617,7 @@ export const anonymousHttp = {
                     [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
                     'x-qorc-anonymous-request-id': requestId,
                     'x-qorc-anonymous-response-bytes': String(options.responseBytes),
+                    ...(options.diagnosticId === undefined ? {} : { 'x-qorc-transfer-diagnostic': String(options.diagnosticId) }),
                     ...(progress ? { 'x-qorc-anonymous-progress': progress[SERIALIZE_TO_IPC_FN]() } : {}),
                 },
             });

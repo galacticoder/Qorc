@@ -2,6 +2,7 @@
 
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
 import { runAnonymousRequestBatch } from '../transport/anonymous-request-lane';
+import { transferAnonymousRead } from '../transport/read-only-transfer';
 import { createBucketProgress, type DiscoveryProgressObserver } from './progress';
 import { ANONYMOUS_DISCOVERY_RESPONSE_BYTES } from '../../../shared/anonymous-transfer-policy.js';
 import { blake3 } from '@noble/hashes/blake3.js';
@@ -283,19 +284,31 @@ async function fetchDiscoveryBlobsOnce(
   });
   const reportProgress = createBucketProgress(ids.length, ANONYMOUS_DISCOVERY_RESPONSE_BYTES, onProgress);
   const perBucket = await runAnonymousRequestBatch(ids.map((id, index) => async (signal: AbortSignal) => {
-    const work = await createAnonymousHttpPow(
-      PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
-      manifest.epochId,
-      [String(id)],
-      DISCOVERY_BUCKET_POW_DIFFICULTY,
+    const response: unknown = await transferAnonymousRead(
+      ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
+      async (attemptSignal, progress) => {
+        const workStartedAt = performance.now();
+        const work = await createAnonymousHttpPow(
+          PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
+          manifest.epochId,
+          [String(id)],
+          DISCOVERY_BUCKET_POW_DIFFICULTY,
+          attemptSignal,
+        );
+        console.info('[DISCOVERY-PERF]', JSON.stringify({
+          event: 'bucket-pow', slot: index, elapsedMs: Math.round(performance.now() - workStartedAt),
+        }));
+        await assertCurrentServerContext(context);
+        return anonymousHttpFetch(
+          DISCOVERY_BUCKET_AUDIENCE,
+          { epochId: manifest.epochId, bucketIds: [id], ...work },
+          context.serverUrl,
+          { signal: attemptSignal, onProgress: progress },
+        );
+      },
       signal,
-    );
-    await assertCurrentServerContext(context);
-    const response: unknown = await anonymousHttpFetch(
-      DISCOVERY_BUCKET_AUDIENCE,
-      { epochId: manifest.epochId, bucketIds: [id], ...work },
-      context.serverUrl,
-      { signal, onProgress: (receivedBytes) => reportProgress(index, receivedBytes) },
+      (receivedBytes) => reportProgress(index, receivedBytes),
+      () => reportProgress.retry(index),
     );
     await assertCurrentServerContext(context);
     if (!hasExactPlainRecordKeys(response, ['ok', 'epochId', 'bucketCount', 'buckets'])) {

@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { STORAGE_KEYS } from '../lib/database/storage-keys';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 type Theme = 'light' | 'dark' | 'system';
 type ResolvedTheme = Exclude<Theme, 'system'>;
@@ -61,6 +62,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     root.classList.add(resolvedTheme);
     root.style.colorScheme = resolvedTheme;
   }, [resolvedTheme]);
+
+  useEffect(() => {
+    void getCurrentWindow().setTheme(theme === 'system' ? null : theme).catch((error) => {
+      console.warn('[THEME] Could not update the native window theme', error);
+    });
+  }, [theme]);
 
   const value = useMemo(
     () => ({ theme, resolvedTheme, setTheme }),
