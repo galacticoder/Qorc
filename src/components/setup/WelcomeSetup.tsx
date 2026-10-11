@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QorcBrandLogo } from '../ui/QorcBrandLogo';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
+import { Server } from 'lucide-react';
+import { SavedServersDialog } from '../servers/SavedServersDialog';
+import { AppSelect } from '../ui/AppSelect';
 import { useStartupConnection } from '../../hooks/app/useStartupConnection';
 import {
   humanizeConnectionError,
@@ -22,13 +25,6 @@ const ChevronIcon = () => (
   </svg>
 );
 
-const RestartIcon = ({ spinning = false }: { spinning?: boolean }) => (
-  <svg className={spinning ? 'welcome-spin' : undefined} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-    <path d="M21 3v6h-6" />
-  </svg>
-);
-
 export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: WelcomeSetupProps) {
   const startup = useStartupConnection();
   const [serverUrl, setServerUrl] = useState(initialServerUrl);
@@ -36,8 +32,8 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
   const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
   const [bridgeLines, setBridgeLines] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [savedServersOpen, setSavedServersOpen] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isRestartingTor, setIsRestartingTor] = useState(false);
   const [error, setError] = useState('');
   const mountedRef = useRef(true);
 
@@ -59,7 +55,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
 
   const handleSubmit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
-    if (isConnecting || isRestartingTor) return;
+    if (isConnecting) return;
 
     const normalized = normalizeToWss(serverUrl);
     if (!normalized) {
@@ -85,25 +81,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
     } finally {
       if (mountedRef.current) setIsConnecting(false);
     }
-  }, [serverUrl, enableBridges, transport, bridgeLines, isConnecting, isRestartingTor, onConnected]);
-
-  const handleRestartTor = useCallback(async () => {
-    if (isRestartingTor || isConnecting) return;
-    setIsRestartingTor(true);
-    setError('');
-    try {
-      await saveTorPreferences({ enableBridges, transport, bridgeLines });
-      const ready = await startupConnection.restartTor();
-      if (!mountedRef.current) return;
-      if (!ready) setError('Tor did not finish bootstrapping. Try enabling bridges.');
-    } catch (err) {
-      if (mountedRef.current) setError(humanizeConnectionError(err));
-    } finally {
-      if (mountedRef.current) setIsRestartingTor(false);
-    }
-  }, [enableBridges, transport, bridgeLines, isConnecting, isRestartingTor]);
-
-  const busy = isConnecting || isRestartingTor;
+  }, [serverUrl, enableBridges, transport, bridgeLines, isConnecting, onConnected]);
   const torStep = (startup.step || 'Starting Tor').replace(/\s*\(\d+%\)\s*$/, '');
   const submitLabel = !isConnecting
     ? 'Connect'
@@ -127,21 +105,21 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
             type="button"
             className="welcome-auth-back"
             onClick={onCancel}
-            disabled={busy}
+            disabled={isConnecting}
           >
             Sign in / Sign up
           </button>
         )}
 
-        <main className="welcome-simple" aria-label="Choose a server">
+        <main className="welcome-simple" aria-label="Connect to a server">
           <header className="welcome-simple-head">
-            <h1>Choose a server</h1>
+            <h1>Connect to a server</h1>
           </header>
 
           <form
             onSubmit={handleSubmit}
-            className={`login-simple-form${busy ? ' is-submitting' : ''}`}
-            aria-busy={busy}
+            className={`login-simple-form${isConnecting ? ' is-submitting' : ''}`}
+            aria-busy={isConnecting}
           >
             <div className="login-simple-field">
               <label htmlFor="welcome-server-url">Server address</label>
@@ -154,7 +132,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                   setServerUrl(event.target.value);
                   if (error) setError('');
                 }}
-                disabled={busy}
+                disabled={isConnecting}
                 autoFocus
                 spellCheck={false}
                 autoComplete="off"
@@ -168,7 +146,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
             <button
               type="submit"
               className="login-simple-submit"
-              disabled={busy || !serverUrl.trim()}
+              disabled={isConnecting || !serverUrl.trim()}
             >
               {submitLabel}
             </button>
@@ -196,7 +174,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                 className={`welcome-toggle${enableBridges ? ' is-on' : ''}`}
                 aria-pressed={enableBridges}
                 onClick={() => setEnableBridges((value) => !value)}
-                disabled={busy}
+                disabled={isConnecting}
               >
                 <span>Use bridges</span>
                 <span className="welcome-toggle-switch" aria-hidden="true">
@@ -208,16 +186,18 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                 <>
                   <div className="login-simple-field">
                     <label htmlFor="welcome-transport">Bridge transport</label>
-                    <select
+                    <AppSelect
                       className="welcome-select"
                       id="welcome-transport"
+                      label="Bridge transport"
                       value={transport}
-                      onChange={(event) => setTransport(event.target.value as 'obfs4' | 'snowflake')}
-                      disabled={busy}
-                    >
-                      <option value="obfs4">obfs4 (standard)</option>
-                      <option value="snowflake">snowflake (resilient)</option>
-                    </select>
+                      onValueChange={(value) => setTransport(value as 'obfs4' | 'snowflake')}
+                      disabled={isConnecting}
+                      options={[
+                        { value: 'obfs4', label: 'obfs4 (standard)' },
+                        { value: 'snowflake', label: 'snowflake (resilient)' },
+                      ]}
+                    />
                   </div>
 
                   <div className="login-simple-field">
@@ -228,26 +208,30 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
                       placeholder="Paste bridge lines here, one per line"
                       value={bridgeLines}
                       onChange={(event) => setBridgeLines(event.target.value)}
-                      disabled={busy}
+                      disabled={isConnecting}
                       spellCheck={false}
                     />
                   </div>
                 </>
               )}
 
-              <button
-                type="button"
-                className="welcome-secondary"
-                onClick={handleRestartTor}
-                disabled={busy}
-              >
-                <RestartIcon spinning={isRestartingTor} />
-                <span>{isRestartingTor ? 'Restarting Tor' : 'Restart Tor'}</span>
-              </button>
             </div>
           </div>
 
+          <div className="welcome-advanced">
+            <button
+              type="button"
+              className="welcome-advanced-toggle"
+              onClick={() => setSavedServersOpen(true)}
+              aria-haspopup="dialog"
+            >
+              <span>Saved servers</span>
+              <Server size={17} aria-hidden="true" />
+            </button>
+          </div>
+
         </main>
+        <SavedServersDialog open={savedServersOpen} onOpenChange={setSavedServersOpen} selectedUrl={serverUrl} disabled={isConnecting} onSelect={(server) => { setServerUrl(server.url); setError(''); }} />
       </div>
     </section>
   );

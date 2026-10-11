@@ -30,6 +30,9 @@ impl AudioPlaybackSession {
     }
 
     fn push(&self, input: &[u8]) -> Result<(), String> {
+        if self.stop.load(Ordering::Acquire) {
+            return Err("audio playback stream stopped".to_string());
+        }
         if input.len() != FRAME_SAMPLES * std::mem::size_of::<f32>() {
             return Err("invalid audio playback frame".to_string());
         }
@@ -53,6 +56,7 @@ impl AudioPlaybackSession {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn fill(&self, output: &mut [u8]) -> usize {
         output.fill(0);
         let Ok(mut queue) = self.queue.lock() else {
@@ -295,11 +299,145 @@ fn pulse_client() -> Result<PulseClient, String> {
 
 #[cfg(target_os = "windows")]
 fn run_playback(
-    _session: Arc<AudioPlaybackSession>,
-    _device_id: Option<&str>,
+    session: Arc<AudioPlaybackSession>,
+    device_id: Option<&str>,
     started: std::sync::mpsc::SyncSender<Result<(), String>>,
 ) {
-    let _ = started.send(Err("native audio playback is unavailable".to_string()));
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let open = || -> Result<cpal::Stream, String> {
+        let host = cpal::default_host();
+        let device = if let Some(device_id) = device_id {
+            let id = device_id
+                .parse()
+                .map_err(|_| "invalid speaker device identifier")?;
+            host.device_by_id(&id)
+                .filter(DeviceTrait::supports_output)
+                .ok_or("selected speaker is unavailable")?
+        } else {
+            host.default_output_device()
+                .ok_or("no speaker is available")?
+        };
+        let selected = device
+            .default_output_config()
+            .map_err(|error| format!("speaker format unavailable: {error}"))?;
+        let config = selected.config();
+        if config.channels == 0 || config.sample_rate == 0 {
+            return Err("invalid speaker format".to_string());
+        }
+        tracing::info!(
+            sample_rate = config.sample_rate,
+            channels = config.channels,
+            sample_format = %selected.sample_format(),
+            "[CALL-DIAG] native-audio-playback-selected-profile"
+        );
+        match selected.sample_format() {
+            cpal::SampleFormat::F32 => output_stream::<f32>(&device, config, session.clone()),
+            cpal::SampleFormat::F64 => output_stream::<f64>(&device, config, session.clone()),
+            cpal::SampleFormat::I8 => output_stream::<i8>(&device, config, session.clone()),
+            cpal::SampleFormat::I16 => output_stream::<i16>(&device, config, session.clone()),
+            cpal::SampleFormat::I24 => output_stream::<cpal::I24>(&device, config, session.clone()),
+            cpal::SampleFormat::I32 => output_stream::<i32>(&device, config, session.clone()),
+            cpal::SampleFormat::I64 => output_stream::<i64>(&device, config, session.clone()),
+            cpal::SampleFormat::U8 => output_stream::<u8>(&device, config, session.clone()),
+            cpal::SampleFormat::U16 => output_stream::<u16>(&device, config, session.clone()),
+            cpal::SampleFormat::U24 => output_stream::<cpal::U24>(&device, config, session.clone()),
+            cpal::SampleFormat::U32 => output_stream::<u32>(&device, config, session.clone()),
+            cpal::SampleFormat::U64 => output_stream::<u64>(&device, config, session.clone()),
+            _ => Err("speaker has an unsupported PCM format".to_string()),
+        }
+    };
+    let stream = match open() {
+        Ok(stream) => stream,
+        Err(error) => {
+            tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-open-failed");
+            let _ = started.send(Err(error));
+            return;
+        }
+    };
+    if let Err(error) = stream.play() {
+        tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-start-failed");
+        let _ = started.send(Err("speaker stream could not be started".to_string()));
+        return;
+    }
+    tracing::info!("[CALL-DIAG] native-audio-playback-started");
+    let _ = started.send(Ok(()));
+    while !session.stop.load(Ordering::Acquire) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(stream);
+}
+
+#[cfg(target_os = "windows")]
+fn output_stream<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    session: Arc<AudioPlaybackSession>,
+) -> Result<cpal::Stream, String>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32>,
+{
+    use cpal::traits::DeviceTrait;
+    let channels = config.channels as usize;
+    let mut resampler = PlaybackResampler::new(config.sample_rate);
+    let error_session = session.clone();
+    device
+        .build_output_stream::<T, _, _>(
+            config,
+            move |output, _| {
+                output.fill(T::EQUILIBRIUM);
+                if session.stop.load(Ordering::Acquire) {
+                    return;
+                }
+                let Ok(mut queue) = session.queue.lock() else {
+                    return;
+                };
+                for frame in output.chunks_exact_mut(channels) {
+                    frame.fill(T::from_sample(resampler.next(&mut queue)));
+                }
+            },
+            move |error| {
+                tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-stream-failed");
+                error_session.stop.store(true, Ordering::Release);
+            },
+            Some(Duration::from_secs(5)),
+        )
+        .map_err(|error| format!("speaker stream could not be opened: {error}"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct PlaybackResampler {
+    step: f64,
+    position: f64,
+    samples: Option<(f32, f32)>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl PlaybackResampler {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            step: 48_000.0 / sample_rate as f64,
+            position: 0.0,
+            samples: None,
+        }
+    }
+
+    fn next(&mut self, queue: &mut VecDeque<f32>) -> f32 {
+        let (mut left, mut right) = self.samples.unwrap_or_else(|| {
+            (
+                queue.pop_front().unwrap_or(0.0),
+                queue.pop_front().unwrap_or(0.0),
+            )
+        });
+        let value = left + (right - left) * self.position as f32;
+        self.position += self.step;
+        while self.position >= 1.0 {
+            self.position -= 1.0;
+            left = right;
+            right = queue.pop_front().unwrap_or(0.0);
+        }
+        self.samples = Some((left, right));
+        value
+    }
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
@@ -318,4 +456,54 @@ fn validate_device_id(device_id: &str) -> Result<(), String> {
         return Err("invalid speaker device identifier".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_preserves_48khz_samples_and_outputs_silence_on_underrun() {
+        let mut queue = VecDeque::from([0.25, -0.5, 1.0, -1.0]);
+        let mut resampler = PlaybackResampler::new(48_000);
+        let output: Vec<_> = (0..7).map(|_| resampler.next(&mut queue)).collect();
+        assert_eq!(output, [0.25, -0.5, 1.0, -1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn playback_resamples_across_callback_boundaries() {
+        for rate in [44_100, 48_000, 96_000, 192_000] {
+            let mut queue: VecDeque<_> = (0..48_002).map(|i| i as f32 / 48_000.0).collect();
+            let mut resampler = PlaybackResampler::new(rate);
+            for index in 0..rate {
+                let sample = resampler.next(&mut queue);
+                assert!((sample - index as f32 / rate as f32).abs() < 0.00001);
+            }
+            assert!(queue.len() <= 1);
+        }
+    }
+
+    #[test]
+    fn playback_queue_is_bounded_and_sanitizes_nonfinite_samples() {
+        let session = AudioPlaybackSession::new();
+        let frame: Vec<_> = [f32::NAN, f32::INFINITY, 2.0, -2.0]
+            .into_iter()
+            .cycle()
+            .take(FRAME_SAMPLES)
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        for _ in 0..20 {
+            session.push(&frame).unwrap();
+        }
+        let queue = session.queue.lock().unwrap();
+        assert_eq!(queue.len(), MAX_QUEUE_SAMPLES);
+        assert_eq!(
+            queue.iter().take(4).copied().collect::<Vec<_>>(),
+            [0.0, 0.0, 1.0, -1.0]
+        );
+        drop(queue);
+        session.stop();
+        assert!(session.push(&frame).is_err());
+        assert!(session.queue.lock().unwrap().is_empty());
+    }
 }

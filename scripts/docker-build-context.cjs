@@ -13,7 +13,8 @@ const SAFE_SERVER_CONFIG_FILES = Object.freeze([
     'infrastructure.js',
     'protocol-keys.js',
     'redis-keys.js',
-    'secure-credentials.js'
+    'secure-credentials.js',
+    'server-profile.js'
 ]);
 
 function copyTree(source, destination, options = {}) {

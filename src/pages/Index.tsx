@@ -24,6 +24,9 @@ import { useP2PMessaging } from "../hooks/p2p/useP2PMessaging";
 import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
 import websocketClient from "../lib/websocket/websocket";
+import { offerToSaveServer } from '../lib/servers/save-server-prompt';
+import { savedServers } from '../lib/servers/saved-servers';
+import { PinnedServer } from '../lib/utils/auth-utils';
 import { EventType } from "../lib/types/event-types";
 import { blockingSystem } from "../lib/blocking/blocking-system";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
@@ -257,6 +260,13 @@ const ChatApp: React.FC = () => {
       }
 
       setSelectedServerUrl(savedUrl);
+      const pinnedIdentity = await PinnedServer.load();
+      if (cancelled) return;
+      if (!pinnedIdentity) {
+        setShowServerSetup(true);
+        setServerEntryPreflightInProgress(false);
+        return;
+      }
       setSetupComplete(true);
 
       const explicitLogout = await isExplicitlyLoggedOut();
@@ -317,6 +327,15 @@ const ChatApp: React.FC = () => {
     Authentication.accountAuthenticated,
     promptForServerEntryIfRequired,
   ]);
+
+  useEffect(() => {
+    if (startup.phase !== 'ready') return;
+    const profile = websocketClient.getServerProfile();
+    if (!profile) return;
+    void savedServers.updateIcon(startup.serverUrl, profile.icon).catch((error: unknown) => {
+      console.warn('[SERVERS] Could not update saved server icon', error);
+    });
+  }, [startup.phase, startup.serverUrl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -702,6 +721,7 @@ const ChatApp: React.FC = () => {
   }, [selectedConversation, messages, getConversationMessages]);
 
   const handleServerSelected = useCallback(async (serverUrl: string) => {
+    void offerToSaveServer(serverUrl, websocketClient.getServerProfile());
     clearRecoveryConnectionIssue();
     setSelectedServerUrl(serverUrl);
     setSetupComplete(true);

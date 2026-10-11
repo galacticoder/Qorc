@@ -24,6 +24,7 @@ coverage/
 
 server/config/*
 !server/config/config.js
+!server/config/server-profile.js
 !server/config/constants.js
 !server/config/secure-credentials.js
 !server/config/protocol-keys.js
@@ -149,3 +150,5 @@ server/test/*
 !server/test/client-icon-resolution.test.js
 !server/test/hybrid-recipient-binding.test.js
 !server/test/unversioned-protocols.test.js
+!server/test/saved-servers.test.js
+!server/test/websocket-bootstrap-ownership.test.js

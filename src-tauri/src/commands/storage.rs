@@ -186,7 +186,14 @@ mod tests {
             "{}0123456789abcdef",
             crate::storage_keys::PRIVATE_AUTH_SLOT_PREFIX
         )));
-        assert!(secure_key_allowed(crate::storage_keys::SERVER_PQ_PIN));
+        assert!(secure_key_allowed(crate::storage_keys::SAVED_SERVERS));
+        assert!(secure_key_allowed(&format!(
+            "{}{}",
+            crate::storage_keys::SERVER_PQ_PIN_PREFIX,
+            "a".repeat(64)
+        )));
+        assert!(!secure_key_allowed("server_pq_pin"));
+        assert!(!secure_key_allowed(crate::storage_keys::SERVER_PQ_PIN_PREFIX));
         assert!(!secure_key_allowed(
             crate::storage_keys::PRIVACY_PASS_TOKEN_PREFIX
         ));

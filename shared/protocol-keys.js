@@ -1,4 +1,5 @@
 export const AUTH_CHANNEL_BINDING_CONTEXT = 'qorc-Authentication-Channel-Binding';
+export const SERVER_PROFILE_SIGNATURE_CONTEXT = 'qorc-Server-Profile-Signature';
 export const KEY_TRANSPARENCY_PROTOCOL = 'qorc-key-transparency';
 export const KEY_TRANSPARENCY_APPEND_POW_DOMAIN = 'qorc-key-transparency-append-pow';
 export const KEY_TRANSPARENCY_SYNC_POW_DOMAIN = 'qorc-key-transparency-sync-pow';

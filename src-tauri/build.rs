@@ -117,5 +117,12 @@ fn main() {
         .join("embedded_tor_bundle.rs");
     fs::write(tor_output, tor_generated).expect("failed to generate embedded Tor bundle metadata");
 
-    tauri_build::build()
+    println!("cargo:rerun-if-changed=windows-app-manifest.xml");
+    tauri_build::try_build(
+        tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new()
+                .app_manifest(include_str!("windows-app-manifest.xml")),
+        ),
+    )
+    .expect("failed to build Tauri resources");
 }

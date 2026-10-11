@@ -3,6 +3,8 @@ import { torNetworkManager } from './tor-network';
 import { websocket, storage, anonymousHttp } from '../tauri-bindings';
 import websocketClient from '../websocket/websocket';
 import { STORAGE_KEYS } from '../database/storage-keys';
+import { normalizeToWss } from '../servers/server-address';
+export { normalizeToWss } from '../servers/server-address';
 
 export type StartupPhase = 'idle' | 'tor' | 'server' | 'ready' | 'failed';
 export type StartupFailureTarget = 'tor' | 'server' | null;
@@ -24,24 +26,6 @@ export interface TorPreferences {
 
 const CONNECT_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 2500;
-
-export function normalizeToWss(value: string): string {
-  let v = (value || '').trim();
-  if (!v) return '';
-  if (!/^wss:\/\//i.test(v)) {
-    if (/^https?:\/\//i.test(v)) v = v.replace(/^https?:\/\//i, 'wss://');
-    else if (/^ws:\/\//i.test(v)) v = v.replace(/^ws:\/\//i, 'wss://');
-    else v = 'wss://' + v;
-  }
-  try {
-    const u = new URL(v);
-    if (u.protocol !== 'wss:') throw new Error('Invalid scheme');
-    if (!u.hostname || u.hostname.length > 253) throw new Error('Invalid host');
-    return u.toString();
-  } catch {
-    return '';
-  }
-}
 
 export function humanizeConnectionError(err: unknown): string {
   const raw = (err instanceof Error ? err.message : (typeof err === 'string' ? err : '')) || '';

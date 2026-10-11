@@ -18,7 +18,7 @@ export const STORAGE_KEYS = {
     KEY_TRANSPARENCY_OWN_TRANSITION: 'own-transition',
     LINK_PREVIEW_INDEX: '__index__',
     PENDING_RETRY_ALL: 'all',
-    SERVER_PQ_PIN: 'server_pq_pin',
+    SAVED_SERVERS: 'saved_servers',
     THEME: 'theme',
     TOR_BRIDGES_ENABLED: 'qorc_tor_bridges_enabled',
     TOR_BRIDGE_LINES: 'qorc_tor_bridge_lines',
@@ -29,6 +29,7 @@ export const STORAGE_KEYS = {
 } as const;
 
 export const STORAGE_PREFIXES = {
+    SERVER_PQ_PIN: 'server-pq-pin:',
     DISCOVERY_MATERIAL: 'discmat:',
     EPHEMERAL: 'ephemeral:',
     INSTANCE: 'qorc',
@@ -51,6 +52,7 @@ export const STORAGE_PREFIXES = {
 } as const;
 
 export const STORAGE_KEY_DOMAINS = {
+    SERVER_PQ_PIN: 'qorc-server-identity-pin',
     DISCOVERY_MATERIAL: 'qorc-discovery-material-cache',
     DATABASE_OWNER: 'qorc-db-owner',
     GATEKEEPER_TOKEN_STORE: 'qorc-gatekeeper-token-store',

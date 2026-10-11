@@ -106,13 +106,17 @@ const APP_SETTINGS_CSS = `
       grid-template-areas:
         "account"
         "general"
+        "servers"
         "notifications"
         "devices"
         "privacy";
       align-content: start;
       align-items: start;
       gap: var(--settings-section-gap);
+      contain: layout paint;
+      overflow-x: hidden;
       overflow-y: auto;
+      overscroll-behavior-y: contain;
       padding: var(--settings-section-gap) 18px 72px;
       background: var(--settings-bg);
       scrollbar-width: thin;
@@ -160,6 +164,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .pane {
+      contain: layout paint;
       width: 100%;
       min-width: 0;
       overflow: visible;
@@ -180,6 +185,10 @@ const APP_SETTINGS_CSS = `
 
     .pane[data-settings-pane="notifications"] {
       grid-area: notifications;
+    }
+
+    .pane[data-settings-pane="servers"] {
+      grid-area: servers;
     }
 
     .pane[data-settings-pane="devices"] {
@@ -269,7 +278,6 @@ const APP_SETTINGS_CSS = `
       border-radius: 8px;
       padding: 17px 18px;
       background: transparent;
-      transition: background .15s ease;
     }
 
     .setting-row:hover,
@@ -667,67 +675,9 @@ const APP_SETTINGS_CSS = `
       outline-offset: 2px;
     }
 
-    .select {
-      width: min(100%, 300px);
-      height: 42px;
-      border: 0;
-      border-radius: 9px;
-      padding: 0 12px;
-      background: var(--settings-input);
-      color: var(--settings-text);
-      outline: none;
-      box-shadow: none;
-      font-size: 13px;
-      line-height: 1;
-      font-weight: 500;
-    }
-
     .device-select {
-      position: relative;
       width: min(100%, 340px);
-      height: 44px;
       justify-self: end;
-      overflow: hidden;
-      border-radius: 10px;
-      background: var(--settings-input);
-      transition: background .15s ease, box-shadow .15s ease;
-    }
-
-    .device-select:hover {
-      background: var(--settings-layout-hover);
-    }
-
-    .device-select:focus-within {
-      background: var(--settings-layout-hover);
-      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--settings-muted) 28%, transparent);
-    }
-
-    .device-select > svg {
-      position: absolute;
-      top: 50%;
-      right: 14px;
-      width: 17px;
-      height: 17px;
-      pointer-events: none;
-      color: var(--settings-muted);
-      transform: translateY(-50%);
-      stroke-width: 2;
-    }
-
-    .select {
-      width: 100%;
-      height: 100%;
-      appearance: none;
-      -webkit-appearance: none;
-      border-radius: inherit;
-      padding: 0 44px 0 15px;
-      background: transparent;
-      cursor: pointer;
-    }
-
-    .select option {
-      background: var(--settings-panel);
-      color: var(--settings-text);
     }
 
     .blocked-spinner {
@@ -1012,10 +962,6 @@ const APP_SETTINGS_CSS = `
       .setting-row {
         grid-template-columns: minmax(0, 1fr);
         gap: 9px;
-      }
-
-      .select {
-        width: 100%;
       }
 
       .device-select {

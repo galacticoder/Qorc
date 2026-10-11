@@ -16,6 +16,7 @@ Current architecture docs:
 - [Blocking](docs/app/BLOCKING.md)
 - [Avatars](docs/app/AVATARS.md)
 - [Local data security](docs/app/LOCAL_DATA_SECURITY.md)
+- [Saved servers and server images](docs/app/SAVED_SERVERS.md)
 - [Environment variables](docs/ENVIRONMENT_VARIABLES.md)
 
 ## What this project is for and includes

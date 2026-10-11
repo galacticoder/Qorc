@@ -246,6 +246,8 @@ without a connected authenticated session, logout and explicit close revoke them
 | Name | Default / range | Owner | Purpose |
 | ---- | --------------- | ----- | ------- |
 | `SERVER_ID` | Required | server and cluster modules | Logical node identifier. It identifies a server process, never a user. |
+| `SERVER_NAME` | `SERVER_ID` | WebSocket gateway | Display name offered to clients when saving this server (1–80 characters). |
+| `SERVER_ICON_PATH` | Unset | WebSocket gateway | Path to a static PNG source, up to 4 MiB, 8192 pixels per edge, and 16,777,216 total pixels. Metadata is stripped before decoding, oversized icons are automatically resized/compressed to at most 128×128 and 8 KiB without modifying the original file. Relative paths resolve from the server working directory. The final image is embedded in the bootstrap and signed with the server transport identitym clients do not fetch an external image URL. Restart the server after changing the name or icon. See [Saved servers](app/SAVED_SERVERS.md). |
 | `SERVER_HOST` | Required by the runtime, Docker supplies `server` | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
 | `CLUSTER_PRIMARY` | Required | cluster modules | Must be exactly `true` for the primary node or `false` for a joining node. The role is never inferred from Redis state. |
 | `CLUSTER_AUTO_APPROVE` | Required | cluster modules | Must be exactly `true` or `false`. `true` lets the primary automatically approve authenticated pending join requests. Joining nodes can never approve themselves. |

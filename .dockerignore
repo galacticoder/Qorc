@@ -18,6 +18,7 @@ server/config/certs/
 server/config/certs/**
 server/config/*
 !server/config/config.js
+!server/config/server-profile.js
 !server/config/constants.js
 !server/config/audiences.js
 !server/config/error-codes.js

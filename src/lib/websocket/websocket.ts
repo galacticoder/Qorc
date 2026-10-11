@@ -8,6 +8,9 @@ import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
 import { hasExactKeys, isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { PinnedServer } from '../utils/auth-utils';
+import { encodeServerProfileTranscript, validateServerProfile } from '../../../shared/server-profile.js';
+import { PostQuantumSignature } from '../cryptography/signature';
+import type { ServerProfile } from '../servers/saved-servers';
 import type { MessageHandler, ServerKeyMaterial, SessionKeyMaterial } from '../types/websocket-types';
 import {
   INITIAL_RECONNECT_DELAY_MS,
@@ -41,7 +44,7 @@ import {
   createAuthChannelBinding,
 } from '../../../shared/auth-channel-binding.js';
 import { UUID_V4_RE } from '../../../shared/patterns.js';
-import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
+import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 interface ConnectOptions {
   autoReconnectOnFailure?: boolean;
@@ -256,6 +259,8 @@ const decodeCanonicalBase64List = (
 interface ServerKeyBootstrap {
   type: SignalType.SERVER_PUBLIC_KEY;
   serverId: string;
+  serverProfile: ServerProfile;
+  serverProfileSignature: string;
   serverTime: number;
   requiresServerPassword: boolean;
   hybridKeys: {
@@ -268,7 +273,8 @@ interface ServerKeyBootstrap {
 const parseServerKeyBootstrap = (value: unknown): ServerKeyBootstrap | null => {
   if (!isPlainObject(value) || hasPrototypePollutionKeys(value)) return null;
   if (
-    Object.keys(value).sort().join(',') !== 'hybridKeys,requiresServerPassword,serverId,serverTime,type' ||
+    Object.keys(value).sort().join(',') !== 'hybridKeys,requiresServerPassword,serverId,serverProfile,serverProfileSignature,serverTime,type' ||
+    !validateServerProfile(value.serverProfile) ||
     value.type !== SignalType.SERVER_PUBLIC_KEY ||
     typeof value.serverId !== 'string' ||
     !/^[A-Za-z0-9._-]{1,128}$/.test(value.serverId) ||
@@ -286,6 +292,7 @@ const parseServerKeyBootstrap = (value: unknown): ServerKeyBootstrap | null => {
     decoded.push(decodeServerResponseBase64(keys.kyberPublicBase64, ML_KEM_1024_PUBLIC_KEY_BYTES));
     decoded.push(decodeServerResponseBase64(keys.dilithiumPublicBase64, ML_DSA_87_PUBLIC_KEY_BYTES));
     decoded.push(decodeServerResponseBase64(keys.x25519PublicBase64, 32));
+    decoded.push(decodeServerResponseBase64(value.serverProfileSignature, ML_DSA_87_SIGNATURE_BYTES));
   } catch {
     return null;
   } finally {
@@ -297,6 +304,11 @@ const parseServerKeyBootstrap = (value: unknown): ServerKeyBootstrap | null => {
 
 // WebSocket Connection Manager
 export class WebSocketConnection {
+  private serverProfile: ServerProfile | null = null;
+
+  getServerProfile(): ServerProfile | null {
+    return this.serverProfile ? { ...this.serverProfile } : null;
+  }
   private _lifecycleState: string = 'idle';
   get lifecycleState(): string { return this._lifecycleState; }
   set lifecycleState(next: string) {
@@ -573,6 +585,7 @@ export class WebSocketConnection {
       throw operationAbortError('Refusing retired WebSocket connection generation');
     }
     if (connectionToken !== this.nativeConnectionToken) {
+      this.serverProfile = null;
       this.serverClockOffsetMs = 0;
       this.serverBootstrapConnectionToken = null;
       this.trustTransportUntil = 0;
@@ -581,6 +594,7 @@ export class WebSocketConnection {
   }
 
   private clearCurrentConnectionClock(): void {
+    this.serverProfile = null;
     this.serverClockOffsetMs = 0;
     this.serverBootstrapConnectionToken = null;
     this.trustTransportUntil = 0;
@@ -1105,12 +1119,26 @@ export class WebSocketConnection {
       const connectionEpoch = expectedConnectionToken;
       const isCurrent = () => this.isConnectionPrivacyEpochCurrent(connectionEpoch);
       try {
+        const signature = decodeServerResponseBase64(bootstrap.serverProfileSignature, ML_DSA_87_SIGNATURE_BYTES);
+        const publicKey = decodeServerResponseBase64(bootstrap.hybridKeys.dilithiumPublicBase64, ML_DSA_87_PUBLIC_KEY_BYTES);
+        const transcript = encodeServerProfileTranscript(bootstrap);
+        try {
+          if (!await PostQuantumSignature.verify(signature, transcript, publicKey)) {
+            throw new Error('Server profile signature verification failed');
+          }
+        } finally {
+          signature.fill(0);
+          publicKey.fill(0);
+          transcript.fill(0);
+        }
+        if (!isCurrent()) return true;
         await PinnedServer.establish(bootstrap.hybridKeys, isCurrent);
         if (!isCurrent()) return true;
         if (this.setServerKeyMaterial(bootstrap.hybridKeys, bootstrap.serverId) !== 'activated') {
           throw new Error('Server identity activation failed');
         }
         this.serverPasswordRequired = bootstrap.requiresServerPassword;
+        this.serverProfile = { ...bootstrap.serverProfile };
       } catch (error) {
         if (!isCurrent()) return true;
         this.logConnectionDiagnostic('bootstrap.identity-rejected', {

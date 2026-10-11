@@ -28,7 +28,7 @@ export const Dialog: React.FC<DialogProps> = ({ children, open, onOpenChange }) 
   );
 };
 
-export const DialogContent: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => {
+export const DialogContent: React.FC<{ children: ReactNode; className?: string; containerClassName?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, containerClassName, ...props }) => {
   const context = useContext(DialogContext);
   const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
   const [isVisible, setIsVisible] = React.useState(false);
@@ -114,7 +114,7 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
           animation: dialogContentHide 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
       `}</style>
-      <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className={cn("fixed inset-0 z-50 flex items-center justify-center", containerClassName)}>
         <div
           className={`dialog-overlay fixed inset-0 bg-black/50 ${isAnimatingOut ? 'closing' : ''}`}
           onClick={handleClose}
@@ -160,4 +160,3 @@ export const DialogDescription: React.FC<{ children: ReactNode; className?: stri
     {children}
   </p>
 );
-

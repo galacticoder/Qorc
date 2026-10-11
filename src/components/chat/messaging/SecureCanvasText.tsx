@@ -4,6 +4,7 @@
 
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { nativeMessageContent } from '../../../lib/tauri-bindings';
+import { useDevicePixelRatio } from '../../../hooks/useDevicePixelRatio';
 
 export interface SecureCanvasTextProps {
     messageId: string;
@@ -33,6 +34,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
     onContextMenu,
 }: SecureCanvasTextProps) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const pixelRatio = useDevicePixelRatio();
     const initialDimensions = useMemo(
         () => ({ width: 40, height: Math.ceil(fontSize * 1.4) }),
         [fontSize],
@@ -75,6 +77,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
                         '#ffffff',
                         singleLine,
                         Math.max(0, Math.min(8, Math.floor(maxLines))),
+                        pixelRatio,
                     );
                     if (cancelled) return;
                     const nextImageSource = `data:image/png;base64,${rendered.pngBase64}`;
@@ -101,7 +104,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
         return () => {
             cancelled = true;
         };
-    }, [isVisible, messageId, contentVersion, maxWidth, fontSize, singleLine, maxLines]);
+    }, [isVisible, messageId, contentVersion, maxWidth, fontSize, singleLine, maxLines, pixelRatio]);
 
     const { width, height, imageSource } = renderedFrame;
 

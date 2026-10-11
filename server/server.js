@@ -431,7 +431,7 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context }) {
   wss = wsServer;
   serverHybridKeyPair = context.serverHybridKeyPair;
 
-  gateway = attachGateway({
+  gateway = await attachGateway({
     wss,
     serverHybridKeyPair,
     serverId: process.env.SERVER_ID,

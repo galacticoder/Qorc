@@ -576,7 +576,6 @@ export const useAuth = () => {
           websocketClient.setServerEntryPromptPending(false);
           setShowPasswordPrompt(false);
           setAuthStatus("Entry granted");
-          toast.success("Server access granted anonymously");
           await resumeSavedAccountAfterServerEntry(operation);
           authLifecycle.assertCurrent(operation);
         } else {

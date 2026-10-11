@@ -20,7 +20,8 @@ pub const PEER_CERTIFICATE_PREFIX: &str = "peercert:";
 pub const PRIVACY_PASS_TOKEN_PREFIX: &str = "pp_tokens_";
 pub const PRIVATE_AUTH_SLOT_PREFIX: &str = "private_auth_slot_";
 pub const REGISTRATION_ATTEMPT_PREFIX: &str = "registration_attempt_";
-pub const SERVER_PQ_PIN: &str = "server_pq_pin";
+pub const SAVED_SERVERS: &str = "saved_servers";
+pub const SERVER_PQ_PIN_PREFIX: &str = "server-pq-pin:";
 pub const SIGNAL_SESSION_STORE: &str = "signal_session_store";
 pub const SIGNAL_IDENTITY_STORE: &str = "signal_identity_store";
 pub const SIGNAL_PEER_MLKEM_STORE: &str = "signal_peer_mlkem_store";
@@ -37,7 +38,7 @@ pub const TOR_BRIDGE_LINES: &str = "qorc_tor_bridge_lines";
 pub const TOR_BRIDGE_TRANSPORT: &str = "qorc_tor_bridge_transport";
 
 pub const RENDERER_EXACT_KEYS: &[&str] = &[
-    SERVER_PQ_PIN,
+    SAVED_SERVERS,
     EXPLICIT_LOGOUT,
     BACKGROUND_SESSION_ACTIVE,
     TOR_BRIDGES_ENABLED,
@@ -46,6 +47,7 @@ pub const RENDERER_EXACT_KEYS: &[&str] = &[
 ];
 
 pub const RENDERER_SCOPED_PREFIXES: &[&str] = &[
+    SERVER_PQ_PIN_PREFIX,
     PRIVACY_PASS_TOKEN_PREFIX,
     LAST_AUTH_USER_PREFIX,
     LAST_AUTH_DISPLAY_PREFIX,

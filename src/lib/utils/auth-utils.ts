@@ -1,7 +1,8 @@
 import { RefObject } from "react";
 import { blake3 } from '@noble/hashes/blake3.js';
-import { storage } from '../tauri-bindings';
-import { STORAGE_KEYS, STORAGE_KEY_DOMAINS } from '../database/storage-keys';
+import { storage, websocket } from '../tauri-bindings';
+import { STORAGE_PREFIXES, STORAGE_KEY_DOMAINS } from '../database/storage-keys';
+import { normalizeToWss } from '../servers/server-address';
 import { CryptoUtils } from './crypto-utils';
 import { bytesToHex } from '../../../shared/bytes.js';
 
@@ -85,9 +86,21 @@ type PinnedServerKeys = {
 };
 
 let cachedServerPin: PinnedServerKeys | null = null;
-let serverPinLoaded = false;
-let serverPinLoadPromise: Promise<PinnedServerKeys | null> | null = null;
+let cachedServerPinUrl: string | null = null;
 let serverPinMutationTail: Promise<void> = Promise.resolve();
+
+async function serverPinContext(): Promise<{ url: string; key: string }> {
+  const url = normalizeToWss((await websocket.getServerUrl()) ?? '');
+  if (!url) throw new Error('Server identity address unavailable');
+  const digest = blake3(new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.SERVER_PQ_PIN}\0${url}`));
+  return { url, key: `${STORAGE_PREFIXES.SERVER_PQ_PIN}${bytesToHex(digest)}` };
+}
+
+async function assertServerPinContext(url: string): Promise<void> {
+  if (normalizeToWss((await websocket.getServerUrl()) ?? '') !== url) {
+    throw new Error('Server identity address changed during verification');
+  }
+}
 
 async function withServerPinMutation<T>(operation: () => Promise<T>): Promise<T> {
   const previous = serverPinMutationTail;
@@ -119,26 +132,24 @@ function serverKeysEqual(left: PinnedServerKeys, right: PinnedServerKeys): boole
 
 export const PinnedServer = {
   async load(): Promise<PinnedServerKeys | null> {
-    if (serverPinLoadPromise) return serverPinLoadPromise;
-    serverPinLoadPromise = withServerPinMutation(async () => {
-      if (serverPinLoaded) return cachedServerPin ? { ...cachedServerPin } : null;
-      const raw = await storage.get(STORAGE_KEYS.SERVER_PQ_PIN);
+    const { url, key } = await serverPinContext();
+    return withServerPinMutation(async () => {
+      await assertServerPinContext(url);
+      if (cachedServerPinUrl === url) return cachedServerPin ? { ...cachedServerPin } : null;
+      cachedServerPin = null;
+      cachedServerPinUrl = null;
+      const raw = await storage.get(key);
+      await assertServerPinContext(url);
       if (raw === null) {
-        cachedServerPin = null;
-        serverPinLoaded = true;
+        cachedServerPinUrl = url;
         return null;
       }
       if (raw.length === 0) throw new Error('Pinned server identity record is invalid');
       if (raw.length > 10_000) throw new Error('Pinned server identity record is oversized');
       cachedServerPin = normalizeServerKeys(JSON.parse(raw));
-      serverPinLoaded = true;
+      cachedServerPinUrl = url;
       return { ...cachedServerPin };
     });
-    try {
-      return await serverPinLoadPromise;
-    } finally {
-      serverPinLoadPromise = null;
-    }
   },
   get(): PinnedServerKeys | null {
     return cachedServerPin ? { ...cachedServerPin } : null;
@@ -146,8 +157,10 @@ export const PinnedServer = {
   async establish(val: any, isCurrent: () => boolean): Promise<void> {
     const normalized = normalizeServerKeys(val);
     const serialized = JSON.stringify(normalized);
+    const { url, key } = await serverPinContext();
     await withServerPinMutation(async () => {
-      const previousRaw = await storage.get(STORAGE_KEYS.SERVER_PQ_PIN);
+      const previousRaw = await storage.get(key);
+      await assertServerPinContext(url);
       if (previousRaw !== null && typeof previousRaw !== 'string') {
         throw new Error('Pinned server identity record is invalid');
       }
@@ -165,32 +178,33 @@ export const PinnedServer = {
           throw new Error('Pinned server identity changed');
         }
         cachedServerPin = previousPin;
-        serverPinLoaded = true;
+        cachedServerPinUrl = url;
         return;
       }
 
-      if (!await storage.set(STORAGE_KEYS.SERVER_PQ_PIN, serialized)) {
+      if (!await storage.set(key, serialized)) {
         throw new Error('Failed to persist server identity pin');
       }
-      const stored = await storage.get(STORAGE_KEYS.SERVER_PQ_PIN);
+      const stored = await storage.get(key);
       if (stored !== serialized) throw new Error('Server identity pin verification failed');
 
-      if (!isCurrent()) {
+      const addressCurrent = normalizeToWss((await websocket.getServerUrl()) ?? '') === url;
+      if (!isCurrent() || !addressCurrent) {
         const restored = previousRaw === null
-          ? await storage.remove(STORAGE_KEYS.SERVER_PQ_PIN)
-          : await storage.set(STORAGE_KEYS.SERVER_PQ_PIN, previousRaw);
+          ? await storage.remove(key)
+          : await storage.set(key, previousRaw);
         if (!restored) throw new Error('Stale server identity pin could not be rolled back');
-        const restoredRaw = await storage.get(STORAGE_KEYS.SERVER_PQ_PIN);
+        const restoredRaw = await storage.get(key);
         if (restoredRaw !== previousRaw) {
           throw new Error('Stale server identity pin rollback could not be verified');
         }
-        cachedServerPin = previousPin;
-        serverPinLoaded = true;
+        cachedServerPin = null;
+        cachedServerPinUrl = null;
         throw new Error('Server identity pin operation is no longer current');
       }
 
       cachedServerPin = normalized;
-      serverPinLoaded = true;
+      cachedServerPinUrl = url;
     });
   }
 };

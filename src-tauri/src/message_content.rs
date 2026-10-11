@@ -184,19 +184,21 @@ fn parse_rgb(color: &str) -> QorcResult<(u8, u8, u8)> {
 }
 
 fn blend_pixel(destination: &mut [u8], source: [u8; 4]) {
-    let source_alpha = u16::from(source[3]);
-    let inverse = 255u16.saturating_sub(source_alpha);
-    let destination_alpha = u16::from(destination[3]);
+    let source_alpha = u32::from(source[3]);
+    let inverse = 255u32.saturating_sub(source_alpha);
+    let destination_alpha = u32::from(destination[3]);
     let output_alpha = source_alpha + (destination_alpha * inverse + 127) / 255;
     if output_alpha == 0 {
         destination.fill(0);
         return;
     }
     for channel in 0..3 {
-        let source_component = u16::from(source[channel]) * source_alpha;
+        let source_component = u32::from(source[channel]) * source_alpha;
         let destination_component =
-            u16::from(destination[channel]) * destination_alpha * inverse / 255;
-        destination[channel] = ((source_component + destination_component) / output_alpha) as u8;
+            u32::from(destination[channel]) * destination_alpha * inverse / 255;
+        destination[channel] =
+            ((source_component + destination_component + output_alpha / 2) / output_alpha)
+                .min(255) as u8;
     }
     destination[3] = output_alpha.min(255) as u8;
 }
@@ -208,6 +210,7 @@ pub fn render_private_message(
     color: &str,
     single_line: bool,
     max_lines: u32,
+    pixel_ratio: f32,
 ) -> QorcResult<RenderedMessageContent> {
     use base64::Engine as _;
     use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
@@ -217,6 +220,8 @@ pub fn render_private_message(
         || !font_size.is_finite()
         || !(10.0..=32.0).contains(&font_size)
         || max_lines > 8
+        || !pixel_ratio.is_finite()
+        || !(0.5..=4.0).contains(&pixel_ratio)
     {
         return Err(QorcError::InvalidArgument(
             "Invalid native message render dimensions".to_string(),
@@ -328,38 +333,50 @@ pub fn render_private_message(
     let height = measured_height
         .ceil()
         .clamp(line_height, MAX_RENDER_HEIGHT as f32) as u32;
-    let pixel_len = usize::try_from(width)
+    let pixel_width = (width as f32 * pixel_ratio).ceil() as u32;
+    let pixel_height = (height as f32 * pixel_ratio).ceil() as u32;
+    let pixel_len = usize::try_from(pixel_width)
         .ok()
-        .and_then(|value| value.checked_mul(height as usize))
+        .and_then(|value| value.checked_mul(pixel_height as usize))
         .and_then(|value| value.checked_mul(4))
         .ok_or_else(|| QorcError::InvalidArgument("Native render size overflow".to_string()))?;
     let mut pixels = Zeroizing::new(vec![0u8; pixel_len]);
     let base_color = Color::rgb(red, green, blue);
-    buffer.draw(
-        &mut font_system,
-        &mut swash_cache,
-        base_color,
-        |x, y, glyph_width, glyph_height, glyph_color| {
-            for offset_y in 0..glyph_height {
-                for offset_x in 0..glyph_width {
-                    let target_x = x + offset_x as i32 + 2;
-                    let target_y = y + offset_y as i32 + 2;
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let physical = glyph.physical(
+                (2.0 * pixel_ratio, (run.line_y + 2.0) * pixel_ratio),
+                pixel_ratio,
+            );
+            swash_cache.with_pixels(
+                &mut font_system,
+                physical.cache_key,
+                glyph.color_opt.unwrap_or(base_color),
+                |x, y, glyph_color| {
+                    let target_x = physical.x + x;
+                    let target_y = physical.y + y;
                     if target_x < 0
                         || target_y < 0
-                        || target_x >= width as i32
-                        || target_y >= height as i32
+                        || target_x >= pixel_width as i32
+                        || target_y >= pixel_height as i32
                     {
-                        continue;
+                        return;
                     }
-                    let index = ((target_y as usize * width as usize) + target_x as usize) * 4;
+                    let index =
+                        ((target_y as usize * pixel_width as usize) + target_x as usize) * 4;
                     blend_pixel(&mut pixels[index..index + 4], glyph_color.as_rgba());
-                }
-            }
-        },
-    );
+                },
+            );
+        }
+    }
     let mut encoded = Zeroizing::new(Vec::new());
     PngEncoder::new(&mut Cursor::new(&mut *encoded))
-        .write_image(pixels.as_slice(), width, height, ExtendedColorType::Rgba8)
+        .write_image(
+            pixels.as_slice(),
+            pixel_width,
+            pixel_height,
+            ExtendedColorType::Rgba8,
+        )
         .map_err(|_| QorcError::Internal("Native message PNG encoding failed".to_string()))?;
     if encoded.len() > 4 * 1024 * 1024 {
         return Err(QorcError::InvalidArgument(
@@ -880,6 +897,7 @@ mod tests {
             "#ffffff",
             false,
             0,
+            1.0,
         )
         .expect("message renders");
         let png = base64::engine::general_purpose::STANDARD
@@ -890,6 +908,48 @@ mod tests {
             !png.windows(b"unique-secret-render-sentinel".len())
                 .any(|window| { window == b"unique-secret-render-sentinel" })
         );
+    }
+
+    #[test]
+    fn overlapping_glyph_pixels_do_not_overflow() {
+        let mut pixel = [255, 255, 255, 128];
+        blend_pixel(&mut pixel, [255, 255, 255, 128]);
+        assert_eq!(pixel, [255, 255, 255, 192]);
+    }
+
+    #[test]
+    fn native_renderer_scales_pixels_without_changing_layout() {
+        use base64::Engine as _;
+        for (single_line, max_lines) in [(false, 0), (true, 0), (false, 2)] {
+            let text = "High DPI text stays sharp without changing wrapping or layout. ".repeat(3);
+            let baseline = render_private_message(
+                &text, 200, 14.0, "#ffffff", single_line, max_lines, 1.0,
+            ).unwrap();
+            for ratio in [1.25, 1.5, 2.0, 3.0, 4.0] {
+                let rendered = render_private_message(
+                    &text, 200, 14.0, "#ffffff", single_line, max_lines, ratio,
+                ).unwrap();
+                assert_eq!(
+                    (rendered.width, rendered.height),
+                    (baseline.width, baseline.height),
+                );
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(rendered.png_base64).unwrap();
+                let image = image::load_from_memory(&png).unwrap().to_rgba8();
+                assert_eq!(image.width(), (rendered.width as f32 * ratio).ceil() as u32);
+                assert_eq!(image.height(), (rendered.height as f32 * ratio).ceil() as u32);
+                assert!(image.pixels().any(|pixel| pixel[3] > 0));
+            }
+        }
+    }
+
+    #[test]
+    fn native_renderer_rejects_unbounded_pixel_ratios() {
+        for ratio in [0.0, -1.0, 4.1, f32::NAN, f32::INFINITY] {
+            assert!(
+                render_private_message("text", 200, 14.0, "#ffffff", false, 0, ratio).is_err()
+            );
+        }
     }
 
     #[test]

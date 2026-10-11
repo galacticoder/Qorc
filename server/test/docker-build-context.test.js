@@ -16,6 +16,8 @@ test('direct Docker builds exclude runtime environment secrets from every image'
   const root = path.resolve(import.meta.dirname, '../..');
   const ignored = new Set(fs.readFileSync(path.join(root, '.dockerignore'), 'utf8').split(/\r?\n/));
   for (const pattern of ['.env', '.env.*', '**/.env', '**/.env.*']) assert.ok(ignored.has(pattern));
+  assert.ok(ignored.has('!server/config/server-profile.js'));
+  assert.ok(SAFE_SERVER_CONFIG_FILES.includes('server-profile.js'));
   for (const file of fs.readdirSync(path.join(root, 'docker')).filter(name => name.startsWith('Dockerfile'))) {
     const source = fs.readFileSync(path.join(root, 'docker', file), 'utf8');
     assert.doesNotMatch(source, /^\s*(?:COPY|ADD)\s+[^\n]*\.env\b/im, file);

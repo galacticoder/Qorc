@@ -11,6 +11,8 @@ import { envInt } from '../utils/env.js';
 import { isSafeJsonTree, isSafeWireMessageType } from '../utils/validation.js';
 import { awaitMessageHandlerWithDeadline } from './message-handler-deadline.js';
 import { revokeAllWebSocketConnections } from './revoke-connections.js';
+import { loadServerProfile } from '../config/server-profile.js';
+import { encodeServerProfileTranscript } from '../../shared/server-profile.js';
 
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -53,7 +55,7 @@ function decodeTextFrame(raw, byteLength) {
 }
 
 // Attach WebSocket gateway
-export function attachGateway({
+export async function attachGateway({
   wss,
   serverHybridKeyPair,
   serverId,
@@ -73,6 +75,7 @@ export function attachGateway({
   if (typeof serverId !== 'string' || serverId.length === 0) {
     throw new Error('attachGateway requires serverId');
   }
+  const serverProfile = await loadServerProfile(serverId);
 
   const {
     bandwidthQuota = 5 * 1024 * 1024,
@@ -124,6 +127,7 @@ export function attachGateway({
     const keyPayload = {
       type: SignalType.SERVER_PUBLIC_KEY,
       serverId,
+      serverProfile,
       hybridKeys: {
         kyberPublicBase64,
         dilithiumPublicBase64,
@@ -131,6 +135,15 @@ export function attachGateway({
       },
       requiresServerPassword: isServerPasswordGateReady(),
     };
+    const signature = await CryptoUtils.Dilithium.sign(
+      encodeServerProfileTranscript(keyPayload),
+      serverHybridKeyPair.dilithium.secretKey
+    );
+    try {
+      keyPayload.serverProfileSignature = Buffer.from(signature).toString('base64');
+    } finally {
+      signature.fill(0);
+    }
     const currentPayload = {
       ...keyPayload,
       serverTime: Date.now()

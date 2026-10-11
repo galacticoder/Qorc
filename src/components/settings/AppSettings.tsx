@@ -7,13 +7,13 @@ import {
   Bell,
   Camera,
   Check,
-  ChevronDown,
   Copy,
   Headphones,
   LoaderCircle,
   LogOut,
   RefreshCw,
   ShieldCheck,
+  Server,
   SlidersHorizontal,
   Trash2,
   UserRound,
@@ -40,6 +40,8 @@ import {
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../ui/UserAvatar';
+import { SavedServersDialog } from '../servers/SavedServersDialog';
+import { AppSelect } from '../ui/AppSelect';
 import { installAppSettingsStyles } from './sections/AppSettingsStyles';
 import {
   readAppSettings,
@@ -214,6 +216,7 @@ export const AppSettings = React.memo(function AppSettings({
   const [unblockTarget, setUnblockTarget] = useState<string | null>(null);
   const [unblocking, setUnblocking] = useState(false);
   const [initialSettingsReady, setInitialSettingsReady] = useState(false);
+  const [savedServersOpen, setSavedServersOpen] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const profilePictureEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
   const blockStatusEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
@@ -706,6 +709,21 @@ export const AppSettings = React.memo(function AppSettings({
               </div>
             </section>
 
+            <section className="pane" data-settings-pane="servers">
+              <header className="pane-head">
+                <div className="pane-heading">
+                  <div className="pane-title-row">
+                    <Server className="pane-title-icon" aria-hidden="true" />
+                    <h2 className="pane-title">Servers</h2>
+                  </div>
+                </div>
+              </header>
+              <div className="settings-section"><div className="settings-list"><div className="setting-row">
+                <div><div className="setting-label">Saved servers</div><div className="setting-description">Add, edit, or remove saved servers.</div></div>
+                <button type="button" className="action" aria-haspopup="dialog" onClick={() => setSavedServersOpen(true)}><Server size={17} aria-hidden="true" /><span>Manage servers</span></button>
+              </div></div></div>
+            </section>
+
             <section className="pane" data-settings-pane="notifications">
               <header className="pane-head">
                 <div className="pane-heading">
@@ -770,39 +788,30 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-label">Microphone</div>
                       <div className="setting-description">Default microphone for calls.</div>
                     </div>
-                    <div className="device-select">
-                      <select className="select" value={preferredMicId} onChange={(event) => handleDevicePreference('preferredMicId', event.target.value)}>
-                        <option value="">System Default</option>
-                        {micDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0, 8)}`}</option>)}
-                      </select>
-                      <ChevronDown aria-hidden="true" />
-                    </div>
+                    <AppSelect className="device-select" label="Microphone" value={preferredMicId} onValueChange={(value) => handleDevicePreference('preferredMicId', value)} options={[
+                      { value: '', label: 'System Default' },
+                      ...micDevices.map((device) => ({ value: device.deviceId, label: device.label || `Microphone ${device.deviceId.slice(0, 8)}` })),
+                    ]} />
                   </div>
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Speaker</div>
                       <div className="setting-description">Default speaker for call audio output.</div>
                     </div>
-                    <div className="device-select">
-                      <select className="select" value={preferredSpeakerId} onChange={(event) => handleDevicePreference('preferredSpeakerId', event.target.value)}>
-                        <option value="">System Default</option>
-                        {speakerDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0, 8)}`}</option>)}
-                      </select>
-                      <ChevronDown aria-hidden="true" />
-                    </div>
+                    <AppSelect className="device-select" label="Speaker" value={preferredSpeakerId} onValueChange={(value) => handleDevicePreference('preferredSpeakerId', value)} options={[
+                      { value: '', label: 'System Default' },
+                      ...speakerDevices.map((device) => ({ value: device.deviceId, label: device.label || `Speaker ${device.deviceId.slice(0, 8)}` })),
+                    ]} />
                   </div>
                   <div className="setting-row">
                     <div>
                       <div className="setting-label">Camera</div>
                       <div className="setting-description">Default camera for video calls.</div>
                     </div>
-                    <div className="device-select">
-                      <select className="select" value={preferredCameraId} onChange={(event) => handleDevicePreference('preferredCameraId', event.target.value)}>
-                        <option value="">System Default</option>
-                        {cameraDevices.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId.slice(0, 8)}`}</option>)}
-                      </select>
-                      <ChevronDown aria-hidden="true" />
-                    </div>
+                    <AppSelect className="device-select" label="Camera" value={preferredCameraId} onValueChange={(value) => handleDevicePreference('preferredCameraId', value)} options={[
+                      { value: '', label: 'System Default' },
+                      ...cameraDevices.map((device) => ({ value: device.deviceId, label: device.label || `Camera ${device.deviceId.slice(0, 8)}` })),
+                    ]} />
                   </div>
                 </div>
               </div>
@@ -855,6 +864,7 @@ export const AppSettings = React.memo(function AppSettings({
           </section>
         </main>
 
+        <SavedServersDialog open={savedServersOpen} onOpenChange={setSavedServersOpen} />
         {unblockTarget && (
           <UnblockConfirmModal
             username={unblockTarget}

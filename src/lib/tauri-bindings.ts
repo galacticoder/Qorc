@@ -434,7 +434,7 @@ export const nativeMessageContent = {
         overwrite,
     }),
     has: (storageId: string) => invoke<boolean>('message_content_has', { storageId }),
-    render: (storageId: string, maxWidth: number, fontSize: number, color: string, singleLine = false, maxLines = 0) =>
+    render: (storageId: string, maxWidth: number, fontSize: number, color: string, singleLine: boolean, maxLines: number, pixelRatio: number) =>
         invoke<NativeRenderedMessageContent>('message_content_render', {
             storageId,
             maxWidth,
@@ -442,6 +442,7 @@ export const nativeMessageContent = {
             color,
             singleLine,
             maxLines,
+            pixelRatio,
         }),
     linkTargets: (storageId: string) =>
         invoke<NativeMessageLinkTarget[]>('message_content_link_targets', { storageId }),

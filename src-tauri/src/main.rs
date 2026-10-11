@@ -134,6 +134,7 @@ fn init_logging() {
         "qorc_lib::camera_capture=info",
         "qorc_lib::commands::microphone=info",
         "qorc_lib::microphone_capture=info",
+        "qorc_lib::audio_playback=info",
         "qorc_lib::commands::message_content=info",
         "qorc_lib::link_preview=info",
         "qorc_call_diag=info",

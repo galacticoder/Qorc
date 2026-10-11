@@ -6,7 +6,7 @@ import {
   getCurrentLocalAccountScope,
   loadLastAuthenticatedAccount,
 } from '../../lib/security/local-account-scope';
-import { computeBlindUserId } from '../../lib/utils/auth-utils';
+import { computeBlindUserId, PinnedServer } from '../../lib/utils/auth-utils';
 import {
   type AuthLifecycle,
   type AuthOperationSnapshot,
@@ -67,7 +67,7 @@ export function useBackgroundResume(
           }
         }
 
-        const storedAccount = explicitLogout || !configuredServerUrl
+        const storedAccount = explicitLogout || !configuredServerUrl || !await awaitCurrent(PinnedServer.load())
           ? null
           : await awaitCurrent(loadLastAuthenticatedAccount());
         const storedUsername = explicitLogout

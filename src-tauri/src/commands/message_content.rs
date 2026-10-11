@@ -123,6 +123,7 @@ pub async fn message_content_render(
     color: String,
     single_line: bool,
     max_lines: u32,
+    pixel_ratio: f32,
     state: State<'_, AppState>,
 ) -> Result<RenderedMessageContent, String> {
     let lifecycle_lock = state.inner().database_lifecycle_lock.clone();
@@ -149,6 +150,7 @@ pub async fn message_content_render(
             &color,
             single_line,
             max_lines,
+            pixel_ratio,
         )
     })
     .await
