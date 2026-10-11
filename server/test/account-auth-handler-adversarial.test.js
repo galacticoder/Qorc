@@ -117,11 +117,30 @@ test('login handler rejects forged, transplanted, expired, unbound and malformed
   ]) {
     const attempt = challenge();
     mutate(attempt);
+    const ownsChallenge = attempt.ws._loginAuthRequestId === attempt.message.authRequestId;
+    const pendingNonce = attempt.ws._loginServerNonce;
     await handler.handleSignInFinalize(attempt.ws, attempt.message);
     assert.equal(issuer.calls, 0);
     assert.equal(attempt.ws.responses.some(response => response.authenticated === true), false);
-    assert.equal(attempt.ws._loginServerNonce, null);
+    assert.equal(attempt.ws._loginServerNonce, ownsChallenge ? null : pendingNonce);
   }
+});
+
+test('a mismatched login finalization leaves the genuine challenge usable exactly once', async () => {
+  const handler = new AccountAuthHandler();
+  const issuer = countingIssuer();
+  handler.ppServer = issuer;
+  const { ws, message } = challenge();
+  const binding = ws._loginAuthChannelBinding;
+  await handler.handleSignInFinalize(ws, { ...message, authRequestId: crypto.randomUUID() });
+  assert.equal(issuer.calls, 0);
+  assert.equal(ws._loginAuthChannelBinding, binding);
+  assert.ok(binding.some(byte => byte !== 0));
+  assert.equal((await handler.handleSignInFinalize(ws, message)).success, true);
+  await handler.handleSignInFinalize(ws, message);
+  assert.equal(issuer.calls, 1);
+  assert.equal(ws._loginServerNonce, null);
+  assert.ok(binding.every(byte => byte === 0));
 });
 
 test('account refresh handler cannot amplify a spent token through concurrent commitments', async () => {

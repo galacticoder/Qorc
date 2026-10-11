@@ -125,6 +125,7 @@ commit-message.txt
 !server/test/
 server/test/*
 !server/test/account-auth-handler-adversarial.test.js
+!server/test/auth-attempt-retry.test.js
 !server/test/account-credential-encoding.test.js
 !server/test/docker-build-context.test.js
 !server/test/client-arm64-builder.test.js

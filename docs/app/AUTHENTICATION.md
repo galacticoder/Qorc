@@ -87,6 +87,17 @@ capacity. There are no shards and no shard identifier on the wire.
    tokens. The client atomically replaces its prior local batch instead of
    appending another batch.
 
+An incorrect password or passphrase can be rejected locally before any login
+finalization is sent. A fresh authentication request UUID, without a preflight
+solution, replaces an unfinished login or registration on the same connection.
+The server wipes the abandoned nonce, channel binding, and registration salt
+and requires a new request-bound proof-of-work preflight. This also allows
+switching from a failed login to registration immediately. It does not reset
+server-entry authorization, modify stored credentials, interrupt active
+finalization, or allow an authenticated connection to begin another account
+flow. Late proofs and finalization messages cannot consume the newer attempt's
+challenge.
+
 The PIR response decodes to one fixed width row even for a modified receiver. Query and public parameter encodings have exact protocol sizes,
 are committed into the authenticated preflight, and remain behind the global
 proof-ofwork and bounded expensive-auth admission queue.

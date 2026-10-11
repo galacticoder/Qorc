@@ -113,12 +113,43 @@ function authRequestCommitment(kind, data) {
 async function requireAuthPreflight(ws, data, kind, responseType, suppliedCommitment = null) {
   const authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
   const commitment = suppliedCommitment || authRequestCommitment(kind, data);
+  const state = SecureStateManager.getState(ws);
+  if (
+    ws._authenticated ||
+    ws._loginRequestInProgress ||
+    state.registrationFinalizeInProgress ||
+    state.registrationConfirmInProgress
+  ) {
+    await sendAuthError(ws, {
+      message: 'Authentication already in progress',
+      code: 'AUTH_IN_PROGRESS',
+      authRequestId
+    });
+    return false;
+  }
+  if (ws._loginServerNonce || state.pendingRegistration || state.registrationReadyRecordId) {
+    const pendingRequestId = ws._loginServerNonce
+      ? ws._loginAuthRequestId
+      : state.pendingRegistration
+        ? state.registrationAuthRequestId
+        : state.registrationReadyAuthRequestId;
+    if (pendingRequestId === authRequestId || Object.hasOwn(data, 'preflightPowSolution')) {
+      await sendAuthError(ws, {
+        message: 'Authentication already in progress',
+        code: 'AUTH_IN_PROGRESS',
+        authRequestId
+      });
+      return false;
+    }
+    clearPendingAccountAuth(ws);
+  }
   const pending = ws._authPreflight;
   const now = Date.now();
   const pendingIsLive = isAuthPreflightLive(pending, now);
   if (
     pendingIsLive &&
-    (pending?.kind !== kind || pending?.authRequestId !== authRequestId)
+    (pending?.kind !== kind || pending?.authRequestId !== authRequestId) &&
+    Object.hasOwn(data, 'preflightPowSolution')
   ) {
     await sendAuthError(ws, {
       message: 'Another authentication request is in progress',
@@ -187,6 +218,18 @@ export class SecureStateManager {
   }
 }
 
+function clearPendingAccountAuth(ws) {
+  SecureStateManager.clearState(ws);
+  ws._authPreflight = null;
+  ws._loginServerNonce = null;
+  ws._loginServerNonceAt = null;
+  ws._loginAuthRequestId = null;
+  wipeBytes(ws._loginAuthChannelBinding);
+  ws._loginAuthChannelBinding = null;
+  ws._loginPowSeed = null;
+  ws._loginPowDifficulty = 0;
+}
+
 export class AccountAuthHandler {
   constructor() {
     this.opaqueServer = OPAQUEServer;
@@ -195,16 +238,8 @@ export class AccountAuthHandler {
   }
 
   clearConnectionState(ws) {
-    SecureStateManager.clearState(ws);
+    clearPendingAccountAuth(ws);
     ServerGatekeeper.clearConnectionState(ws);
-    ws._authPreflight = null;
-    ws._loginServerNonce = null;
-    ws._loginServerNonceAt = null;
-    ws._loginAuthRequestId = null;
-    wipeBytes(ws._loginAuthChannelBinding);
-    ws._loginAuthChannelBinding = null;
-    ws._loginPowSeed = null;
-    ws._loginPowDifficulty = 0;
     ws._loginRequestInProgress = false;
     delete ws._connectionPrivacyMode;
   }
@@ -223,30 +258,13 @@ export class AccountAuthHandler {
         ? ['authRequestId', 'blindedElement', 'preflightPowSolution', 'type']
         : ['authRequestId', 'blindedElement', 'type'];
       if (!hasExactPlainObjectKeys(data, requestKeys)) {
-        ws._authPreflight = null;
+        if (ws._authPreflight?.authRequestId === authRequestId) ws._authPreflight = null;
         return sendAuthError(ws, {
           message: 'Invalid registration request',
           code: INVALID_REQUEST,
           authRequestId
         });
       }
-      const registrationState = SecureStateManager.getState(ws);
-      if (
-        ws._authenticated ||
-        registrationState.pendingRegistration ||
-        registrationState.registrationFinalizeInProgress ||
-        registrationState.registrationReadyRecordId ||
-        registrationState.registrationConfirmInProgress ||
-        ws._loginRequestInProgress ||
-        ws._loginServerNonce
-      ) {
-        return sendAuthError(ws, {
-          message: 'Registration already in progress',
-          code: 'AUTH_IN_PROGRESS',
-          authRequestId
-        });
-      }
-
       if (!await requireAuthPreflight(
         ws,
         data,
@@ -323,6 +341,9 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Registration state lost");
     }
     const registrationState = SecureStateManager.getState(ws);
+    if (registrationState.registrationAuthRequestId !== authRequestId) {
+      return sendAuthError(ws, { message: 'Registration state lost', code: INVALID_REQUEST, authRequestId });
+    }
     const {
       pendingRegistration,
       registrationFinalizeInProgress,
@@ -493,6 +514,10 @@ export class AccountAuthHandler {
 
     const recordId = UserDatabase.createRecordId(data.registrationAttemptId);
     const state = SecureStateManager.getState(ws);
+    if (state.registrationReadyAuthRequestId !== authRequestId) {
+      wipeBytes(registrationAttemptBytes);
+      return sendAuthError(ws, { message: 'Registration confirmation state lost', code: INVALID_REQUEST, authRequestId });
+    }
     const readyAgeMs = Date.now() - Number(state.registrationReadyAt);
     if (
       state.registrationConfirmInProgress ||
@@ -627,17 +652,6 @@ export class AccountAuthHandler {
     let authChannelBinding = null;
     try {
       authRequestId = requireUuidV4(data?.authRequestId, 'authentication request identifier');
-      const authState = SecureStateManager.getState(ws);
-      if (
-        ws._authenticated ||
-        authState.pendingRegistration ||
-        authState.registrationFinalizeInProgress ||
-        authState.registrationReadyRecordId ||
-        authState.registrationConfirmInProgress
-      ) {
-        return sendAuthError(ws, { message: 'Authentication already in progress', code: 'AUTH_IN_PROGRESS', authRequestId });
-      }
-
       const { blindedElement } = data;
       const hasPreflightProof = Object.hasOwn(data, 'preflightPowSolution');
       const requestKeys = hasPreflightProof
@@ -653,7 +667,7 @@ export class AccountAuthHandler {
           ]
         : ['authChannelBinding', 'authRequestId', 'blindedElement', 'requestCommitment', 'type'];
       if (!hasExactPlainObjectKeys(data, requestKeys)) {
-        ws._authPreflight = null;
+        if (ws._authPreflight?.authRequestId === authRequestId) ws._authPreflight = null;
         return sendAuthError(ws, {
           message: 'Invalid private auth request',
           code: 'INVALID_PRIVATE_AUTH_REQUEST',
@@ -712,19 +726,6 @@ export class AccountAuthHandler {
 
       if (ws._loginRequestInProgress) {
         return sendAuthError(ws, { message: 'Authentication request already in progress', code: 'AUTH_IN_PROGRESS', authRequestId });
-      }
-      if (ws._loginServerNonce) {
-        const nonceAge = Date.now() - Number(ws._loginServerNonceAt || 0);
-        if (Number.isSafeInteger(nonceAge) && nonceAge >= 0 && nonceAge <= LOGIN_FINALIZE_TTL_MS) {
-          return sendAuthError(ws, { message: 'Authentication finalization required', code: 'AUTH_IN_PROGRESS', authRequestId });
-        }
-        ws._loginServerNonce = null;
-        ws._loginServerNonceAt = null;
-        ws._loginAuthRequestId = null;
-        wipeBytes(ws._loginAuthChannelBinding);
-        ws._loginAuthChannelBinding = null;
-        ws._loginPowSeed = null;
-        ws._loginPowDifficulty = 0;
       }
       ws._loginRequestInProgress = true;
 
@@ -854,6 +855,9 @@ export class AccountAuthHandler {
       const stashedNonce = ws._loginServerNonce;
       const stashedNonceAt = Number(ws._loginServerNonceAt || 0);
       const stashedAuthRequestId = ws._loginAuthRequestId;
+      if (stashedAuthRequestId !== authRequestId) {
+        return sendAuthError(ws, { message: 'Invalid login finalization request', code: 'INVALID_FINALIZE_REQUEST', authRequestId });
+      }
       stashedAuthChannelBinding = ws._loginAuthChannelBinding;
       ws._loginServerNonce = null;
       ws._loginServerNonceAt = null;
