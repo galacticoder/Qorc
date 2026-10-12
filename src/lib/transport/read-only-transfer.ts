@@ -3,12 +3,18 @@ import { anonymousBodyTimeoutMs } from '../../../shared/anonymous-transfer-polic
 const RATE_CHECK_INTERVAL_MS = 5_000;
 const RATE_WINDOW_MS = 30_000;
 
+export interface AnonymousReadSpeedReference {
+  responseBytes: number;
+  bytesPerMs: number;
+}
+
 export async function transferAnonymousRead<T>(
   responseBytes: number,
   request: (signal: AbortSignal, progress: (bytes: number) => void) => Promise<T>,
   signal: AbortSignal,
   onProgress: (bytes: number) => void,
   onRetry?: () => void,
+  speedReference?: AnonymousReadSpeedReference,
 ): Promise<T> {
   const transferBudgetMs = anonymousBodyTimeoutMs(responseBytes);
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -38,8 +44,17 @@ export async function transferAnonymousRead<T>(
       const windowRate = (receivedBytes - baseline.bytes) / Math.max(1, now - baseline.at);
       const recentRate = (receivedBytes - recent.bytes) / Math.max(1, now - recent.at);
       const idle = now - lastByteAt >= RATE_WINDOW_MS;
-      if (idle || (windowRate < requiredRate && recentRate < requiredRate)) {
-        slowTransfer = new Error(`Anonymous download ${idle ? 'stalled' : 'too slow'}: received ${receivedBytes}/${responseBytes} bytes after ${Math.round(elapsed)} ms`);
+      const referenceRate = speedReference?.responseBytes === responseBytes &&
+        Number.isFinite(speedReference.bytesPerMs) && speedReference.bytesPerMs > 0
+        ? speedReference.bytesPerMs
+        : 0;
+      const batchOutlier = referenceRate > 0 &&
+        windowRate < referenceRate / 4 && recentRate < referenceRate / 4 &&
+        (responseBytes - receivedBytes) / Math.max(windowRate, recentRate) >
+          responseBytes / referenceRate + RATE_WINDOW_MS;
+      if (idle || (windowRate < requiredRate && recentRate < requiredRate) || batchOutlier) {
+        const reason = idle ? 'stalled' : batchOutlier ? 'slower than completed batch reads' : 'too slow';
+        slowTransfer = new Error(`Anonymous download ${reason}: received ${receivedBytes}/${responseBytes} bytes after ${Math.round(elapsed)} ms${batchOutlier ? ` (recent ${Math.round(recentRate * 1000 / 1024)} KiB/s, completed ${Math.round(referenceRate * 1000 / 1024)} KiB/s)` : ''}`);
         controller.abort();
       }
     }, RATE_CHECK_INTERVAL_MS);
@@ -58,6 +73,10 @@ export async function transferAnonymousRead<T>(
       });
       signal.throwIfAborted();
       controller.signal.throwIfAborted();
+      if (speedReference?.responseBytes === responseBytes && receivedBytes === responseBytes && startedAt !== undefined) {
+        const elapsed = performance.now() - startedAt;
+        if (elapsed > 0) speedReference.bytesPerMs = Math.max(speedReference.bytesPerMs, responseBytes / elapsed);
+      }
       return result;
     } catch (error) {
       signal.throwIfAborted();

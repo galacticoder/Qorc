@@ -229,6 +229,159 @@ test('a recovering transfer survives a low lifetime average when its recent rate
   assert.equal(await result, 'verified');
 });
 
+test('a completed bucket supplies a speed reference only after response verification succeeds', async (t) => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const reference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: 0 };
+  await transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, async (_signal, progress) => {
+    progress(0);
+    now = 20_000;
+    progress(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+    assert.equal(reference.bytesPerMs, 0);
+    return 'verified';
+  }, new AbortController().signal, () => {}, undefined, reference);
+  assert.equal(reference.bytesPerMs, ANONYMOUS_DISCOVERY_RESPONSE_BYTES / 20_000);
+  reference.bytesPerMs = 0;
+  await assert.rejects(transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, async (_signal, progress) => {
+    progress(0);
+    now += 20_000;
+    progress(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+    throw new Error('Invalid anonymous transport response signature');
+  }, new AbortController().signal, () => {}, undefined, reference));
+  assert.equal(reference.bytesPerMs, 0);
+});
+
+test('a 27 KiB/s bucket is retried instead of blocking a batch with healthy 20-second reads', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  const attempts = [];
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(console, 'warn', () => {});
+  const reference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: 0 };
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attempts.push(signal);
+    if (attempts.length === 2) return Promise.resolve('verified');
+    report = progress;
+    progress(0);
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  }, new AbortController().signal, () => {}, undefined, reference);
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    report(tick * 5 * 27 * 1024);
+    if (tick === 4) reference.bytesPerMs = ANONYMOUS_DISCOVERY_RESPONSE_BYTES / 20_000;
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(await result, 'verified');
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].aborted, true);
+  assert.notEqual(attempts[0], attempts[1]);
+});
+
+test('a nearly complete bucket is retained when restarting would take longer', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const reference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: ANONYMOUS_DISCOVERY_RESPONSE_BYTES / 20_000 };
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    progress(ANONYMOUS_DISCOVERY_RESPONSE_BYTES - 1_000_000);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {}, undefined, reference);
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES - 1_000_000 + tick * 5 * 27 * 1024);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('a recovering circuit is not retried merely because the batch reference is faster', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  let bytes = 0;
+  t.mock.method(performance, 'now', () => now);
+  const reference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: ANONYMOUS_DISCOVERY_RESPONSE_BYTES / 20_000 };
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {}, undefined, reference);
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    bytes += 5 * (tick <= 4 ? 27 : 300) * 1024;
+    report(bytes);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
+test('uniformly slow connections are not penalized by a reference from a different response size', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const reference = { responseBytes: 65536, bytesPerMs: 1000 };
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {}, undefined, reference);
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    report(tick * 5 * 27 * 1024);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+  assert.equal(reference.bytesPerMs, 1000);
+});
+
+test('uniformly slow same-size bucket reads keep the existing transfer budget', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0;
+  let report;
+  let complete;
+  let attemptSignal;
+  t.mock.method(performance, 'now', () => now);
+  const reference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: 27 * 1024 / 1000 };
+  const result = transferAnonymousRead(ANONYMOUS_DISCOVERY_RESPONSE_BYTES, (signal, progress) => {
+    attemptSignal = signal;
+    report = progress;
+    progress(0);
+    return new Promise(resolve => { complete = resolve; });
+  }, new AbortController().signal, () => {}, undefined, reference);
+  for (let tick = 1; tick <= 6; tick++) {
+    now = tick * 5000;
+    report(tick * 5 * 27 * 1024);
+    t.mock.timers.tick(5000);
+  }
+  assert.equal(attemptSignal.aborted, false);
+  report(ANONYMOUS_DISCOVERY_RESPONSE_BYTES);
+  complete('verified');
+  assert.equal(await result, 'verified');
+});
+
 test('retry progress resets only the interrupted bucket and remains explicit until it finishes', () => {
   const updates = [];
   const progress = progressModule.createBucketProgress(4, 100, value => updates.push(value));

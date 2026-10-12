@@ -8,7 +8,7 @@ export const formatClockDurationSeconds = (seconds: number): string => {
 };
 
 // Format a date as relative age string (now, Xm, Xh, Xd, or MM/DD/YY)
-export const formatRelativeAge = (date: Date | number | undefined): string => {
+export const formatRelativeAge = (date: Date | number | undefined, now = Date.now()): string => {
   if (date === undefined || date === null) return '';
 
   const dateObj = typeof date === 'number' ? new Date(date) : date;
@@ -16,8 +16,7 @@ export const formatRelativeAge = (date: Date | number | undefined): string => {
     return '';
   }
 
-  const now = new Date();
-  const diff = now.getTime() - dateObj.getTime();
+  const diff = now - dateObj.getTime();
 
   if (diff < 0) return '';
 

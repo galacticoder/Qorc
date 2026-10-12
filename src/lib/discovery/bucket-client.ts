@@ -283,6 +283,7 @@ async function fetchDiscoveryBlobsOnce(
     totalBytes: ids.length * ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
   });
   const reportProgress = createBucketProgress(ids.length, ANONYMOUS_DISCOVERY_RESPONSE_BYTES, onProgress);
+  const speedReference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: 0 };
   const perBucket = await runAnonymousRequestBatch(ids.map((id, index) => async (signal: AbortSignal) => {
     const response: unknown = await transferAnonymousRead(
       ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
@@ -309,6 +310,7 @@ async function fetchDiscoveryBlobsOnce(
       signal,
       (receivedBytes) => reportProgress(index, receivedBytes),
       () => reportProgress.retry(index),
+      speedReference,
     );
     await assertCurrentServerContext(context);
     if (!hasExactPlainRecordKeys(response, ['ok', 'epochId', 'bucketCount', 'buckets'])) {

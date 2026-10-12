@@ -160,6 +160,18 @@ The server never receives the four IDs as a set, it answers four
 indistinguishable single-bucket requests and can only correlate them through
 timing and volume.
 
+The client waits for all four authenticated bucket responses before returning
+material, including for an unknown sender's first message. Each lookup keeps a
+local speed reference from its completed same-size reads. After a 30-second
+measurement window, a circuit running below one quarter of that reference is
+retried only when its estimated remaining time exceeds a complete replacement
+download plus a 30-second connection allowance. A recovering or nearly complete
+download is retained. This avoids one unusually slow circuit blocking a batch
+for minutes without imposing a fixed speed requirement on uniformly slow
+connections. Retries remain bounded to three attempts, use fresh isolated
+requests, and keep the same bucket IDs, response sizes, cover count, and
+verification requirements.
+
 Each returned bucket has the configured target count, 64 by default. Real
 records are selected with a secret-keyed deterministic rank when a bucket is
 overloaded, remaining entries are fixed-size deterministic decoys. Ordering is

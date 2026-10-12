@@ -17,7 +17,7 @@ import {
   MAX_UI_CALL_STATUS_PEER_LENGTH,
   MAX_UI_CALL_STATUS_VALUE_LENGTH,
 } from '../../../lib/constants';
-import { formatRelativeAge } from "../../../lib/utils/date-utils";
+import { RelativeMessageTime } from './RelativeMessageTime';
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
 import { UnreadIndicator } from "./UnreadIndicator";
 import { TypingBubble } from "./TypingIndicator";
@@ -166,14 +166,13 @@ const ConversationItem = memo<ConversationItemProps>(({
               </Button>
           </div>
           {conversation.lastMessageTime && (
-            <span
+            <RelativeMessageTime
+              date={conversation.lastMessageTime}
               className={cn(
                 "qorc-conversation-time",
                 !isSelected && (conversation.unreadCount ?? 0) > 0 && "font-bold"
               )}
-            >
-              {formatRelativeAge(conversation.lastMessageTime)}
-            </span>
+            />
           )}
         </div>
 
