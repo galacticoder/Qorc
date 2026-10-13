@@ -65,7 +65,7 @@ export function ChatInput({
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [replyDisplaySender, setReplyDisplaySender] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const messageInputRef = useRef<HTMLInputElement>(null);
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const editingMessageIdRef = useRef<string | null>(null);
 
   const networkFileSender = useFileSender(
@@ -125,6 +125,25 @@ export function ChatInput({
     setShowVoiceRecorder(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [selectedConversation, currentUsername]);
+
+  useLayoutEffect(() => {
+    const input = messageInputRef.current;
+    if (!input) return;
+
+    const resize = () => {
+      input.style.height = 'auto';
+      input.style.height = `${input.scrollHeight}px`;
+    };
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth === width) return;
+      width = input.clientWidth;
+      resize();
+    });
+    resize();
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [message, disabledPlaceholder]);
 
   // Handle sending text messages or edits
   const handleSend = useCallback(() => {
@@ -251,14 +270,14 @@ export function ChatInput({
   }, [selectedConversation, validateFile, sendFile]);
 
   // Handle message input changes and typing indicators
-  const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setMessage(e.target.value);
     onTyping();
   }, [onTyping]);
 
   // Handle keyboard events
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -356,15 +375,16 @@ export function ChatInput({
             </div>
 
             {/* Message Input */}
-            <input
+            <textarea
               ref={messageInputRef}
               placeholder={disabledPlaceholder || (editingMessage
                 ? "Editing message..."
                 : replyTo
                   ? `Replying to ${replyDisplaySender || 'User'}...`
                   : "Message...")}
-              type="text"
+              rows={1}
               id="messageInput"
+              aria-label="Message"
               value={disabledPlaceholder ? '' : message}
               onChange={handleMessageChange}
               onKeyDown={handleKeyDown}

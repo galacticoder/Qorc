@@ -4,6 +4,11 @@ import { constants, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
+    TOR_BOOTSTRAP_TIMEOUT_MS,
+    TOR_PUBLICATION_TIMEOUT_MS,
+    TOR_PROCESS_STOP_TIMEOUT_MS,
+} from '../config/infrastructure.js';
+import {
     processMatchesExecutable,
     readProcessIdFileSnapshot,
     removeUnchangedProcessIdFile,
@@ -35,6 +40,15 @@ export class TorManager {
         this.checkInterval = 5000;
         this.isRunningState = false;
         this.isPublishedState = false;
+        this.isBootstrappedState = false;
+        this.publicationState = { offset: null, current: false, next: false };
+        this.startupLogOffset = 0;
+        this.startupHsLogOffset = 0;
+        this.startedAt = 0;
+        this.startPromise = null;
+        this.stopPromise = null;
+        this.startController = null;
+        this.isStopping = false;
     }
 
     async getOnionAddress() {
@@ -94,17 +108,16 @@ export class TorManager {
     }
 
     async hasPublishedDescriptorsSince(startOffset) {
-        const currentPublished = await this.logContainsSince(
-            this.hsLogPath,
-            startOffset,
-            'QORC_HS_DESC_READY current'
+        if (this.publicationState.offset !== startOffset) {
+            this.publicationState = { offset: startOffset, current: false, next: false };
+        }
+        this.publicationState.current ||= await this.logContainsSince(
+            this.hsLogPath, startOffset, 'QORC_HS_DESC_READY current'
         );
-        if (!currentPublished) return false;
-        return this.logContainsSince(
-            this.hsLogPath,
-            startOffset,
-            'QORC_HS_DESC_READY next'
+        this.publicationState.next ||= await this.logContainsSince(
+            this.hsLogPath, startOffset, 'QORC_HS_DESC_READY next'
         );
+        return this.publicationState.current && this.publicationState.next;
     }
 
     async logContainsSince(logPath, startOffset, marker) {
@@ -141,6 +154,11 @@ export class TorManager {
 
     async isRunning() {
         try {
+            if (this.torProcess && this.torProcess.exitCode === null &&
+                this.torProcess.signalCode === null &&
+                await processMatchesExecutable(this.torProcess.pid, this.getTorBinaryPath())) {
+                return true;
+            }
             const snapshot = await readProcessIdFileSnapshot(this.pidPath);
             return Boolean(snapshot?.pid && await processMatchesExecutable(snapshot.pid, this.getTorBinaryPath()));
         } catch { }
@@ -169,7 +187,6 @@ export class TorManager {
 
         const torrcContent = [
             `DataDirectory ${this.dataDir}`,
-            `PidFile ${this.pidPath}`,
             `Log notice file ${this.logPath}`,
             `Log [rend]info file ${this.hsLogPath}`,
             `HiddenServiceDir ${this.hiddenServiceDir}`,
@@ -182,89 +199,175 @@ export class TorManager {
         await fs.writeFile(this.torrcPath, torrcContent, { mode: 0o600 });
     }
 
-    async start(listenPort) {
-        await this.validateConfig(listenPort);
+    start(listenPort) {
+        if (this.isStopping) return Promise.resolve(false);
+        if (this.startPromise) return this.startPromise;
+        this.startController = new AbortController();
+        this.startPromise = this.launch(listenPort, this.startController.signal).finally(() => {
+            this.startPromise = null;
+        });
+        return this.startPromise;
+    }
 
-        if (await this.isRunning()) {
-            console.log('[TOR] Tor is already running.');
-            this.isRunningState = true;
-            return true;
-        }
+    async launch(listenPort, signal) {
+        await this.validateConfig(listenPort);
+        if (signal.aborted) return false;
+        const torBin = await this.getTorBinary();
+        await this.stopProcess();
+        if (signal.aborted) return false;
 
         console.log('[TOR] Starting Tor Hidden Service...');
         this.isPublishedState = false;
-
-        const torBin = await this.getTorBinary();
+        this.isBootstrappedState = false;
+        this.publicationState = { offset: null, current: false, next: false };
+        this._onionAddress = null;
 
         try {
-            const startupLogOffset = await this.getTorLogSize();
-            const startupHsLogOffset = await this.getHsLogSize();
+            this.startupLogOffset = await this.getTorLogSize();
+            this.startupHsLogOffset = await this.getHsLogSize();
             const logStream = await fs.open(this.logPath, 'a');
-            this.torProcess = spawn(torBin, ['-f', this.torrcPath], {
-                detached: true,
-                stdio: ['ignore', logStream.fd, logStream.fd],
-                env: this.getTorEnvironment()
-            });
-            this.torProcess.unref();
-            await logStream.close();
-
-            console.log('[TOR] Waiting for bootstrap and confirmed descriptor publication...');
-            for (let i = 0; ; i++) {
-                if (this.torProcess.exitCode !== null) {
-                    throw new Error(`Tor exited during startup (${this.torProcess.exitCode})`);
+            try {
+                if (signal.aborted) return false;
+                this.torProcess = spawn(torBin, ['-f', this.torrcPath], {
+                    detached: true,
+                    stdio: ['ignore', logStream.fd, logStream.fd],
+                    env: this.getTorEnvironment(),
+                    signal,
+                });
+                const child = this.torProcess;
+                child.on('exit', () => {
+                    if (this.torProcess !== child) return;
+                    this.isRunningState = false;
+                    this.isPublishedState = false;
+                });
+                await new Promise((resolve, reject) => {
+                    child.once('spawn', resolve);
+                    child.on('error', (error) => {
+                        if (this.torProcess === child) {
+                            this.isRunningState = false;
+                            this.isPublishedState = false;
+                        }
+                        reject(error);
+                    });
+                });
+                child.unref();
+                const pidFile = await fs.open(this.pidPath,
+                    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+                    0o600);
+                let pidStat;
+                try {
+                    pidStat = await pidFile.stat();
+                    await pidFile.writeFile(`${child.pid}\n`, { encoding: 'utf8' });
+                    await pidFile.sync();
+                } catch (error) {
+                    if (pidStat) await removeUnchangedProcessIdFile(this.pidPath, { device: pidStat.dev, inode: pidStat.ino });
+                    throw error;
+                } finally {
+                    await pidFile.close();
                 }
-                const addr = await this.getOnionAddress();
-                const bootstrapped = await this.hasBootstrappedSince(startupLogOffset);
-                const published = await this.hasPublishedDescriptorsSince(startupHsLogOffset);
-                if (addr && bootstrapped && published) {
-                    console.log(`[TOR] Onion URL: https://${addr}`);
-                    console.log('[TOR] Hidden-service descriptor accepted by an HSDir.');
-                    this.isRunningState = true;
-                    this.isPublishedState = true;
-                    return true;
-                }
-                if (i > 0 && i % 300 === 0) {
-                    console.warn('[TOR] Descriptor publication is still pending');
-                }
-                await new Promise((resolve) => setTimeout(resolve, 1000));
+            } finally {
+                await logStream.close();
             }
+            if (signal.aborted) return false;
+            if (this.torProcess.exitCode !== null || this.torProcess.signalCode !== null) {
+                throw new Error(`Tor exited during startup (${this.torProcess.exitCode ?? this.torProcess.signalCode})`);
+            }
+            this.isRunningState = true;
+            this.startedAt = Date.now();
+            this.lastCheck = 0;
+            console.log('[TOR] Waiting for bootstrap and confirmed descriptor publication...');
+            return true;
         } catch (err) {
+            if (signal.aborted) return false;
             console.error('[TOR] Failed to start Tor:', err.message);
             throw err;
         }
     }
 
-    async stop() {
+    stop() {
+        if (this.stopPromise) return this.stopPromise;
+        this.isStopping = true;
+        this.isPublishedState = false;
+        this.startController?.abort();
+        this.stopPromise = (async () => {
+            await this.startPromise?.catch(() => {});
+            await this.stopProcess();
+            this.isRunningState = false;
+            this.isBootstrappedState = false;
+        })();
+        return this.stopPromise;
+    }
+
+    async stopProcess() {
         try {
+            const child = this.torProcess;
+            if (child && !child.killed && child.exitCode === null && child.signalCode === null) {
+                child.kill('SIGTERM');
+            }
             const snapshot = await readProcessIdFileSnapshot(this.pidPath);
+            const ownsSnapshot = !child || snapshot?.pid === child.pid;
             if (snapshot) {
                 const { pid } = snapshot;
-                if (pid && await processMatchesExecutable(pid, this.getTorBinaryPath())) {
+                if (ownsSnapshot && pid && await processMatchesExecutable(pid, this.getTorBinaryPath())) {
                     console.log(`[TOR] Stopping Tor (PID: ${pid})...`);
-                    try { process.kill(pid, 'SIGTERM'); } catch { }
+                    if (pid !== child?.pid || !child.killed) {
+                        try { process.kill(pid, 'SIGTERM'); } catch (error) {
+                            if (error.code !== 'ESRCH') throw error;
+                        }
+                    }
                 } else {
                     console.warn('[TOR] Refusing to signal a PID not owned by bundled Tor');
                 }
+            }
+            const ownedPids = new Set([ownsSnapshot ? snapshot?.pid : null, child?.pid].filter(pid => Number.isSafeInteger(pid) && pid > 0));
+            const deadline = Date.now() + TOR_PROCESS_STOP_TIMEOUT_MS;
+            for (const pid of ownedPids) {
+                while (await processMatchesExecutable(pid, this.getTorBinaryPath())) {
+                    if (Date.now() >= deadline) throw new Error('Tor did not stop before its shutdown deadline');
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+            }
+            if (snapshot && ownsSnapshot) {
                 if (!await removeUnchangedProcessIdFile(this.pidPath, snapshot)) {
                     throw new Error('Tor PID file changed while stopping');
                 }
             }
             this.isRunningState = false;
             this.isPublishedState = false;
+            this.torProcess = null;
         } catch (err) {
             console.error('[TOR] Error stopping Tor:', err.message);
+            throw err;
         }
     }
 
     async monitor(listenPort) {
+        if (this.isStopping) return;
         const now = Date.now();
         if (now - this.lastCheck < this.checkInterval) return;
         this.lastCheck = now;
 
         const stillRunning = await this.isRunning();
-        if (!stillRunning && this.isRunningState) {
-            console.log('[TOR] Tor service died unexpectedly, restarting...');
+        if (this.isStopping) return;
+        if (!stillRunning || this.startedAt === 0) {
+            if (this.startedAt > 0) console.log('[TOR] Tor service died unexpectedly, restarting...');
+            this.isPublishedState = false;
             await this.start(listenPort);
+            return;
         }
+
+        if (this.isPublishedState) return;
+        this.isBootstrappedState ||= await this.hasBootstrappedSince(this.startupLogOffset);
+        const published = await this.hasPublishedDescriptorsSince(this.startupHsLogOffset);
+        const addr = await this.getOnionAddress();
+        if (this.isStopping) return;
+        if (addr && this.isBootstrappedState && published) {
+            console.log(`[TOR] Onion URL: https://${addr}`);
+            console.log('[TOR] Hidden-service descriptor accepted by an HSDir.');
+            this.isPublishedState = true;
+            return;
+        }
+        const timeout = this.isBootstrappedState ? TOR_PUBLICATION_TIMEOUT_MS : TOR_BOOTSTRAP_TIMEOUT_MS;
+        if (Date.now() - this.startedAt >= timeout) await this.start(listenPort);
     }
 }

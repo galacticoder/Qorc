@@ -79,6 +79,7 @@ function fixture(t, options = {}) {
       calls.encrypt += 1;
       return 'ciphertext';
     },
+    encryptContentRef: async (...args) => signal.encrypt(...args),
   };
   const refs = [];
   let refIndex = 0;
@@ -107,7 +108,7 @@ function fixture(t, options = {}) {
     signal,
     shouldAttemptDiscovery: () => true,
     extractX25519FromSignalBundle: () => hybridKeys.x25519PublicBase64,
-    loadTrustedPersistedDiscoveryMaterial: async () => null,
+    loadTrustedPersistedDiscoveryMaterial: async () => options.persistedMaterial ?? null,
     resolveTrustedPeerHybridPublicKeys: async () => ({
       valid: options.trusted !== false,
       hybridKeys,
@@ -149,7 +150,9 @@ function fixture(t, options = {}) {
   };
   render();
   t.after(() => { for (const cleanup of cleanups) cleanup(); });
-  const encrypt = (type = SignalType.RECEIPT_BATCH) => provider('bob', { deliveredIds: ['a'.repeat(32)], readIds: [] }, type);
+  const encrypt = (type = SignalType.RECEIPT_BATCH) => provider('bob', type === SignalType.MESSAGE
+    ? { messageId: 'a'.repeat(32), nativeContentRef: 'a'.repeat(32), content: '' }
+    : { deliveredIds: ['a'.repeat(32)], readIds: [] }, type);
   return { calls, state, encrypt, window, render, loginUsernameRef, unifiedSignalTransport };
 }
 
@@ -223,6 +226,17 @@ test('a restored native key needs no discovery or bundle installation', async (t
   assert.equal(f.calls.nativeKey, 1);
   assert.equal(f.calls.discovery, 0);
   assert.equal(f.calls.install, 0);
+});
+
+test('restored peer routing keys allow a first send without network discovery after login', async (t) => {
+  const f = fixture(t, {
+    routingKeys: false, persistedMaterial: material, state: { staticKey: true },
+    findUser: () => { throw new Error('A restored authorized peer must not require discovery'); },
+  });
+  assert.ok(await f.encrypt(SignalType.MESSAGE));
+  assert.equal(f.calls.discovery, 0);
+  assert.equal(f.calls.encrypt, 1);
+  assert.deepEqual(f.calls.denials, []);
 });
 
 test('typing defers explicitly and a receipt joins its pending key installation', async (t) => {

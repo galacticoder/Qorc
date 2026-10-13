@@ -240,6 +240,15 @@ failed refresh leaves the retained material available to messaging and calling
 while later background checks retry. Newly discovered material still requires
 an unexpired certificate and complete transparency verification.
 
+After a saved record passes restoration against the exact current authorization
+and its signatures, the same material remains eligible for encryption and
+Signal-bundle validation after certificate freshness expiry. Restoring a known
+peer must not succeed in the loader and then fail in a second validator as if it
+were a new discovery. This retained status is local to the validated object;
+copies and newly downloaded records still require an unexpired certificate.
+Revocation, account changes, altered signatures, and authorization-generation
+changes continue to invalidate retained material.
+
 A deliberately rejected alternative: publishing a per-record hash alongside the
 blob and fetching it by PIR as a version check. It would have worked, but a
 plaintext per-user hash is a stable identifier until the user rotates keys, a PIR

@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { Pencil, Reply, Trash2, Download, SmilePlus, Copy } from 'lucide-react';
+import { Pencil, Reply, Trash2, Download, Loader2, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
 interface MessageAnchorRect {
@@ -25,7 +25,8 @@ interface MessageContextMenuProps {
     onDelete?: () => void;
     onReact?: (position: MenuPosition) => void;
     onReactionSelect?: (emoji: string) => void;
-    onDownload?: () => void;
+    onDownload?: () => void | Promise<void>;
+    isDownloading: boolean;
     canEdit: boolean;
     canDelete: boolean;
     isFile: boolean;
@@ -43,6 +44,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     onReact,
     onReactionSelect,
     onDownload,
+    isDownloading,
     canEdit,
     canDelete,
     isFile,
@@ -208,12 +210,18 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                 {isFile && (
                     <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); onDownload?.(); onClose(); }}
+                        onClick={async (e) => {
+                            e.stopPropagation();
+                            try { await onDownload?.(); }
+                            finally { if (menuRef.current) onClose(); }
+                        }}
                         className="qorc-message-context-action"
-                        title="Download"
-                        aria-label="Download"
+                        disabled={isDownloading}
+                        aria-busy={isDownloading || undefined}
+                        title={isDownloading ? 'Preparing download…' : 'Download'}
+                        aria-label={isDownloading ? 'Preparing download…' : 'Download'}
                     >
-                        <Download className="w-5 h-5" />
+                        {isDownloading ? <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" /> : <Download className="w-5 h-5" aria-hidden="true" />}
                     </button>
                 )}
 

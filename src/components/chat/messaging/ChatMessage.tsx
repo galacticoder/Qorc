@@ -113,10 +113,17 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
 
   const [contextMenu, setContextMenu] = useState<{ anchorRect: MessageAnchorRect } | null>(null);
   const [isContentRendered, setIsContentRendered] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const downloadGenerationRef = useRef(0);
+  const pendingDownloadRef = useRef(false);
   useEffect(() => {
     downloadGenerationRef.current += 1;
-    return () => { downloadGenerationRef.current += 1; };
+    pendingDownloadRef.current = false;
+    setIsDownloading(false);
+    return () => {
+      downloadGenerationRef.current += 1;
+      pendingDownloadRef.current = false;
+    };
   }, [message.id, secureDB]);
 
   const { systemLabel, systemActions, systemIsError, systemCallType, systemShowCallIcon } = useMemo(() => {
@@ -193,8 +200,11 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
 
   // Handle file download
   const handleDownload = useCallback(async () => {
+    if (pendingDownloadRef.current) return;
     const generation = downloadGenerationRef.current;
     const database = secureDB;
+    pendingDownloadRef.current = true;
+    setIsDownloading(true);
     try {
       if (!database || !message.id) throw new Error('Encrypted file storage is unavailable');
       const blob = await database.getFile(message.id);
@@ -210,8 +220,14 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
         setTimeout(() => URL.revokeObjectURL(url), 0);
       }
     } catch (error) {
+      if (generation !== downloadGenerationRef.current) return;
       console.error('Failed to download file:', error);
       alert('Failed to download file');
+    } finally {
+      if (generation === downloadGenerationRef.current) {
+        pendingDownloadRef.current = false;
+        setIsDownloading(false);
+      }
     }
   }, [message, secureDB, timestamp]);
 
@@ -409,6 +425,8 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
                     secureDB={secureDB}
                     onRendered={() => setIsContentRendered(true)}
                     loadFile={loadFile}
+                    onDownload={handleDownload}
+                    isDownloading={isDownloading}
                   />
                 )}
                 {messageReactions}
@@ -502,6 +520,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
           onReact={onReact ? (origin) => openPicker(messageTriggerId, origin) : undefined}
           onReactionSelect={onReact ? handlePickEmoji : undefined}
           onDownload={isDownloadable ? handleDownload : undefined}
+          isDownloading={isDownloading}
           canEdit={!isFileMessageType && safeIsCurrentUser && !!onEdit}
           canDelete={safeIsCurrentUser}
           isFile={isFileMessageType}

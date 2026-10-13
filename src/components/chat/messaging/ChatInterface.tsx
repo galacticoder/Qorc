@@ -110,6 +110,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onTogglePin,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const interfaceRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
 
   const displayResolverRef = useRef(getDisplayUsername);
   useEffect(() => { displayResolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
@@ -172,6 +174,22 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       container.scrollTo({ top: 0, behavior: 'auto' });
     } catch { }
   }, []);
+
+  useLayoutEffect(() => {
+    const root = interfaceRef.current;
+    const composer = composerRef.current;
+    if (!root || !composer) return;
+    const measure = () => {
+      root.style.setProperty('--qorc-composer-height', `${composer.getBoundingClientRect().height}px`);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(composer);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty('--qorc-composer-height');
+    };
+  }, [openingConversation, selectedConversation]);
 
   useLayoutEffect(() => {
     prevMessagesLengthRef.current = messages.length;
@@ -614,7 +632,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }
 
   return (
-    <div className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
+    <div ref={interfaceRef} className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
       <div
         className="qorc-toolbar"
       >
@@ -726,6 +744,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       </ScrollArea>
 
       <div
+        ref={composerRef}
         className="qorc-composer-wrap"
       >
         {keyChangePending ? (

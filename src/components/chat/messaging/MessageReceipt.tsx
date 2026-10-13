@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { MessageReceipt as ReceiptType } from './types';
 import { Check, CheckCheck, Loader2 } from 'lucide-react';
 import { cn } from '../../../lib/utils/shared-utils';
@@ -22,8 +22,8 @@ export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurre
 		);
 	}
 
-	const readTime = useMemo(() => formatReceiptTime(receipt.readAt), [receipt?.readAt]);
-	const deliveredTime = useMemo(() => formatReceiptTime(receipt.deliveredAt), [receipt?.deliveredAt]);
+	const readTime = formatReceiptTime(receipt.readAt);
+	const deliveredTime = formatReceiptTime(receipt.deliveredAt);
 
 	if (receipt.read) {
 		return (

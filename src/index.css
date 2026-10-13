@@ -3264,7 +3264,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   width: 100%;
   flex: 0 0 auto;
   gap: 0;
-  padding: 80px 16px 112px;
+  padding: 80px 16px calc(var(--qorc-composer-height, 70px) + 2px);
 }
 
 .qorc-message-stack.is-empty {
@@ -4328,9 +4328,9 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-message-box {
   width: 100%;
-  height: 42px;
+  min-height: 42px;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 0;
   min-width: 0;
   border: 0;
@@ -4354,7 +4354,7 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-file-upload-wrapper,
 .qorc-voice-button-wrap {
-  height: 100%;
+  height: 42px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -4399,13 +4399,20 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 .qorc-message-input {
   flex: 1;
   min-width: 0;
-  height: 100%;
+  height: 42px;
+  min-height: 42px;
+  max-height: 122px;
+  box-sizing: border-box;
+  resize: none;
+  overflow-y: auto;
   border: 0;
   outline: none;
-  padding: 0 10px;
+  padding: 11px 10px;
   background: transparent;
   color: var(--qorc-text);
+  font-family: inherit;
   font-size: 14px;
+  line-height: 20px;
   user-select: text;
 }
 
@@ -4474,6 +4481,12 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 
 .qorc-file-card[role="button"]:hover {
   background: #e5e5e9;
+}
+
+.qorc-file-card[aria-busy="true"],
+.qorc-file-preview-trigger:disabled,
+.qorc-file-dl:disabled {
+  cursor: progress;
 }
 
 .qorc-file-media-card {
@@ -4567,7 +4580,6 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
 }
 
 .qorc-file-dl:disabled {
-  cursor: default;
   opacity: .55;
 }
 

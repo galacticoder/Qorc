@@ -14,6 +14,8 @@ import {
 } from '../discovery/persisted-discovery-material';
 import { persistPeerDetectionKey } from '../spool/detection-key';
 
+const retainedDiscoveryMaterials = new WeakSet<object>();
+
 export async function loadTrustedPersistedDiscoveryMaterial(
     accountUsername: string,
     peerUsername: string
@@ -56,6 +58,7 @@ export async function loadTrustedPersistedDiscoveryMaterial(
         peerUsername,
         material.spoolDetectionKey,
       );
+      retainedDiscoveryMaterials.add(material);
       return material;
     }
   }
@@ -129,7 +132,7 @@ async function validateCertifiedDiscoveryMaterial(
   peerUsername: string,
   material: any,
   observedFullBundle?: unknown,
-  allowExpired = false,
+  allowExpired = retainedDiscoveryMaterials.has(material),
 ): Promise<CertifiedDiscoveryValidationResult> {
   if (!isKeyTransparencyVerifiedMaterial(material, accountUsername, peerUsername)) {
     return { valid: false, reason: 'KEY_TRANSPARENCY_NOT_VERIFIED' };

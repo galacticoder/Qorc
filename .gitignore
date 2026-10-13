@@ -24,6 +24,7 @@ coverage/
 
 server/config/*
 !server/config/config.js
+!server/config/infrastructure.js
 !server/config/server-profile.js
 !server/config/constants.js
 !server/config/secure-credentials.js
@@ -139,6 +140,9 @@ server/test/*
 !server/test/discovery-diagnostics.test.js
 !server/test/auth-connection-lifecycle.test.js
 !server/test/encryption-provider-readiness.test.js
+!server/test/certified-identity-client-utils.test.js
+!server/test/chat-ui-interactions.test.js
+!server/test/loadbalancer-startup.test.js
 !server/test/websocket-control-backpressure.test.js
 !server/test/p2p-startup-readiness.test.js
 !server/test/native-context-menu-policy.test.js

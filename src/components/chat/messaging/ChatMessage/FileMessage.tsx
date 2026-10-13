@@ -1,10 +1,9 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Download } from "lucide-react";
+import { Download, Loader2 } from "lucide-react";
 import { cn } from "../../../../lib/utils/shared-utils";
 import { useFileUrl } from "../../../../hooks/file-handling/useFileUrl";
 import {
-  createDownloadLink,
   formatFileSize,
   hasExtension,
   isSafeFileUrl,
@@ -20,6 +19,8 @@ interface FileContentProps {
   readonly secureDB: SecureDB;
   readonly onRendered: () => void;
   readonly loadFile: boolean;
+  readonly onDownload: () => Promise<void>;
+  readonly isDownloading: boolean;
 }
 
 export const FileContent: React.FC<FileContentProps> = ({
@@ -27,6 +28,8 @@ export const FileContent: React.FC<FileContentProps> = ({
   secureDB,
   onRendered,
   loadFile,
+  onDownload,
+  isDownloading,
 }) => {
   const { filename, fileSize, mimeType } = message;
   const [imageError, setImageError] = React.useState(false);
@@ -34,9 +37,7 @@ export const FileContent: React.FC<FileContentProps> = ({
   const [audioError, setAudioError] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
   const [imageLoaded, setImageLoaded] = React.useState(false);
-  const [downloadRequested, setDownloadRequested] = React.useState(false);
   const [mediaRequested, setMediaRequested] = React.useState(false);
-  const pendingDownloadRef = React.useRef(false);
   const onRenderedRef = React.useRef(onRendered);
   onRenderedRef.current = onRendered;
 
@@ -67,7 +68,7 @@ export const FileContent: React.FC<FileContentProps> = ({
     onRenderedRef.current();
   }, [message.id]);
 
-  const previewKind = mediaRequested && !downloadRequested
+  const previewKind = mediaRequested
     ? isImageFile
       ? 'image'
       : isVideoFile
@@ -81,7 +82,7 @@ export const FileContent: React.FC<FileContentProps> = ({
     secureDB,
     fileId: message.id,
     mimeType: mimeType || 'application/octet-stream',
-    enabled: loadFile && (mediaRequested || downloadRequested),
+    enabled: loadFile && mediaRequested,
     previewKind,
   });
   const effectiveFileUrl = isSafeFileUrl(resolvedFileUrl);
@@ -95,40 +96,25 @@ export const FileContent: React.FC<FileContentProps> = ({
   }, [effectiveFileUrl]);
 
   const sizeLabel = formatFileSize(fileSize ?? 0);
-  const downloadFile = () => {
-    if (effectiveFileUrl) {
-      createDownloadLink(effectiveFileUrl, filename || 'download');
-      return;
-    }
-    pendingDownloadRef.current = true;
-    setDownloadRequested(true);
-  };
+  const downloadLabel = isDownloading ? 'Preparing download…' : 'Download file';
+  const downloadIcon = isDownloading
+    ? <Loader2 className="w-[18px] h-[18px] animate-spin" aria-hidden="true" />
+    : <Download className="w-[18px] h-[18px]" aria-hidden="true" />;
 
-  useEffect(() => {
-    if (!effectiveFileUrl || !pendingDownloadRef.current) return;
-    pendingDownloadRef.current = false;
-    createDownloadLink(effectiveFileUrl, filename || 'download');
-    setDownloadRequested(false);
-  }, [effectiveFileUrl, filename]);
-
-  useEffect(() => {
-    if (!fileLoadError || !pendingDownloadRef.current) return;
-    pendingDownloadRef.current = false;
-    setDownloadRequested(false);
-  }, [fileLoadError]);
-
-  const fileCard = (children: React.ReactNode, onClick?: () => void, label?: string) => (
+  const fileCard = (children: React.ReactNode, onClick?: () => void) => (
     <div
       className="qorc-file-card"
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
-      aria-label={onClick ? label : undefined}
-      title={onClick ? label : undefined}
-      onClick={onClick}
+      aria-label={onClick ? downloadLabel : undefined}
+      aria-busy={isDownloading || undefined}
+      aria-disabled={onClick ? isDownloading : undefined}
+      title={onClick ? downloadLabel : undefined}
+      onClick={onClick && !isDownloading ? onClick : undefined}
       onKeyDown={onClick ? (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          onClick();
+          if (!isDownloading) onClick();
         }
       } : undefined}
     >
@@ -138,29 +124,30 @@ export const FileContent: React.FC<FileContentProps> = ({
   );
 
   const mediaCard = (onOpen: () => void, label: string) => (
-    <div className="qorc-file-card qorc-file-media-card">
+    <div className="qorc-file-card qorc-file-media-card" aria-busy={isDownloading || undefined}>
       <button
         type="button"
         className="qorc-file-preview-trigger"
         onClick={onOpen}
         aria-label={label}
         title={label}
+        disabled={isDownloading}
       >
         <MaterialFileIcon fileName={filename} className="qorc-file-card-icon" />
         <span className="qorc-file-meta">
           <span className="qorc-file-name" title={filename}>{filename || 'File'}</span>
-          <span className="qorc-file-size">{sizeLabel}</span>
+          <span className="qorc-file-size" aria-live="polite">{isDownloading ? downloadLabel : sizeLabel}</span>
         </span>
       </button>
       <button
         type="button"
         className="qorc-file-dl"
-        onClick={downloadFile}
-        disabled={downloadRequested}
-        aria-label="Download file"
-        title="Download file"
+        onClick={onDownload}
+        disabled={isDownloading}
+        aria-label={downloadLabel}
+        title={downloadLabel}
       >
-        <Download className="w-[18px] h-[18px]" aria-hidden="true" />
+        {downloadIcon}
       </button>
     </div>
   );
@@ -173,7 +160,7 @@ export const FileContent: React.FC<FileContentProps> = ({
       )}
 
       {!isGenericFile && mediaRequested && fileLoadError && mediaCard(
-        downloadFile,
+        onDownload,
         'Download file',
       )}
 
@@ -269,12 +256,11 @@ export const FileContent: React.FC<FileContentProps> = ({
         <>
           <div className="qorc-file-meta">
             <span className="qorc-file-name" title={filename}>{filename || 'File'}</span>
-            <span className="qorc-file-size">{sizeLabel}</span>
+            <span className="qorc-file-size" aria-live="polite">{isDownloading ? downloadLabel : sizeLabel}</span>
           </div>
-          <div className="qorc-file-dl" aria-hidden="true"><Download className="w-[18px] h-[18px]" /></div>
+          <div className="qorc-file-dl" aria-hidden="true">{downloadIcon}</div>
         </>,
-        downloadFile,
-        'Download file',
+        onDownload,
       )}
     </>
   );

@@ -41,6 +41,11 @@ class AutoLoadBalancer {
     this.listenPort = DEFAULT_HTTPS_PORT;
     this.lastServerHash = '';
     this.monitorInterval = null;
+    this.monitorPromise = null;
+    this.commandSetupPromise = null;
+    this.stopPromise = null;
+    this.signalHandlers = [];
+    this.beforeExitHandler = null;
     this.isStopping = false;
 
     const here = fileURLToPath(import.meta.url);
@@ -135,8 +140,18 @@ class AutoLoadBalancer {
   }
 
   // Monitor cluster and manage load balancer
-  async monitor() {
+  monitor() {
+    if (this.isStopping) return Promise.resolve();
+    if (this.monitorPromise) return this.monitorPromise;
+    this.monitorPromise = this.monitorOnce().finally(() => {
+      this.monitorPromise = null;
+    });
+    return this.monitorPromise;
+  }
+
+  async monitorOnce() {
     const servers = await this.getActiveServers();
+    if (this.isStopping) return;
     const serverCount = servers.length;
     const serverHash = this.generateServerHash(servers);
     const serversChanged = serverHash !== this.lastServerHash;
@@ -156,6 +171,7 @@ class AutoLoadBalancer {
 
     if (serversChanged || !this.haproxyManager.isRunning) {
       await this.generateHAProxyConfig(servers);
+      if (this.isStopping) return;
       if (this.haproxyManager.isRunning) {
         await this.haproxyManager.reload();
       } else {
@@ -164,11 +180,12 @@ class AutoLoadBalancer {
       this.lastServerHash = serverHash;
     }
 
+    if (this.isStopping) return;
     await this.torManager.monitor(this.listenPort);
 
     const onionAddr = await this.torManager.getOnionAddress();
     await withRedisClient(async (client) => {
-      if (onionAddr && this.torManager.isPublished()) {
+      if (!this.isStopping && onionAddr && this.torManager.isPublished()) {
         await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`);
       } else {
         await client.del(REDIS_KEYS.LB_ONION_ADDRESS);
@@ -229,26 +246,6 @@ class AutoLoadBalancer {
     console.log(`\tLock file: ${LOADBALANCER_LOCK_FILE}`);
     console.log(`\tRedis: ${safeServiceEndpointForDisplay(process.env.REDIS_URL)}`);
 
-    const noGui = (process.env.NO_GUI || 'false').toLowerCase() === 'true';
-    if (!noGui) {
-      await this.commandListener.setup();
-    } else {
-      console.log('\t[INIT] Skipping command listener (NO_GUI mode)');
-    }
-
-    await this.monitor();
-    await this.torManager.start(this.listenPort);
-
-    this.monitorInterval = setInterval(() => {
-      this.monitor().catch((error) => {
-        console.error('[AUTO-LB] Monitor cycle failed', error);
-        this.stop(1).catch((shutdownError) => {
-          console.error('[AUTO-LB] Fatal shutdown failed', shutdownError);
-          process.exit(1);
-        });
-      });
-    }, 1000);
-
     const handleShutdown = (signal) => {
       if (this.isStopping) {
         return;
@@ -260,20 +257,49 @@ class AutoLoadBalancer {
       });
     };
 
-    process.on('SIGINT', () => handleShutdown('SIGINT'));
-    process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      const handler = () => handleShutdown(signal);
+      this.signalHandlers.push([signal, handler]);
+      process.on(signal, handler);
+    }
 
-    process.on('beforeExit', async () => {
+    this.beforeExitHandler = async () => {
       await this.releaseLock();
-    });
+    };
+    process.on('beforeExit', this.beforeExitHandler);
+
+    const noGui = (process.env.NO_GUI || 'false').toLowerCase() === 'true';
+    if (!noGui) {
+      this.commandSetupPromise = this.commandListener.setup();
+      await this.commandSetupPromise;
+    } else {
+      console.log('\t[INIT] Skipping command listener (NO_GUI mode)');
+    }
+    if (this.isStopping) return;
+
+    await this.monitor();
+    if (this.isStopping) return;
+
+    this.monitorInterval = setInterval(() => {
+      if (this.isStopping || this.monitorPromise) return;
+      this.monitor().catch((error) => {
+        console.error('[AUTO-LB] Monitor cycle failed', error);
+        this.stop(1).catch((shutdownError) => {
+          console.error('[AUTO-LB] Fatal shutdown failed', shutdownError);
+          process.exit(1);
+        });
+      });
+    }, 1000);
   }
 
-  async stop(exitCode = 0) {
-    if (this.isStopping) {
-      return;
-    }
+  stop(exitCode = 0) {
+    if (this.stopPromise) return this.stopPromise;
     this.isStopping = true;
+    this.stopPromise = this.shutdown(exitCode);
+    return this.stopPromise;
+  }
 
+  async shutdown(exitCode) {
     console.log('\n[SHUTDOWN] Stopping load balancer monitor...');
     console.log(`\tMonitor PID: ${process.pid}`);
 
@@ -283,32 +309,42 @@ class AutoLoadBalancer {
       console.log('\t[OK] Stopped monitoring interval');
     }
 
-    await this.commandListener.stop();
+    for (const [signal, handler] of this.signalHandlers) process.removeListener(signal, handler);
+    this.signalHandlers = [];
+    if (this.beforeExitHandler) process.removeListener('beforeExit', this.beforeExitHandler);
+    this.beforeExitHandler = null;
 
-    if (this.haproxyManager.isRunning || (this.haproxyManager.pidFile && existsSync(this.haproxyManager.pidFile))) {
-      console.log('\t[OK] Stopping HAProxy...');
-      await this.haproxyManager.stop();
-    }
+    const stoppingTor = this.torManager.isRunningState || Boolean(this.torManager.startPromise);
+    if (stoppingTor) console.log('\t[OK] Stopping Tor service...');
+    const pending = await Promise.allSettled([
+      this.torManager.stop(), this.monitorPromise, this.commandSetupPromise,
+    ]);
+    if (stoppingTor && pending[0].status === 'fulfilled') console.log('\t[OK] Tor service terminated');
 
-    if (await this.torManager.isRunning()) {
-      console.log('\t[OK] Stopping Tor service...');
-      await this.torManager.stop();
-      console.log('\t[OK] Tor service terminated');
-    }
+    const cleanup = await Promise.allSettled([
+      this.commandListener.stop(),
+      (async () => {
+        if (this.haproxyManager.isRunning || (this.haproxyManager.pidFile && existsSync(this.haproxyManager.pidFile))) {
+          console.log('\t[OK] Stopping HAProxy...');
+          await this.haproxyManager.stop();
+        }
+      })(),
+      withRedisClient(client => client.del(REDIS_KEYS.LB_ONION_ADDRESS)),
+    ]);
 
     await this.releaseLock();
     console.log('\t[OK] Released process lock\n');
 
-    process.exit(exitCode);
+    process.exit(exitCode || (pending.concat(cleanup).some(result => result.status === 'rejected') ? 1 : 0));
   }
 }
 
 // CLI mode
 if (import.meta.url === `file://${process.argv[1]}`) {
   const manager = new AutoLoadBalancer();
-  manager.start().catch(error => {
+  manager.start().catch(async error => {
     console.error('Fatal error:', error);
-    process.exit(1);
+    await manager.stop(1);
   });
 }
 
