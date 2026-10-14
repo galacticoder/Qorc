@@ -7,7 +7,11 @@ import {
     TOR_BOOTSTRAP_TIMEOUT_MS,
     TOR_PUBLICATION_TIMEOUT_MS,
     TOR_PROCESS_STOP_TIMEOUT_MS,
+    TOR_HEALTH_CHECK_INTERVAL_MS,
+    TOR_HEALTH_CHECK_TIMEOUT_MS,
+    TOR_HEALTH_LEASE_MS,
 } from '../config/infrastructure.js';
+import { probeOnionHttps } from './onion-health.js';
 import {
     processMatchesExecutable,
     readProcessIdFileSnapshot,
@@ -34,6 +38,7 @@ export class TorManager {
         this.pidPath = path.join(this.dataDir, 'tor.pid');
         this.logPath = path.join(this.dataDir, 'tor.log');
         this.hsLogPath = path.join(this.dataDir, 'tor-hs.log');
+        this.proxyPath = path.join(this.dataDir, 'health-proxy.sock');
         this.torProcess = null;
         this._onionAddress = null;
         this.lastCheck = 0;
@@ -49,6 +54,12 @@ export class TorManager {
         this.stopPromise = null;
         this.startController = null;
         this.isStopping = false;
+        this.healthProbePromise = null;
+        this.healthController = null;
+        this.healthGeneration = 0;
+        this.lastHealthCheckAt = 0;
+        this.lastReachableAt = 0;
+        this.unreachableSince = 0;
     }
 
     async getOnionAddress() {
@@ -166,7 +177,65 @@ export class TorManager {
     }
 
     isPublished() {
-        return this.isPublishedState;
+        return this.isPublishedState && Date.now() - this.lastReachableAt < TOR_HEALTH_LEASE_MS;
+    }
+
+    probeReachability(onionAddress, signal) {
+        const certificatePath = process.env.TLS_CERT_PATH;
+        if (typeof certificatePath !== 'string' || certificatePath.length === 0) {
+            return Promise.reject(new Error('TLS_CERT_PATH is required for onion health verification'));
+        }
+        return probeOnionHttps({
+            proxyPath: this.proxyPath,
+            onionAddress,
+            certificatePath: path.resolve(__dirname, '..', '..', certificatePath),
+            timeoutMs: TOR_HEALTH_CHECK_TIMEOUT_MS,
+            signal,
+        });
+    }
+
+    checkReachability(onionAddress) {
+        if (this.healthProbePromise || this.isStopping) return;
+        const generation = this.healthGeneration;
+        this.lastHealthCheckAt = Date.now();
+        this.healthController = new AbortController();
+        this.healthProbePromise = this.probeReachability(onionAddress, this.healthController.signal)
+            .catch(error => {
+                if (generation === this.healthGeneration && !this.isStopping) {
+                    console.warn('[TOR-HEALTH] Reachability verification failed', {
+                        errorCode: error.code || error.name,
+                        elapsedMs: Date.now() - this.lastHealthCheckAt,
+                    });
+                }
+                return false;
+            })
+            .then(reachable => {
+                if (generation !== this.healthGeneration || this.isStopping) return;
+                if (reachable !== this.isPublishedState) {
+                    console.info('[TOR-HEALTH] Verified readiness changed', { reachable });
+                }
+                this.isPublishedState = reachable;
+                if (reachable) {
+                    this.lastReachableAt = Date.now();
+                    this.unreachableSince = 0;
+                } else {
+                    this.unreachableSince ||= Date.now();
+                }
+            })
+            .finally(() => {
+                if (generation === this.healthGeneration) this.healthProbePromise = null;
+            });
+    }
+
+    resetReachability() {
+        this.healthGeneration++;
+        this.healthController?.abort();
+        this.healthController = null;
+        this.healthProbePromise = null;
+        this.lastHealthCheckAt = 0;
+        this.lastReachableAt = 0;
+        this.unreachableSince = 0;
+        this.isPublishedState = false;
     }
 
     async validateConfig(listenPort) {
@@ -192,7 +261,8 @@ export class TorManager {
             `HiddenServiceDir ${this.hiddenServiceDir}`,
             `HiddenServicePort 443 127.0.0.1:${listenPort}`,
             `HiddenServiceNumIntroductionPoints ${HIDDEN_SERVICE_INTRO_POINTS}`,
-            `SocksPort 0`,
+            `SocksPort unix:${this.proxyPath} IsolateSOCKSAuth`,
+            `SafeSocks 1`,
             `RunAsDaemon 0`,
         ].join('\n');
 
@@ -218,6 +288,7 @@ export class TorManager {
 
         console.log('[TOR] Starting Tor Hidden Service...');
         this.isPublishedState = false;
+        this.resetReachability();
         this.isBootstrappedState = false;
         this.publicationState = { offset: null, current: false, next: false };
         this._onionAddress = null;
@@ -238,14 +309,14 @@ export class TorManager {
                 child.on('exit', () => {
                     if (this.torProcess !== child) return;
                     this.isRunningState = false;
-                    this.isPublishedState = false;
+                    this.resetReachability();
                 });
                 await new Promise((resolve, reject) => {
                     child.once('spawn', resolve);
                     child.on('error', (error) => {
                         if (this.torProcess === child) {
                             this.isRunningState = false;
-                            this.isPublishedState = false;
+                            this.resetReachability();
                         }
                         reject(error);
                     });
@@ -299,6 +370,7 @@ export class TorManager {
     }
 
     async stopProcess() {
+        this.resetReachability();
         try {
             const child = this.torProcess;
             if (child && !child.killed && child.exitCode === null && child.signalCode === null) {
@@ -356,15 +428,20 @@ export class TorManager {
             return;
         }
 
-        if (this.isPublishedState) return;
         this.isBootstrappedState ||= await this.hasBootstrappedSince(this.startupLogOffset);
         const published = await this.hasPublishedDescriptorsSince(this.startupHsLogOffset);
         const addr = await this.getOnionAddress();
         if (this.isStopping) return;
         if (addr && this.isBootstrappedState && published) {
-            console.log(`[TOR] Onion URL: https://${addr}`);
-            console.log('[TOR] Hidden-service descriptor accepted by an HSDir.');
-            this.isPublishedState = true;
+            if (this.lastHealthCheckAt === 0 || now - this.lastHealthCheckAt >= TOR_HEALTH_CHECK_INTERVAL_MS) {
+                this.checkReachability(addr);
+            }
+            if (this.isPublished()) return;
+        }
+        if (this.lastReachableAt > 0) {
+            if (this.unreachableSince > 0 && now - this.unreachableSince >= TOR_PUBLICATION_TIMEOUT_MS) {
+                await this.start(listenPort);
+            }
             return;
         }
         const timeout = this.isBootstrappedState ? TOR_PUBLICATION_TIMEOUT_MS : TOR_BOOTSTRAP_TIMEOUT_MS;

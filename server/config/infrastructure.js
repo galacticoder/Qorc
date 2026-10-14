@@ -8,6 +8,10 @@ export const TEMP_DIRECTORY = os.tmpdir();
 export const TOR_BOOTSTRAP_TIMEOUT_MS = 5 * 60 * 1000;
 export const TOR_PUBLICATION_TIMEOUT_MS = 15 * 60 * 1000;
 export const TOR_PROCESS_STOP_TIMEOUT_MS = 10 * 1000;
+export const TOR_HEALTH_CHECK_INTERVAL_MS = 60 * 1000;
+export const TOR_HEALTH_CHECK_TIMEOUT_MS = 130 * 1000;
+export const TOR_HEALTH_LEASE_MS = 3 * 60 * 1000;
+export const LOADBALANCER_ADDRESS_LEASE_MS = 45 * 1000;
 
 export function haproxyStatsSocketPath() {
   if (typeof process.getuid !== 'function') throw new Error('HAProxy requires a POSIX runtime');

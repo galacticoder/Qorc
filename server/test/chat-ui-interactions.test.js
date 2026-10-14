@@ -109,6 +109,15 @@ const fileUtils = {
   parseCurrentVoiceNoteFilename: () => null,
 };
 
+test('selected conversations keep the same options pill and readable theme colors', () => {
+  const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+  const pill = css.match(/\.qorc-conversation-action-pill\s*\{([^}]+)\}/)?.[1];
+  assert.match(pill, /background:\s*#e9e9e9/);
+  assert.match(pill, /color:\s*var\(--qorc-text\)/);
+  assert.match(css, /\.dark \.qorc-conversation-action-pill\s*\{\s*background:\s*var\(--qorc-conversation-card-bg\)/);
+  assert.doesNotMatch(css, /\.is-selected\s+\.qorc-conversation-(?:action-pill|tiny-btn)(?::hover)?\s*\{/);
+});
+
 test('composer sends newlines, preserves Shift+Enter, and does not send IME confirmation', () => {
   const host = hookHost();
   const sent = [];

@@ -143,6 +143,8 @@ server/test/*
 !server/test/certified-identity-client-utils.test.js
 !server/test/chat-ui-interactions.test.js
 !server/test/loadbalancer-startup.test.js
+!server/test/onion-health.test.js
+!server/test/pir-snapshot-responsiveness.test.js
 !server/test/websocket-control-backpressure.test.js
 !server/test/p2p-startup-readiness.test.js
 !server/test/native-context-menu-policy.test.js

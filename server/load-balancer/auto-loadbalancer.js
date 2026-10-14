@@ -16,6 +16,7 @@ import {
   IS_ROOT,
   TEMP_DIRECTORY,
   haproxyStatsDashboardUrl,
+  LOADBALANCER_ADDRESS_LEASE_MS,
 } from '../config/infrastructure.js';
 import { REDIS_KEYS } from '../config/redis-keys.js';
 import { processMatchesExecutable, readProcessIdFileSnapshot } from '../utils/process-identity.js';
@@ -39,7 +40,7 @@ const LOADBALANCER_ENTRY_PATH = fileURLToPath(import.meta.url);
 class AutoLoadBalancer {
   constructor() {
     this.listenPort = DEFAULT_HTTPS_PORT;
-    this.lastServerHash = '';
+    this.lastServerHash = null;
     this.monitorInterval = null;
     this.monitorPromise = null;
     this.commandSetupPromise = null;
@@ -155,6 +156,8 @@ class AutoLoadBalancer {
     const serverCount = servers.length;
     const serverHash = this.generateServerHash(servers);
     const serversChanged = serverHash !== this.lastServerHash;
+    await this.haproxyManager.refreshRunningState();
+    if (this.isStopping) return;
 
     if (serversChanged) {
       console.log(`\n[SERVER CHANGE] ${serverCount} server(s) detected`);
@@ -185,8 +188,9 @@ class AutoLoadBalancer {
 
     const onionAddr = await this.torManager.getOnionAddress();
     await withRedisClient(async (client) => {
-      if (!this.isStopping && onionAddr && this.torManager.isPublished()) {
-        await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`);
+      if (!this.isStopping && serverCount > 0 && this.haproxyManager.isRunning &&
+          onionAddr && this.torManager.isPublished()) {
+        await client.set(REDIS_KEYS.LB_ONION_ADDRESS, `https://${onionAddr}`, 'PX', LOADBALANCER_ADDRESS_LEASE_MS);
       } else {
         await client.del(REDIS_KEYS.LB_ONION_ADDRESS);
       }

@@ -193,6 +193,7 @@ defaults
     timeout tunnel  ${this.timeouts.tunnel}
     timeout http-keep-alive ${this.timeouts.httpKeepAlive}
     timeout http-request    ${this.timeouts.httpRequest}
+    timeout check          10s
     
     # Retry policy
     retries 3
@@ -259,6 +260,18 @@ frontend https-in
     
     # Default backend for HTTP requests
     default_backend http_backend
+
+resolvers qorc_backends
+    parse-resolv-conf
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 5s
+    hold nx 1s
+    hold refused 1s
+    hold timeout 1s
+    hold other 1s
+    hold obsolete 5s
 
 #---------------------------------------------------------------------
 # Backend: HTTP traffic
@@ -329,7 +342,7 @@ cache quantum_cache
       return `\t# No backend servers available - HAProxy will return 503 Service Unavailable`;
     }
     return this.backends.map(backend => {
-      const checkParams = `check inter 2s fall 2 rise 2`;
+      const checkParams = `check inter 2s fall 3 rise 2 resolvers qorc_backends resolve-prefer ipv4 init-addr none`;
       const sslParams = `ssl verify required ca-file ${this.backendCaFile}`;
       const alpnParam = type === 'websocket' ? 'alpn http/1.1' : 'alpn h2,http/1.1';
       const cookieParam = type === 'websocket' ? '' : 'cookie SERVERID ';

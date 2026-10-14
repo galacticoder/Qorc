@@ -2226,6 +2226,7 @@ html.light .qorc-conversation-empty-lines span,
   overflow: hidden;
   border-radius: 9px;
   background: #e9e9e9;
+  color: var(--qorc-text);
   opacity: 0;
   transition: opacity .18s ease, background .18s ease;
 }
@@ -2238,11 +2239,6 @@ html.light .qorc-conversation-empty-lines span,
 .qorc-conversation-action-pill:focus-within,
 .qorc-conversation-action-pill:has([data-state="open"]) {
   opacity: 1;
-}
-
-.qorc-conversation-item.is-selected .qorc-conversation-action-pill {
-  background: rgba(255, 255, 255, .14);
-  color: inherit;
 }
 
 .qorc-conversation-tiny-btn {
@@ -2264,16 +2260,8 @@ html.light .qorc-conversation-empty-lines span,
   background: var(--qorc-conversation-card-hover-bg) !important;
 }
 
-.qorc-conversation-item.is-selected .qorc-conversation-tiny-btn:hover {
-  background: rgba(255, 255, 255, .18) !important;
-}
-
 .qorc-conversation-tiny-btn.danger {
   color: #e3616a !important;
-}
-
-.qorc-conversation-item.is-selected .qorc-conversation-tiny-btn {
-  color: #fff !important;
 }
 
 /* add conversation modal */

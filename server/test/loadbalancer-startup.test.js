@@ -4,14 +4,71 @@ import fsAsync from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import ts from 'typescript';
 import * as infrastructure from '../config/infrastructure.js';
 import { readProcessIdFileSnapshot } from '../utils/process-identity.js';
+import { HAProxyConfigGenerator } from '../load-balancer/haproxy-config-generator.js';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const keys = { CLUSTER_SERVERS: 'servers', LB_ONION_ADDRESS: 'onion', LB_HTTPS_PORT: 'https-port' };
+
+test('both bundled edge runtimes contain the authenticated current Tor source and publication patch', () => {
+  const metadata = JSON.parse(fs.readFileSync(path.join(repo, 'docker/tor/manifest.json'), 'utf8'));
+  const dockerfile = fs.readFileSync(path.join(repo, 'docker/Dockerfile.loadbalancer'), 'utf8');
+  const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+  assert.equal(digest(fs.readFileSync(path.join(repo, 'docker/tor', metadata.patch))), metadata.patch_sha256);
+  assert.match(dockerfile, new RegExp(`org\\.qorc\\.tor\\.version="${metadata.version.replaceAll('.', '\\.')}"`));
+  assert.ok(dockerfile.includes(`org.qorc.tor.source-sha256="${metadata.source_sha256}"`));
+  assert.ok(dockerfile.includes(`org.qorc.tor.patch-sha256="${metadata.patch_sha256}"`));
+  for (const [architecture, target, machine] of [['amd64', 'x86_64', 62], ['arm64', 'arm64', 183]]) {
+    const archive = path.join(repo, `docker/edge-runtime/qorc-edge-runtime-linux-${target}-v1.tar.gz`);
+    const expected = dockerfile.match(new RegExp(`${architecture}\\) archive=[^;]+; expected=([a-f0-9]{64})`))?.[1];
+    assert.equal(digest(fs.readFileSync(archive)), expected);
+    const manifest = JSON.parse(execFileSync('tar', ['-xzOf', archive, 'qorc-edge/manifest.json'], { encoding: 'utf8' }));
+    assert.equal(manifest.target, `linux-${target}-glibc-2.35`);
+    assert.equal(manifest.tor.version, metadata.version);
+    assert.equal(manifest.tor.source_sha256, metadata.source_sha256);
+    assert.equal(manifest.tor.patch_sha256, metadata.patch_sha256);
+    const binary = execFileSync('tar', ['-xzOf', archive, 'qorc-edge/tor/tor'], { maxBuffer: 32 * 1024 * 1024 });
+    assert.equal(binary.readUInt16LE(18), machine);
+    assert.equal(digest(binary), manifest.tor.binary_sha256);
+    assert.equal(manifest.files['tor/tor'], manifest.tor.binary_sha256);
+  }
+});
+
+test('generated proxy health checks tolerate transient work and re-resolve Docker backends', () => {
+  const generator = new HAProxyConfigGenerator({
+    listenPort: 8443, statsPort: 8404, tlsCertPath: '/fixture/certs',
+    statsUsername: 'fixture', statsPassword: 'fixture-password-123456', statsBindAddress: '127.0.0.1',
+  });
+  generator.addBackend({ name: 'server-main', host: 'server', port: 3000 });
+  const config = generator.generateConfig();
+  assert.match(config, /timeout check\s+10s/);
+  assert.equal((config.match(/check inter 2s fall 3 rise 2/g) || []).length, 2);
+  assert.match(config, /resolvers qorc_backends\n\s+parse-resolv-conf/);
+  assert.match(config, /hold valid 5s/);
+  assert.equal((config.match(/resolvers qorc_backends resolve-prefer ipv4 init-addr none/g) || []).length, 2);
+  assert.equal((config.match(/verify required/g) || []).length, 2);
+});
+
+test('headless load-balancer startup never opens the terminal renderer and propagates its mode', () => {
+  const source = fs.readFileSync(path.join(repo, 'scripts/start-loadbalancer.cjs'), 'utf8');
+  const expression = source.match(/NO_GUI:\s*([^,]+),\s*HAPROXY_HTTPS_PORT:/)?.[1];
+  assert.ok(expression);
+  const headless = new Function('process', `return (${expression});`);
+  for (const [flag, stdin, stdout, expected] of [
+    ['false', false, false, true], ['false', true, false, true],
+    ['false', false, true, true], ['true', true, true, true], ['false', true, true, false],
+  ]) {
+    assert.equal(headless({ env: { NO_GUI: flag }, stdin: { isTTY: stdin }, stdout: { isTTY: stdout } }), expected);
+  }
+  assert.match(source, /NO_GUI:\s*String\(CONFIG\.NO_GUI\)/);
+  assert.match(source, /await ui\.start\(\);\s*\} catch \(error\) \{\s*child\.kill\('SIGTERM'\)/);
+});
 
 function load(relativePath, mocks, processMock, clock = Date, schedule = setTimeout) {
   const filename = path.join(repo, relativePath);
@@ -33,7 +90,7 @@ function load(relativePath, mocks, processMock, clock = Date, schedule = setTime
     id => {
       if (Object.hasOwn(mocks, id)) return mocks[id];
       throw new Error(`Unmocked dependency: ${id}`);
-    }, module, module.exports, processMock, { log() {}, warn() {}, error() {} }, clock, schedule,
+    }, module, module.exports, processMock, { log() {}, info() {}, warn() {}, error() {} }, clock, schedule,
   );
   return module.exports;
 }
@@ -92,6 +149,7 @@ function torFixture(context, { clock = Date, schedule = setTimeout, failSpawn = 
     child_process: { spawn, execFileSync() {} }, 'fs/promises': fsAsync,
     fs, path, url: { fileURLToPath },
     '../config/infrastructure.js': infrastructure,
+    './onion-health.js': {},
     '../utils/process-identity.js': {
       processMatchesExecutable: async pid => live.has(pid),
       readProcessIdFileSnapshot: async () => {
@@ -116,8 +174,10 @@ function torFixture(context, { clock = Date, schedule = setTimeout, failSpawn = 
   manager.pidPath = path.join(directory, 'tor.pid');
   manager.logPath = path.join(directory, 'tor.log');
   manager.hsLogPath = path.join(directory, 'tor-hs.log');
+  manager.proxyPath = path.join(directory, 'health-proxy.sock');
   manager.checkInterval = 0;
   manager.getTorBinary = async () => manager.getTorBinaryPath();
+  manager.probeReachability = async () => true;
   fs.mkdirSync(manager.hiddenServiceDir, { mode: 0o700 });
   fs.writeFileSync(path.join(manager.hiddenServiceDir, 'hostname'), `${'a'.repeat(56)}.onion\n`);
   fs.writeFileSync(path.join(manager.hiddenServiceDir, 'hs_ed25519_secret_key'), 'preserved-identity');
@@ -133,6 +193,25 @@ function torFixture(context, { clock = Date, schedule = setTimeout, failSpawn = 
     next() { fs.appendFileSync(manager.hsLogPath, 'QORC_HS_DESC_READY next\n'); },
   };
 }
+
+test('an exited Tor process cannot regain readiness from its outstanding health probe', async context => {
+  const fixture = torFixture(context);
+  const { manager } = fixture;
+  await manager.start(8443);
+  const probe = deferred();
+  manager.probeReachability = () => probe.promise;
+  manager.checkReachability('a'.repeat(56) + '.onion');
+  const completion = manager.healthProbePromise;
+  const child = manager.torProcess;
+  fixture.live.delete(child.pid);
+  child.exitCode = 1;
+  child.emit('exit', 1, null);
+  probe.resolve(true);
+  await completion;
+  assert.equal(manager.isPublished(), false);
+  assert.equal(manager.lastReachableAt, 0);
+  assert.equal(manager.healthProbePromise, null);
+});
 
 test('Tor launch returns while publication is pending and requires both fresh descriptors', async context => {
   const fixture = torFixture(context);
@@ -150,6 +229,7 @@ test('Tor launch returns while publication is pending and requires both fresh de
   assert.equal(fixture.children.length, 1);
   fixture.next();
   await manager.monitor(8443);
+  await manager.healthProbePromise;
   assert.equal(manager.isPublished(), true);
   await manager.stop();
 });
@@ -194,6 +274,7 @@ test('observed publication survives bounded log-window growth without dropping r
   fs.appendFileSync(fixture.manager.hsLogPath, 'unrelated Tor activity\n'.repeat(20_000));
   fixture.next();
   await fixture.manager.monitor(8443);
+  await fixture.manager.healthProbePromise;
   assert.equal(fixture.manager.isPublished(), true);
   await fixture.manager.stop();
 });
@@ -226,6 +307,7 @@ test('a stalled bootstrap is bounded and process death immediately revokes readi
   assert.equal(fixture.children.length, 2);
   fixture.bootstrap(); fixture.current(); fixture.next();
   await fixture.manager.monitor(8443);
+  await fixture.manager.healthProbePromise;
   assert.equal(fixture.manager.isPublished(), true);
   fixture.children[1].kill('SIGTERM');
   await Promise.resolve();
@@ -249,6 +331,61 @@ test('Tor launch is single-flight and cancellation prevents a late spawn', async
   await stopping;
   assert.equal(fixture.children.length, 0);
   assert.equal(await fixture.manager.start(8443), false);
+});
+
+test('descriptor acknowledgments cannot advertise an onion before its pinned HTTPS probe succeeds', async context => {
+  const fixture = torFixture(context);
+  const probe = deferred();
+  fixture.manager.probeReachability = () => probe.promise;
+  await fixture.manager.start(8443);
+  fixture.bootstrap(); fixture.current(); fixture.next();
+  await fixture.manager.monitor(8443);
+  assert.equal(fixture.manager.isPublished(), false);
+  assert.ok(fixture.manager.healthProbePromise);
+  probe.resolve(true);
+  await fixture.manager.healthProbePromise;
+  assert.equal(fixture.manager.isPublished(), true);
+  await fixture.manager.stop();
+});
+
+test('a formerly reachable onion is withdrawn and recovered without clearing its identity or guards', async context => {
+  let now = 1_000_000;
+  const fixture = torFixture(context, { clock: { now: () => now } });
+  await fixture.manager.start(8443);
+  fixture.bootstrap(); fixture.current(); fixture.next();
+  await fixture.manager.monitor(8443);
+  await fixture.manager.healthProbePromise;
+  assert.equal(fixture.manager.isPublished(), true);
+  fixture.manager.probeReachability = async () => false;
+  now += infrastructure.TOR_HEALTH_CHECK_INTERVAL_MS;
+  await fixture.manager.monitor(8443);
+  await fixture.manager.healthProbePromise;
+  assert.equal(fixture.manager.isPublished(), false);
+  now += infrastructure.TOR_PUBLICATION_TIMEOUT_MS;
+  await fixture.manager.monitor(8443);
+  assert.equal(fixture.children.length, 2);
+  assert.equal(fs.readFileSync(path.join(fixture.manager.hiddenServiceDir, 'hs_ed25519_secret_key'), 'utf8'), 'preserved-identity');
+  assert.equal(fs.readFileSync(path.join(fixture.manager.dataDir, 'state'), 'utf8'), 'preserved-guards');
+  await fixture.manager.stop();
+});
+
+test('an expired health lease or a late successful probe cannot retain stale readiness', async context => {
+  let now = 1_000_000;
+  const fixture = torFixture(context, { clock: { now: () => now } });
+  await fixture.manager.start(8443);
+  fixture.bootstrap(); fixture.current(); fixture.next();
+  await fixture.manager.monitor(8443);
+  await fixture.manager.healthProbePromise;
+  now += infrastructure.TOR_HEALTH_LEASE_MS;
+  assert.equal(fixture.manager.isPublished(), false);
+  const probe = deferred();
+  fixture.manager.probeReachability = () => probe.promise;
+  await fixture.manager.monitor(8443);
+  const pending = fixture.manager.healthProbePromise;
+  await fixture.manager.stop();
+  probe.resolve(true);
+  await pending;
+  assert.equal(fixture.manager.isPublished(), false);
 });
 
 test('spawn errors reject startup and a pending publication does not block shutdown', async context => {
@@ -323,6 +460,7 @@ function balancerFixture(tor = null) {
   let interval = null;
   class HAProxyManager {
     isRunning = false;
+    async refreshRunningState() { return this.isRunning; }
     async start() { counts.start++; this.isRunning = true; }
     async reload() { counts.reload++; }
     async stop() { counts.haproxyStop++; this.isRunning = false; }
@@ -413,6 +551,27 @@ test('monitor cycles share one operation and stop prevents a delayed backend sta
   assert.equal(balancer.counts.torStop, 1);
   assert.equal(balancer.counts.release, 1);
   assert.deepEqual(balancer.exits, [0]);
+});
+
+test('an HAProxy death restarts its runtime even when cluster hostnames have not changed', async () => {
+  const balancer = balancerFixture();
+  await balancer.start();
+  assert.equal(balancer.counts.start, 1);
+  balancer.manager.haproxyManager.isRunning = false;
+  await balancer.manager.monitor();
+  assert.equal(balancer.counts.start, 2);
+  assert.equal(balancer.counts.config, 2);
+  await balancer.manager.stop();
+});
+
+test('an empty cluster never advertises its onion and still replaces stale initial proxy configuration', async () => {
+  const balancer = balancerFixture();
+  balancer.setServers([]);
+  balancer.manager.torManager.published = true;
+  await balancer.start();
+  assert.equal(balancer.counts.config, 1);
+  assert.equal(balancer.redis.has(keys.LB_ONION_ADDRESS), false);
+  await balancer.manager.stop();
 });
 
 test('SIGTERM works while publication is pending and cannot resurrect either service', async () => {

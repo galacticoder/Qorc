@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setImmediate } from 'node:timers/promises';
 import { blake3 } from '@noble/hashes/blake3.js';
 
 import {
@@ -81,10 +82,20 @@ function validatePirRecords(records) {
   return records;
 }
 
-function pirRows(records) {
-  return validatePirRecords(records).flatMap((record) => (
-    splitSpoolPirRecord(record).map((row) => Buffer.from(row))
-  ));
+async function pirRows(records) {
+  const rows = [];
+  try {
+    for (const record of validatePirRecords(records)) {
+      for (const row of splitSpoolPirRecord(record)) {
+        rows.push(Buffer.from(row.buffer, row.byteOffset, row.byteLength));
+      }
+      await setImmediate();
+    }
+    return rows;
+  } catch (error) {
+    for (const row of rows) row.fill(0);
+    throw error;
+  }
 }
 
 async function prepareBuildSlot(slot) {
@@ -146,8 +157,10 @@ async function buildAndPublishSnapshot(now) {
   let source = null;
   let rows = null;
   slot.snapshot = null;
+  const startedAt = Date.now();
   try {
     source = await readGlobalMixPirSnapshot(now);
+    const preparationMs = Date.now() - startedAt;
     if (sameIndex(publishedSlot?.snapshot, source)) {
       await prepareBuildSlot(slot);
       lastRefreshAt = Date.now();
@@ -155,14 +168,14 @@ async function buildAndPublishSnapshot(now) {
     }
 
     const epoch = snapshotEpoch(source);
-    const startedAt = Date.now();
     console.log('[PIR] Spool snapshot build started', {
       epoch,
-      records: source.records.length
+      records: source.records.length,
+      preparationMs
     });
     await prepareBuildSlot(slot);
     if (source.records.length > 0) {
-      rows = pirRows(source.records);
+      rows = await pirRows(source.records);
       await slot.worker.build(epoch, rows, SPOOL_PIR_ROW_BYTES);
     }
     slot.snapshot = {

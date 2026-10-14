@@ -10,8 +10,8 @@ HAProxy 3.2.21
   License: GPL-2.0-or-later, with the OpenSSL linking exception described by
   HAProxy's LICENSE file, exportable headers are LGPL-2.1 or later.
 
-Tor 0.4.9.11, with qorc's hidden-service descriptor publication patch
-  Source: https://dist.torproject.org/tor-0.4.9.11.tar.gz
+Tor 0.4.9.14, with qorc's hidden-service descriptor publication patch
+  Source: https://dist.torproject.org/tor-0.4.9.14.tar.gz
   Patch: docker/tor/patches/0001-retry-hsdesc-upload.patch
   License: BSD-3-Clause and other permissive licenses detailed in Tor's LICENSE.
 

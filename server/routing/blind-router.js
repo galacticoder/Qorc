@@ -5,6 +5,7 @@
  */
 
 import crypto from 'crypto';
+import { setImmediate } from 'node:timers/promises';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { withRedisClient, createSubscriber, closeSubscriber } from '../session/redis-client.js';
 import { envInt } from '../utils/env.js';
@@ -103,7 +104,8 @@ const GLOBAL_MIX_SPOOL_MEMBER_BYTES = Buffer.byteLength(JSON.stringify({
     probe: 'a'.repeat(SPOOL_DETECTION_PROBE_BYTES * 2)
   }
 }), 'utf8');
-const GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS = 1_000;
+const GLOBAL_MIX_SPOOL_READ_EXPIRY_GUARD_MS = 30_000;
+const GLOBAL_MIX_SPOOL_READ_BATCH = 16;
 const GLOBAL_MIX_PUBLICATION_MAX_BYTES = envInt(
   'GLOBAL_MIX_PUBLICATION_MAX_BYTES',
   2 * 1024 * 1024,
@@ -1359,26 +1361,35 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
       return { ids: [], tags: [], probes: [], records: [] };
     }
 
-    const raw = await client.mget(
-      ...rows.map((row) => `${PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX}${row.id}`)
-    );
-    if (!Array.isArray(raw) || raw.length !== rows.length) {
-      throw new Error('invalid_global_mix_spool_read');
-    }
-
     const records = [];
-    for (let index = 0; index < raw.length; index += 1) {
-      if (typeof raw[index] !== 'string') {
-        throw new Error('global_mix_spool_entry_expired_during_pir_build');
+    try {
+      for (let offset = 0; offset < rows.length; offset += GLOBAL_MIX_SPOOL_READ_BATCH) {
+        const batch = rows.slice(offset, offset + GLOBAL_MIX_SPOOL_READ_BATCH);
+        const raw = await client.mget(
+          ...batch.map((row) => `${PROTOCOL_KEYS.MIXNET_SPOOL_ENTRY_REDIS_PREFIX}${row.id}`)
+        );
+        if (!Array.isArray(raw) || raw.length !== batch.length) {
+          throw new Error('invalid_global_mix_spool_read');
+        }
+        for (let index = 0; index < raw.length; index += 1) {
+          if (typeof raw[index] !== 'string') {
+            throw new Error('global_mix_spool_entry_expired_during_pir_build');
+          }
+          const stored = parseGlobalSpoolStoredEntry(raw[index], batch[index]);
+          if (!stored) throw new Error('invalid_global_mix_spool_entry');
+          const envelope = stored.envelope;
+          records.push(Buffer.concat([
+            Buffer.from(envelope.ephemeralKey, 'base64'),
+            Buffer.from(envelope.nonce, 'base64'),
+            Buffer.from(envelope.ciphertext, 'base64')
+          ]));
+          raw[index] = null;
+          await setImmediate();
+        }
       }
-      const stored = parseGlobalSpoolStoredEntry(raw[index], rows[index]);
-      if (!stored) throw new Error('invalid_global_mix_spool_entry');
-      const envelope = stored.envelope;
-      records.push(Buffer.concat([
-        Buffer.from(envelope.ephemeralKey, 'base64'),
-        Buffer.from(envelope.nonce, 'base64'),
-        Buffer.from(envelope.ciphertext, 'base64')
-      ]));
+    } catch (error) {
+      for (const record of records) record.fill(0);
+      throw error;
     }
     return {
       ids: rows.map((row) => row.id),

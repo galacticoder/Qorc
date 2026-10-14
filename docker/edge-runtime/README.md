@@ -7,14 +7,14 @@ of HAProxy or Tor.
 Archives:
 
 - `qorc-edge-runtime-linux-x86_64-v1.tar.gz` (amd64)
-  - SHA-256: `41876029965386aa0623f4d34c8956aac664ac4f9e85e39ae3309fb0d0d3b095`
+  - SHA-256: `64cfc5bc17930cbbd2b175705c6c13c4192cff976b3d8b2a83358b2178511482`
 - `qorc-edge-runtime-linux-arm64-v1.tar.gz` (arm64)
-  - SHA-256: `f24331e5685b04ba73ecc79b61a3deead1453537e97ba6816e3ed543c1f21fb0`
+  - SHA-256: `0d0ff5dcaa235e7e13aa462ac2b0d7345d4d2f0136aa7ab741b08460a95be2a9`
 
 The archive contains:
 
 - HAProxy 3.2.21
-- qorc's patched Tor 0.4.9.11 hidden-service runtime
+- qorc's patched Tor 0.4.9.14 hidden-service runtime
 - the OQS OpenSSL provider and liboqs
 - the private dynamic libraries required by those binaries
 - `manifest.json`, including version, source, patch, and per-file hashes

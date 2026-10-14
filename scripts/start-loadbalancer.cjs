@@ -46,7 +46,8 @@ function loadDotEnv(filePath) {
 loadDotEnv(path.join(repoRoot, '.env'));
 
 const CONFIG = {
-  NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true',
+  NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true' ||
+    !process.stdin.isTTY || !process.stdout.isTTY,
   HAPROXY_HTTPS_PORT: process.env.HAPROXY_HTTPS_PORT,
   HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT,
   SERVER_ACTIVE_TIMEOUT_MS: Math.min(
@@ -691,7 +692,7 @@ async function checkStatsCredentials() {
     throw new Error('HAPROXY_STATS_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0');
   }
 
-  const env = { ...process.env, REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT) };
+  const env = { ...process.env, NO_GUI: String(CONFIG.NO_GUI), REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT) };
 
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: 'inherit' });
@@ -743,5 +744,11 @@ async function checkStatsCredentials() {
     process.exit(exitCode);
   });
 
-  await ui.start();
+  try {
+    await ui.start();
+  } catch (error) {
+    child.kill('SIGTERM');
+    await ui.stop().catch(() => {});
+    throw error;
+  }
 })();

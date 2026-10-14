@@ -35,6 +35,15 @@ export class HAProxyManager {
         this.haproxyBin = BUNDLED_HAPROXY_BIN;
     }
 
+    async refreshRunningState() {
+        const snapshot = await readProcessIdFileSnapshot(this.pidFile);
+        const running = Boolean(snapshot?.pid &&
+            await processMatchesExecutable(snapshot.pid, this.haproxyBin));
+        this.haproxyPid = running ? snapshot.pid : null;
+        this.isRunning = running;
+        return running;
+    }
+
     // Only the immutable bundled executable is accepted.
     async isInstalled() {
         try {

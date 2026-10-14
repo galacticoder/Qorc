@@ -251,13 +251,37 @@ without a connected authenticated session, logout and explicit close revoke them
 | `SERVER_HOST` | Required by the runtime, Docker supplies `server` | launcher, `server/cluster/cluster-manager.js` | Backend host advertised to cluster state and HAProxy. |
 | `CLUSTER_PRIMARY` | Required | cluster modules | Must be exactly `true` for the primary node or `false` for a joining node. The role is never inferred from Redis state. |
 | `CLUSTER_AUTO_APPROVE` | Required | cluster modules | Must be exactly `true` or `false`. `true` lets the primary automatically approve authenticated pending join requests. Joining nodes can never approve themselves. |
-| `NO_GUI` | `false` | launchers | Disables the interactive server/load-balancer terminal UI. |
+| `NO_GUI` | `false` | launchers | Disables the interactive server/load-balancer terminal UI. The load-balancer launcher also runs headlessly when either input or output is not a terminal, including detached Compose containers. |
 | `HAPROXY_HTTPS_PORT` | Required | load-balancer modules | External HAProxy HTTPS port. |
 | `HAPROXY_STATS_PORT` | Required | load-balancer modules | HAProxy statistics listener port. |
 | `HAPROXY_STATS_BIND_ADDRESS` | Required | load-balancer modules | Must be `127.0.0.1` for native deployment or `0.0.0.0` inside the Docker container. Docker publishes the statistics port only on host loopback. |
 | `HAPROXY_STATS_USERNAME` | Required for the load balancer, configured through `.env` | load-balancer modules | HAProxy statistics and command channel identity. |
 | `HAPROXY_STATS_PASSWORD` | Required for the load balancer, configured through `.env` | load-balancer modules | Companion secret. On first startup the launcher derives and stores its protected command channel material under `server/config`. |
 | `LB_SERVER_ACTIVE_TIMEOUT_MS` | `45000`, 10000-300000 | same | Age after which a cluster backend is no longer considered active. |
+| `TOR_HS_INTRO_POINTS` | `3`, 3-20 | load-balancer Tor manager | Number of Tor introduction points for the server onion service. |
+
+The load balancer advertises its onion address only after a complete onion
+connection returns HTTP 200 from `/api/health`. The probe uses a private Unix
+SOCKS socket, TLS 1.3 with `X25519MLKEM768`, certificate-chain verification, and
+an exact leaf-certificate pin from `TLS_CERT_PATH`. Descriptor-upload
+acknowledgments alone do not establish reachability. There is no public SOCKS
+listener and no direct-IP health substitute.
+
+Probes run at most once per minute with a 130-second deadline and cannot overlap.
+A failed probe withdraws readiness; a successful check expires after three
+minutes. The Redis onion address has a 45-second renewable lease so a crashed
+monitor cannot leave stale readiness indefinitely. Fifteen minutes of continuous
+unreachability restarts Tor while preserving the onion identity and guard state.
+`[TOR-HEALTH]` entries identify SOCKS, onion-connect, TLS, and backend-response
+timings, status, and error codes without recording credentials or application
+traffic. A successful probe verifies one Tor path, not every client's path.
+
+HAProxy resolves backend hostnames through the container's configured DNS
+resolvers rather than keeping their startup IP addresses indefinitely. Backend
+health checks have a ten-second response budget and require three failures
+before removing a backend. PIR snapshot reads are batched and yield between
+records so snapshot preparation does not block health, heartbeat, or WebSocket
+handling. Snapshot build logs include preparation time in the total duration.
 
 ## PQ TLS and installation tooling
 

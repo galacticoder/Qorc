@@ -202,9 +202,21 @@ export class PirWorkerClient {
     } finally {
       suffix.fill(0);
     }
-    const recordBytes = Buffer.concat(records);
+    let output;
+    let created = false;
     try {
-      await fs.writeFile(file, recordBytes, { mode: 0o600, flag: 'wx' });
+      output = await fs.open(file, 'wx', 0o600);
+      created = true;
+      for (let offset = 0; offset < records.length; offset += 32) {
+        const batch = Buffer.concat(records.slice(offset, offset + 32));
+        try {
+          await output.writeFile(batch);
+        } finally {
+          batch.fill(0);
+        }
+      }
+      await output.close();
+      output = null;
       const header = Buffer.allocUnsafe(12);
       header.writeUInt32LE(epoch >>> 0, 0);
       header.writeUInt32LE(records.length, 4);
@@ -228,8 +240,8 @@ export class PirWorkerClient {
         payload.fill(0);
       }
     } finally {
-      recordBytes.fill(0);
-      await fs.rm(file, { force: true });
+      await output?.close();
+      if (created) await fs.rm(file, { force: true });
     }
   }
 
