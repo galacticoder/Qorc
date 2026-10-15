@@ -25,11 +25,56 @@ function packet(sequence, arrivedAt = 1000, discontinuity = false, dtx = false) 
         arrivedAt, discontinuity, packet: dtx ? Uint8Array.of(1) : Uint8Array.of(2, sequence & 255) };
 }
 
-function frame(buffer, now) {
-    const result = buffer.next(now);
+function frame(buffer, now, nativeQueuedMs = 0) {
+    const result = buffer.next(now, nativeQueuedMs);
     assert.ok(result);
     return result;
 }
+
+test('a stable audio path starts within sixty milliseconds without dropping any speech', () => {
+    const buffer = new CallAudioPlayout();
+    let firstOutputAt = null;
+    const played = [];
+    for (let sequence = 0; sequence < 30; sequence++) {
+        const now = 1000 + sequence * 20;
+        buffer.push(packet(sequence, now));
+        const value = buffer.next(now, 0);
+        if (!value) continue;
+        firstOutputAt ??= now;
+        played.push(value.packet[1]);
+    }
+    assert.ok(firstOutputAt - 1000 <= 60, `startup held audio for ${firstOutputAt - 1000} ms`);
+    for (let now = 1600; played.length < 30; now += 20) played.push(frame(buffer, now).packet[1]);
+    assert.deepEqual(played, Array.from({ length: 30 }, (_, sequence) => sequence));
+    assert.equal(buffer.snapshot().rebufferCount, 0);
+    assert.equal(buffer.snapshot().lateDrops, 0);
+});
+
+test('an empty encoded queue does not rebuffer while native playback still has audio', () => {
+    const buffer = new CallAudioPlayout();
+    for (let sequence = 0; sequence < 6; sequence++) buffer.push(packet(sequence, 1000 + sequence * 20));
+    for (let sequence = 0; sequence < 6; sequence++) frame(buffer, 1120);
+    assert.equal(buffer.next(1120, 60), null);
+    assert.equal(buffer.snapshot().buffering, false);
+    assert.equal(buffer.snapshot().rebufferCount, 0);
+    buffer.push(packet(6, 1140));
+    assert.equal(frame(buffer, 1140, 40).packet[1], 6);
+    assert.equal(buffer.snapshot().rebufferCount, 0);
+});
+
+test('a real native underrun still enables bounded jitter rebuffering', () => {
+    const buffer = new CallAudioPlayout();
+    for (let sequence = 0; sequence < 6; sequence++) buffer.push(packet(sequence, 1000 + sequence * 20));
+    for (let sequence = 0; sequence < 6; sequence++) frame(buffer, 1120);
+    buffer.next(1120, 40);
+    buffer.next(1160, 0);
+    assert.equal(buffer.snapshot().buffering, true);
+    assert.equal(buffer.snapshot().rebufferCount, 1);
+    buffer.push(packet(6, 1300));
+    assert.equal(buffer.next(1300, 0), null);
+    assert.equal(frame(buffer, 1900).packet[1], 6);
+    assert.equal(buffer.snapshot().lateDrops, 0);
+});
 
 test('normal Tor bursts retain all speech instead of clipping to five packets', () => {
     const buffer = new CallAudioPlayout();
@@ -48,7 +93,7 @@ test('an empty arrival gap does not discard the next valid speech frames', () =>
     const buffer = new CallAudioPlayout();
     buffer.push(packet(0));
     assert.equal(frame(buffer, 1200).packet[1], 0);
-    for (let now = 1220; now < 1800; now += 20) assert.equal(buffer.next(now), null);
+    for (let now = 1220; now < 1800; now += 20) assert.equal(buffer.next(now, 0), null);
     for (let sequence = 1; sequence < 13; sequence++) buffer.push(packet(sequence, 1800));
     for (let sequence = 1; sequence < 13; sequence++) assert.equal(frame(buffer, 2400 + sequence * 20).packet[1], sequence);
     assert.equal(buffer.snapshot().lateDrops, 0);
@@ -69,7 +114,7 @@ test('reordered frames get a bounded grace period before concealment', () => {
     buffer.push(packet(0));
     frame(buffer, 1200);
     buffer.push(packet(2, 1200));
-    assert.equal(buffer.next(1210), null);
+    assert.equal(buffer.next(1210, 0), null);
     buffer.push(packet(1, 1220));
     assert.equal(frame(buffer, 1230).packet[1], 1);
     assert.equal(frame(buffer, 1250).packet[1], 2);
@@ -92,7 +137,7 @@ test('FEC copies its packet so the next real frame remains playable after wiping
 test('DTX silence uses the same jitter protection and codec timeline as speech', () => {
     const buffer = new CallAudioPlayout();
     buffer.push(packet(0, 1000, false, true));
-    assert.equal(buffer.next(1000), null);
+    assert.equal(buffer.next(1000, 0), null);
     for (let sequence = 1; sequence < 20; sequence++) {
         buffer.push(packet(sequence, 1200, false, true));
     }
@@ -142,7 +187,7 @@ test('bursty 50fps audio survives delayed UI timers without intentional speech d
         while (cursor < incoming.length && incoming[cursor].arrivedAt <= now) buffer.push(incoming[cursor++]);
         if (now % 20 !== 0 || (now % 2000 > 1100 && now % 2000 < 1170)) continue;
         for (let count = 0; count < 4 && queuedMs < 80; count++) {
-            const value = buffer.next(now);
+            const value = buffer.next(now, queuedMs);
             if (!value) break;
             assert.equal(value.packet[1], played & 255);
             played++;
@@ -153,6 +198,55 @@ test('bursty 50fps audio survives delayed UI timers without intentional speech d
     assert.equal(buffer.snapshot().lateDrops, 0);
     assert.equal(buffer.snapshot().overflowDrops, 0);
 });
+
+for (const burstFrames of [1, 4, 5, 6]) {
+    test(`${burstFrames * 20} ms arrival bursts keep bounded latency without speech loss or native underruns`, () => {
+        const buffer = new CallAudioPlayout();
+        const output = [];
+        const delays = [];
+        const total = 500;
+        let queuedMs = 0;
+        let received = 0;
+        let played = 0;
+        let underrunMs = 0;
+        for (let now = 1000; now < 16000 && played < total; now++) {
+            if (output.length) {
+                const current = output[0];
+                if (current.remaining === 20) delays.push(now - current.capturedAt);
+                current.remaining--;
+                queuedMs--;
+                if (current.remaining === 0) {
+                    output.shift();
+                    played++;
+                }
+            } else if (delays.length) {
+                underrunMs++;
+            }
+            if (played === total) break;
+            let arrived = false;
+            while (received < total && 1300 + (Math.floor(received / burstFrames) + 1) * burstFrames * 20 <= now) {
+                const sequence = received++;
+                buffer.push({ ...packet(sequence, now), capturedAt: 1000 + sequence * 20 });
+                arrived = true;
+            }
+            if (now % 20 !== 0 && !arrived) continue;
+            for (let count = 0; count < 4 && queuedMs < 80; count++) {
+                const value = buffer.next(now, queuedMs);
+                if (!value) break;
+                const sequence = played + output.length;
+                assert.equal(value.fec, false);
+                assert.equal(value.packet[1], sequence & 255);
+                output.push({ remaining: 20, capturedAt: 1000 + sequence * 20 });
+                queuedMs += 20;
+            }
+        }
+        assert.equal(played, total);
+        assert.equal(underrunMs, 0);
+        assert.equal(buffer.snapshot().overflowDrops, 0);
+        assert.equal(buffer.snapshot().lateDrops, 0);
+        assert.ok(Math.max(...delays) <= 300 + Math.max(60, burstFrames * 20) + 2);
+    });
+}
 
 test('speaker levels are coalesced, silence-expiring, and isolated to the active call', t => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -300,6 +394,58 @@ test('the real receiver replenishes from the native clock after a delayed timer 
     assert.ok(queuedMs >= 80);
     stream.close();
     await receiving;
+});
+
+test('the real receiver resumes arriving speech immediately while native playback is still buffered', async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 });
+    let queuedMs = 0;
+    let measuredAt = Date.now();
+    const info = () => {
+        queuedMs = Math.max(0, queuedMs - (Date.now() - measuredAt));
+        measuredAt = Date.now();
+        return { queuedMs, level: 0 };
+    };
+    let releaseNext;
+    let releaseEnd;
+    const stream = {
+        async *[Symbol.asyncIterator]() {
+            yield Uint8Array.of(0);
+            await new Promise(resolve => { releaseNext = resolve; });
+            yield Uint8Array.of(1);
+            await new Promise(resolve => { releaseEnd = resolve; });
+        },
+    };
+    const decoded = [];
+    const service = receiver({ info: async () => info() }, {
+        decodeToPlayback: async (_id, bytes) => {
+            decoded.push(bytes[1]);
+            info();
+            queuedMs += 20;
+            return info();
+        },
+    }, {
+        decodeCallAudioBatch: data => data[0] === 0
+            ? Array.from({ length: 6 }, (_, sequence) => packet(sequence, Date.now()))
+            : [packet(6, Date.now())],
+    });
+    configureReceiver(service, stream);
+    const receiving = service.receiveAudioStream();
+    try {
+        await flush();
+        t.mock.timers.tick(40);
+        await flush();
+        assert.deepEqual(decoded, [0, 1, 2, 3, 4, 5]);
+        t.mock.timers.tick(20);
+        await flush();
+        assert.equal(info().queuedMs, 60);
+        releaseNext();
+        await flush();
+        assert.deepEqual(decoded, [0, 1, 2, 3, 4, 5, 6]);
+        assert.equal(info().queuedMs, 80);
+    } finally {
+        releaseEnd();
+        await receiving;
+    }
 });
 
 test('a stale native-output error during speaker switching cannot terminate the call', async t => {

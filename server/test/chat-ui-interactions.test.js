@@ -239,6 +239,78 @@ test('selected conversations keep the same options pill and readable theme color
   assert.doesNotMatch(css, /\.is-selected\s+\.qorc-conversation-(?:action-pill|tiny-btn)(?::hover)?\s*\{/);
 });
 
+test('options menus share the call-history surface without separate message-menu panel backgrounds', () => {
+  const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+  const popover = fs.readFileSync(path.join(root, 'src/components/ui/popover.tsx'), 'utf8');
+  assert.match(css, /--qorc-menu-bg:\s*#e9e9e9/);
+  assert.match(css, /--qorc-menu-bg:\s*#0e0e11/);
+  assert.match(popover, /backgroundColor:\s*'var\(--qorc-menu-bg\)'/);
+  assert.match(css, /\.qorc-message-context-menu\s*\{[^}]*background:\s*var\(--qorc-menu-bg\)/);
+  for (const section of ['reactions', 'actions']) {
+    assert.match(css, new RegExp(`\\.qorc-message-context-${section}\\s*\\{[^}]*background:\\s*transparent`));
+    assert.doesNotMatch(css, new RegExp(`\\.dark \\.qorc-message-context-${section}\\s*\\{`));
+  }
+});
+
+function callHistoryHost() {
+  const host = hookHost();
+  const history = {
+    logs: [{ id: 'recent-call', peerUsername: 'peer', startTime: Date.now(), type: 'audio', direction: 'outgoing', status: 'completed' }],
+    isLoading: false, hasMoreLogs: false, loadMoreLogs() {}, scheduleLogRelease() {}, cancelLogRelease() {},
+    getAllLogs: () => history.logs, clearLogs: () => { history.logs = []; }, deleteLog() {},
+  };
+  const { CallLogs, CallLogOptions } = load('src/components/chat/calls/CallLogs.tsx', {
+    react: host.react,
+    'lucide-react': Object.fromEntries(['Clock3', 'MessageCircle', 'MoreVertical', 'Search', 'Trash2', 'Video', 'X'].map(name => [name, `${name}-icon`])),
+    '../../ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
+    '../../ui/button': { Button: 'button' }, '../../ui/scroll-area': { ScrollArea: 'scroll-area' },
+    '../../ui/UserAvatar': { UserAvatar: 'user-avatar' }, '../assets/icons': { CallIcon: 'call-icon' },
+    '../../../contexts/CallHistoryContext': { useCallHistory: () => history },
+    '../../../hooks/database/useDisplayUsername': { useDisplayUsername: ({ username }) => username },
+    '../../../lib/utils/date-utils': dates,
+    '../../../lib/constants': { NEAR_BOTTOM_THRESHOLD: 200, SCROLL_THRESHOLD: 200 },
+    '../../ui/ViewSkeletons': { CallLogRowsSkeleton: 'call-skeleton' },
+  }, ['CallLogOptions']);
+  return {
+    host, history, CallLogOptions,
+    render: () => host.render(() => CallLogs({ getDisplayUsername: async username => username, onOpenConversation() {}, onStartCall() {} })),
+  };
+}
+
+test('call-history options share neutral call-button styling and keep empty/loading guards', () => {
+  const ui = callHistoryHost();
+  try {
+    const initial = ui.render();
+    const trigger = find(initial, element => element.props?.['aria-label'] === 'Call history options');
+    assert.match(trigger.props.className, /qorc-call-pill-btn/);
+    assert.doesNotMatch(trigger.props.className, /qorc-icon-btn/);
+    assert.equal(trigger.props.disabled, false);
+    assert.ok(find(initial, element => element.props?.className === 'qorc-call-log-options-menu'));
+    find(initial, element => element.type === 'popover').props.onOpenChange(true);
+    assert.equal(find(ui.render(), element => element.type === 'popover').props.open, true);
+    ui.history.isLoading = true;
+    const loading = ui.render();
+    assert.equal(find(loading, element => element.props?.['aria-label'] === 'Call history options').props.disabled, true);
+    assert.equal(find(loading, element => element.type === 'popover').props.open, false);
+    ui.history.isLoading = false;
+    find(ui.render(), element => element.props?.className === 'qorc-call-log-popover-action is-danger').props.onClick();
+    const empty = ui.render();
+    assert.equal(find(empty, element => element.props?.['aria-label'] === 'Call history options').props.disabled, true);
+    assert.equal(find(empty, element => element.props?.['aria-label'] === 'Search call history').props.disabled, true);
+  } finally { ui.host.unmount(); }
+});
+
+test('individual call options use the same compact layout and still delete the selected call', () => {
+  const ui = callHistoryHost();
+  const removed = [];
+  try {
+    const tree = ui.host.render(() => ui.CallLogOptions({ id: 'chosen-call', displayName: 'Peer', onDelete: id => removed.push(id) }));
+    assert.ok(find(tree, element => element.props?.className === 'qorc-call-log-options-menu'));
+    find(tree, element => element.props?.className === 'qorc-call-log-popover-action is-danger').props.onClick();
+    assert.deepEqual(removed, ['chosen-call']);
+  } finally { ui.host.unmount(); }
+});
+
 test('composer sends newlines, preserves Shift+Enter, and does not send IME confirmation', () => {
   const host = hookHost();
   const sent = [];

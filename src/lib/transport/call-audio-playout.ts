@@ -1,8 +1,8 @@
 import { SecureMemory } from '../cryptography/secure-memory';
 
 export const AUDIO_FRAME_DURATION_MS = 20;
-const INITIAL_BUFFER_MS = 200;
-const MIN_BUFFER_MS = 120;
+const INITIAL_BUFFER_MS = 100;
+const MIN_BUFFER_MS = 60;
 const MAX_BUFFER_MS = 600;
 const MAX_BUFFER_PACKETS = 60;
 const MAX_CONCEALMENT_FRAMES = 3;
@@ -64,7 +64,7 @@ export class CallAudioPlayout {
                 this.peakVariationMs = Math.max(this.peakVariationMs * 0.99, Math.min(MAX_BUFFER_MS, variation));
                 this.targetMs = Math.min(MAX_BUFFER_MS, Math.max(
                     MIN_BUFFER_MS,
-                    AUDIO_FRAME_DURATION_MS * 3 + this.jitterMs * 4,
+                    AUDIO_FRAME_DURATION_MS * 2 + this.jitterMs * 3,
                     this.peakVariationMs + AUDIO_FRAME_DURATION_MS * 2,
                 ));
             }
@@ -84,14 +84,14 @@ export class CallAudioPlayout {
         return true;
     }
 
-    next(now: number): AudioPlayoutFrame | null {
+    next(now: number, nativeQueuedMs: number): AudioPlayoutFrame | null {
         const sequences = this.sequences();
         if (sequences.length === 0) {
-            if (!this.buffering) {
+            if (!this.buffering && nativeQueuedMs <= 0) {
                 this.rebuffers++;
                 this.targetMs = Math.min(MAX_BUFFER_MS, this.targetMs + AUDIO_FRAME_DURATION_MS * 2);
+                this.buffering = true;
             }
-            this.buffering = true;
             return null;
         }
         const first = this.packets.get(sequences[0])!;

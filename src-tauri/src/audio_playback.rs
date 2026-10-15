@@ -336,8 +336,8 @@ fn run_pulse_playback(
         sink_index: Some(sink.index),
         buffer_attr: protocol::stream::BufferAttr {
             max_length: frame_bytes * 6,
-            target_length: frame_bytes * 3,
-            pre_buffering: frame_bytes * 2,
+            target_length: frame_bytes * 2,
+            pre_buffering: frame_bytes,
             minimum_request_length: frame_bytes,
             ..Default::default()
         },

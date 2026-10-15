@@ -362,6 +362,7 @@ textarea::placeholder {
   --qorc-muted-bg: #f3f4f6;
   --qorc-control-bg: #f6f7f9;
   --qorc-control-hover: #eef0f3;
+  --qorc-menu-bg: #e9e9e9;
   --qorc-input-bg: #f7f7f7;
   --qorc-select-menu-bg: #f6f7f9;
   --qorc-conversation-card-bg: var(--qorc-control-bg);
@@ -390,6 +391,7 @@ textarea::placeholder {
   --qorc-muted-bg: #0d0d12;
   --qorc-control-bg: #101015;
   --qorc-control-hover: #181520;
+  --qorc-menu-bg: #0e0e11;
   --qorc-input-bg: #0e0e11;
   --qorc-select-menu-bg: #0d0d0e;
   --qorc-conversation-card-bg: rgb(10, 10, 10);
@@ -972,12 +974,14 @@ html.light .qorc-profile-stack,
   transition: background .18s ease, color .18s ease !important;
 }
 
-.qorc-call-pill-btn:hover {
+.qorc-call-pill-btn:hover:not(:disabled),
+.qorc-call-pill-btn:focus-visible:not(:disabled) {
   background: #e5e5e9 !important;
   color: var(--qorc-text) !important;
 }
 
-.dark .qorc-call-pill-btn:hover {
+.dark .qorc-call-pill-btn:hover:not(:disabled),
+.dark .qorc-call-pill-btn:focus-visible:not(:disabled) {
   background: var(--qorc-conversation-card-hover-bg) !important;
 }
 
@@ -1296,24 +1300,11 @@ html.light .qorc-profile-stack,
   letter-spacing: -.025em;
 }
 
-.qorc-call-log-header .qorc-icon-btn:hover,
-.qorc-call-log-header .qorc-icon-btn:focus-visible {
-  outline: none;
-  background: var(--qorc-control-hover) !important;
-  color: var(--qorc-text) !important;
-}
-
-.qorc-call-log-header .qorc-icon-btn {
+.qorc-call-log-options-btn {
   width: 40px !important;
   height: 40px !important;
   min-width: 40px;
-  cursor: pointer;
-}
-
-.qorc-call-log-header .qorc-icon-btn:disabled {
-  opacity: .5;
-  cursor: not-allowed;
-  background: var(--qorc-control-bg) !important;
+  background: var(--qorc-menu-bg) !important;
 }
 
 .qorc-call-log-header-actions {
@@ -1594,72 +1585,102 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   flex: 0 0 auto;
 }
 
-.qorc-call-log-popover {
-  width: 130px !important;
+.qorc-call-log-popover,
+.qorc-conversation-options-popover {
   overflow: hidden;
   border: 0 !important;
   border-radius: 10px !important;
   padding: 0 !important;
-  background: #e9e9e9 !important;
+  background: var(--qorc-menu-bg) !important;
   color: var(--qorc-text) !important;
-  box-shadow: 0 12px 32px rgba(17, 24, 39, .18) !important;
+  box-shadow: 0 2px 7px rgba(17, 24, 39, .08) !important;
 }
 
-.dark .qorc-call-log-popover {
-  background: #0e0e11 !important;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .32) !important;
+.qorc-call-log-popover {
+  width: 130px !important;
 }
 
-.qorc-call-log-popover-title {
-  padding: 8px 10px 6px;
+.qorc-conversation-options-popover {
+  width: 148px !important;
+}
+
+.dark .qorc-call-log-popover,
+.dark .qorc-conversation-options-popover {
+  box-shadow: 0 2px 7px rgba(0, 0, 0, .16) !important;
+}
+
+.qorc-call-log-options-menu,
+.qorc-conversation-options-menu {
+  display: grid;
+  padding: 4px;
+}
+
+.qorc-call-log-popover-title,
+.qorc-conversation-options-title {
+  padding: 4px 6px 6px;
   color: var(--qorc-muted-text);
   font-size: 12px;
   line-height: 1.2;
   font-weight: 500;
-  text-align: center;
+  text-align: left;
 }
 
-.qorc-call-log-popover-action {
+.qorc-call-log-popover-action,
+.qorc-conversation-options-action {
   width: 100%;
-  height: 38px;
+  height: 32px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
   border: 0;
-  border-radius: 0 0 10px 10px;
-  padding: 0 8px;
+  border-radius: 6px;
+  padding: 0 6px;
   background: transparent;
   color: var(--qorc-text);
-  font-size: 12.5px;
+  font-size: 12px;
+  white-space: nowrap;
   font-weight: 500;
+  text-align: left;
   cursor: pointer;
   transition: background .15s ease;
 }
 
-.qorc-call-log-popover-action.is-danger {
+.qorc-call-log-popover-action.is-danger,
+.qorc-conversation-options-action.danger {
   color: #e3616a;
 }
 
 .qorc-call-log-popover-action:hover:not(:disabled),
-.qorc-call-log-popover-action:focus-visible:not(:disabled) {
+.qorc-call-log-popover-action:focus-visible:not(:disabled),
+.qorc-conversation-options-action:hover:not(:disabled),
+.qorc-conversation-options-action:focus-visible:not(:disabled),
+.saved-server-menu button:hover:not(:disabled),
+.saved-server-menu button:focus-visible:not(:disabled) {
   outline: none;
   background: #e5e5e9;
 }
 
 .dark .qorc-call-log-popover-action:hover:not(:disabled),
-.dark .qorc-call-log-popover-action:focus-visible:not(:disabled) {
+.dark .qorc-call-log-popover-action:focus-visible:not(:disabled),
+.dark .qorc-conversation-options-action:hover:not(:disabled),
+.dark .qorc-conversation-options-action:focus-visible:not(:disabled),
+.dark .saved-server-menu button:hover:not(:disabled),
+.dark .saved-server-menu button:focus-visible:not(:disabled) {
   background: var(--qorc-conversation-card-hover-bg);
 }
 
-.qorc-call-log-popover-action:disabled {
+.qorc-call-log-popover-action:disabled,
+.qorc-conversation-options-action:disabled {
   cursor: not-allowed;
   opacity: .45;
 }
 
-.qorc-call-log-popover-action svg {
-  width: 15px;
-  height: 15px;
+.qorc-call-log-popover-action svg,
+.qorc-conversation-options-action svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
 }
 
 .qorc-call-log-empty {
@@ -1720,7 +1741,7 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
 .qorc-message-context-menu {
   min-width: 220px;
   border: 0;
-  background: var(--qorc-dialog-bg);
+  background: var(--qorc-menu-bg);
   color: var(--qorc-text);
 }
 
@@ -1730,7 +1751,7 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   justify-content: center;
   gap: 1px;
   padding: 7px;
-  background: var(--qorc-dialog-bg);
+  background: transparent;
 }
 
 .qorc-message-context-reaction,
@@ -1767,8 +1788,14 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
 .qorc-message-context-reaction:hover,
 .qorc-message-context-more-reactions:hover,
 .qorc-message-context-action:hover {
-  background: var(--qorc-control-hover);
+  background: #e5e5e9;
   color: var(--qorc-text);
+}
+
+.dark .qorc-message-context-reaction:hover,
+.dark .qorc-message-context-more-reactions:hover,
+.dark .qorc-message-context-action:hover {
+  background: var(--qorc-conversation-card-hover-bg);
 }
 
 .qorc-message-context-reaction:active,
@@ -1792,7 +1819,7 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
   overflow: hidden;
   gap: 0;
   padding: 0;
-  background: var(--qorc-control-bg);
+  background: transparent;
 }
 
 .qorc-message-context-action {
@@ -1816,14 +1843,6 @@ html.light .qorc-call-log-search.is-disabled:focus-within,
 
 .qorc-message-context-action--danger:hover {
   color: #e3616a;
-}
-
-.dark .qorc-message-context-reactions {
-  background: #101015;
-}
-
-.dark .qorc-message-context-actions {
-  background: rgba(14, 14, 17, 0.44);
 }
 
 .qorc-system-message-action {
@@ -2634,80 +2653,6 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
-}
-
-.qorc-conversation-options-popover {
-  width: 148px !important;
-  overflow: hidden;
-  border: 0 !important;
-  border-radius: 10px !important;
-  padding: 0 !important;
-  background: hsl(var(--popover)) !important;
-  color: var(--qorc-text) !important;
-  box-shadow: 0 2px 7px rgba(17, 24, 39, .08) !important;
-}
-
-.dark .qorc-conversation-options-popover {
-  box-shadow: 0 2px 7px rgba(0, 0, 0, .16) !important;
-}
-
-.qorc-conversation-options-menu {
-  display: grid;
-  padding: 4px;
-}
-
-.qorc-conversation-options-title {
-  padding: 4px 6px 6px;
-  color: var(--qorc-muted-text);
-  font-size: 12px;
-  font-weight: 500;
-  text-align: left;
-}
-
-.qorc-conversation-options-action {
-  width: 100%;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  border: 0;
-  border-radius: 6px;
-  padding: 0 6px;
-  background: transparent;
-  color: var(--qorc-text);
-  font-size: 12px;
-  white-space: nowrap;
-  font-weight: 500;
-  text-align: center;
-  cursor: pointer;
-  transition: background .15s ease;
-}
-
-.qorc-conversation-options-action:hover,
-.qorc-conversation-options-action:focus-visible {
-  outline: none;
-  background: #e5e5e9;
-}
-
-.qorc-conversation-options-action.danger {
-  color: #e3616a;
-}
-
-.dark .qorc-conversation-options-action:hover,
-.dark .qorc-conversation-options-action:focus-visible {
-  background: var(--qorc-conversation-card-hover-bg);
-}
-
-.qorc-conversation-options-action:disabled {
-  cursor: not-allowed;
-  opacity: .5;
-}
-
-.qorc-conversation-options-action svg {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
 }
 
 .qorc-conversation-status-icons {
@@ -4990,7 +4935,6 @@ button.saved-server-select { cursor: pointer; }
 .saved-server-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .saved-server-menu { z-index: 121; width: 180px; padding: 6px; border: 0; border-radius: 10px; }
 .saved-server-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: 7px; background: transparent; color: inherit; text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
-.saved-server-menu button:hover { background: hsl(var(--accent)); }
 .saved-server-menu .is-danger { color: #ef4444; }
 
 .saved-servers-overlay {

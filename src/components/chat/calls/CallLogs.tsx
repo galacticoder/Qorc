@@ -84,15 +84,17 @@ const CallLogOptions = React.memo(function CallLogOptions({
                 </Button>
             </PopoverTrigger>
             <PopoverContent className="qorc-call-log-popover select-none" align="end">
-                <div className="qorc-call-log-popover-title">Options</div>
-                <button
-                    type="button"
-                    className="qorc-call-log-popover-action is-danger"
-                    onClick={handleDelete}
-                >
-                    <Trash2 aria-hidden="true" />
-                    <span>Delete</span>
-                </button>
+                <div className="qorc-call-log-options-menu">
+                    <div className="qorc-call-log-popover-title">Options</div>
+                    <button
+                        type="button"
+                        className="qorc-call-log-popover-action is-danger"
+                        onClick={handleDelete}
+                    >
+                        <Trash2 aria-hidden="true" />
+                        <span>Delete</span>
+                    </button>
+                </div>
             </PopoverContent>
         </Popover>
     );
@@ -356,7 +358,7 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                             <Button
                                 size="sm"
                                 variant="ghost"
-                                className="qorc-icon-btn"
+                                className="qorc-call-pill-btn qorc-call-log-options-btn"
                                 title="Call history options"
                                 aria-label="Call history options"
                                 disabled={historyControlsDisabled}
@@ -365,16 +367,18 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                             </Button>
                         </PopoverTrigger>
                         <PopoverContent className="qorc-call-log-popover select-none" align="end">
-                            <div className="qorc-call-log-popover-title">Options</div>
-                            <button
-                                type="button"
-                                className="qorc-call-log-popover-action is-danger"
-                                onClick={handleClearLogs}
-                                disabled={historyControlsDisabled}
-                            >
-                                <Trash2 aria-hidden="true" />
-                                <span>Clear history</span>
-                            </button>
+                            <div className="qorc-call-log-options-menu">
+                                <div className="qorc-call-log-popover-title">Options</div>
+                                <button
+                                    type="button"
+                                    className="qorc-call-log-popover-action is-danger"
+                                    onClick={handleClearLogs}
+                                    disabled={historyControlsDisabled}
+                                >
+                                    <Trash2 aria-hidden="true" />
+                                    <span>Clear history</span>
+                                </button>
+                            </div>
                         </PopoverContent>
                     </Popover>
                 </div>

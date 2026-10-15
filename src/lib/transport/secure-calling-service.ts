@@ -2619,7 +2619,7 @@ export class SecureCallingService {
                 updateCallSpeakerLevel(codecSessionId, output.level);
                 for (let count = 0; count < 4 && output.queuedMs < NATIVE_AUDIO_TARGET_MS; count++) {
                     if (!outputIsCurrent()) return;
-                    const frame = buffer.next(Date.now());
+                    const frame = buffer.next(Date.now(), output.queuedMs);
                     if (!frame) break;
                     const decodeStartedAt = performance.now();
                     try {
