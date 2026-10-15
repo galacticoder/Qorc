@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, memo 
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown, Volume2 } from 'lucide-react';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { CallSpeakingAvatar } from './CallSpeakingAvatar';
+import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '../../../lib/utils/shared-utils';
 import { readAppSettingsAsync } from '../../../lib/ui/app-settings';
@@ -12,6 +13,7 @@ import type { CallState } from '../../../lib/types/calling-types';
 
 interface CallModalProps {
   readonly call: CallState | null;
+  readonly localUsername: string;
   readonly localMediaActive: boolean;
   readonly localVideoCanvas: HTMLCanvasElement | null;
   readonly localScreenCanvas: HTMLCanvasElement | null;
@@ -62,6 +64,39 @@ const CanvasDisplay = memo(({
   return <div ref={hostRef} className={cn('overflow-hidden', className)} />;
 });
 CanvasDisplay.displayName = 'CanvasDisplay';
+
+const CallVideoTile = ({
+  canvas, enabled, username, isCurrentUser, callId, speaking, size, children
+}: {
+  canvas: HTMLCanvasElement | null;
+  enabled: boolean;
+  username: string;
+  isCurrentUser: boolean;
+  callId: string;
+  speaking: boolean;
+  size: 'lg' | 'xl';
+  children?: React.ReactNode;
+}) => {
+  if (enabled && canvas) return <CanvasDisplay canvas={canvas} className="h-full w-full" />;
+  const color = getDefaultAvatarColor(username);
+  return (
+    <div
+      className="flex h-full w-full flex-col items-center justify-center overflow-hidden text-white/80"
+      style={{
+        backgroundColor: color,
+        backgroundImage: `radial-gradient(circle at center, color-mix(in srgb, ${color} 78%, white) 0%, ${color} 68%)`,
+        backgroundPosition: 'center',
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: '190% 190%'
+      }}
+    >
+      {isCurrentUser
+        ? <UserAvatar username={username} isCurrentUser size={size} />
+        : <CallSpeakingAvatar callId={callId} active={speaking} username={username} size={size} />}
+      {children}
+    </div>
+  );
+};
 
 type PipCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 type StageSource = 'screen' | 'remote-video' | 'local-video';
@@ -148,6 +183,7 @@ type DeviceOption = { deviceId: string; label: string };
 const MediaDeviceControl = ({
   kind,
   enabled,
+  disabled = false,
   devices,
   selectedDeviceId,
   open,
@@ -157,6 +193,7 @@ const MediaDeviceControl = ({
 }: {
   kind: 'microphone' | 'camera';
   enabled: boolean;
+  disabled?: boolean;
   devices: DeviceOption[];
   selectedDeviceId?: string | null;
   open: boolean;
@@ -167,7 +204,7 @@ const MediaDeviceControl = ({
   const isMicrophone = kind === 'microphone';
   const toggleTitle = isMicrophone
     ? enabled ? 'Mute' : 'Unmute'
-    : enabled ? 'Turn Off Video' : 'Turn On Video';
+    : enabled ? 'Turn Off Video' : devices.length === 0 ? 'No camera available' : 'Turn On Video';
   const pickerTitle = isMicrophone ? 'Choose microphone' : 'Choose camera';
 
   return (
@@ -175,8 +212,10 @@ const MediaDeviceControl = ({
       <button
         type="button"
         onClick={() => void onToggle()}
+        disabled={disabled || (!isMicrophone && !enabled && devices.length === 0)}
+        aria-pressed={enabled}
         className={cn(
-          'relative flex h-full w-full cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55',
+          'relative flex h-full w-full cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55 disabled:cursor-not-allowed disabled:opacity-50',
           !enabled && 'bg-red-600/75 hover:bg-red-500/85'
         )}
         title={toggleTitle}
@@ -285,6 +324,7 @@ const OutputDeviceControl = ({
 
 export const CallModal: React.FC<CallModalProps> = memo(({
   call,
+  localUsername,
   localMediaActive,
   localVideoCanvas,
   localScreenCanvas,
@@ -307,7 +347,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   onFloatingPositionChange,
 }) => {
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [isVideoChanging, setIsVideoChanging] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
   const [isExpandedScreenShare, setIsExpandedScreenShare] = useState(false);
   const [mainStageSource, setMainStageSource] = useState<StageSource>('remote-video');
@@ -361,6 +401,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const isIncoming = call?.direction === 'incoming';
   const isRinging = call?.status === 'ringing';
   const isVideoCall = call?.type === 'video';
+  const isVideoEnabled = isVideoCall && localMediaActive && call?.localVideoEnabled === true;
   const callStatusText = isIncoming && isRinging
     ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...`
     : isConnected
@@ -470,12 +511,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, [localMediaActive, isVideoCall]);
 
   useEffect(() => {
-    if (!localMediaActive) {
-      setIsVideoEnabled(isVideoCall);
-      return;
-    }
-    setIsVideoEnabled(isVideoCall);
     setIsMuted(false);
+    setIsVideoChanging(false);
   }, [localMediaActive, isVideoCall, call?.id]);
 
   useEffect(() => {
@@ -557,10 +594,14 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   };
 
   const toggleVideo = async () => {
+    if (isVideoChanging) return;
+    setIsVideoChanging(true);
     try {
-      setIsVideoEnabled(await onToggleVideo());
+      await onToggleVideo();
     } catch (error) {
       console.error('Failed to toggle camera', error);
+    } finally {
+      setIsVideoChanging(false);
     }
   };
 
@@ -591,8 +632,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   const sharedScreenCanvas = remoteScreenCanvas ?? (isScreenSharing ? localScreenCanvas : null);
   const hasSharedScreen = Boolean(sharedScreenCanvas);
-  const hasRemoteVideo = Boolean(remoteVideoCanvas);
-  const showLocalPreview = isVideoCall && Boolean(localVideoCanvas);
+  const showLocalPreview = isVideoCall && localMediaActive;
   useEffect(() => {
     const screenBecameAvailable = hasSharedScreen && !sharedScreenWasAvailableRef.current;
     sharedScreenWasAvailableRef.current = hasSharedScreen;
@@ -602,29 +642,21 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
     setMainStageSource(previous => {
       if (previous === 'screen' && !hasSharedScreen) {
-        return hasRemoteVideo ? 'remote-video' : 'local-video';
+        return 'remote-video';
       }
       if (previous === 'local-video' && !showLocalPreview) {
         return hasSharedScreen ? 'screen' : 'remote-video';
       }
       return previous;
     });
-  }, [hasSharedScreen, hasRemoteVideo, showLocalPreview]);
+  }, [hasSharedScreen, showLocalPreview]);
 
   if (!call) return null;
 
   const glassControl = 'flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55';
   const peerAvatarColor = getDefaultAvatarColor(call.peer || '');
-  const avatarStageStyle: React.CSSProperties = {
-    backgroundColor: peerAvatarColor,
-    backgroundImage: `radial-gradient(circle at center, color-mix(in srgb, ${peerAvatarColor} 78%, white) 0%, ${peerAvatarColor} 68%)`,
-    backgroundPosition: 'center',
-    backgroundRepeat: 'no-repeat',
-    backgroundSize: '190% 190%'
-  };
-
   const activeMainStageSource = mainStageSource === 'screen' && !hasSharedScreen
-    ? hasRemoteVideo ? 'remote-video' : 'local-video'
+    ? 'remote-video'
     : mainStageSource === 'local-video' && !showLocalPreview
       ? hasSharedScreen ? 'screen' : 'remote-video'
       : mainStageSource;
@@ -684,48 +716,34 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         onFocusCapture={revealControls}
       >
         {!isVideoCall ? (
-          <div
-            className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden text-white/80"
-            style={avatarStageStyle}
+          <CallVideoTile
+            canvas={null} enabled={false} username={call.peer} isCurrentUser={false}
+            callId={call.id} speaking={isConnected} size="xl"
           >
-            <CallSpeakingAvatar callId={call.id} active={isConnected} username={call.peer || ''} size="xl" />
             {!isConnected && <p className="mt-3 text-sm font-medium">{callStatusText}</p>}
-          </div>
+          </CallVideoTile>
         ) : activeMainStageSource === 'screen' && hasSharedScreen ? (
           <CanvasDisplay canvas={sharedScreenCanvas} objectFit="contain" className="h-full w-full" />
         ) : activeMainStageSource === 'local-video' && showLocalPreview ? (
           <div className="relative h-full w-full bg-zinc-900">
-            <CanvasDisplay
-              canvas={localVideoCanvas}
-              className={cn('h-full w-full', !isVideoEnabled && 'opacity-0')}
+            <CallVideoTile
+              canvas={localVideoCanvas} enabled={isVideoEnabled} username={localUsername} isCurrentUser
+              callId={call.id} speaking={false} size="xl"
             />
-            {!isVideoEnabled && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <VideoOff className="h-8 w-8 text-white/60" />
-              </div>
-            )}
-            {isVideoEnabled && !localVideoCanvas && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Video className="h-8 w-8 text-white/60" />
-              </div>
-            )}
             <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-black/45 px-2 py-1 text-xs font-medium text-white backdrop-blur-md">
               You
             </span>
           </div>
-        ) : activeMainStageSource === 'remote-video' && hasRemoteVideo ? (
-          <CanvasDisplay canvas={remoteVideoCanvas} className="h-full w-full" />
         ) : (
-          <div
-            className="absolute inset-0 flex flex-col items-center justify-center text-white/75"
-            style={avatarStageStyle}
+          <CallVideoTile
+            canvas={remoteVideoCanvas} enabled={call.remoteVideoEnabled} username={call.peer} isCurrentUser={false}
+            callId={call.id} speaking={isConnected} size="xl"
           >
-            <CallSpeakingAvatar callId={call.id} active={isConnected} username={call.peer || ''} size="xl" className="mb-3" />
-            {!isConnected && <p className="text-sm font-medium">{callStatusText}</p>}
-          </div>
+            {!isConnected && <p className="mt-3 text-sm font-medium">{callStatusText}</p>}
+          </CallVideoTile>
         )}
 
-        {isVideoCall && hasRemoteVideo && activeMainStageSource !== 'remote-video' && (
+        {isVideoCall && activeMainStageSource !== 'remote-video' && (
           <DockedPip
             corner={pipCorners['remote-cam']}
             label={displayPeerName}
@@ -734,7 +752,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             onActivate={() => setMainStageSource('remote-video')}
             large={isDocked}
           >
-            <CanvasDisplay canvas={remoteVideoCanvas} className="h-full w-full" />
+            <CallVideoTile
+              canvas={remoteVideoCanvas} enabled={call.remoteVideoEnabled} username={call.peer} isCurrentUser={false}
+              callId={call.id} speaking={isConnected} size="lg"
+            />
           </DockedPip>
         )}
 
@@ -747,22 +768,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             onActivate={() => setMainStageSource('local-video')}
             large={isDocked}
           >
-            <div className="relative h-full w-full bg-zinc-900">
-              <CanvasDisplay
-                canvas={localVideoCanvas}
-                className={cn('h-full w-full', !isVideoEnabled && 'opacity-0')}
-              />
-              {!isVideoEnabled && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <VideoOff className="h-5 w-5 text-white/60" />
-                </div>
-              )}
-              {isVideoEnabled && !localVideoCanvas && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <Video className="h-5 w-5 text-white/60" />
-                </div>
-              )}
-            </div>
+            <CallVideoTile
+              canvas={localVideoCanvas} enabled={isVideoEnabled} username={localUsername} isCurrentUser
+              callId={call.id} speaking={false} size="lg"
+            />
           </DockedPip>
         )}
 
@@ -884,6 +893,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
                 <MediaDeviceControl
                   kind="camera"
                   enabled={isVideoEnabled}
+                  disabled={isVideoChanging}
                   devices={videoDevices}
                   selectedDeviceId={preferredCameraId}
                   open={devicePicker === 'camera'}

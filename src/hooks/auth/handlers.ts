@@ -26,6 +26,7 @@ import {
   wipeStaleAuthResult,
 } from "../../lib/auth/auth-lifecycle";
 import { keyTransparencyClient } from "../../lib/key-transparency/client";
+import { startupConnection } from "../../lib/transport/startup-connection";
 import {
   PASSPHRASE_MAX_LENGTH,
   PASSPHRASE_MIN_LENGTH,
@@ -349,6 +350,8 @@ export const createHandleAccountSubmit = (
       setters.setLoginError('Authentication request could not be initialized');
       return;
     }
+    const recoverLocalAccount = mode === 'login' && helpers.isLocalRecovery()
+      && refs.loginUsernameRef.current === trimmedUsername;
     const operation = helpers.lifecycle.begin(trimmedUsername, authRequestId);
     tokenVault.lock();
     const assertCurrent = () => {
@@ -415,7 +418,8 @@ export const createHandleAccountSubmit = (
     };
 
     try {
-      if (mode === 'login' && helpers.isLocalRecovery()) {
+      await awaitCurrent(startupConnection.prepareAuthenticationTransport());
+      if (recoverLocalAccount) {
         refs.passphrasePlaintextRef.current = passphrase;
         setters.setAuthStatus('Unlocking local account...');
         await awaitCurrent(helpers.initializeKeys());
@@ -1025,7 +1029,10 @@ export const createHandleAccountSubmit = (
       if (isStaleAuthOperation(err) || !helpers.lifecycle.isCurrent(operation)) return;
       tokenVault.lock();
       console.error('[Auth] Connection or key error:', err);
-      setters.setLoginError(err instanceof Error && err.message ? err.message : 'Connection failed. Please try again.');
+      const errorMessage = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+      setters.setLoginError(/invalid tag|invalid mac|decrypt|tag mismatch/i.test(errorMessage)
+        ? 'Incorrect username, password, or passphrase.'
+        : errorMessage || 'Authentication could not be started. Please try again.');
       setters.setIsSubmittingAuth(false);
     } finally {
       if (helpers.lifecycle.isCurrent(operation)) {

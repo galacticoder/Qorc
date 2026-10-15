@@ -91,7 +91,7 @@ export const setupCallStateChangeCallback = (
           isOutgoing: true
         });
       }
-    } else if (call.status === 'connected' && isActive) {
+    } else if (call.status === 'connected' && isActive && !wasConnected) {
       try { refs.everConnectedRef.current.add(call.id); } catch { }
       power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {

@@ -133,6 +133,9 @@ Video setup checks whether a local camera exists. A participant without one
 requests microphone access only and can still receive the other participant's
 video. The call remains a video call, but no local camera or video encoder is
 started. An actual capture or permission failure is still reported as an error.
+The camera control reflects capture state rather than the call type. A disabled
+or absent camera displays that participant's avatar in the main view and preview,
+including while the other participant shares a screen.
 
 Linux screen sharing is a separate native path. The xdg-desktop-portal chooser
 authorizes one monitor or window and returns a restricted PipeWire connection,
@@ -671,13 +674,15 @@ Code references:
 A video call opens the preferred microphone and camera through native sessions.
 When no preference is stored, the platform default device is selected. An
 unavailable saved device fails media startup. Linux camera capture uses
-Video4Linux and Windows uses Media Foundation. A video call requires working audio and camera
-sessions, a denied permission or unusable camera fails setup instead of silently
-changing the call type. The local preview and outgoing encoder share the same
-persistent canvas, so the camera has one native consumer. Selecting the active
-camera does not reopen it. Disabling video releases the hardware stream and
-publishes low-rate black JPEG frames until it is enabled again. No bundled or
-synthetic sample video is used.
+Video4Linux and Windows uses Media Foundation. A video call requires working audio;
+camera capture starts only when a local camera exists. A denied permission or
+unusable camera fails setup instead of silently changing the call type. The
+local preview and outgoing encoder share the same persistent canvas, so the
+camera has one native consumer. Selecting the active
+camera does not reopen it. Disabling video disables native capture and
+publishes low-rate black VP8 frames until it is enabled again. Camera state is
+sent separately so the peer displays an avatar instead of those black frames.
+No bundled or synthetic sample video is used.
 
 Each visual stream owns one persistent WebCodecs `VideoEncoder` and one
 `VideoDecoder`. The fixed format is a raw VP8 elementary stream. The encoder
@@ -920,13 +925,19 @@ configuration rather than representing only its support subset.
 
 ## Runtime Call Telemetry
 
-A connected call starts one optional lossy `call-telemetry:<callId>` stream. Its
+A connected call starts one lossy `call-telemetry:<callId>` stream. Its
 17-byte request and 33-byte response frames carry a random 64-bit probe ID and
 integer millisecond timestamps. A two-byte control frame requests a fresh VP8
 keyframe for the camera or screen decoder and is limited to one request per
 media kind every two seconds. One probe is outstanding at a time, probes are
 sent every two seconds, and an unanswered probe fails after eight seconds. The
-reported RTT subtracts the peer's measured response-processing interval. The
+same encrypted, call-bound stream carries an exact two-byte camera-state control
+frame: type 4 and a boolean byte restricted to 0 or 1. Video participants send
+their actual local camera state on connection, immediately after a successful
+toggle, and every two seconds to repair a dropped update. Audio calls reject
+camera-state frames. Updates belong to the active call, connection, and telemetry
+stream; they are not sent as server signaling or inferred from a retained canvas.
+The reported RTT subtracts the peer's measured response-processing interval. The
 displayed one-way estimate is RTT divided by two and is a diagnostic estimate,
 not a measurement of asymmetric path delay.
 

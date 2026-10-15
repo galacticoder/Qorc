@@ -65,6 +65,25 @@ test('answering an incoming call never logs it as an outgoing call', () => {
     assert.equal(events.filter(event => event.name === EventType.UI_CALL_LOG && event.detail.type === 'started').length, 0);
 });
 
+test('camera state updates refresh the call UI without repeating connected history', () => {
+    const { setupCallStateChangeCallback } = load('../../src/hooks/calling/callbacks.ts', {
+        EventType, power: { start: async () => {}, stop: async () => {} },
+        unstable_batchedUpdates: action => action(), clearCallMediaState() {},
+    });
+    let changed;
+    const events = [];
+    const states = [];
+    setupCallStateChangeCallback({ onCallStateChange: callback => { changed = callback; } }, {
+        everConnectedRef: { current: new Set() },
+        eventDebouncer: { current: { enqueue: (name, detail) => events.push({ name, detail }) } },
+    }, { setCurrentCall: state => states.push(state), setPendingIncomingCalls() {} }, 'alice');
+    for (const enabled of [true, false, true, false]) {
+        changed({ id: 'call', peer: 'bob', direction: 'incoming', type: 'video', status: 'connected', localVideoEnabled: enabled }, true);
+    }
+    assert.deepEqual(states.map(call => call.localVideoEnabled), [true, false, true, false]);
+    assert.equal(events.filter(event => event.name === EventType.UI_CALL_LOG && event.detail.type === 'connected').length, 1);
+});
+
 test('replayed call events keep one chat message and one persisted message ID', () => {
     class CallEvent extends Event {
         constructor(type, options) { super(type); this.detail = options.detail; }

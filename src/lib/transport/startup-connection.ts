@@ -392,7 +392,7 @@ class StartupConnection {
     return run;
   }
 
-  async prepareRecoveryTransport(): Promise<void> {
+  async prepareAuthenticationTransport(): Promise<void> {
     const torReady = await this.validateTor();
     if (!torReady) {
       throw new Error(this.state.step || 'Tor could not connect.');

@@ -2854,7 +2854,8 @@ export class WebSocketConnection {
       try {
         await active.promise;
       } catch (error) {
-        if (active.targetMode === 'linked') throw error;
+        throwIfOperationAborted(abortSignal);
+        if (active.targetMode === 'linked' && !(error instanceof Error && error.name === 'AbortError')) throw error;
       }
       throwIfOperationAborted(abortSignal);
       if (
@@ -2892,7 +2893,8 @@ export class WebSocketConnection {
       try {
         await transition.promise;
       } catch (error) {
-        if (transition.targetMode === 'linked') throw error;
+        throwIfOperationAborted(abortSignal);
+        if (transition.targetMode === 'linked' && !(error instanceof Error && error.name === 'AbortError')) throw error;
       }
       throwIfOperationAborted(abortSignal);
     }

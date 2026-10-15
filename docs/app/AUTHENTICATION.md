@@ -204,6 +204,18 @@ vault before the client reads the native restart pool. If that pool is empty,
 the same submit continues into normal private account authentication without
 deriving the local vault a second time.
 
+Local-unlock mode belongs only to that saved username. Entering a different
+username cancels the previous authentication generation, detaches its in-memory
+account services, and clears the old unlock and logged-in UI state. The new
+account uses normal private authentication on a linked connection; it cannot
+reuse the old account's recovery result, token vault, or public-key cache. Tor
+readiness is prepared after the new authentication operation takes ownership,
+so connection setup cannot first resume the previous identity. A canceled
+connection transition from the old attempt does not cancel the new attempt.
+Switching accounts locks the old native session without deleting its saved
+account data or restart credentials. The last-account marker changes only after
+successful authentication.
+
 This prompt is required by the no-keychain, no-second-device design. Persisting
 an unattended recovery secret beside the copied files would make those files
 self-unlocking and would defeat the local theft boundary.

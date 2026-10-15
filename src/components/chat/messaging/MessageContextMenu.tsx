@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { Pencil, Reply, Trash2, Download, Loader2, SmilePlus, Copy } from 'lucide-react';
+import { Pencil, Reply, Trash2, Check, Download, Loader2, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
 interface MessageAnchorRect {
@@ -27,6 +27,7 @@ interface MessageContextMenuProps {
     onReactionSelect?: (emoji: string) => void;
     onDownload?: () => void | Promise<void>;
     isDownloading: boolean;
+    isDownloaded: boolean;
     canEdit: boolean;
     canDelete: boolean;
     isFile: boolean;
@@ -45,6 +46,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     onReactionSelect,
     onDownload,
     isDownloading,
+    isDownloaded,
     canEdit,
     canDelete,
     isFile,
@@ -212,16 +214,21 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                         type="button"
                         onClick={async (e) => {
                             e.stopPropagation();
+                            if (isDownloading || isDownloaded) return;
                             try { await onDownload?.(); }
                             finally { if (menuRef.current) onClose(); }
                         }}
                         className="qorc-message-context-action"
-                        disabled={isDownloading}
+                        disabled={isDownloading || isDownloaded}
                         aria-busy={isDownloading || undefined}
-                        title={isDownloading ? 'Preparing download…' : 'Download'}
-                        aria-label={isDownloading ? 'Preparing download…' : 'Download'}
+                        title={isDownloading ? 'Preparing download…' : isDownloaded ? 'Downloaded' : 'Download'}
+                        aria-label={isDownloading ? 'Preparing download…' : isDownloaded ? 'Downloaded' : 'Download'}
                     >
-                        {isDownloading ? <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" /> : <Download className="w-5 h-5" aria-hidden="true" />}
+                        {isDownloading
+                            ? <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" />
+                            : isDownloaded
+                                ? <Check className="w-5 h-5" aria-hidden="true" />
+                                : <Download className="w-5 h-5" aria-hidden="true" />}
                     </button>
                 )}
 

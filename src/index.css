@@ -4500,9 +4500,14 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   background: #e5e5e9;
 }
 
-.qorc-file-card[aria-busy="true"],
+.qorc-file-card[aria-disabled="true"],
 .qorc-file-preview-trigger:disabled,
 .qorc-file-dl:disabled {
+  cursor: default;
+}
+
+.qorc-file-card[aria-busy="true"],
+.qorc-file-media-card[aria-busy="true"] button:disabled {
   cursor: progress;
 }
 

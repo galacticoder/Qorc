@@ -56,11 +56,11 @@ function calling(methods, dependencies = {}) {
         ...dependencies,
     });
     Object.assign(service, {
-        currentCall: { id: firstId, peer: 'bob', direction: 'incoming', type: 'video', status: 'connecting' },
+        currentCall: { id: firstId, peer: 'bob', direction: 'incoming', type: 'video', status: 'connecting', localVideoEnabled: false, remoteVideoEnabled: false },
         localUsername: 'alice', closedCalls: new Map(), pendingIncomingCalls: new Map(),
         localMediaActive: false, cameraSessionId: null, microphoneSessionId: null,
         lastCaptureReleaseAt: 0, mediaGeneration: 0,
-        teardownCallMediaElements() {}, notifyLocalMediaChange() {},
+        teardownCallMediaElements() {}, notifyLocalMediaChange() {}, notifyCallState() {},
     });
     return service;
 }
@@ -80,7 +80,7 @@ test('a camera-less video participant starts a microphone without camera permiss
     assert.equal(service.localMediaActive, true);
     assert.equal(service.microphoneSessionId, firstId);
     assert.equal(service.cameraSessionId, null);
-    assert.equal(service.videoEnabled, false);
+    assert.equal(service.currentCall.localVideoEnabled, false);
     assert.equal(service.currentCall.type, 'video');
 });
 
@@ -98,6 +98,113 @@ test('a camera-less video participant receives video and starts audio without a 
     await service.startMediaStreaming(firstId);
     assert.equal(audio, 1);
     assert.equal(receiving, 1);
+});
+
+test('a real camera is reported on only after its native capture starts', async () => {
+    const start = deferred();
+    const observed = [];
+    const service = calling(['setupLocalMedia'], {
+        nativeCamera: { devices: async () => [{ device_id: 'camera' }], start: () => start.promise },
+        nativeMicrophone: { start: async () => {} },
+        requireNativeMediaAccess: async () => {}, readAppSettingsAsync: async () => ({}),
+    });
+    service.notifyCallState = call => observed.push(call.localVideoEnabled);
+    const pending = service.setupLocalMedia('video', firstId);
+    await flush();
+    assert.equal(service.currentCall.localVideoEnabled, false);
+    start.resolve();
+    await pending;
+    assert.equal(service.currentCall.localVideoEnabled, true);
+    assert.deepEqual(observed, [true]);
+});
+
+test('remote camera controls are scoped to the active call, connection, and stream', async () => {
+    let callbacks;
+    const streams = new Map();
+    const connection = {
+        state: 'connected',
+        createStream: async options => {
+            const stream = { id: options.id };
+            streams.set(options.type, stream);
+            return stream;
+        },
+    };
+    const service = calling(['establishCallConnection'], {
+        CALL_CONNECTION_ATTEMPTS: 1,
+        CallTelemetry: class { constructor(...args) { callbacks = args; } },
+    });
+    const observed = [];
+    Object.assign(service, {
+        transport: { getConnection: () => connection },
+        bindCallConnectionState() {}, notifyCallState: call => observed.push(call.remoteVideoEnabled),
+    });
+    await service.establishCallConnection('bob', firstId);
+    callbacks[6](true);
+    callbacks[6](true);
+    callbacks[6](false);
+    assert.deepEqual(observed, [true, false]);
+    service.currentCall.localVideoEnabled = true;
+    assert.equal(callbacks[7](), true);
+    service.telemetryStream = { id: 'replacement-stream' };
+    callbacks[6](true);
+    assert.equal(service.currentCall.remoteVideoEnabled, false);
+    service.telemetryStream = streams.get('call-telemetry');
+    service.callConnection = { state: 'connected' };
+    callbacks[6](true);
+    assert.equal(service.currentCall.remoteVideoEnabled, false);
+    service.callConnection = connection;
+    service.currentCall = { id: secondId, remoteVideoEnabled: false, localVideoEnabled: true };
+    callbacks[6](true);
+    assert.equal(service.currentCall.remoteVideoEnabled, false);
+    assert.equal(callbacks[7](), false);
+});
+
+test('camera toggles publish native capture state to local observers and the peer', async () => {
+    const capture = [];
+    const states = [];
+    const published = [];
+    const service = calling(['toggleVideo'], {
+        nativeCamera: { setEnabled: async (id, enabled) => capture.push({ id, enabled }) },
+    });
+    Object.assign(service, {
+        localMediaActive: true, cameraSessionId: firstId, videoStream: {},
+        notifyCallState: call => states.push({ ...call }),
+        callTelemetry: { sendCameraState: async () => published.push(service.currentCall.localVideoEnabled) },
+    });
+    service.currentCall.localVideoEnabled = true;
+    assert.equal(await service.toggleVideo(), false);
+    assert.equal(await service.toggleVideo(), true);
+    assert.deepEqual(capture, [{ id: firstId, enabled: false }, { id: firstId, enabled: true }]);
+    assert.deepEqual(states.map(call => call.localVideoEnabled), [false, true]);
+    assert.deepEqual(published, [false, true]);
+});
+
+test('a camera-less participant never reports its camera as enabled', async () => {
+    const service = calling(['toggleVideo'], {
+        nativeCamera: { setEnabled: async () => assert.fail('no native camera exists') },
+    });
+    Object.assign(service, { localMediaActive: true, videoStream: {} });
+    assert.equal(await service.toggleVideo(), false);
+    assert.equal(service.currentCall.localVideoEnabled, false);
+});
+
+test('failed or canceled camera toggles cannot invent state or update a replacement call', async () => {
+    const capture = deferred();
+    const service = calling(['toggleVideo'], { nativeCamera: { setEnabled: () => capture.promise } });
+    Object.assign(service, {
+        localMediaActive: true, cameraSessionId: firstId, videoStream: {},
+        notifyCallState: () => assert.fail('a stale camera toggle cannot notify the new call'),
+    });
+    const pending = service.toggleVideo();
+    service.currentCall = { id: secondId, type: 'video', localVideoEnabled: false };
+    service.cameraSessionId = secondId;
+    capture.resolve();
+    assert.equal(await pending, false);
+    assert.equal(service.currentCall.localVideoEnabled, false);
+    service.currentCall.localVideoEnabled = true;
+    capture.promise = Promise.reject(new Error('capture failed'));
+    await assert.rejects(service.toggleVideo(), /capture failed/);
+    assert.equal(service.currentCall.localVideoEnabled, true);
 });
 
 test('late codec startup cannot install its session into a replacement call', async () => {

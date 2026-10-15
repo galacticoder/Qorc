@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { Download, Loader2 } from "lucide-react";
+import { Check, Download, Loader2 } from "lucide-react";
 import { cn } from "../../../../lib/utils/shared-utils";
 import { useFileUrl } from "../../../../hooks/file-handling/useFileUrl";
 import {
@@ -21,6 +21,7 @@ interface FileContentProps {
   readonly loadFile: boolean;
   readonly onDownload: () => Promise<void>;
   readonly isDownloading: boolean;
+  readonly isDownloaded: boolean;
 }
 
 export const FileContent: React.FC<FileContentProps> = ({
@@ -30,6 +31,7 @@ export const FileContent: React.FC<FileContentProps> = ({
   loadFile,
   onDownload,
   isDownloading,
+  isDownloaded,
 }) => {
   const { filename, fileSize, mimeType } = message;
   const [imageError, setImageError] = React.useState(false);
@@ -96,10 +98,13 @@ export const FileContent: React.FC<FileContentProps> = ({
   }, [effectiveFileUrl]);
 
   const sizeLabel = formatFileSize(fileSize ?? 0);
-  const downloadLabel = isDownloading ? 'Preparing download…' : 'Download file';
+  const downloadDisabled = isDownloading || isDownloaded;
+  const downloadLabel = isDownloading ? 'Preparing download…' : isDownloaded ? 'Downloaded' : 'Download file';
   const downloadIcon = isDownloading
     ? <Loader2 className="w-[18px] h-[18px] animate-spin" aria-hidden="true" />
-    : <Download className="w-[18px] h-[18px]" aria-hidden="true" />;
+    : isDownloaded
+      ? <Check className="w-[18px] h-[18px]" aria-hidden="true" />
+      : <Download className="w-[18px] h-[18px]" aria-hidden="true" />;
 
   const fileCard = (children: React.ReactNode, onClick?: () => void) => (
     <div
@@ -108,13 +113,13 @@ export const FileContent: React.FC<FileContentProps> = ({
       tabIndex={onClick ? 0 : undefined}
       aria-label={onClick ? downloadLabel : undefined}
       aria-busy={isDownloading || undefined}
-      aria-disabled={onClick ? isDownloading : undefined}
+      aria-disabled={onClick ? downloadDisabled : undefined}
       title={onClick ? downloadLabel : undefined}
-      onClick={onClick && !isDownloading ? onClick : undefined}
+      onClick={onClick && !downloadDisabled ? onClick : undefined}
       onKeyDown={onClick ? (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          if (!isDownloading) onClick();
+          if (!downloadDisabled) onClick();
         }
       } : undefined}
     >
@@ -131,7 +136,7 @@ export const FileContent: React.FC<FileContentProps> = ({
         onClick={onOpen}
         aria-label={label}
         title={label}
-        disabled={isDownloading}
+        disabled={downloadDisabled}
       >
         <MaterialFileIcon fileName={filename} className="qorc-file-card-icon" />
         <span className="qorc-file-meta">
@@ -143,7 +148,7 @@ export const FileContent: React.FC<FileContentProps> = ({
         type="button"
         className="qorc-file-dl"
         onClick={onDownload}
-        disabled={isDownloading}
+        disabled={downloadDisabled}
         aria-label={downloadLabel}
         title={downloadLabel}
       >

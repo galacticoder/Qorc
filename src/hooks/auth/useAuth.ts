@@ -102,9 +102,28 @@ export const useAuth = () => {
       if (/^[a-f0-9]{64}$/.test(previousOwner)) {
         void account.lock(previousOwner).catch(() => false);
       }
+      unifiedSignalTransport.resetForAccountTransition();
+      deliveryReceiptOutbox.setPersistence(null, null);
+      deliveryReceiptOutbox.setActiveAccount(null);
+      receiptBatcher.setActiveAccount(null);
+      identityChangeStore.clear();
+      blockingSystem.setSecureDB(null);
+      blockStatusCache.clear();
+      profilePictureSystem.setSecureDB(null);
+      syncEncryptedStorage.reset();
+      void p2pTransport.shutdown().catch(() => {});
+      resetAvatarStoreClient();
+      resetBlindRoutingClient();
       keyTransparencyClient.destroy();
+      keyTransparencyWarningStore.clear();
       hybridKeysRef.current = null;
       keyManagerOwnerRef.current = '';
+      setIsLoggedIn(false);
+      setAccountAuthenticated(false);
+      setVaultReady(false);
+      setShowPassphrasePrompt(false);
+      setRecoveryActive(false);
+      setTokenValidationInProgress(false);
     }
 
     const next = {
@@ -123,7 +142,7 @@ export const useAuth = () => {
       requestId: next.requestId,
       signal: next.controller.signal,
     };
-  }, []);
+  }, [setTokenValidationInProgress]);
 
   const captureAuthOperation = useCallback((): AuthOperationSnapshot => {
     const current = authLifecycleStateRef.current;

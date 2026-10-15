@@ -801,16 +801,6 @@ const ChatApp: React.FC = () => {
     }
   }, [Authentication, promptForServerEntryIfRequired]);
 
-  const handleAccountSubmitWhenConnected = useCallback(async (
-    mode: "login" | "register",
-    username: string,
-    password: string,
-    passphrase: string,
-  ) => {
-    if (!await connectedForAuth()) return;
-    await Authentication.handleAccountSubmit(mode, username, password, passphrase);
-  }, [connectedForAuth, Authentication]);
-
   const handleServerPasswordSubmitWhenConnected = useCallback(async (password: string) => {
     if (!await connectedForAuth(true)) return;
     await Authentication.handleServerPasswordSubmit(password);
@@ -930,7 +920,7 @@ const ChatApp: React.FC = () => {
           isGeneratingKeys={Authentication.isGeneratingKeys}
           authStatus={Authentication.authStatus}
           error={Authentication.loginError}
-          onAccountSubmit={handleAccountSubmitWhenConnected}
+          onAccountSubmit={Authentication.handleAccountSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
           isRegistrationMode={registrationMode}
           setIsRegistrationMode={Authentication.setIsRegistrationMode}
@@ -1107,6 +1097,7 @@ const ChatApp: React.FC = () => {
         currentCall && CallModalPanel && createPortal(
           <CallModalPanel
             call={currentCall}
+            localUsername={Authentication.loginUsernameRef.current || ''}
             localMediaActive={callingHook.localMediaActive}
             localVideoCanvas={callingHook.localVideoCanvas}
             localScreenCanvas={callingHook.localScreenCanvas}
@@ -1135,6 +1126,7 @@ const ChatApp: React.FC = () => {
           <CallModalPanel
             key={foregroundIncomingCall.id}
             call={foregroundIncomingCall}
+            localUsername={Authentication.loginUsernameRef.current || ''}
             localMediaActive={false}
             localVideoCanvas={null}
             localScreenCanvas={null}

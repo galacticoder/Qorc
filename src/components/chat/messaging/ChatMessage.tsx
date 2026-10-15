@@ -1,6 +1,6 @@
 import React, { useRef, useMemo, useCallback, useEffect, useState } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
-import { format, isSameMinute } from "date-fns";
+import { format } from "date-fns";
 import { EmojiPicker } from "../../ui/EmojiPicker";
 import { useEmojiPicker } from "../../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types";
@@ -88,17 +88,18 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
   const displaySender = useDisplayUsername({ username: sender });
   const displayReplyToSender = useDisplayUsername({ username: message.replyTo?.sender || '' });
 
-  // Group messages within 3 minutes from same sender
-  const isGrouped = useMemo(() => {
-    if (!previousMessage) return false;
-    if (previousMessage.sender !== sender) return false;
-    if (!(previousMessage.timestamp instanceof Date) || !(timestamp instanceof Date)) return false;
-    const diff = Math.abs(timestamp.getTime() - previousMessage.timestamp.getTime());
-    const GROUP_GAP_MS = 3 * 60 * 1000;
-    return diff <= GROUP_GAP_MS || isSameMinute(previousMessage.timestamp, timestamp);
-  }, [previousMessage, sender, timestamp]);
+  const safeIsCurrentUser = isCurrentUser === true || sender === currentUsername;
 
-  const safeIsCurrentUser = useMemo(() => isCurrentUser || false, [isCurrentUser]);
+  const isGrouped = useMemo(() => {
+    if (!previousMessage || previousMessage.id === message.id) return false;
+    if (isSystemMessage || isDeleted || previousMessage.isSystemMessage || previousMessage.isDeleted) return false;
+    if (previousMessage.sender !== sender) return false;
+    if (previousMessage.recipient !== message.recipient) return false;
+    if ((previousMessage.isCurrentUser === true || previousMessage.sender === currentUsername) !== safeIsCurrentUser) return false;
+    if (!(previousMessage.timestamp instanceof Date) || !(timestamp instanceof Date)) return false;
+    const diff = timestamp.getTime() - previousMessage.timestamp.getTime();
+    return Number.isFinite(diff) && diff >= 0 && diff <= 3 * 60 * 1000;
+  }, [previousMessage, message.id, message.recipient, sender, timestamp, isSystemMessage, isDeleted, currentUsername, safeIsCurrentUser]);
 
   const bubbleRef = useRef<HTMLDivElement | null>(null);
   const { openPicker, openPickerOrigin, closePicker, isPickerOpen } = useEmojiPicker();
@@ -114,15 +115,20 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
   const [contextMenu, setContextMenu] = useState<{ anchorRect: MessageAnchorRect } | null>(null);
   const [isContentRendered, setIsContentRendered] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isDownloaded, setIsDownloaded] = useState(false);
   const downloadGenerationRef = useRef(0);
   const pendingDownloadRef = useRef(false);
+  const downloadCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     downloadGenerationRef.current += 1;
     pendingDownloadRef.current = false;
     setIsDownloading(false);
+    setIsDownloaded(false);
     return () => {
       downloadGenerationRef.current += 1;
       pendingDownloadRef.current = false;
+      if (downloadCooldownRef.current !== null) clearTimeout(downloadCooldownRef.current);
+      downloadCooldownRef.current = null;
     };
   }, [message.id, secureDB]);
 
@@ -219,13 +225,20 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
       } finally {
         setTimeout(() => URL.revokeObjectURL(url), 0);
       }
+      setIsDownloaded(true);
+      downloadCooldownRef.current = setTimeout(() => {
+        if (generation !== downloadGenerationRef.current) return;
+        downloadCooldownRef.current = null;
+        pendingDownloadRef.current = false;
+        setIsDownloaded(false);
+      }, 3000);
     } catch (error) {
       if (generation !== downloadGenerationRef.current) return;
       console.error('Failed to download file:', error);
       alert('Failed to download file');
     } finally {
       if (generation === downloadGenerationRef.current) {
-        pendingDownloadRef.current = false;
+        if (downloadCooldownRef.current === null) pendingDownloadRef.current = false;
         setIsDownloading(false);
       }
     }
@@ -427,6 +440,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
                     loadFile={loadFile}
                     onDownload={handleDownload}
                     isDownloading={isDownloading}
+                    isDownloaded={isDownloaded}
                   />
                 )}
                 {messageReactions}
@@ -521,6 +535,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
           onReactionSelect={onReact ? handlePickEmoji : undefined}
           onDownload={isDownloadable ? handleDownload : undefined}
           isDownloading={isDownloading}
+          isDownloaded={isDownloaded}
           canEdit={!isFileMessageType && safeIsCurrentUser && !!onEdit}
           canDelete={safeIsCurrentUser}
           isFile={isFileMessageType}

@@ -14,6 +14,7 @@ export type CallTelemetryMediaKind = 'audio' | 'video' | 'screen';
 const PROBE_REQUEST = 1;
 const PROBE_RESPONSE = 2;
 const KEY_FRAME_REQUEST = 3;
+const CAMERA_STATE = 4;
 const PROBE_ID_BYTES = 8;
 const PROBE_REQUEST_BYTES = 17;
 const PROBE_RESPONSE_BYTES = 33;
@@ -41,7 +42,12 @@ type KeyFrameRequest = {
     kind: 'video' | 'screen';
 };
 
-export type CallTelemetryProbe = ProbeRequest | ProbeResponse | KeyFrameRequest;
+type CameraState = {
+    type: 'camera-state';
+    enabled: boolean;
+};
+
+export type CallTelemetryProbe = ProbeRequest | ProbeResponse | KeyFrameRequest | CameraState;
 
 type SampleSummary = {
     latest: number | null;
@@ -233,6 +239,10 @@ function writeTimestamp(view: DataView, offset: number, value: number): void {
 }
 
 export function encodeCallTelemetryProbe(probe: CallTelemetryProbe): Uint8Array {
+    if (probe.type === 'camera-state') {
+        if (typeof probe.enabled !== 'boolean') throw new Error('Invalid call camera state');
+        return Uint8Array.of(CAMERA_STATE, probe.enabled ? 1 : 0);
+    }
     if (probe.type === 'key-frame-request') {
         return Uint8Array.of(KEY_FRAME_REQUEST, probe.kind === 'video' ? 1 : 2);
     }
@@ -254,6 +264,12 @@ export function encodeCallTelemetryProbe(probe: CallTelemetryProbe): Uint8Array 
 
 export function decodeCallTelemetryProbe(frame: Uint8Array): CallTelemetryProbe {
     if (!(frame instanceof Uint8Array)) throw new Error('Invalid call telemetry probe');
+    if (frame[0] === CAMERA_STATE) {
+        if (frame.byteLength !== 2 || (frame[1] !== 0 && frame[1] !== 1)) {
+            throw new Error('Invalid call camera state');
+        }
+        return { type: 'camera-state', enabled: frame[1] === 1 };
+    }
     if (frame[0] === KEY_FRAME_REQUEST) {
         if (frame.byteLength !== 2 || (frame[1] !== 1 && frame[1] !== 2)) {
             throw new Error('Invalid call telemetry key-frame request');
@@ -315,7 +331,9 @@ export class CallTelemetry {
         private readonly callType: CallState['type'],
         private readonly connection: SecureConnection,
         private readonly stream: SecureStream,
-        private readonly onKeyFrameRequest: (kind: 'video' | 'screen') => void
+        private readonly onKeyFrameRequest: (kind: 'video' | 'screen') => void,
+        private readonly onCameraState: (enabled: boolean) => void,
+        private readonly isCameraEnabled: () => boolean
     ) {
         for (const kind of mediaKinds) {
             this.interval.set(kind, createMediaInterval());
@@ -328,7 +346,11 @@ export class CallTelemetry {
         if (this.reporting || this.stopped) return;
         this.reporting = true;
         void this.sendProbe();
-        this.probeTimer = setInterval(() => { void this.sendProbe(); }, PROBE_INTERVAL_MS);
+        void this.sendCameraState();
+        this.probeTimer = setInterval(() => {
+            void this.sendProbe();
+            void this.sendCameraState();
+        }, PROBE_INTERVAL_MS);
         this.nextEventLoopSampleAt = monotonicNow() + EVENT_LOOP_SAMPLE_INTERVAL_MS;
         this.eventLoopTimer = setInterval(() => {
             const now = monotonicNow();
@@ -349,6 +371,18 @@ export class CallTelemetry {
         this.eventLoopTimer = null;
         this.clearPendingProbe(false);
         if (this.reporting) this.emit(true);
+    }
+
+    async sendCameraState(): Promise<void> {
+        if (this.stopped || this.stream.closed || this.callType !== 'video') return;
+        const frame = encodeCallTelemetryProbe({ type: 'camera-state', enabled: this.isCameraEnabled() });
+        try {
+            await this.stream.write(frame);
+        } catch {
+            if (!this.stopped) this.noteProbeFailure();
+        } finally {
+            frame.fill(0);
+        }
     }
 
     noteSend(kind: CallTelemetryMediaKind, bytes: number, writeMs: number): void {
@@ -664,7 +698,10 @@ export class CallTelemetry {
                 try {
                     if (this.stopped) break;
                     const probe = decodeCallTelemetryProbe(frame);
-                    if (probe.type === 'key-frame-request') {
+                    if (probe.type === 'camera-state') {
+                        if (this.callType !== 'video') throw new Error('Camera state on an audio call');
+                        this.onCameraState(probe.enabled);
+                    } else if (probe.type === 'key-frame-request') {
                         this.interval.get(probe.kind)!.keyFrameRequestsReceived += 1;
                         this.totals.get(probe.kind)!.keyFrameRequestsReceived += 1;
                         this.onKeyFrameRequest(probe.kind);

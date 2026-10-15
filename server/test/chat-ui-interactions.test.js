@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const compiled = new Map();
 
-function load(relativePath, mocks = {}) {
+function load(relativePath, mocks = {}, exposed = []) {
   const filename = path.resolve(root, relativePath);
   if (!compiled.has(filename)) {
     compiled.set(filename, ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
@@ -24,7 +24,8 @@ function load(relativePath, mocks = {}) {
     }).outputText);
   }
   const module = { exports: {} };
-  new Function('require', 'module', 'exports', compiled.get(filename))(id => {
+  const body = compiled.get(filename) + exposed.map(name => `\nexports.${name} = ${name};`).join('');
+  new Function('require', 'module', 'exports', body)(id => {
     if (Object.hasOwn(mocks, id)) return mocks[id];
     if (id === 'react/jsx-runtime' || id === 'date-fns') return require(id);
     throw new Error(`Unmocked dependency: ${id}`);
@@ -108,6 +109,126 @@ const fileUtils = {
   isSafeFileUrl: url => url?.startsWith('blob:') ? url : null,
   parseCurrentVoiceNoteFilename: () => null,
 };
+
+function callHost() {
+  const host = hookHost();
+  const previousWindow = globalThis.window;
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  const unmount = host.unmount;
+  host.unmount = () => {
+    unmount();
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  };
+  const controls = load('src/components/chat/calls/CallModal.tsx', {
+    react: host.react,
+    'lucide-react': Object.fromEntries(['Phone', 'PhoneOff', 'Video', 'VideoOff', 'Mic', 'MicOff', 'Monitor', 'MonitorOff', 'Minimize2', 'Maximize2', 'ChevronDown', 'Volume2'].map(name => [name, `${name}-icon`])),
+    '../../../hooks/database/useDisplayUsername': { useDisplayUsername: ({ username }) => username },
+    './CallSpeakingAvatar': { CallSpeakingAvatar: 'speaking-avatar' },
+    '../../ui/UserAvatar': { UserAvatar: 'user-avatar' },
+    '../../ui/popover': { Popover: 'popover', PopoverContent: 'popover-content', PopoverTrigger: 'popover-trigger' },
+    '../../../lib/utils/shared-utils': shared,
+    '../../../lib/ui/app-settings': { readAppSettingsAsync: async () => ({}) },
+    '../../../lib/utils/date-utils': dates,
+    '../../../lib/tauri-bindings': {
+      nativeCamera: { devices: async () => [] },
+      nativeMicrophone: { devices: async () => [], outputDevices: async () => [] },
+    },
+    '../../../lib/utils/avatar-utils': { getDefaultAvatarColor: () => '#777777' },
+  }, ['CallVideoTile', 'MediaDeviceControl', 'CanvasDisplay']);
+  const props = {
+    call: { id: 'call', type: 'video', peer: 'peer', direction: 'incoming', status: 'connected', localVideoEnabled: false, remoteVideoEnabled: false },
+    localUsername: 'me', localMediaActive: true,
+    localVideoCanvas: null, remoteVideoCanvas: null, localScreenCanvas: null, remoteScreenCanvas: null,
+  };
+  return { host, props, ...controls, render: () => host.render(() => controls.CallModal(props)) };
+}
+
+test('camera-less answers and disabled cameras use authoritative camera state, not retained canvases', () => {
+  const ui = callHost();
+  try {
+    for (const canvas of [null, { id: 'retained-canvas' }]) {
+      ui.props.localVideoCanvas = canvas;
+      ui.props.remoteVideoCanvas = canvas;
+      const tree = ui.render();
+      const camera = find(tree, element => element.type === ui.MediaDeviceControl && element.props.kind === 'camera');
+      assert.equal(camera.props.enabled, false);
+      const local = find(tree, element => element.type === ui.CallVideoTile && element.props.isCurrentUser);
+      assert.equal(local.props.enabled, false);
+      assert.equal(local.props.username, 'me');
+      const localTile = ui.CallVideoTile(local.props);
+      assert.equal(find(localTile, element => element.type === 'user-avatar').props.isCurrentUser, true);
+      assert.equal(find(localTile, element => element.type === ui.CanvasDisplay), null);
+      const remote = find(tree, element => element.type === ui.CallVideoTile && !element.props.isCurrentUser);
+      const remoteTile = ui.CallVideoTile(remote.props);
+      assert.equal(find(remoteTile, element => element.type === 'speaking-avatar').props.username, 'peer');
+      assert.equal(find(remoteTile, element => element.type === ui.CanvasDisplay), null);
+    }
+  } finally { ui.host.unmount(); }
+});
+
+test('a video call updates camera controls and tiles when camera state changes', () => {
+  const ui = callHost();
+  try {
+    for (const enabled of [false, true, false, true]) {
+      ui.props.call = { ...ui.props.call, localVideoEnabled: enabled, remoteVideoEnabled: enabled };
+      ui.props.localVideoCanvas = { id: 'local' };
+      ui.props.remoteVideoCanvas = { id: 'remote' };
+      const tree = ui.render();
+      assert.equal(find(tree, element => element.type === ui.MediaDeviceControl && element.props.kind === 'camera').props.enabled, enabled);
+      for (const own of [false, true]) {
+        const tile = find(tree, element => element.type === ui.CallVideoTile && element.props.isCurrentUser === own);
+        assert.equal(tile.props.enabled, enabled);
+        const content = ui.CallVideoTile(tile.props);
+        assert.equal(content.type === ui.CanvasDisplay, enabled);
+      }
+    }
+  } finally { ui.host.unmount(); }
+});
+
+test('screen sharing keeps avatars for both camera-off participants without replacing the shared screen', () => {
+  const ui = callHost();
+  try {
+    ui.props.remoteScreenCanvas = { id: 'screen' };
+    ui.render();
+    ui.render();
+    const tree = ui.render();
+    assert.equal(find(tree, element => element.type === ui.CanvasDisplay).props.canvas, ui.props.remoteScreenCanvas);
+    assert.ok(find(tree, element => element.type === ui.CallVideoTile && element.props.isCurrentUser));
+    assert.ok(find(tree, element => element.type === ui.CallVideoTile && !element.props.isCurrentUser));
+    ui.props.remoteScreenCanvas = null;
+    ui.render();
+    const stopped = ui.render();
+    assert.equal(find(stopped, element => element.type === ui.CanvasDisplay), null);
+    assert.ok(find(stopped, element => element.type === ui.CallVideoTile && !element.props.isCurrentUser));
+  } finally { ui.host.unmount(); }
+});
+
+test('a missing camera is shown as off and cannot be toggled on', () => {
+  const ui = callHost();
+  try {
+    const tree = ui.MediaDeviceControl({
+      kind: 'camera', enabled: false, devices: [], open: false,
+      onOpenChange() {}, onToggle() {}, onSelect() {},
+    });
+    const control = find(tree, element => element.type === 'button' && element.props.title === 'No camera available');
+    assert.equal(control.props.disabled, true);
+    assert.equal(control.props['aria-pressed'], false);
+    assert.ok(find(control, element => element.type === 'VideoOff-icon'));
+  } finally { ui.host.unmount(); }
+});
+
+test('an active camera can always be turned off while the device picker is loading', () => {
+  const ui = callHost();
+  try {
+    const tree = ui.MediaDeviceControl({
+      kind: 'camera', enabled: true, devices: [], open: false,
+      onOpenChange() {}, onToggle() {}, onSelect() {},
+    });
+    const control = find(tree, element => element.type === 'button' && element.props.title === 'Turn Off Video');
+    assert.equal(control.props.disabled, false);
+  } finally { ui.host.unmount(); }
+});
 
 test('selected conversations keep the same options pill and readable theme colors', () => {
   const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
@@ -212,7 +333,7 @@ test('generic and media download controls show busy feedback and release it afte
     const props = {
       message: { id: 'file', filename: 'file.dat', fileSize: 65_000_000, mimeType },
       secureDB: {}, loadFile: true, onRendered() {},
-      onDownload: async () => { downloads++; }, isDownloading: false,
+      onDownload: async () => { downloads++; }, isDownloading: false, isDownloaded: false,
     };
     const render = () => host.render(() => FileContent(props));
     try {
@@ -230,6 +351,19 @@ test('generic and media download controls show busy feedback and release it afte
       assert.ok(busyControl.props.disabled || busyControl.props['aria-disabled']);
       assert.ok(find(busy, element => element.props?.className === 'qorc-file-size' && element.props.children === 'Preparing download…'));
       props.isDownloading = false;
+      props.isDownloaded = true;
+      const completed = render();
+      assert.ok(find(completed, element => element.type === 'Check-icon'));
+      assert.equal(find(completed, element => element.type === 'Download-icon'), null);
+      const completedControl = find(completed, element => element.props?.['aria-label'] === 'Downloaded');
+      assert.ok(completedControl.props.disabled || completedControl.props['aria-disabled']);
+      if (completedControl.props.onKeyDown) {
+        completedControl.props.onKeyDown({ key: 'Enter', preventDefault() {} });
+        completedControl.props.onKeyDown({ key: ' ', preventDefault() {} });
+        assert.equal(completedControl.props.onClick, undefined);
+        assert.equal(downloads, 1);
+      }
+      props.isDownloaded = false;
       const finished = render();
       assert.ok(find(finished, element => element.type === 'Download-icon'));
       assert.equal(find(finished, element => element.type === 'Loader2-icon'), null);
@@ -270,7 +404,8 @@ function messageHost(getFile) {
   return { host, props, downloads, render: () => host.render(() => ChatMessage(props)) };
 }
 
-test('file-card and context downloads share one pending operation and reset on success', async () => {
+test('successful downloads show a checkmark and block repeat downloads for exactly three seconds', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
   const request = deferred();
   let reads = 0;
   const ui = messageHost(() => { reads++; return request.promise; });
@@ -284,7 +419,21 @@ test('file-card and context downloads share one pending operation and reset on s
     await Promise.all([first, second]);
     assert.equal(ui.downloads.length, 1);
     assert.equal(ui.downloads[0][1], 'file.dat');
-    assert.equal(find(ui.render(), element => element.type === 'file-content').props.isDownloading, false);
+    const completed = find(ui.render(), element => element.type === 'file-content');
+    assert.equal(completed.props.isDownloading, false);
+    assert.equal(completed.props.isDownloaded, true);
+    await control.props.onDownload();
+    assert.equal(reads, 1);
+    context.mock.timers.tick(2999);
+    assert.equal(find(ui.render(), element => element.type === 'file-content').props.isDownloaded, true);
+    await completed.props.onDownload();
+    assert.equal(reads, 1);
+    context.mock.timers.tick(1);
+    const ready = find(ui.render(), element => element.type === 'file-content');
+    assert.equal(ready.props.isDownloaded, false);
+    await ready.props.onDownload();
+    assert.equal(reads, 2);
+    assert.equal(ui.downloads.length, 2);
   } finally { ui.host.unmount(); }
 });
 
@@ -301,6 +450,7 @@ test('a failed download clears busy state and can be retried', async context => 
     await find(ui.render(), element => element.type === 'file-content').props.onDownload();
     const control = find(ui.render(), element => element.type === 'file-content');
     assert.equal(control.props.isDownloading, false);
+    assert.equal(control.props.isDownloaded, false);
     await control.props.onDownload();
     assert.equal(ui.downloads.length, 1);
     assert.equal(reads, 2);
@@ -309,6 +459,40 @@ test('a failed download clears busy state and can be retried', async context => 
     if (previousAlert === undefined) delete globalThis.alert;
     else globalThis.alert = previousAlert;
   }
+});
+
+test('download completion timers cannot block another file or clear its pending state', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const next = deferred();
+  const ui = messageHost(id => id === 'file' ? Promise.resolve(new Blob(['old'])) : next.promise);
+  try {
+    await find(ui.render(), element => element.type === 'file-content').props.onDownload();
+    assert.equal(find(ui.render(), element => element.type === 'file-content').props.isDownloaded, true);
+    ui.props.message = { ...ui.props.message, id: 'new-file', filename: 'next.dat' };
+    ui.render();
+    const ready = find(ui.render(), element => element.type === 'file-content');
+    assert.equal(ready.props.isDownloaded, false);
+    const pending = ready.props.onDownload();
+    context.mock.timers.tick(3000);
+    const loading = find(ui.render(), element => element.type === 'file-content');
+    assert.equal(loading.props.isDownloading, true);
+    assert.equal(loading.props.isDownloaded, false);
+    next.resolve(new Blob(['next']));
+    await pending;
+    assert.equal(ui.downloads.length, 2);
+    assert.equal(find(ui.render(), element => element.type === 'file-content').props.isDownloaded, true);
+  } finally { ui.host.unmount(); }
+});
+
+test('missing file bytes never show a successful download checkmark', async () => {
+  const ui = messageHost(async () => null);
+  try {
+    await find(ui.render(), element => element.type === 'file-content').props.onDownload();
+    const control = find(ui.render(), element => element.type === 'file-content');
+    assert.equal(control.props.isDownloaded, false);
+    assert.equal(control.props.isDownloading, false);
+    assert.equal(ui.downloads.length, 0);
+  } finally { ui.host.unmount(); }
 });
 
 test('stale downloads cannot save another account file or clear its pending indicator', async () => {
@@ -347,6 +531,49 @@ test('receipts stay below both first and grouped messages instead of beside head
   } finally { ui.host.unmount(); }
 });
 
+for (const type of [signalTypes.SignalType.FILE, signalTypes.SignalType.MESSAGE]) {
+  test(`${type} keeps sender details after a call or deleted message`, () => {
+    const ui = messageHost(async () => new Blob());
+    try {
+      ui.props.message = { ...ui.props.message, type, content: 'hello', recipient: 'peer' };
+      for (const boundary of [{ isSystemMessage: true, type: 'system' }, { isDeleted: true }]) {
+        ui.props.previousMessage = { ...ui.props.message, id: 'boundary', ...boundary };
+        const tree = ui.render();
+        assert.ok(find(tree, element => element.type === 'user-avatar'));
+        assert.ok(find(tree, element => element.props?.role === 'time'));
+        assert.ok(find(tree, element => element.type === 'span' && element.props.children === 'me'));
+      }
+    } finally { ui.host.unmount(); }
+  });
+}
+
+test('out-of-order messages and different recipients cannot suppress sender details', () => {
+  const ui = messageHost(async () => new Blob());
+  try {
+    ui.props.message = { ...ui.props.message, recipient: 'peer', timestamp: new Date('2026-10-15T18:00:00Z') };
+    for (const previous of [
+      { timestamp: new Date('2026-10-15T18:01:00Z') },
+      { recipient: 'another-peer' },
+      { id: ui.props.message.id },
+      { timestamp: new Date('2026-10-15T17:56:59Z') },
+    ]) {
+      ui.props.previousMessage = { ...ui.props.message, id: 'previous', ...previous };
+      assert.ok(find(ui.render(), element => element.props?.role === 'time'));
+    }
+  } finally { ui.host.unmount(); }
+});
+
+test('a real consecutive same-sender group still hides repeated sender details', () => {
+  const ui = messageHost(async () => new Blob());
+  try {
+    ui.props.message = { ...ui.props.message, recipient: 'peer', timestamp: new Date('2026-10-15T18:00:00Z') };
+    ui.props.previousMessage = { ...ui.props.message, id: 'previous', timestamp: new Date('2026-10-15T17:58:00Z') };
+    const tree = ui.render();
+    assert.equal(find(tree, element => element.type === 'user-avatar'), null);
+    assert.equal(find(tree, element => element.props?.role === 'time'), null);
+  } finally { ui.host.unmount(); }
+});
+
 test('a context-menu download stays visible with a spinner until file preparation finishes', async () => {
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
@@ -361,7 +588,7 @@ test('a context-menu download stays visible with a spinner until file preparatio
   const props = {
     anchorRect: { top: 0, left: 0, right: 20, bottom: 20 }, triggerId: 'file',
     isCurrentUser: true, canEdit: false, canDelete: false, isFile: true,
-    isDownloading: false, onDownload: () => request.promise, onClose: () => closed++,
+    isDownloading: false, isDownloaded: false, onDownload: () => request.promise, onClose: () => closed++,
   };
   const render = () => host.render(() => MessageContextMenu(props));
   try {
@@ -376,6 +603,11 @@ test('a context-menu download stays visible with a spinner until file preparatio
     request.resolve();
     await completion;
     assert.equal(closed, 1);
+    props.isDownloading = false;
+    props.isDownloaded = true;
+    const downloaded = find(render(), element => element.props?.['aria-label'] === 'Downloaded');
+    assert.equal(downloaded.props.disabled, true);
+    assert.equal(downloaded.props.children.type, 'Check-icon');
   } finally {
     host.unmount();
     if (previousDocument === undefined) delete globalThis.document;

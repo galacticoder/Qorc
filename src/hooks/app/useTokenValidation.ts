@@ -78,7 +78,7 @@ export function useTokenValidation({
       inFlight = true;
       try {
         try {
-          await startupConnection.prepareRecoveryTransport();
+          await startupConnection.prepareAuthenticationTransport();
         } catch (error) {
           if (!isCurrent()) return;
           const startupState = startupConnection.getState();

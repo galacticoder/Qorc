@@ -4,6 +4,8 @@ export interface CallState {
     direction: 'incoming' | 'outgoing';
     status: 'ringing' | 'connecting' | 'connected' | 'ended' | 'declined' | 'missed';
     peer: string;
+    localVideoEnabled: boolean;
+    remoteVideoEnabled: boolean;
     startTime?: number;
     endTime?: number;
     duration?: number;

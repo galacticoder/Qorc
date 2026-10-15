@@ -258,7 +258,6 @@ export class SecureCallingService {
     private callSignalAbort: AbortController | null = null;
     private isScreenSharing: boolean = false;
     private screenSharePending: boolean = false;
-    private videoEnabled: boolean = false;
     private localUsername: string = '';
     private preferredCameraDeviceId: string | null = null;
     private preferredMicrophoneDeviceId: string | null = null;
@@ -469,7 +468,9 @@ export class SecureCallingService {
             type: signal.data.callType,
             direction: 'incoming',
             status: 'ringing',
-            peer: signal.from
+            peer: signal.from,
+            localVideoEnabled: false,
+            remoteVideoEnabled: false
         };
         const timeoutId = setTimeout(() => {
             this.finishPendingIncomingCall(signal.callId, 'missed', 'timeout');
@@ -729,7 +730,9 @@ export class SecureCallingService {
             type: callType,
             direction: 'outgoing',
             status: 'connecting',
-            peer: targetUser
+            peer: targetUser,
+            localVideoEnabled: false,
+            remoteVideoEnabled: false
         };
         this.callSignalAbort = new AbortController();
 
@@ -959,12 +962,15 @@ export class SecureCallingService {
 
     // Toggle video state
     async toggleVideo(): Promise<boolean> {
+        const call = this.currentCall;
         const sessionId = this.cameraSessionId;
-        if (!this.localMediaActive || this.currentCall?.type !== 'video' || !this.videoStream || !sessionId) return false;
-        const enabled = !this.videoEnabled;
+        if (!this.localMediaActive || call?.type !== 'video' || !this.videoStream || sessionId !== call.id) return false;
+        const enabled = !call.localVideoEnabled;
         await nativeCamera.setEnabled(sessionId, enabled);
-        if (this.cameraSessionId !== sessionId || this.currentCall?.id !== sessionId) return false;
-        this.videoEnabled = enabled;
+        if (this.cameraSessionId !== sessionId || this.currentCall !== call) return false;
+        call.localVideoEnabled = enabled;
+        this.notifyCallState(call);
+        void this.callTelemetry?.sendCameraState();
         return enabled;
     }
 
@@ -1004,7 +1010,7 @@ export class SecureCallingService {
                 }
                 throw new Error('Call changed while the camera was switching');
             }
-            await nativeCamera.setEnabled(activeCallId, this.videoEnabled);
+            await nativeCamera.setEnabled(activeCallId, this.currentCall?.localVideoEnabled === true);
             await this.startVideoStreaming();
             if (
                 switchGeneration !== this.cameraSwitchGeneration ||
@@ -1043,7 +1049,7 @@ export class SecureCallingService {
             ) {
                 try {
                     await nativeCamera.start(activeCallId, previousDeviceId, CAMERA_CAPTURE_WIDTH, CAMERA_CAPTURE_HEIGHT, TARGET_FPS);
-                    await nativeCamera.setEnabled(activeCallId, this.videoEnabled);
+                    await nativeCamera.setEnabled(activeCallId, this.currentCall?.localVideoEnabled === true);
                 } catch { }
                 try { await this.startVideoStreaming(); } catch { }
             }
@@ -1515,7 +1521,8 @@ export class SecureCallingService {
         }
 
         this.localMediaActive = true;
-        this.videoEnabled = this.cameraSessionId === expectedCallId;
+        this.currentCall!.localVideoEnabled = this.cameraSessionId === expectedCallId;
+        this.notifyCallState(this.currentCall!);
         console.info('[CALL-DIAG]', { phase: 'media.notify-local-capture-before', callType });
         this.notifyLocalMediaChange(true);
         console.info('[CALL-DIAG]', {
@@ -1612,7 +1619,19 @@ export class SecureCallingService {
                     kind => {
                         if (kind === 'video') this.videoEncoder?.requestKeyFrame();
                         else this.screenEncoder?.requestKeyFrame();
-                    }
+                    },
+                    enabled => {
+                        const call = this.currentCall;
+                        if (
+                            call?.id !== expectedCallId ||
+                            this.callConnection !== connection ||
+                            this.telemetryStream !== telemetryStream ||
+                            call.remoteVideoEnabled === enabled
+                        ) return;
+                        call.remoteVideoEnabled = enabled;
+                        this.notifyCallState(call);
+                    },
+                    () => this.currentCall?.id === expectedCallId && this.currentCall.localVideoEnabled
                 );
                 this.bindCallConnectionState(connection, expectedCallId);
                 if (!callIsCurrent() || this.callConnection !== connection) {
@@ -2169,7 +2188,7 @@ export class SecureCallingService {
         let localPreviewAnnounced = false;
         const encoder = new RealtimeVisualEncoder('video', {
             isActive,
-            isSourceEnabled: () => this.videoEnabled,
+            isSourceEnabled: () => this.currentCall?.id === cameraSessionId && this.currentCall.localVideoEnabled,
             send: async (frame, frames) => {
                 if (!isActive()) throw new Error('Video sender is stale');
                 const startedAt = performance.now();
@@ -2279,7 +2298,7 @@ export class SecureCallingService {
                 }
                 return;
             }
-            await nativeCamera.setEnabled(expectedCallId, this.videoEnabled);
+            await nativeCamera.setEnabled(expectedCallId, this.currentCall?.localVideoEnabled === true);
             if (!this.isCameraRecoveryCurrent(
                 expectedCallId,
                 failedEncoder,
@@ -2331,6 +2350,9 @@ export class SecureCallingService {
             } else if (this.videoEncoder === failedEncoder) {
                 failedEncoder.stop();
                 this.videoEncoder = null;
+                call.localVideoEnabled = false;
+                this.notifyCallState(call);
+                void this.callTelemetry?.sendCameraState();
                 if (this.localVideoCanvas === failedEncoder.getCanvas()) {
                     this.localVideoCanvas = null;
                     this.notifyLocalVideoCanvas(null);
@@ -3379,7 +3401,6 @@ export class SecureCallingService {
         this.cameraRecoveryAttempts = 0;
         this.cameraRecoveryInFlight = false;
         this.microphoneSwitchGeneration += 1;
-        this.videoEnabled = false;
         this.cancelPendingSignalSessionWaits();
         this.unsubscribeCallConnectionState();
         this.unsubscribeCallStreams();

@@ -139,6 +139,7 @@ server/test/*
 !server/test/conversation-relative-time.test.js
 !server/test/discovery-diagnostics.test.js
 !server/test/auth-connection-lifecycle.test.js
+!server/test/auth-account-switch.test.js
 !server/test/encryption-provider-readiness.test.js
 !server/test/certified-identity-client-utils.test.js
 !server/test/chat-ui-interactions.test.js
@@ -163,3 +164,4 @@ server/test/*
 !server/test/call-audio-playout.test.js
 !server/test/call-event-history.test.js
 !server/test/call-startup.test.js
+!server/test/call-camera-state.test.js
