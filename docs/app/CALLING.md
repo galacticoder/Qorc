@@ -561,8 +561,9 @@ u8 version | u8 flags | u32be codecSequence | u64be captureTimestampMs | opus
 
 The current version is 1. Flag bit 0 marks a one-byte DTX packet and flag bit 1
 marks a discontinuity caused by a dropped capture, suppressed DTX frame, failed
-send, or audio-route change. A received discontinuity lets playout skip an
-already obsolete sequence gap instead of synthesizing audio for it. The codec
+send, or audio-route change. A received discontinuity lets playout skip a
+sequence gap only after earlier buffered speech has played; it never purges
+valid speech merely because a newer discontinuity arrived. The codec
 sequence advances per captured frame and the timestamp records capture time in
 milliseconds. One to four packets are enclosed in this audio batch:
 
@@ -580,22 +581,44 @@ The entire batch is authenticated and encrypted under the
 20 ms spacing before jitter estimation so intentional batching is not treated
 as network jitter.
 
-The receiver estimates arrival variation with a 1/16 smoothing factor and
-selects a target of three to five 20 ms packets, giving a nominal 60–100 ms
-jitter buffer. It starts when the target is available or the oldest packet has
-waited 100 ms. For one missing packet it first asks Opus to recover FEC from the
-following packet. It otherwise invokes Opus packet-loss concealment for up to
-five consecutive gaps, then emits silence until a later sequence lets playout
-resynchronize. Duplicate, late, oversized, and excess buffered packets are
-dropped.
+The receiver estimates arrival variation with a 1/16 smoothing factor and a
+decaying peak, selecting an adaptive 120–600 ms buffer with a 200 ms initial
+target. A normal Tor burst is retained, not reduced to the target packet count.
+The encoded backlog has a hard limit of 60 packets (1.2 seconds), with secure
+wiping on eviction, rejection, or teardown. Sequence ordering supports wraparound.
+
+An empty arrival queue causes rebuffering without advancing the expected codec
+sequence, so packets delayed by a Tor stall remain playable. A bounded reorder
+grace period admits late arrivals before declaring a known sequence gap. For
+one missing frame with a following packet, Opus FEC recovers the missing frame
+without consuming or wiping the following packet. Known gaps use at most three
+concealment frames before resynchronizing. DTX gaps are intentional silence,
+not continuously synthesized missing packets.
 
 Decoded PCM goes to a selectable native output: PulseAudio on Linux or CPAL on
 Windows. That playback queue is capped at ten 20 ms frames and discards the
-oldest complete frame when full. A call fails media startup when native playback
-cannot start. Capture, realtime encryption, native sending, encrypted receive,
-jitter, decode, and playback are therefore bounded to current audio rather than
-seconds of accumulated speech. Played, dropped, and destroyed sample buffers
-are wiped on a best-effort basis.
+oldest complete frame when full. Playout reads the actual native queue depth
+and replenishes it toward 80 ms in batches of at most four frames. The speaker
+clock, not one JavaScript timer callback per frame, determines consumption.
+Speaker-device changes pause replenishment and invalidate outstanding output
+reads without ending an otherwise healthy call. A call fails media startup when
+native playback cannot start. All queues remain bounded rather than growing with
+call duration. Played, dropped, and destroyed sample buffers are wiped on a
+best-effort basis.
+
+The native output callback measures RMS from samples submitted to the speaker,
+including silence on underrun. This ephemeral loudness value drives a circular
+ring around the peer avatar; queued or newly received packets do not indicate
+speaking prematurely. The avatar subscribes independently so updates do not
+rerender the chat screen. Values expire during silence and are cleared on call
+end, are never sent to the peer or server, and are not persisted or logged.
+The ring expands and brightens with loudness, fading during silence.
+Reduced-motion mode disables expansion while retaining the brightness indicator.
+
+Audio telemetry records decoded-frame counts and its renderer state: target and
+buffered duration, native queue duration, rebuffer events, concealment frames,
+late drops, and hard-limit evictions. No waveform, PCM, or loudness values are
+included in these logs.
 
 Code references:
 
@@ -604,6 +627,8 @@ Code references:
 - `src-tauri/src/audio_playback.rs`
 - `src/lib/tauri-bindings.ts`
 - `src/lib/transport/secure-calling-service.ts`
+- `src/lib/transport/call-audio-playout.ts`
+- `src/components/chat/calls/CallSpeakingAvatar.tsx`
 
 ## Camera Video Pipeline
 

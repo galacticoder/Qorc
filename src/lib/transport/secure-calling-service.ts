@@ -63,19 +63,15 @@ import {
     type VisualFrameMetadata,
 } from './call-video-codec';
 
+import { CallAudioPlayout, AUDIO_FRAME_DURATION_MS, type BufferedAudioPacket } from './call-audio-playout';
+import { startCallSpeakerLevel, updateCallSpeakerLevel, clearCallSpeakerLevel } from '../ui/call-speaker-level';
+
 export type { CallState, CallSignal };
 
 type PendingAudioCapture = {
     pcm: Uint8Array;
     capturedAt: number;
     sequence: number;
-};
-type BufferedAudioPacket = {
-    packet: Uint8Array;
-    sequence: number;
-    capturedAt: number;
-    arrivedAt: number;
-    discontinuity: boolean;
 };
 type PendingScreenShareReady = {
     callId: string;
@@ -101,9 +97,8 @@ const AUDIO_BATCH_ENTRY_BYTES = 2;
 const MAX_AUDIO_BATCH_PACKETS = 4;
 const MAX_AUDIO_BATCH_BYTES = AUDIO_BATCH_HEADER_BYTES +
     MAX_AUDIO_BATCH_PACKETS * (AUDIO_BATCH_ENTRY_BYTES + MAX_AUDIO_PLAINTEXT_BYTES);
-const MAX_AUDIO_QUEUE_PACKETS = 5;
-const MIN_AUDIO_JITTER_PACKETS = 3;
-const AUDIO_FRAME_DURATION_MS = 20;
+const MAX_PENDING_AUDIO_CAPTURE_FRAMES = 5;
+const NATIVE_AUDIO_TARGET_MS = 80;
 const AUDIO_SEND_DEADLINE_MS = 160;
 const AUDIO_SEND_DEADLINE_MAX_MS = 320;
 const AUDIO_DTX_KEEPALIVE_FRAMES = 20;
@@ -285,6 +280,7 @@ export class SecureCallingService {
     private seenRemoteScreenStreamIds = new Set<string>();
     private audioCodecSessionId: string | null = null;
     private audioPlaybackSessionId: string | null = null;
+    private audioOutputGeneration = 0;
 
     private videoEncoder: RealtimeVisualEncoder | null = null;
     private screenEncoder: RealtimeVisualEncoder | null = null;
@@ -1106,6 +1102,8 @@ export class SecureCallingService {
         }
         if (this.preferredSpeakerDeviceId === deviceId) return;
         const previousDeviceId = this.preferredSpeakerDeviceId;
+        this.audioOutputGeneration++;
+        this.audioPlaybackSessionId = null;
         try {
             await nativeAudioPlayback.start(activeCallId, deviceId);
             if (
@@ -1119,13 +1117,20 @@ export class SecureCallingService {
             this.preferredSpeakerDeviceId = deviceId;
             await updateAppSettingsAsync({ preferredSpeakerId: deviceId });
         } catch (error) {
-            try {
-                await nativeAudioPlayback.start(activeCallId, previousDeviceId);
-                if (this.currentCall?.id === activeCallId) {
-                    this.audioPlaybackSessionId = activeCallId;
+            if (this.currentCall?.id === activeCallId && this.audioCodecSessionId === activeCallId) {
+                try {
+                    await nativeAudioPlayback.start(activeCallId, previousDeviceId);
+                    if (this.currentCall?.id === activeCallId && this.audioCodecSessionId === activeCallId) {
+                        this.audioPlaybackSessionId = activeCallId;
+                    } else {
+                        await nativeAudioPlayback.stop(activeCallId).catch(() => { });
+                    }
+                } catch {
+                    if (this.currentCall?.id === activeCallId && this.audioCodecSessionId === activeCallId) {
+                        this.audioPlaybackSessionId = null;
+                        await this.endCall('failed');
+                    }
                 }
-            } catch {
-                this.audioPlaybackSessionId = null;
             }
             throw error;
         }
@@ -1984,7 +1989,9 @@ export class SecureCallingService {
                                 this.callTelemetry?.noteCaptureDrop('audio');
                                 continue;
                             }
+                            const encodeStartedAt = performance.now();
                             opusPacket = await audioCodec.encode(codecSessionId, capture.pcm);
+                            if (isCurrent()) this.callTelemetry?.noteEncode('audio', performance.now() - encodeStartedAt);
                             if (!isCurrent() || Date.now() - capture.capturedAt >= sendDeadlineMs) {
                                 streamDiscontinuity = true;
                                 this.callTelemetry?.noteCaptureDrop('audio');
@@ -2075,7 +2082,8 @@ export class SecureCallingService {
                         this.callTelemetry?.noteCaptureDrop('audio');
                         continue;
                     }
-                    if (pending.length >= MAX_AUDIO_QUEUE_PACKETS) {
+                    this.callTelemetry?.noteSourceFrame('audio');
+                    if (pending.length >= MAX_PENDING_AUDIO_CAPTURE_FRAMES) {
                         const dropped = pending.shift();
                         if (dropped) SecureMemory.zeroBuffer(dropped.pcm);
                         streamDiscontinuity = true;
@@ -2544,190 +2552,82 @@ export class SecureCallingService {
     // Receive and decode audio stream
     private async receiveAudioStream(): Promise<void> {
         if (!this.audioStream || !this.audioCodecSessionId) return;
-
         const generation = this.mediaGeneration;
         const stream = this.audioStream;
         const codecSessionId = this.audioCodecSessionId;
         if (this.audioPlaybackSessionId !== codecSessionId) {
             throw new Error('Native audio playback is unavailable');
         }
-
-        if (generation !== this.mediaGeneration || this.audioStream !== stream) return;
-
-        let playoutTimer: ReturnType<typeof setInterval> | null = null;
-        const jitterBuffer = new Map<number, BufferedAudioPacket>();
+        const isCurrent = () => generation === this.mediaGeneration &&
+            this.audioStream === stream && this.audioCodecSessionId === codecSessionId;
+        const buffer = new CallAudioPlayout();
+        startCallSpeakerLevel(codecSessionId);
+        let busy = false;
+        let stopped = false;
+        const playout = async (): Promise<void> => {
+            if (busy || stopped || !isCurrent() || this.audioPlaybackSessionId !== codecSessionId) return;
+            const outputGeneration = this.audioOutputGeneration;
+            const outputIsCurrent = () => !stopped && isCurrent() &&
+                this.audioPlaybackSessionId === codecSessionId && this.audioOutputGeneration === outputGeneration;
+            busy = true;
+            try {
+                let output = await nativeAudioPlayback.info(codecSessionId);
+                if (!outputIsCurrent()) return;
+                updateCallSpeakerLevel(codecSessionId, output.level);
+                for (let count = 0; count < 4 && output.queuedMs < NATIVE_AUDIO_TARGET_MS; count++) {
+                    if (!outputIsCurrent()) return;
+                    const frame = buffer.next(Date.now());
+                    if (!frame) break;
+                    const decodeStartedAt = performance.now();
+                    try {
+                        output = await audioCodec.decodeToPlayback(codecSessionId, frame.packet, frame.fec);
+                        if (!outputIsCurrent()) return;
+                        updateCallSpeakerLevel(codecSessionId, output.level);
+                        this.callTelemetry?.noteDecoderAdmitted('audio');
+                        this.callTelemetry?.noteDecoded('audio');
+                        this.callTelemetry?.noteDecode('audio', performance.now() - decodeStartedAt);
+                    } catch {
+                        if (outputIsCurrent()) this.callTelemetry?.noteReceiveError('audio');
+                    } finally {
+                        SecureMemory.zeroBuffer(frame.packet);
+                    }
+                }
+                this.callTelemetry?.noteAudioPlayout({ ...buffer.snapshot(), nativeQueuedMs: output.queuedMs });
+            } catch (error) {
+                if (outputIsCurrent() && !stopped) {
+                    stopped = true;
+                    console.warn('[CALL-DIAG]', {
+                        phase: 'audio.native-output-failed',
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                    void this.endCall('failed');
+                }
+            } finally {
+                busy = false;
+            }
+        };
+        const timer = setInterval(() => { void playout(); }, AUDIO_FRAME_DURATION_MS);
         try {
-            let expectedSequence: number | null = null;
-            let started = false;
-            let playoutBusy = false;
-            let consecutiveLosses = 0;
-            let lastArrival: number | null = null;
-            let lastCapture: number | null = null;
-            let estimatedJitterMs = 0;
-            let targetPackets = MIN_AUDIO_JITTER_PACKETS;
-            const sortedSequences = () => Array.from(jitterBuffer.keys()).sort((left, right) => left - right);
-            const discardPacket = (sequence: number): void => {
-                const packet = jitterBuffer.get(sequence);
-                if (!packet) return;
-                jitterBuffer.delete(sequence);
-                SecureMemory.zeroBuffer(packet.packet);
-            };
-            const decodeFrame = async (packet: Uint8Array, fec: boolean): Promise<void> => {
-                await audioCodec.decodeToPlayback(codecSessionId, packet, fec);
-            };
-            const playout = async (): Promise<void> => {
-                if (
-                    playoutBusy ||
-                    generation !== this.mediaGeneration ||
-                    this.audioStream !== stream ||
-                    this.audioCodecSessionId !== codecSessionId
-                ) return;
-                if (!started) {
-                    const sequences = sortedSequences();
-                    if (sequences.length === 0) return;
-                    const oldest = jitterBuffer.get(sequences[0]);
-                    if (
-                        sequences.length < targetPackets &&
-                        oldest &&
-                        Date.now() - oldest.arrivedAt < 100
-                    ) return;
-                    expectedSequence = sequences[0];
-                    started = true;
-                }
-                if (expectedSequence === null) return;
-                playoutBusy = true;
-                const decodeStartedAt = performance.now();
-                let advanceExpectedSequence = true;
-                try {
-                    const exact = jitterBuffer.get(expectedSequence);
-                    if (exact) {
-                        jitterBuffer.delete(expectedSequence);
-                        try {
-                            await decodeFrame(exact.packet, false);
-                        } finally {
-                            SecureMemory.zeroBuffer(exact.packet);
-                        }
-                        consecutiveLosses = 0;
-                    } else {
-                        const nextSequence = (expectedSequence + 1) >>> 0;
-                        const next = jitterBuffer.get(nextSequence);
-                        if (next) {
-                            try {
-                                await decodeFrame(next.packet, true);
-                            } catch {
-                                await decodeFrame(new Uint8Array(0), false);
-                            }
-                        } else if (consecutiveLosses < MAX_AUDIO_QUEUE_PACKETS) {
-                            await decodeFrame(new Uint8Array(0), false);
-                        } else {
-                            await decodeFrame(new Uint8Array(0), false);
-                            advanceExpectedSequence = false;
-                        }
-                        consecutiveLosses += 1;
-                    }
-                    if (
-                        generation !== this.mediaGeneration ||
-                        this.audioStream !== stream ||
-                        this.audioCodecSessionId !== codecSessionId
-                    ) {
-                        return;
-                    }
-                    this.callTelemetry?.noteDecode('audio', performance.now() - decodeStartedAt);
-                    if (advanceExpectedSequence) {
-                        expectedSequence = (expectedSequence + 1) >>> 0;
-                    }
-                    const sequences = sortedSequences();
-                    if (
-                        consecutiveLosses >= MAX_AUDIO_QUEUE_PACKETS &&
-                        sequences.length > 0 &&
-                        sequences[0] > expectedSequence
-                    ) {
-                        expectedSequence = sequences[0];
-                        consecutiveLosses = 0;
-                    }
-                    while (jitterBuffer.size > targetPackets) {
-                        const oldestSequence = sortedSequences()[0];
-                        if (oldestSequence === undefined) break;
-                        discardPacket(oldestSequence);
-                        if (oldestSequence >= expectedSequence) {
-                            expectedSequence = (oldestSequence + 1) >>> 0;
-                        }
-                        this.callTelemetry?.noteRenderDrop('audio');
-                    }
-                } catch {
-                    this.callTelemetry?.noteReceiveError('audio');
-                } finally {
-                    playoutBusy = false;
-                }
-            };
-            playoutTimer = setInterval(() => { void playout(); }, AUDIO_FRAME_DURATION_MS);
-
             for await (const data of stream) {
                 try {
-                    if (generation !== this.mediaGeneration || this.audioStream !== stream) break;
+                    if (!isCurrent()) break;
                     const arrivedAt = Date.now();
                     for (const packet of decodeCallAudioBatch(data, arrivedAt)) {
-                        this.callTelemetry?.noteReceive(
-                            'audio',
-                            AUDIO_PACKET_HEADER_BYTES + packet.packet.byteLength,
-                            packet.capturedAt
-                        );
-                        if (
-                            packet.discontinuity &&
-                            started &&
-                            expectedSequence !== null &&
-                            packet.sequence > expectedSequence
-                        ) {
-                            expectedSequence = packet.sequence;
-                            consecutiveLosses = 0;
-                            for (const sequence of sortedSequences()) {
-                                if (sequence < expectedSequence) discardPacket(sequence);
-                            }
-                        }
-                        if (started && expectedSequence !== null && packet.sequence < expectedSequence) {
-                            SecureMemory.zeroBuffer(packet.packet);
-                            this.callTelemetry?.noteRenderDrop('audio');
-                            continue;
-                        }
-                        if (jitterBuffer.has(packet.sequence)) {
-                            SecureMemory.zeroBuffer(packet.packet);
-                            continue;
-                        }
-                        if (lastArrival !== null && lastCapture !== null) {
-                            const variation = Math.abs(
-                                (packet.arrivedAt - lastArrival) -
-                                (packet.capturedAt - lastCapture)
-                            );
-                            estimatedJitterMs += (variation - estimatedJitterMs) / 16;
-                            targetPackets = Math.max(
-                                MIN_AUDIO_JITTER_PACKETS,
-                                Math.min(
-                                    MAX_AUDIO_QUEUE_PACKETS,
-                                    Math.ceil((60 + Math.min(40, estimatedJitterMs * 4)) / AUDIO_FRAME_DURATION_MS)
-                                )
-                            );
-                        }
-                        lastArrival = packet.arrivedAt;
-                        lastCapture = packet.capturedAt;
-                        jitterBuffer.set(packet.sequence, packet);
-                        while (jitterBuffer.size > MAX_AUDIO_QUEUE_PACKETS) {
-                            const oldestSequence = sortedSequences()[0];
-                            if (oldestSequence === undefined) break;
-                            discardPacket(oldestSequence);
-                            this.callTelemetry?.noteRenderDrop('audio');
-                        }
+                        this.callTelemetry?.noteReceive('audio', AUDIO_PACKET_HEADER_BYTES + packet.packet.byteLength, packet.capturedAt);
+                        if (!buffer.push(packet)) this.callTelemetry?.noteRenderDrop('audio');
                     }
+                    void playout();
                 } catch {
                     this.callTelemetry?.noteReceiveError('audio');
                 } finally {
                     SecureMemory.zeroBuffer(data);
                 }
             }
-        } catch { }
-        finally {
-            if (playoutTimer) clearInterval(playoutTimer);
-            for (const packet of jitterBuffer.values()) SecureMemory.zeroBuffer(packet.packet);
-            jitterBuffer.clear();
+        } finally {
+            stopped = true;
+            clearInterval(timer);
+            buffer.clear();
+            clearCallSpeakerLevel(codecSessionId);
         }
     }
 
@@ -3436,6 +3336,7 @@ export class SecureCallingService {
 
     // Cleanup call resources
     private cleanup(): void {
+        if (this.audioCodecSessionId) clearCallSpeakerLevel(this.audioCodecSessionId);
         this.mediaGeneration += 1;
         this.cameraSwitchGeneration += 1;
         this.clearCameraRecoveryTimer();

@@ -5,19 +5,29 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const FRAME_SAMPLES: usize = 960;
 const MAX_QUEUE_SAMPLES: usize = FRAME_SAMPLES * 10;
 const MAX_SESSIONS: usize = 2;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPlaybackInfo {
+    pub queued_ms: f64,
+    pub level: f32,
+}
+
 struct AudioPlaybackSession {
     stop: AtomicBool,
     queue: Mutex<VecDeque<f32>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    level: AtomicU32,
+    level_at: AtomicU64,
+    started_at: Instant,
 }
 
 impl AudioPlaybackSession {
@@ -26,6 +36,9 @@ impl AudioPlaybackSession {
             stop: AtomicBool::new(false),
             queue: Mutex::new(VecDeque::with_capacity(MAX_QUEUE_SAMPLES)),
             worker: Mutex::new(None),
+            level: AtomicU32::new(0),
+            level_at: AtomicU64::new(0),
+            started_at: Instant::now(),
         }
     }
 
@@ -62,15 +75,51 @@ impl AudioPlaybackSession {
         let Ok(mut queue) = self.queue.lock() else {
             return output.len();
         };
+        let mut energy = 0.0f64;
         for bytes in output.chunks_exact_mut(4) {
             let sample = queue.pop_front().unwrap_or(0.0);
+            energy += f64::from(sample).powi(2);
             bytes.copy_from_slice(&sample.to_le_bytes());
         }
+        self.record_level(energy, output.len() / 4);
         output.len()
+    }
+
+    fn record_level(&self, energy: f64, samples: usize) {
+        let level = if samples == 0 {
+            0.0
+        } else {
+            (energy / samples as f64).sqrt() as f32
+        };
+        self.level.store(level.to_bits(), Ordering::Release);
+        self.level_at.store(
+            self.started_at.elapsed().as_millis() as u64,
+            Ordering::Release,
+        );
+    }
+
+    fn info(&self) -> Result<AudioPlaybackInfo, String> {
+        let queue = self
+            .queue
+            .lock()
+            .map_err(|_| "audio playback queue unavailable")?;
+        let level = if (self.started_at.elapsed().as_millis() as u64)
+            .saturating_sub(self.level_at.load(Ordering::Acquire))
+            < 200
+        {
+            f32::from_bits(self.level.load(Ordering::Acquire))
+        } else {
+            0.0
+        };
+        Ok(AudioPlaybackInfo {
+            queued_ms: queue.len() as f64 / 48.0,
+            level,
+        })
     }
 
     fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        self.level.store(0, Ordering::Release);
         if let Ok(mut worker) = self.worker.lock()
             && let Some(worker) = worker.take()
         {
@@ -168,6 +217,18 @@ impl AudioPlaybackState {
             session.stop();
         }
         Ok(())
+    }
+
+    pub fn info(&self, session_id: &str) -> Result<AudioPlaybackInfo, String> {
+        validate_session_id(session_id)?;
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "audio playback unavailable")?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "audio playback session unavailable".to_string())?;
+        session.info()
     }
 }
 
@@ -391,9 +452,13 @@ where
                 let Ok(mut queue) = session.queue.lock() else {
                     return;
                 };
+                let mut energy = 0.0f64;
                 for frame in output.chunks_exact_mut(channels) {
-                    frame.fill(T::from_sample(resampler.next(&mut queue)));
+                    let sample = resampler.next(&mut queue);
+                    energy += f64::from(sample).powi(2);
+                    frame.fill(T::from_sample(sample));
                 }
+                session.record_level(energy, output.len() / channels);
             },
             move |error| {
                 tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-stream-failed");
@@ -505,5 +570,42 @@ mod tests {
         session.stop();
         assert!(session.push(&frame).is_err());
         assert!(session.queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn output_level_is_measured_from_played_samples_not_queued_samples() {
+        let session = AudioPlaybackSession::new();
+        let frame: Vec<_> = (0..FRAME_SAMPLES)
+            .flat_map(|_| 0.5f32.to_le_bytes())
+            .collect();
+        session.push(&frame).unwrap();
+        let initial = session.info().unwrap();
+        assert_eq!(initial.queued_ms, 20.0);
+        assert_eq!(initial.level, 0.0);
+        let mut queue = session.queue.lock().unwrap();
+        let energy = queue.iter().map(|sample| f64::from(*sample).powi(2)).sum();
+        session.record_level(energy, queue.len());
+        queue.clear();
+        drop(queue);
+        assert_eq!(session.info().unwrap().level, 0.5);
+        session.record_level(0.0, FRAME_SAMPLES);
+        assert_eq!(session.info().unwrap().level, 0.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_output_callback_reports_loudness_and_clears_it_on_underrun() {
+        let session = AudioPlaybackSession::new();
+        let frame: Vec<_> = (0..FRAME_SAMPLES)
+            .flat_map(|_| 0.25f32.to_le_bytes())
+            .collect();
+        session.push(&frame).unwrap();
+        let mut output = vec![0; FRAME_SAMPLES * 4];
+        session.fill(&mut output);
+        assert_eq!(session.info().unwrap().level, 0.25);
+        assert_eq!(session.info().unwrap().queued_ms, 0.0);
+        session.fill(&mut output);
+        assert!(output.iter().all(|sample| *sample == 0));
+        assert_eq!(session.info().unwrap().level, 0.0);
     }
 }

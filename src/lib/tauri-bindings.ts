@@ -494,6 +494,11 @@ export const pir = {
         invoke<void>('pir_discard_query', { sessionId }),
 };
 
+export interface NativeAudioPlaybackInfo {
+    queuedMs: number;
+    level: number;
+}
+
 export const audioCodec = {
     start: (sessionId: string) => invoke<boolean>('audio_opus_start', { sessionId }),
     stop: (sessionId: string) => invoke<boolean>('audio_opus_stop', { sessionId }),
@@ -502,7 +507,7 @@ export const audioCodec = {
             headers: { 'x-qorc-audio-session': sessionId },
         }).then(value => new Uint8Array(value)),
     decodeToPlayback: (sessionId: string, packet: Uint8Array, fec = false) =>
-        invoke<boolean>('audio_opus_decode_playback', packet, {
+        invoke<NativeAudioPlaybackInfo>('audio_opus_decode_playback', packet, {
             headers: {
                 'x-qorc-audio-session': sessionId,
                 'x-qorc-opus-fec': fec ? '1' : '0',
@@ -514,6 +519,7 @@ export const nativeAudioPlayback = {
     start: (sessionId: string, deviceId: string | null) =>
         invoke<boolean>('audio_playback_start', { sessionId, deviceId }),
     stop: (sessionId: string) => invoke<boolean>('audio_playback_stop', { sessionId }),
+    info: (sessionId: string) => invoke<NativeAudioPlaybackInfo>('audio_playback_info', { sessionId }),
 };
 
 export const nativeCamera = {

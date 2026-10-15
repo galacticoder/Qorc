@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown, Volume2 } from 'lucide-react';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
-import { UserAvatar } from '../../ui/UserAvatar';
+import { CallSpeakingAvatar } from './CallSpeakingAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '../../../lib/utils/shared-utils';
 import { readAppSettingsAsync } from '../../../lib/ui/app-settings';
@@ -688,7 +688,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden text-white/80"
             style={avatarStageStyle}
           >
-            <UserAvatar username={call.peer || ''} size="xl" className="relative" />
+            <CallSpeakingAvatar callId={call.id} active={isConnected} username={call.peer || ''} size="xl" />
             {!isConnected && <p className="mt-3 text-sm font-medium">{callStatusText}</p>}
           </div>
         ) : activeMainStageSource === 'screen' && hasSharedScreen ? (
@@ -720,7 +720,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             className="absolute inset-0 flex flex-col items-center justify-center text-white/75"
             style={avatarStageStyle}
           >
-            <UserAvatar username={call.peer || ''} size="xl" className="mb-3 opacity-70" />
+            <CallSpeakingAvatar callId={call.id} active={isConnected} username={call.peer || ''} size="xl" className="mb-3" />
             {!isConnected && <p className="text-sm font-medium">{callStatusText}</p>}
           </div>
         )}
@@ -797,7 +797,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             )}
             onMouseDown={!isExpandedScreenShare && !isDocked ? handleDragStart : undefined}
           >
-            <UserAvatar
+            <CallSpeakingAvatar
+              callId={call.id}
+              active={isConnected}
               username={call.peer || ''}
               size="xs"
               className={isDocked ? 'qorc-docked-call-avatar' : undefined}

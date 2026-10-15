@@ -343,6 +343,7 @@ pub fn run() {
             commands::audio::audio_opus_decode_playback,
             commands::audio::audio_playback_start,
             commands::audio::audio_playback_stop,
+            commands::audio::audio_playback_info,
             commands::camera::camera_devices,
             commands::camera::camera_capture_start,
             commands::camera::camera_capture_set_enabled,

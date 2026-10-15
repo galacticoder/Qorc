@@ -1,6 +1,7 @@
 import { PostQuantumRandom } from '../cryptography/random';
 import type { CallState } from '../types/calling-types';
 import type { SecureConnection, SecureStream } from './secure-transport';
+import type { CallAudioPlayout } from './call-audio-playout';
 import type {
     VisualAdaptationState,
     VisualDecoderState,
@@ -48,6 +49,8 @@ type SampleSummary = {
     p95: number | null;
     maximum: number | null;
 };
+
+type AudioPlayoutState = ReturnType<CallAudioPlayout['snapshot']> & { nativeQueuedMs: number };
 
 type MediaInterval = {
     sourceFrames: number;
@@ -283,6 +286,7 @@ export class CallTelemetry {
     private readonly visualEncoderState = new Map<'video' | 'screen', VisualEncoderState>();
     private readonly visualDecoderState = new Map<'video' | 'screen', VisualDecoderState>();
     private readonly visualRendererState = new Map<'video' | 'screen', VisualRendererState>();
+    private audioPlayoutState: AudioPlayoutState | null = null;
     private readonly lastKeyFrameRequestAt = new Map<'video' | 'screen', number>();
     private readonly rttSamples: number[] = [];
     private readonly eventLoopLagSamples: number[] = [];
@@ -358,7 +362,7 @@ export class CallTelemetry {
         this.totals.get(kind)!.captureDrops += 1;
     }
 
-    noteSourceFrame(kind: 'video' | 'screen'): void {
+    noteSourceFrame(kind: CallTelemetryMediaKind): void {
         this.interval.get(kind)!.sourceFrames += 1;
         this.totals.get(kind)!.sourceFrames += 1;
     }
@@ -382,7 +386,7 @@ export class CallTelemetry {
         else interval.capturePrepareMs.push(milliseconds);
     }
 
-    noteEncode(kind: 'video' | 'screen', encodeMs: number): void {
+    noteEncode(kind: CallTelemetryMediaKind, encodeMs: number): void {
         if (Number.isFinite(encodeMs) && encodeMs >= 0) {
             this.interval.get(kind)!.encodeMs.push(encodeMs);
         }
@@ -480,12 +484,12 @@ export class CallTelemetry {
         }
     }
 
-    noteDecoderAdmitted(kind: 'video' | 'screen'): void {
+    noteDecoderAdmitted(kind: CallTelemetryMediaKind): void {
         this.interval.get(kind)!.admittedFrames += 1;
         this.totals.get(kind)!.admittedFrames += 1;
     }
 
-    noteDecoded(kind: 'video' | 'screen'): void {
+    noteDecoded(kind: CallTelemetryMediaKind): void {
         this.interval.get(kind)!.decodedFrames += 1;
         this.totals.get(kind)!.decodedFrames += 1;
     }
@@ -493,6 +497,10 @@ export class CallTelemetry {
     noteDiscontinuity(kind: 'video' | 'screen'): void {
         this.interval.get(kind)!.discontinuities += 1;
         this.totals.get(kind)!.discontinuities += 1;
+    }
+
+    noteAudioPlayout(state: AudioPlayoutState): void {
+        this.audioPlayoutState = { ...state };
     }
 
     requestKeyFrame(kind: 'video' | 'screen'): void {
@@ -565,7 +573,9 @@ export class CallTelemetry {
                 decoderState: kind === 'audio'
                     ? null
                     : this.visualDecoderState.get(kind) ?? null,
-                rendererState: !renderer
+                rendererState: kind === 'audio'
+                    ? this.audioPlayoutState
+                    : !renderer
                     ? null
                     : {
                         animationFramePending: renderer.animationFramePending,

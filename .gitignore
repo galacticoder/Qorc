@@ -160,3 +160,4 @@ server/test/*
 !server/test/unversioned-protocols.test.js
 !server/test/saved-servers.test.js
 !server/test/websocket-bootstrap-ownership.test.js
+!server/test/call-audio-playout.test.js

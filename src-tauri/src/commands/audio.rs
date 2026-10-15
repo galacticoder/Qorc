@@ -1,3 +1,4 @@
+use crate::audio_playback::AudioPlaybackInfo;
 use crate::state::AppState;
 use tauri::{
     State,
@@ -48,7 +49,7 @@ pub fn audio_opus_encode(
 pub fn audio_opus_decode_playback(
     state: State<'_, AppState>,
     request: Request<'_>,
-) -> Result<bool, String> {
+) -> Result<AudioPlaybackInfo, String> {
     let session_id = session_id(&request)?;
     let fec = request
         .headers()
@@ -61,7 +62,15 @@ pub fn audio_opus_decode_playback(
     let result = state.audio_playback.push(&session_id, &pcm);
     pcm.fill(0);
     result?;
-    Ok(true)
+    state.audio_playback.info(&session_id)
+}
+
+#[tauri::command]
+pub fn audio_playback_info(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<AudioPlaybackInfo, String> {
+    state.audio_playback.info(&session_id)
 }
 
 #[tauri::command]

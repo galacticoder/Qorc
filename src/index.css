@@ -3405,6 +3405,35 @@ html.light .qorc-cm-dialog input.qorc-cm-search-input:focus,
   text-shadow: 0 1px 1px rgba(0, 0, 0, .22);
 }
 
+.qorc-speaking-avatar {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  isolation: isolate;
+}
+
+.qorc-speaking-ring {
+  position: absolute;
+  inset: -4px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(calc(1 + var(--qorc-speaking-level) * .12));
+  transition: opacity 140ms ease, transform 100ms ease;
+}
+
+.qorc-speaking-avatar[data-speaking="true"] .qorc-speaking-ring {
+  opacity: calc(.25 + var(--qorc-speaking-level) * .6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qorc-speaking-ring {
+    transform: none;
+    transition: none;
+  }
+}
+
 .qorc-call-modal-ringing {
   --qorc-call-ring-wave-color: color-mix(in srgb, var(--qorc-call-ring-color, #a78bfa) 58%, white);
   animation: qorc-call-modal-buzz 2s linear infinite;
