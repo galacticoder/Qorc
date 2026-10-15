@@ -259,7 +259,7 @@ Starting a call performs these operations in order:
    a requested capture device fails setup instead of changing the call type.
 6. Warm the authenticated P2P onion connection without waiting for its handshake
    to finish before delivering the live offer. An existing route is used
-   immediately; otherwise the sealed live-only server route carries signaling.
+   immediately, otherwise the sealed live-only server route carries signaling.
 7. Enter local `ringing` before sending the offer. This ordering prevents an
    immediate answer from racing ahead of the caller's state transition.
 8. Send the encrypted live-only offer and then arm the 20-second outgoing timeout.
@@ -549,7 +549,7 @@ Each call owns a native Opus encoder/decoder session configured for:
 - 48 kHz mono speech and 20 ms frames,
 - restricted-low-delay, CELT-only application mode,
 - 48 kbit/s target bitrate, variable bitrate, and complexity 10,
-- discontinuous transmission,
+- continuous encoding without voice-activity suppression or discontinuous transmission,
 - loss-aware prediction with an expected 10 percent packet-loss rate, the
   CELT-only profile uses packet-loss concealment, not SILK in-band FEC,
 - a maximum encoded packet size of 1,276 bytes.
@@ -561,16 +561,27 @@ drain takes up to four pending 20 ms frames, encodes them in sequence, and sends
 their packets together in one encrypted write. This preserves codec sequencing
 while amortizing Tauri IPC, Noise framing, native scheduling, and TCP flushing
 across as much as 80 ms of speech. The realtime encryption queue also permits at
-most five pending writes and services realtime work before normal traffic. A
-one-byte Opus DTX result is marked as silence and sent on the same 20 ms codec
-timeline as speech. The application does not suppress intermediate DTX packets 
-the receiver must advance the decoder's comfort-noise state through silence.
+most five pending writes and services realtime work before normal traffic.
+Every microphone frame is encoded, including quiet speech, background sounds,
+and silence. The encoder's activity-based DTX suppression is disabled because
+it can misclassify ongoing quiet speech after its activity detector warms up.
+Silence still compresses efficiently as coded CELT frames rather than requiring
+the receiver to synthesize audio from previous speech. No volume threshold gates
+the microphone signal.
+
+The receiver also validates explicit Opus silence packets on the same 20 ms
+codec timeline as speech and advances its decoder history for each one.
 Header-only packets, and packets with only one payload byte, use the decoder's
-concealment path instead of parsing nonexistent speech or FEC. Their TOC must
-identify one mono 20 ms frame before they can change decoder state. This follows
+concealment path internally instead of parsing nonexistent speech or FEC. Their
+TOC must identify one mono 20 ms frame before they can change decoder state. This follows
 the [reference Opus decoder](https://github.com/xiph/opus/blob/main/src/opus_decoder.c)
 handling of empty and one-byte frame payloads, preserving the prediction history
-needed when speech resumes.
+needed when speech resumes. Received silence is not audible packet-loss recovery:
+the receiver ramps its last output sample to zero over 5 ms, then plays zero
+instead of the codec's pitch-repeated or noise-generated comfort audio. Loss
+concealment during that silent interval also stays silent until coded audio
+resumes. A missing speech packet still uses normal concealment, an FEC request
+with a short following packet does not mark that missing frame as silence.
 
 The plaintext audio packet has a fixed 14-byte header:
 
@@ -581,7 +592,7 @@ u8 version | u8 flags | u32be codecSequence | u64be captureTimestampMs | opus
 The current version is 1. Flag bit 0 marks a one-byte DTX packet and flag bit 1
 marks a discontinuity caused by a dropped capture, failed
 send, or audio-route change. A received discontinuity lets playout skip a
-sequence gap only after earlier buffered speech has played; it never purges
+sequence gap only after earlier buffered speech has played, it never purges
 valid speech merely because a newer discontinuity arrived. The codec
 sequence advances per captured frame and the timestamp records capture time in
 milliseconds. One to four packets are enclosed in this audio batch:
@@ -622,7 +633,7 @@ and replenishes it toward 80 ms in batches of at most four frames. The speaker
 clock, not one JavaScript timer callback per frame, determines consumption.
 The shared 48 kHz playback queue fades the first and last 5 ms around an underrun
 instead of stepping abruptly between speech and zero. Steady buffered speech
-is unchanged; the fade adds no queued latency. Native underrun counts and total
+is unchanged, the fade adds no queued latency. Native underrun counts and total
 underrun duration are included in the existing client-side audio telemetry.
 Speaker-device changes pause replenishment and invalidate outstanding output
 reads without ending an otherwise healthy call. A call fails media startup when
@@ -632,7 +643,7 @@ best-effort basis.
 
 The native output callback measures RMS from samples submitted to the speaker,
 including silence on underrun. This ephemeral loudness value drives a circular
-ring around the peer avatar; queued or newly received packets do not indicate
+ring around the peer avatar, queued or newly received packets do not indicate
 speaking prematurely. The avatar subscribes independently so updates do not
 rerender the chat screen. Values expire during silence and are cleared on call
 end, are never sent to the peer or server, and are not persisted or logged.
