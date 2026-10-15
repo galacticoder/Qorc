@@ -534,11 +534,11 @@ reopen the device.
 Each call owns a native Opus encoder/decoder session configured for:
 
 - 48 kHz mono speech and 20 ms frames,
-- VoIP application mode,
+- restricted-low-delay, CELT-only application mode,
 - 24 kbit/s target bitrate, variable bitrate, and complexity 8,
 - discontinuous transmission,
-- in-band forward error correction with an expected 10 percent packet-loss
-  rate,
+- loss-aware prediction with an expected 10 percent packet-loss rate, the
+  CELT-only profile uses packet-loss concealment, not SILK in-band FEC,
 - a maximum encoded packet size of 1,276 bytes.
 
 The sender keeps at most five captured PCM frames. When capture outruns encoding,
@@ -549,9 +549,15 @@ their packets together in one encrypted write. This preserves codec sequencing
 while amortizing Tauri IPC, Noise framing, native scheduling, and TCP flushing
 across as much as 80 ms of speech. The realtime encryption queue also permits at
 most five pending writes and services realtime work before normal traffic. A
-one-byte Opus DTX result is marked as silence, one such packet is sent every 20
-silent frames, approximately every 400 ms, while intermediate silence is
-suppressed.
+one-byte Opus DTX result is marked as silence and sent on the same 20 ms codec
+timeline as speech. The application does not suppress intermediate DTX packets 
+the receiver must advance the decoder's comfort-noise state through silence.
+Header-only packets, and packets with only one payload byte, use the decoder's
+concealment path instead of parsing nonexistent speech or FEC. Their TOC must
+identify one mono 20 ms frame before they can change decoder state. This follows
+the [reference Opus decoder](https://github.com/xiph/opus/blob/main/src/opus_decoder.c)
+handling of empty and one-byte frame payloads, preserving the prediction history
+needed when speech resumes.
 
 The plaintext audio packet has a fixed 14-byte header:
 
@@ -560,7 +566,7 @@ u8 version | u8 flags | u32be codecSequence | u64be captureTimestampMs | opus
 ```
 
 The current version is 1. Flag bit 0 marks a one-byte DTX packet and flag bit 1
-marks a discontinuity caused by a dropped capture, suppressed DTX frame, failed
+marks a discontinuity caused by a dropped capture, failed
 send, or audio-route change. A received discontinuity lets playout skip a
 sequence gap only after earlier buffered speech has played; it never purges
 valid speech merely because a newer discontinuity arrived. The codec
@@ -590,16 +596,21 @@ wiping on eviction, rejection, or teardown. Sequence ordering supports wraparoun
 An empty arrival queue causes rebuffering without advancing the expected codec
 sequence, so packets delayed by a Tor stall remain playable. A bounded reorder
 grace period admits late arrivals before declaring a known sequence gap. For
-one missing frame with a following packet, Opus FEC recovers the missing frame
-without consuming or wiping the following packet. Known gaps use at most three
-concealment frames before resynchronizing. DTX gaps are intentional silence,
-not continuously synthesized missing packets.
+one missing frame with a following packet, the codec recovery request uses
+CELT packet-loss concealment without consuming or wiping the following packet.
+Known gaps use at most three
+concealment frames before resynchronizing. DTX packets follow the same buffering
+and sequencing rules as speech silence never bypasses the jitter buffer.
 
 Decoded PCM goes to a selectable native output: PulseAudio on Linux or CPAL on
 Windows. That playback queue is capped at ten 20 ms frames and discards the
 oldest complete frame when full. Playout reads the actual native queue depth
 and replenishes it toward 80 ms in batches of at most four frames. The speaker
 clock, not one JavaScript timer callback per frame, determines consumption.
+The shared 48 kHz playback queue fades the first and last 5 ms around an underrun
+instead of stepping abruptly between speech and zero. Steady buffered speech
+is unchanged; the fade adds no queued latency. Native underrun counts and total
+underrun duration are included in the existing client-side audio telemetry.
 Speaker-device changes pause replenishment and invalidate outstanding output
 reads without ending an otherwise healthy call. A call fails media startup when
 native playback cannot start. All queues remain bounded rather than growing with
@@ -617,7 +628,8 @@ Reduced-motion mode disables expansion while retaining the brightness indicator.
 
 Audio telemetry records decoded-frame counts and its renderer state: target and
 buffered duration, native queue duration, rebuffer events, concealment frames,
-late drops, and hard-limit evictions. No waveform, PCM, or loudness values are
+late drops, hard-limit evictions, and native underrun counts and duration.
+No waveform, PCM, or loudness values are
 included in these logs.
 
 Code references:

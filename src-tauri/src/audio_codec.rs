@@ -1,4 +1,4 @@
-use rusty_opus::{Application, OpusDecoder, OpusEncoder};
+use rusty_opus::{Application, OpusDecoder, OpusEncoder, repacketizer::samples_per_frame};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -25,12 +25,11 @@ impl AudioCodecState {
 
     pub fn start(&self, session_id: &str) -> Result<(), String> {
         validate_session_id(session_id)?;
-        let mut encoder = OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::Voip)
+        let mut encoder = OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::RestrictedLowDelay)
             .map_err(|_| "failed to initialize Opus encoder".to_string())?;
         encoder.bitrate_bps = 24_000;
         encoder.complexity = 8;
         encoder.use_cbr = false;
-        encoder.use_inband_fec = true;
         encoder.use_dtx = true;
         encoder.packet_loss_perc = 10;
         let decoder = OpusDecoder::new(SAMPLE_RATE as i32, 1)
@@ -99,6 +98,13 @@ impl AudioCodecState {
         if packet.len() > MAX_PACKET_BYTES || (fec && packet.is_empty()) {
             return Err("invalid Opus packet".to_string());
         }
+        if !packet.is_empty()
+            && packet.len() <= 2
+            && (packet[0] & 7 != 0
+                || samples_per_frame(packet[0], SAMPLE_RATE as i32) != FRAME_SAMPLES as i32)
+        {
+            return Err("invalid Opus silence frame".to_string());
+        }
         let mut pcm = vec![0.0f32; FRAME_SAMPLES];
         let decoded = {
             let mut sessions = self
@@ -108,7 +114,7 @@ impl AudioCodecState {
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| "audio codec session unavailable".to_string())?;
-            if fec {
+            if fec && packet.len() > 2 {
                 session
                     .decoder
                     .decode_fec(packet, FRAME_SAMPLES, &mut pcm)
@@ -116,7 +122,11 @@ impl AudioCodecState {
             } else {
                 session
                     .decoder
-                    .decode(packet, FRAME_SAMPLES, &mut pcm)
+                    .decode(
+                        if packet.len() <= 2 { &[] } else { packet },
+                        FRAME_SAMPLES,
+                        &mut pcm,
+                    )
                     .map_err(|_| "Opus decoding failed".to_string())?
             }
         };
@@ -212,5 +222,148 @@ mod tests {
             }
         }
         assert!(entered_dtx);
+    }
+
+    #[test]
+    fn toc_only_silence_advances_comfort_noise_instead_of_decoding_empty_speech() {
+        let state = AudioCodecState::new();
+        let sender = "00112233445566778899aabbccddeeff";
+        let reference = "ffeeddccbbaa99887766554433221100";
+        state.start(sender).unwrap();
+        state.start(reference).unwrap();
+        for frame in 0..50 {
+            let packet = state
+                .encode(sender, &pcm_bytes(frame as f32 * 57.6))
+                .unwrap();
+            state.decode(sender, &packet, false).unwrap();
+            state.decode(reference, &packet, false).unwrap();
+        }
+        let mut checked = 0;
+        for _ in 0..3 {
+            for _ in 0..150 {
+                let packet = state.encode(sender, &silence_bytes()).unwrap();
+                let actual = state.decode(sender, &packet, false).unwrap();
+                let expected = state
+                    .decode(
+                        reference,
+                        if packet.len() == 1 { &[] } else { &packet },
+                        false,
+                    )
+                    .unwrap();
+                if packet.len() == 1 {
+                    assert!(
+                        actual == expected,
+                        "TOC-only silence must advance comfort-noise state, not decode an empty speech payload"
+                    );
+                    checked += 1;
+                }
+            }
+            for frame in 0..25 {
+                let packet = state
+                    .encode(sender, &pcm_bytes(frame as f32 * 57.6))
+                    .unwrap();
+                let actual = state.decode(sender, &packet, false).unwrap();
+                let expected = state.decode(reference, &packet, false).unwrap();
+                assert!(
+                    actual == expected,
+                    "speech must resume from the correct decoder history after silence"
+                );
+            }
+        }
+        assert!(checked > 150);
+    }
+
+    #[test]
+    fn resumed_speech_does_not_produce_amplitude_spikes() {
+        let state = AudioCodecState::new();
+        let session = "00112233445566778899aabbccddeeff";
+        state.start(session).unwrap();
+        for frame in 0..50 {
+            let packet = state
+                .encode(session, &pcm_bytes(frame as f32 * 57.6))
+                .unwrap();
+            let output = state.decode(session, &packet, false).unwrap();
+            assert!(
+                packet[0] & 0x80 != 0,
+                "call audio must remain in the CELT profile"
+            );
+            assert!(
+                output
+                    .chunks_exact(4)
+                    .all(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()).abs() < 0.6),
+                "test speech must not produce full-scale codec spikes"
+            );
+        }
+        for _ in 0..3 {
+            for _ in 0..150 {
+                let packet = state.encode(session, &silence_bytes()).unwrap();
+                let output = state.decode(session, &packet, false).unwrap();
+                assert!(
+                    output.chunks_exact(4).all(|bytes| f32::from_le_bytes(
+                        bytes.try_into().unwrap()
+                    )
+                    .abs()
+                        < 0.6),
+                    "test silence must not produce codec spikes"
+                );
+            }
+            for frame in 0..25 {
+                let packet = state
+                    .encode(session, &pcm_bytes(frame as f32 * 57.6))
+                    .unwrap();
+                let output = state.decode(session, &packet, false).unwrap();
+                assert!(
+                    packet[0] & 0x80 != 0,
+                    "resuming speech must not switch codec profiles"
+                );
+                assert!(
+                    output.chunks_exact(4).all(|bytes| f32::from_le_bytes(
+                        bytes.try_into().unwrap()
+                    )
+                    .abs()
+                        < 0.6),
+                    "resumed test speech must not produce amplitude spikes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_silence_frames_use_concealment_even_when_requested_for_fec() {
+        let state = AudioCodecState::new();
+        let actual = "0123456789abcdef0123456789abcdef";
+        let reference = "fedcba9876543210fedcba9876543210";
+        state.start(actual).unwrap();
+        state.start(reference).unwrap();
+        for frame in 0..50 {
+            let packet = state
+                .encode(actual, &pcm_bytes(frame as f32 * 57.6))
+                .unwrap();
+            state.decode(actual, &packet, false).unwrap();
+            state.decode(reference, &packet, false).unwrap();
+        }
+        for packet in [vec![0x48], vec![0x48, 0]] {
+            for fec in [false, true] {
+                let output = state.decode(actual, &packet, fec).unwrap();
+                let expected = state.decode(reference, &[], false).unwrap();
+                assert!(
+                    output == expected,
+                    "a silence frame cannot contain recoverable FEC or coded speech"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_frames_reject_wrong_channels_duration_and_framing() {
+        let state = AudioCodecState::new();
+        let session = "0123456789abcdef0123456789abcdef";
+        state.start(session).unwrap();
+        for toc in 0u8..=255 {
+            let valid = [0x08, 0x28, 0x48, 0x68, 0x78, 0x98, 0xb8, 0xd8, 0xf8].contains(&toc);
+            for packet in [vec![toc], vec![toc, 0]] {
+                assert_eq!(state.decode(session, &packet, false).is_ok(), valid);
+            }
+        }
     }
 }

@@ -497,6 +497,8 @@ export const pir = {
 export interface NativeAudioPlaybackInfo {
     queuedMs: number;
     level: number;
+    underruns: number;
+    underrunMs: number;
 }
 
 export const audioCodec = {

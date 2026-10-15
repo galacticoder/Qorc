@@ -29,7 +29,6 @@ export class CallAudioPlayout {
     private jitterMs = 0;
     private peakVariationMs = 0;
     private targetMs = INITIAL_BUFFER_MS;
-    private lastWasDtx = false;
     private losses = 0;
     private rebuffers = 0;
     private concealments = 0;
@@ -88,7 +87,7 @@ export class CallAudioPlayout {
     next(now: number): AudioPlayoutFrame | null {
         const sequences = this.sequences();
         if (sequences.length === 0) {
-            if (!this.buffering && !this.lastWasDtx) {
+            if (!this.buffering) {
                 this.rebuffers++;
                 this.targetMs = Math.min(MAX_BUFFER_MS, this.targetMs + AUDIO_FRAME_DURATION_MS * 2);
             }
@@ -98,13 +97,12 @@ export class CallAudioPlayout {
         const first = this.packets.get(sequences[0])!;
         if (this.buffering) {
             const bufferedMs = sequences.length * AUDIO_FRAME_DURATION_MS;
-            if (first.packet.length !== 1 && !this.lastWasDtx &&
-                bufferedMs < this.targetMs && now - first.arrivedAt < this.targetMs) return null;
+            if (bufferedMs < this.targetMs && now - first.arrivedAt < this.targetMs) return null;
             if (this.expected === null) this.expected = first.sequence;
             this.buffering = false;
         }
         let packet = this.packets.get(this.expected!);
-        if (!packet && (first.discontinuity || this.lastWasDtx || this.losses >= MAX_CONCEALMENT_FRAMES)) {
+        if (!packet && (first.discontinuity || this.losses >= MAX_CONCEALMENT_FRAMES)) {
             this.expected = first.sequence;
             packet = first;
             this.losses = 0;
@@ -112,7 +110,6 @@ export class CallAudioPlayout {
         if (packet) {
             this.packets.delete(packet.sequence);
             this.expected = (packet.sequence + 1) >>> 0;
-            this.lastWasDtx = packet.packet.length === 1;
             this.losses = 0;
             return { packet: packet.packet, fec: false };
         }

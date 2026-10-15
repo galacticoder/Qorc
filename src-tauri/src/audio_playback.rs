@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const FRAME_SAMPLES: usize = 960;
 const MAX_QUEUE_SAMPLES: usize = FRAME_SAMPLES * 10;
+const EDGE_FADE_SAMPLES: usize = 240;
 const MAX_SESSIONS: usize = 2;
 
 #[derive(serde::Serialize)]
@@ -19,11 +20,55 @@ const MAX_SESSIONS: usize = 2;
 pub struct AudioPlaybackInfo {
     pub queued_ms: f64,
     pub level: f32,
+    pub underruns: u64,
+    pub underrun_ms: f64,
+}
+
+struct PlaybackQueue {
+    samples: VecDeque<f32>,
+    gain: f32,
+    playing: bool,
+    starved: bool,
+    underruns: u64,
+    underrun_samples: u64,
+}
+
+impl PlaybackQueue {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(MAX_QUEUE_SAMPLES),
+            gain: 0.0,
+            playing: false,
+            starved: false,
+            underruns: 0,
+            underrun_samples: 0,
+        }
+    }
+
+    fn next(&mut self) -> f32 {
+        let remaining = self.samples.len();
+        let Some(sample) = self.samples.pop_front() else {
+            if self.playing {
+                if !self.starved {
+                    self.underruns += 1;
+                }
+                self.underrun_samples += 1;
+                self.starved = true;
+            }
+            self.gain = 0.0;
+            return 0.0;
+        };
+        self.playing = true;
+        self.starved = false;
+        let target = (remaining as f32 / EDGE_FADE_SAMPLES as f32).min(1.0);
+        self.gain = (self.gain + 1.0 / EDGE_FADE_SAMPLES as f32).min(target);
+        sample * self.gain
+    }
 }
 
 struct AudioPlaybackSession {
     stop: AtomicBool,
-    queue: Mutex<VecDeque<f32>>,
+    queue: Mutex<PlaybackQueue>,
     worker: Mutex<Option<JoinHandle<()>>>,
     level: AtomicU32,
     level_at: AtomicU64,
@@ -34,7 +79,7 @@ impl AudioPlaybackSession {
     fn new() -> Self {
         Self {
             stop: AtomicBool::new(false),
-            queue: Mutex::new(VecDeque::with_capacity(MAX_QUEUE_SAMPLES)),
+            queue: Mutex::new(PlaybackQueue::new()),
             worker: Mutex::new(None),
             level: AtomicU32::new(0),
             level_at: AtomicU64::new(0),
@@ -53,14 +98,14 @@ impl AudioPlaybackSession {
             .queue
             .lock()
             .map_err(|_| "audio playback queue unavailable".to_string())?;
-        while queue.len() + FRAME_SAMPLES > MAX_QUEUE_SAMPLES {
-            for _ in 0..FRAME_SAMPLES.min(queue.len()) {
-                queue.pop_front();
+        while queue.samples.len() + FRAME_SAMPLES > MAX_QUEUE_SAMPLES {
+            for _ in 0..FRAME_SAMPLES.min(queue.samples.len()) {
+                queue.samples.pop_front();
             }
         }
         for bytes in input.chunks_exact(4) {
             let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            queue.push_back(if sample.is_finite() {
+            queue.samples.push_back(if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
             } else {
                 0.0
@@ -77,7 +122,7 @@ impl AudioPlaybackSession {
         };
         let mut energy = 0.0f64;
         for bytes in output.chunks_exact_mut(4) {
-            let sample = queue.pop_front().unwrap_or(0.0);
+            let sample = queue.next();
             energy += f64::from(sample).powi(2);
             bytes.copy_from_slice(&sample.to_le_bytes());
         }
@@ -112,8 +157,10 @@ impl AudioPlaybackSession {
             0.0
         };
         Ok(AudioPlaybackInfo {
-            queued_ms: queue.len() as f64 / 48.0,
+            queued_ms: queue.samples.len() as f64 / 48.0,
             level,
+            underruns: queue.underruns,
+            underrun_ms: queue.underrun_samples as f64 / 48.0,
         })
     }
 
@@ -126,10 +173,11 @@ impl AudioPlaybackSession {
             let _ = worker.join();
         }
         if let Ok(mut queue) = self.queue.lock() {
-            for sample in queue.iter_mut() {
+            for sample in queue.samples.iter_mut() {
                 *sample = 0.0;
             }
-            queue.clear();
+            queue.samples.clear();
+            queue.gain = 0.0;
         }
     }
 }
@@ -486,19 +534,14 @@ impl PlaybackResampler {
         }
     }
 
-    fn next(&mut self, queue: &mut VecDeque<f32>) -> f32 {
-        let (mut left, mut right) = self.samples.unwrap_or_else(|| {
-            (
-                queue.pop_front().unwrap_or(0.0),
-                queue.pop_front().unwrap_or(0.0),
-            )
-        });
+    fn next(&mut self, queue: &mut PlaybackQueue) -> f32 {
+        let (mut left, mut right) = self.samples.unwrap_or_else(|| (queue.next(), queue.next()));
         let value = left + (right - left) * self.position as f32;
         self.position += self.step;
         while self.position >= 1.0 {
             self.position -= 1.0;
             left = right;
-            right = queue.pop_front().unwrap_or(0.0);
+            right = queue.next();
         }
         self.samples = Some((left, right));
         value
@@ -529,23 +572,67 @@ mod tests {
 
     #[test]
     fn playback_preserves_48khz_samples_and_outputs_silence_on_underrun() {
-        let mut queue = VecDeque::from([0.25, -0.5, 1.0, -1.0]);
+        let mut queue = PlaybackQueue::new();
+        queue.gain = 1.0;
+        queue.samples.extend([0.25, -0.5, 1.0, -1.0]);
+        queue.samples.extend(vec![0.0; EDGE_FADE_SAMPLES]);
         let mut resampler = PlaybackResampler::new(48_000);
-        let output: Vec<_> = (0..7).map(|_| resampler.next(&mut queue)).collect();
-        assert_eq!(output, [0.25, -0.5, 1.0, -1.0, 0.0, 0.0, 0.0]);
+        let output: Vec<_> = (0..EDGE_FADE_SAMPLES + 7)
+            .map(|_| resampler.next(&mut queue))
+            .collect();
+        assert_eq!(&output[..4], &[0.25, -0.5, 1.0, -1.0]);
+        assert!(output[4..].iter().all(|sample| *sample == 0.0));
+        assert_eq!(queue.underruns, 1);
     }
 
     #[test]
     fn playback_resamples_across_callback_boundaries() {
         for rate in [44_100, 48_000, 96_000, 192_000] {
-            let mut queue: VecDeque<_> = (0..48_002).map(|i| i as f32 / 48_000.0).collect();
+            let mut queue = PlaybackQueue::new();
+            queue.gain = 1.0;
+            queue
+                .samples
+                .extend((0..48_002 + EDGE_FADE_SAMPLES).map(|i| i as f32 / 48_000.0));
             let mut resampler = PlaybackResampler::new(rate);
             for index in 0..rate {
                 let sample = resampler.next(&mut queue);
                 assert!((sample - index as f32 / rate as f32).abs() < 0.00001);
             }
-            assert!(queue.len() <= 1);
+            assert!(queue.samples.len() <= EDGE_FADE_SAMPLES + 1);
+            assert_eq!(queue.underruns, 0);
         }
+    }
+
+    #[test]
+    fn underrun_edges_fade_without_affecting_steady_audio() {
+        let mut queue = PlaybackQueue::new();
+        for _ in 0..FRAME_SAMPLES {
+            assert_eq!(queue.next(), 0.0);
+        }
+        assert_eq!(queue.underruns, 0);
+        queue.samples.extend(vec![0.75; FRAME_SAMPLES]);
+        let output: Vec<_> = (0..FRAME_SAMPLES).map(|_| queue.next()).collect();
+        let step = 0.75 / EDGE_FADE_SAMPLES as f32;
+        assert!(output[0] <= step + 0.00001);
+        assert_eq!(output[FRAME_SAMPLES / 2], 0.75);
+        assert!(output[FRAME_SAMPLES - 1] <= step + 0.00001);
+        assert!(
+            output
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() <= step + 0.00001)
+        );
+        for _ in 0..4800 {
+            assert_eq!(queue.next(), 0.0);
+        }
+        assert_eq!(queue.underruns, 1);
+        assert_eq!(queue.underrun_samples, 4800);
+        queue.samples.extend(vec![-0.75; FRAME_SAMPLES]);
+        assert!(queue.next().abs() <= step + 0.00001);
+        for _ in 1..FRAME_SAMPLES {
+            queue.next();
+        }
+        assert_eq!(queue.next(), 0.0);
+        assert_eq!(queue.underruns, 2);
     }
 
     #[test]
@@ -561,15 +648,15 @@ mod tests {
             session.push(&frame).unwrap();
         }
         let queue = session.queue.lock().unwrap();
-        assert_eq!(queue.len(), MAX_QUEUE_SAMPLES);
+        assert_eq!(queue.samples.len(), MAX_QUEUE_SAMPLES);
         assert_eq!(
-            queue.iter().take(4).copied().collect::<Vec<_>>(),
+            queue.samples.iter().take(4).copied().collect::<Vec<_>>(),
             [0.0, 0.0, 1.0, -1.0]
         );
         drop(queue);
         session.stop();
         assert!(session.push(&frame).is_err());
-        assert!(session.queue.lock().unwrap().is_empty());
+        assert!(session.queue.lock().unwrap().samples.is_empty());
     }
 
     #[test]
@@ -583,11 +670,13 @@ mod tests {
         assert_eq!(initial.queued_ms, 20.0);
         assert_eq!(initial.level, 0.0);
         let mut queue = session.queue.lock().unwrap();
-        let energy = queue.iter().map(|sample| f64::from(*sample).powi(2)).sum();
-        session.record_level(energy, queue.len());
-        queue.clear();
+        let energy = (0..FRAME_SAMPLES)
+            .map(|_| f64::from(queue.next()).powi(2))
+            .sum();
+        session.record_level(energy, FRAME_SAMPLES);
         drop(queue);
-        assert_eq!(session.info().unwrap().level, 0.5);
+        let level = session.info().unwrap().level;
+        assert!(level > 0.0 && level < 0.5);
         session.record_level(0.0, FRAME_SAMPLES);
         assert_eq!(session.info().unwrap().level, 0.0);
     }
@@ -602,10 +691,19 @@ mod tests {
         session.push(&frame).unwrap();
         let mut output = vec![0; FRAME_SAMPLES * 4];
         session.fill(&mut output);
-        assert_eq!(session.info().unwrap().level, 0.25);
+        let energy: f64 = output
+            .chunks_exact(4)
+            .map(|bytes| f64::from(f32::from_le_bytes(bytes.try_into().unwrap())).powi(2))
+            .sum();
+        assert_eq!(
+            session.info().unwrap().level,
+            (energy / FRAME_SAMPLES as f64).sqrt() as f32
+        );
         assert_eq!(session.info().unwrap().queued_ms, 0.0);
         session.fill(&mut output);
         assert!(output.iter().all(|sample| *sample == 0));
         assert_eq!(session.info().unwrap().level, 0.0);
+        assert_eq!(session.info().unwrap().underruns, 1);
+        assert_eq!(session.info().unwrap().underrun_ms, 20.0);
     }
 }

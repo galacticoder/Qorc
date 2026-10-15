@@ -50,7 +50,11 @@ type SampleSummary = {
     maximum: number | null;
 };
 
-type AudioPlayoutState = ReturnType<CallAudioPlayout['snapshot']> & { nativeQueuedMs: number };
+type AudioPlayoutState = ReturnType<CallAudioPlayout['snapshot']> & {
+    nativeQueuedMs: number;
+    nativeUnderruns: number;
+    nativeUnderrunMs: number;
+};
 
 type MediaInterval = {
     sourceFrames: number;

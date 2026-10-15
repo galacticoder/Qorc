@@ -101,7 +101,6 @@ const MAX_PENDING_AUDIO_CAPTURE_FRAMES = 5;
 const NATIVE_AUDIO_TARGET_MS = 80;
 const AUDIO_SEND_DEADLINE_MS = 160;
 const AUDIO_SEND_DEADLINE_MAX_MS = 320;
-const AUDIO_DTX_KEEPALIVE_FRAMES = 20;
 const MAX_REMOTE_SCREEN_SHARES_PER_CALL = 128;
 const MAX_PENDING_SIGNAL_SESSION_WAITS = 8;
 const MAX_CALL_SIGNAL_ERROR_RETRIES = 3;
@@ -1950,7 +1949,6 @@ export class SecureCallingService {
         const microphoneSessionId = this.microphoneSessionId;
         const pending: PendingAudioCapture[] = [];
         let nativeSequence = 0;
-        let dtxFrames = 0;
         let streamDiscontinuity = false;
         let lastAudioRoute: string | null = null;
         let draining = false;
@@ -1996,15 +1994,6 @@ export class SecureCallingService {
                                 streamDiscontinuity = true;
                                 this.callTelemetry?.noteCaptureDrop('audio');
                                 continue;
-                            }
-                            if (opusPacket.byteLength === 1) {
-                                dtxFrames += 1;
-                                if ((dtxFrames - 1) % AUDIO_DTX_KEEPALIVE_FRAMES !== 0) {
-                                    streamDiscontinuity = true;
-                                    continue;
-                                }
-                            } else {
-                                dtxFrames = 0;
                             }
                             packet = createAudioPacket(
                                 opusPacket,
@@ -2592,7 +2581,10 @@ export class SecureCallingService {
                         SecureMemory.zeroBuffer(frame.packet);
                     }
                 }
-                this.callTelemetry?.noteAudioPlayout({ ...buffer.snapshot(), nativeQueuedMs: output.queuedMs });
+                this.callTelemetry?.noteAudioPlayout({
+                    ...buffer.snapshot(), nativeQueuedMs: output.queuedMs,
+                    nativeUnderruns: output.underruns, nativeUnderrunMs: output.underrunMs,
+                });
             } catch (error) {
                 if (outputIsCurrent() && !stopped) {
                     stopped = true;

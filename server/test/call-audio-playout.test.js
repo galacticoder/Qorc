@@ -89,13 +89,18 @@ test('FEC copies its packet so the next real frame remains playable after wiping
     assert.equal(frame(buffer, 1240).packet[1], 2);
 });
 
-test('DTX silence does not create fake missing codec frames', () => {
+test('DTX silence uses the same jitter protection and codec timeline as speech', () => {
     const buffer = new CallAudioPlayout();
     buffer.push(packet(0, 1000, false, true));
-    frame(buffer, 1000);
-    for (let now = 1020; now < 1400; now += 20) assert.equal(buffer.next(now), null);
-    buffer.push(packet(20, 1400, true));
-    assert.equal(frame(buffer, 1400).packet[1], 20);
+    assert.equal(buffer.next(1000), null);
+    for (let sequence = 1; sequence < 20; sequence++) {
+        buffer.push(packet(sequence, 1200, false, true));
+    }
+    for (let sequence = 0; sequence < 20; sequence++) {
+        assert.equal(frame(buffer, 1200 + sequence * 20).packet.length, 1);
+    }
+    buffer.push(packet(20, 1600));
+    assert.equal(frame(buffer, 1600).packet[1], 20);
     assert.equal(buffer.snapshot().concealedFrames, 0);
     assert.equal(buffer.snapshot().rebufferCount, 0);
 });
@@ -181,12 +186,19 @@ function receiver(native, codec, overrides = {}) {
     const source = fs.readFileSync(filename, 'utf8');
     const ast = ts.createSourceFile('service.ts', source, ts.ScriptTarget.ES2022, true);
     const declaration = ast.statements.find(node => ts.isClassDeclaration(node) && node.name.text === 'SecureCallingService');
-    const methods = declaration.members.filter(node => ['receiveAudioStream', 'switchSpeaker'].includes(node.name?.getText(ast)));
-    const body = ts.transpileModule(`export class Receiver { ${methods.map(method => method.getText(ast)).join('\n')} }`, {
+    const methods = declaration.members.filter(node => ['receiveAudioStream', 'switchSpeaker', 'startAudioStreaming'].includes(node.name?.getText(ast)));
+    const helpers = ast.statements.filter(node => ts.isFunctionDeclaration(node) &&
+        ['createAudioPacket', 'encodeCallAudioBatch'].includes(node.name?.text));
+    const body = ts.transpileModule(`${helpers.map(node => node.getText(ast)).join('\n')}
+        export class Receiver { ${methods.map(method => method.getText(ast)).join('\n')} }`, {
         compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
     }).outputText;
     const dependencies = { CallAudioPlayout, AUDIO_FRAME_DURATION_MS: 20, NATIVE_AUDIO_TARGET_MS: 80,
-        AUDIO_PACKET_HEADER_BYTES: 14, SecureMemory: { zeroBuffer: value => value.fill(0) },
+        AUDIO_PACKET_HEADER_BYTES: 14, AUDIO_BATCH_VERSION: 2, AUDIO_BATCH_HEADER_BYTES: 4,
+        AUDIO_BATCH_ENTRY_BYTES: 2, MAX_AUDIO_BATCH_PACKETS: 4, MAX_AUDIO_BATCH_BYTES: 5172,
+        MAX_AUDIO_PLAINTEXT_BYTES: 1290, OPUS_MAX_PACKET_BYTES: 1276, OPUS_PCM_BYTES: 3840,
+        MAX_PENDING_AUDIO_CAPTURE_FRAMES: 5, AUDIO_SEND_DEADLINE_MS: 160, AUDIO_SEND_DEADLINE_MAX_MS: 320,
+        SecureMemory: { zeroBuffer: value => value.fill(0) },
         nativeAudioPlayback: native, audioCodec: codec,
         decodeCallAudioBatch: () => Array.from({ length: 24 }, (_, sequence) => packet(sequence, Date.now())),
         startCallSpeakerLevel() {}, updateCallSpeakerLevel() {}, clearCallSpeakerLevel() {},
@@ -218,6 +230,51 @@ function configureReceiver(service, stream) {
     service.audioPlaybackSessionId = 'first';
     service.callTelemetry = null;
 }
+
+test('the real sender sends every DTX frame instead of suppressing the decoder timeline', async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+    const batches = [];
+    const encoded = [];
+    const service = receiver({}, {
+        encode: async (_id, pcm) => {
+            encoded.push(pcm);
+            return Uint8Array.of(1);
+        },
+    }, {
+        nativeMicrophone: {
+            pull: async (_id, after) => new Promise(resolve => setTimeout(() => resolve({
+                sequence: after + 1, capturedAt: Date.now(), pcm: new Uint8Array(3840).fill(7),
+            }), 20)),
+        },
+    });
+    configureReceiver(service, { write: async data => { batches.push(data.slice()); } });
+    service.microphoneSwitchGeneration = 0;
+    service.microphoneSessionId = 'first';
+    service.nextAudioCaptureSequence = 0;
+    await service.startAudioStreaming();
+    for (let count = 0; count < 80; count++) {
+        t.mock.timers.tick(20);
+        await flush();
+    }
+    service.mediaGeneration++;
+    t.mock.timers.tick(20);
+    await flush();
+    const sequences = [];
+    for (const batch of batches) {
+        const view = new DataView(batch.buffer, batch.byteOffset, batch.byteLength);
+        let offset = 4;
+        for (let index = 0; index < batch[1]; index++) {
+            const length = view.getUint16(offset, false);
+            offset += 2;
+            assert.equal(length, 15);
+            sequences.push(view.getUint32(offset + 2, false));
+            offset += length;
+        }
+    }
+    assert.deepEqual(sequences, Array.from({ length: 80 }, (_, index) => index));
+    assert.equal(encoded.length, 80);
+    assert.ok(encoded.every(bytes => bytes.every(byte => byte === 0)));
+});
 
 test('the real receiver replenishes from the native clock after a delayed timer tick', async t => {
     t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 });
