@@ -61,6 +61,7 @@ export const setupCallStateChangeCallback = (
   setters: CallbackSetters,
   account: string
 ) => {
+  let startedCallId: string | null = null;
   service.onCallStateChange((call, isActive) => {
     const statusDetail = {
       account,
@@ -78,15 +79,18 @@ export const setupCallStateChangeCallback = (
 
     if (call.status === 'connecting') {
       power.start().catch(() => { });
-      refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
-        account,
-        type: 'started',
-        peer: call.peer,
-        at: Date.now(),
-        callId: call.id,
-        isVideo: call.type === 'video',
-        isOutgoing: call.direction === 'outgoing'
-      });
+      if (isActive && call.direction === 'outgoing' && startedCallId !== call.id) {
+        startedCallId = call.id;
+        refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
+          account,
+          type: 'started',
+          peer: call.peer,
+          at: Date.now(),
+          callId: call.id,
+          isVideo: call.type === 'video',
+          isOutgoing: true
+        });
+      }
     } else if (call.status === 'connected' && isActive) {
       try { refs.everConnectedRef.current.add(call.id); } catch { }
       power.start().catch(() => { });

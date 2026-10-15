@@ -60,7 +60,6 @@ export interface ActionSetters {
 // Callback for starting a call
 export const createStartCall = (
   refs: ActionRefs,
-  setters: ActionSetters,
   currentUsername: string
 ) => {
   return async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
@@ -130,12 +129,6 @@ export const createStartCall = (
         });
       }
 
-      if (serviceIsCurrent) {
-        unstable_batchedUpdates(() => {
-          setters.setCurrentCall(null);
-          clearCallMediaState(refs, setters);
-        });
-      }
       throw _error;
     }
   };

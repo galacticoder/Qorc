@@ -114,6 +114,7 @@ const MAX_CALL_OFFERS_PER_PEER = 4;
 const MAX_CALL_OFFERS_GLOBAL = 16;
 const MAX_CALL_OFFER_RATE_PEERS = 128;
 const MAX_PENDING_INCOMING_CALLS = 6;
+const MAX_CLOSED_CALLS = 128;
 const SCREEN_CAPTURE_REQUEST_TIMEOUT_MS = 30_000;
 const SCREEN_SHARE_READY_TIMEOUT_MS = 10_000;
 const SCREEN_FIRST_FRAME_TIMEOUT_MS = 10_000;
@@ -253,6 +254,8 @@ export class SecureCallingService {
     private screenCaptureSessionId: string | null = null;
     private currentCall: CallState | null = null;
     private pendingIncomingCalls = new Map<string, PendingIncomingCall>();
+    private closedCalls = new Map<string, { peer: string; expiresAt: number }>();
+    private callSignalAbort: AbortController | null = null;
     private isScreenSharing: boolean = false;
     private screenSharePending: boolean = false;
     private videoEnabled: boolean = false;
@@ -429,6 +432,7 @@ export class SecureCallingService {
         const pending = this.takePendingIncomingCall(callId);
         if (!pending) return null;
         const endTime = Date.now();
+        this.rememberClosedCall(callId, pending.call.peer);
         pending.call.status = status;
         pending.call.endTime = endTime;
         pending.call.duration = Math.max(0, endTime - pending.receivedAt);
@@ -441,6 +445,18 @@ export class SecureCallingService {
         for (const callId of Array.from(this.pendingIncomingCalls.keys())) {
             this.finishPendingIncomingCall(callId, 'ended', endReason);
         }
+    }
+
+    private rememberClosedCall(callId: string, peer: string): void {
+        const now = Date.now();
+        for (const [id, call] of this.closedCalls) {
+            if (call.expiresAt <= now) this.closedCalls.delete(id);
+        }
+        this.closedCalls.delete(callId);
+        if (this.closedCalls.size >= MAX_CLOSED_CALLS) {
+            this.closedCalls.delete(this.closedCalls.keys().next().value!);
+        }
+        this.closedCalls.set(callId, { peer, expiresAt: now + MAX_CALL_SIGNAL_CLOCK_SKEW_MS });
     }
 
     private queueIncomingCall(signal: Extract<CallSignal, { type: 'offer' }>): boolean {
@@ -715,6 +731,7 @@ export class SecureCallingService {
             status: 'connecting',
             peer: targetUser
         };
+        this.callSignalAbort = new AbortController();
 
         this.ringStartAt = Date.now();
         console.info('[CALL-DIAG]', { phase: 'service.notify-connecting-before', callType });
@@ -760,12 +777,6 @@ export class SecureCallingService {
             this.notifyCallState(this.currentCall);
             console.info('[CALL-DIAG]', { phase: 'service.notify-ringing-after', callType: actualCallType });
 
-            this.callTimeoutId = setTimeout(() => {
-                if (this.currentCall?.id === activeCallId && this.currentCall.status === 'ringing') {
-                    void this.endCall('timeout');
-                }
-            }, CALL_RING_TIMEOUT);
-
             console.info('[CALL-DIAG]', { phase: 'service.offer-before', callType: actualCallType });
             await this.sendCallSignal({
                 type: 'offer',
@@ -786,6 +797,13 @@ export class SecureCallingService {
             if (!this.currentCall || this.currentCall.id !== activeCallId || this.currentCall.peer !== targetUser) {
                 throw new Error('Call ended while the offer was being delivered');
             }
+            if (this.currentCall.status === 'ringing') {
+                this.callTimeoutId = setTimeout(() => {
+                    if (this.currentCall?.id === activeCallId && this.currentCall.status === 'ringing') {
+                        void this.endCall('timeout');
+                    }
+                }, CALL_RING_TIMEOUT);
+            }
 
             return activeCallId;
 
@@ -798,13 +816,7 @@ export class SecureCallingService {
                 errorMessage: error instanceof Error ? error.message : String(error),
             });
             if (this.currentCall?.id === callId) {
-                const failedCall = this.currentCall;
-                failedCall.status = 'ended';
-                failedCall.endReason = 'failed';
-                failedCall.endTime = Date.now();
-                failedCall.duration = failedCall.startTime ? failedCall.endTime - failedCall.startTime : 0;
-                this.notifyCallState(failedCall);
-                this.cleanup();
+                await this.endCall('failed');
             }
             throw error;
         }
@@ -830,6 +842,7 @@ export class SecureCallingService {
             throw new Error('Incoming call ended before it could be answered');
         }
         this.currentCall = selected.call;
+        this.callSignalAbort = new AbortController();
         this.ringStartAt = selected.receivedAt;
 
         const peer = this.currentCall.peer;
@@ -1375,6 +1388,8 @@ export class SecureCallingService {
     // Set up local media capture
     private async setupLocalMedia(callType: 'audio' | 'video', expectedCallId: string): Promise<'audio' | 'video'> {
         const startedAt = performance.now();
+        const callIsCurrent = () => this.currentCall?.id === expectedCallId;
+        if (!callIsCurrent()) throw new Error('Call was cancelled before media capture');
         console.info('[CALL-DIAG]', { phase: 'media.setup-enter', callType });
         console.info('[CALL-DIAG]', { phase: 'media.teardown-elements-before', callType });
         this.teardownCallMediaElements();
@@ -1394,6 +1409,7 @@ export class SecureCallingService {
                 });
             }
         }
+        if (!callIsCurrent()) throw new Error('Call was cancelled while releasing the previous camera');
         const previousMicrophoneSessionId = this.microphoneSessionId;
         this.microphoneSessionId = null;
         if (previousMicrophoneSessionId) {
@@ -1409,6 +1425,7 @@ export class SecureCallingService {
                 });
             }
         }
+        if (!callIsCurrent()) throw new Error('Call was cancelled while releasing the previous microphone');
         if (this.localMediaActive) {
             this.localMediaActive = false;
             this.notifyLocalMediaChange(false);
@@ -1426,18 +1443,21 @@ export class SecureCallingService {
             await new Promise(resolve => setTimeout(resolve, CALL_DEVICE_SETTLE_MS - sinceRelease));
             console.info('[CALL-DIAG]', { phase: 'media.device-settle-after' });
         }
-        const callIsCurrent = () => this.currentCall?.id === expectedCallId;
         if (!callIsCurrent()) {
             throw new Error('Call was cancelled before media capture');
         }
+        const hasCamera = callType === 'video' && (await nativeCamera.devices()).length > 0;
+        if (!callIsCurrent()) throw new Error('Call was cancelled while checking capture devices');
         console.info('[CALL-DIAG]', { phase: 'media.native-permission-before', callType });
-        await requireNativeMediaAccess(callType === 'video' ? 'microphone-camera' : 'microphone');
+        await requireNativeMediaAccess(hasCamera ? 'microphone-camera' : 'microphone');
+        if (!callIsCurrent()) throw new Error('Call was cancelled while media permission was pending');
         console.info('[CALL-DIAG]', {
             phase: 'media.native-permission-after',
             callType,
             elapsedMs: Math.round(performance.now() - startedAt),
         });
         const storedSettings = await readAppSettingsAsync();
+        if (!callIsCurrent()) throw new Error('Call was cancelled while loading capture settings');
         this.preferredMicrophoneDeviceId = storedSettings.preferredCallMicId || null;
         this.preferredSpeakerDeviceId = storedSettings.preferredSpeakerId || null;
         this.preferredCameraDeviceId = storedSettings.preferredCameraId || null;
@@ -1447,8 +1467,6 @@ export class SecureCallingService {
             preferredDevice: this.preferredMicrophoneDeviceId !== null,
         });
         await nativeMicrophone.start(expectedCallId, this.preferredMicrophoneDeviceId);
-        this.microphoneSessionId = expectedCallId;
-        this.microphoneEnabled = true;
         console.info('[CALL-DIAG]', {
             phase: 'media.native-microphone-after',
             callType,
@@ -1456,13 +1474,14 @@ export class SecureCallingService {
         });
 
         if (!callIsCurrent()) {
-            this.microphoneSessionId = null;
             await nativeMicrophone.stop(expectedCallId);
             throw new Error('Call was cancelled while media permission was pending');
         }
+        this.microphoneSessionId = expectedCallId;
+        this.microphoneEnabled = true;
 
         try {
-            if (callType === 'video') {
+            if (hasCamera) {
                 console.info('[CALL-DIAG]', {
                     phase: 'media.native-camera-before',
                     callType,
@@ -1490,13 +1509,13 @@ export class SecureCallingService {
                 this.cameraSessionId = expectedCallId;
             }
         } catch (error) {
-            this.microphoneSessionId = null;
+            if (this.microphoneSessionId === expectedCallId) this.microphoneSessionId = null;
             await nativeMicrophone.stop(expectedCallId).catch(() => { });
             throw error;
         }
 
         this.localMediaActive = true;
-        this.videoEnabled = callType === 'video';
+        this.videoEnabled = this.cameraSessionId === expectedCallId;
         console.info('[CALL-DIAG]', { phase: 'media.notify-local-capture-before', callType });
         this.notifyLocalMediaChange(true);
         console.info('[CALL-DIAG]', {
@@ -1685,13 +1704,21 @@ export class SecureCallingService {
         }
 
         const generation = this.mediaGeneration;
+        const callIsCurrent = () => generation === this.mediaGeneration &&
+            this.currentCall?.id === expectedCallId && this.currentCall.status === 'connecting' &&
+            this.microphoneSessionId === expectedCallId && this.localMediaActive && this.callConnection;
         if (this.audioCodecSessionId !== expectedCallId) {
             const previousSession = this.audioCodecSessionId;
             this.audioCodecSessionId = null;
             if (previousSession) {
                 try { await audioCodec.stop(previousSession); } catch { }
             }
+            if (!callIsCurrent()) throw new Error('Call ended while media was starting');
             await audioCodec.start(expectedCallId);
+            if (!callIsCurrent()) {
+                await audioCodec.stop(expectedCallId).catch(() => {});
+                throw new Error('Call ended while media was starting');
+            }
             this.audioCodecSessionId = expectedCallId;
         }
         if (this.audioPlaybackSessionId !== expectedCallId) {
@@ -1700,7 +1727,12 @@ export class SecureCallingService {
             if (previousSession) {
                 try { await nativeAudioPlayback.stop(previousSession); } catch { }
             }
+            if (!callIsCurrent()) throw new Error('Call ended while media was starting');
             await nativeAudioPlayback.start(expectedCallId, this.preferredSpeakerDeviceId);
+            if (!callIsCurrent()) {
+                await nativeAudioPlayback.stop(expectedCallId).catch(() => {});
+                throw new Error('Call ended while media was starting');
+            }
             this.audioPlaybackSessionId = expectedCallId;
         }
         const starters: Promise<void>[] = [];
@@ -1708,7 +1740,7 @@ export class SecureCallingService {
         starters.push(this.startAudioStreaming());
 
         // Set up video processing
-        if (this.currentCall.type === 'video' && this.videoStream) {
+        if (this.currentCall.type === 'video' && this.videoStream && this.cameraSessionId === expectedCallId) {
             starters.push(this.startVideoStreaming());
         }
 
@@ -2997,6 +3029,8 @@ export class SecureCallingService {
         }
 
         const generation = this.lifecycleGeneration;
+        const abortSignal = callSig.type === 'end-call' || callSig.type === 'decline-call'
+            ? undefined : this.callSignalAbort?.signal;
         await this.waitForSignalSession(callSig.to, generation);
         for (let attempt = 0; attempt <= MAX_CALL_SIGNAL_ERROR_RETRIES; attempt += 1) {
             if (
@@ -3017,7 +3051,8 @@ export class SecureCallingService {
                 result = await unifiedSignalTransport.send(
                     callSig.to,
                     { content: JSON.stringify(callSig) },
-                    SignalType.CALL_SIGNAL
+                    SignalType.CALL_SIGNAL,
+                    abortSignal
                 );
             } catch (error: unknown) {
                 result = {
@@ -3055,6 +3090,7 @@ export class SecureCallingService {
             'blocking-policy-unavailable',
             'recipient-policy-changed',
             'account-transition',
+            'send-cancelled',
             'encryption provider not set',
             'invalid encrypted envelope'
         ].some((terminal) => normalized.includes(terminal));
@@ -3106,8 +3142,13 @@ export class SecureCallingService {
         }
 
         if (signal.type === 'offer') {
+            const closed = this.closedCalls.get(signal.callId);
+            if (closed?.peer === signal.from && closed.expiresAt > Date.now()) return;
             if (!this.allowIncomingOffer(signal.from)) return;
         } else {
+            if (signal.type === 'end-call' || signal.type === 'decline-call') {
+                this.rememberClosedCall(signal.callId, signal.from);
+            }
             const matchesCurrent = Boolean(
                 this.currentCall
                 && this.currentCall.id === signal.callId
@@ -3201,7 +3242,7 @@ export class SecureCallingService {
 
     // Handle incoming call offer
     private async handleCallOffer(signal: Extract<CallSignal, { type: 'offer' }>): Promise<void> {
-        if (this.pendingIncomingCalls.has(signal.callId)) return;
+        if (this.pendingIncomingCalls.has(signal.callId) || this.currentCall?.id === signal.callId) return;
         if (this.currentCall) {
             // Collision Detection
             if (
@@ -3328,6 +3369,9 @@ export class SecureCallingService {
 
     // Cleanup call resources
     private cleanup(): void {
+        if (this.currentCall) this.rememberClosedCall(this.currentCall.id, this.currentCall.peer);
+        this.callSignalAbort?.abort();
+        this.callSignalAbort = null;
         if (this.audioCodecSessionId) clearCallSpeakerLevel(this.audioCodecSessionId);
         this.mediaGeneration += 1;
         this.cameraSwitchGeneration += 1;
@@ -3452,6 +3496,7 @@ export class SecureCallingService {
         this.cleanup();
 
         this.incomingOfferRates.clear();
+        this.closedCalls.clear();
         this.incomingOfferGlobal = { windowStart: 0, count: 0 };
         this.onIncomingCallCallback = null;
         this.onCallStateChangeCallback = null;

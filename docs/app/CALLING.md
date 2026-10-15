@@ -11,6 +11,10 @@ call media. Call signaling is intentionally ephemeral: it can reach a currently
 connected peer and can make bounded retries while the current action is alive,
 but it cannot become an offline message that rings later.
 
+Cold call signaling starts peer connection setup in the background rather than
+waiting for the P2P handshake. Until that route is ready, offers and answers use
+the encrypted live-only server route. The media itself still requires P2P.
+
 ## Components And Ownership
 
 The calling stack is divided into five responsibilities:
@@ -125,6 +129,11 @@ plays speakers through PulseAudio, and captures cameras through Video4Linux.
 Windows uses CPAL for microphone and speaker I/O and Media Foundation for camera
 capture. Microphone and camera frames therefore do not traverse WebKit.
 
+Video setup checks whether a local camera exists. A participant without one
+requests microphone access only and can still receive the other participant's
+video. The call remains a video call, but no local camera or video encoder is
+started. An actual capture or permission failure is still reported as an error.
+
 Linux screen sharing is a separate native path. The xdg-desktop-portal chooser
 authorizes one monitor or window and returns a restricted PipeWire connection,
 the app-private GStreamer runtime consumes that PipeWire stream and requests up
@@ -161,19 +170,23 @@ audio or video type, incoming or outgoing direction, and one of these states:
 - `ended`: the user, peer, timeout, block, failure, shutdown, or security event
   ended the operation,
 - `declined`: either side rejected the ringing call,
-- `missed`: an admitted incoming call rang for 60 seconds without an answer.
+- `missed`: an admitted incoming call rang for 20 seconds without an answer.
 
 The connected duration begins when the state changes to `connected`, not when
 device capture or dialing begins. Each endpoint records that transition from its
 own clock, there is no duration-synchronization message or peer-clock adjustment,
 so the two displayed durations can differ slightly. Both outgoing and incoming
-ringing windows are 60 seconds. All control signals must be within five minutes
-of the receiver's clock.
+ringing windows are 20 seconds. The outgoing timer starts after offer delivery,
+so signaling setup does not consume the answer window. All control signals must
+be within five minutes of the receiver's clock.
 
 Lifecycle, media, screen-share, camera-switch, and microphone-switch generations
 invalidate asynchronous completions from an old operation. A permission prompt,
 connection attempt, decoder, or device switch that completes after the call or
 account changed cannot install its resources into the replacement call.
+Ending a call also aborts its queued and in-flight signaling before transport
+writes. A bounded in-memory record of ended call IDs rejects delayed offers for
+those calls, including an offer received after its authenticated cancellation.
 
 Code references:
 
@@ -211,8 +224,10 @@ On receive, the encrypted-message handler finishes Hybrid and Signal
 authentication before parsing the call object. The authenticated outer Signal
 sender must equal the inner `from`, the inner `to` must equal the current local
 account. After that binding, the handler freezes and dispatches the exact signal
-to the calling service. A guessed call ID is insufficient: non-offer signals
-must match both the current call ID and the authenticated current peer.
+to the calling service. A guessed call ID is insufficient to modify an active
+call: non-offer signals must match both its call ID and authenticated peer.
+Authenticated terminal signals for other call IDs only record that peer's call
+as ended, they cannot terminate another active call.
 
 Signaling and media therefore use related identity material but different keys
 and lifecycles. Signal protects call intent and control. Live audio, video,
@@ -238,24 +253,22 @@ Starting a call performs these operations in order:
 3. Create the call ID and enter `connecting`.
 4. Confirm Signal signaling is available before activating privacy-sensitive
    microphone or camera capture or opening a media route.
-5. Capture audio and, for a requested video call, the preferred or default
-   camera. Audio calls require a live audio track, video calls require that track
-   plus a native camera session. Permission denial or a missing required source
-   fails setup instead of silently changing the call type.
-6. Reuse or attempt to establish the authenticated P2P onion connection, with a
-   90-second connection timeout. A connected route opens deterministic lossy
-   audio and optional video streams, each with a distinct derived key. A missing
-   endpoint or recoverable onion-dial failure does not prevent the live offer,
-   either endpoint can establish the media route after the answer.
+5. Capture audio and, for a requested video call with a local camera, the
+   preferred or default camera. Both call types require microphone capture,
+   local camera hardware is optional for video. Permission denial or failure of
+   a requested capture device fails setup instead of changing the call type.
+6. Warm the authenticated P2P onion connection without waiting for its handshake
+   to finish before delivering the live offer. An existing route is used
+   immediately; otherwise the sealed live-only server route carries signaling.
 7. Enter local `ringing` before sending the offer. This ordering prevents an
    immediate answer from racing ahead of the caller's state transition.
-8. Send the encrypted live-only offer and arm the 60-second outgoing timeout.
+8. Send the encrypted live-only offer and then arm the 20-second outgoing timeout.
    Camera and screen media use the fixed raw VP8 WebCodecs stream format.
 
-When the pre-offer route attempt succeeds, the caller prepares its media streams
-before signaling. When it fails for a recoverable reachability reason, the
-answerer sends the answer first and retries the direct connection, allowing the
-caller to accept the resulting authenticated inbound route. Neither side starts
+The answerer sends the answer before waiting for the direct media connection,
+allowing the caller to accept the resulting authenticated inbound route. Media
+setup has a 90-second connection timeout and opens deterministic lossy audio and
+optional video streams, each with a distinct derived key. Neither side starts
 media processing until an authenticated answer exists and a direct connection
 with the required streams is ready. If setup ultimately fails, the call becomes
 `ended` with a failure reason and all call-owned resources are released.
@@ -277,7 +290,7 @@ The calling service then independently validates the exact schema, recipient,
 timestamp, blocking state, and current call state. It accepts at most four
 offers from one peer and sixteen offers globally per rolling minute, with a
 bounded 128-peer rate map. Only then does it create an incoming `ringing` call,
-notify the UI, and arm the 60-second missed-call timeout. Microphone and camera
+notify the UI, and arm the 20-second missed-call timeout. Microphone and camera
 capture still do not begin until the local user answers.
 
 Code references:
@@ -535,7 +548,7 @@ Each call owns a native Opus encoder/decoder session configured for:
 
 - 48 kHz mono speech and 20 ms frames,
 - restricted-low-delay, CELT-only application mode,
-- 24 kbit/s target bitrate, variable bitrate, and complexity 8,
+- 48 kbit/s target bitrate, variable bitrate, and complexity 10,
 - discontinuous transmission,
 - loss-aware prediction with an expected 10 percent packet-loss rate, the
   CELT-only profile uses packet-loss concealment, not SILK in-band FEC,

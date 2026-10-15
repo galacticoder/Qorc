@@ -826,8 +826,10 @@ export class SecureP2PService {
     async sendMessage(
         to: string,
         message: any,
-        messageType: SignalType = SignalType.SEALED_ENVELOPE
+        messageType: SignalType = SignalType.SEALED_ENVELOPE,
+        signal?: AbortSignal
     ): Promise<void> {
+        signal?.throwIfAborted();
         const normalizedRecipient = typeof to === 'string' ? to.trim().toLowerCase() : '';
         if (normalizedRecipient !== to || !AUTH_USERNAME_REGEX.test(normalizedRecipient)) {
             throw new Error('Invalid P2P recipient');
@@ -957,7 +959,8 @@ export class SecureP2PService {
             ) {
                 throw new Error('P2P send was cancelled');
             }
-            await messageStream.write(data);
+            signal?.throwIfAborted();
+            await messageStream.write(data, { signal });
         } finally {
             data.fill(0);
         }

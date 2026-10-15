@@ -349,11 +349,11 @@ test('tampered ciphertext cannot produce an authenticated request diagnostic', a
   assert.equal(f.received.length, 0);
 });
 
-test('every peer signal waits past three seconds for a successful P2P dial', async (t) => {
+test('non-call peer signals wait for a successful P2P dial', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { createPeerSignalSender } = loadSource('src/lib/transport/peer-signal-sender.ts');
+  const { createPeerSignalSender } = loadSource('src/lib/transport/peer-signal-sender.ts', { SignalType });
   for (const type of [
-    SignalType.MESSAGE, SignalType.CALL_SIGNAL, SignalType.FILE_MESSAGE_CHUNK,
+    SignalType.MESSAGE, SignalType.FILE_MESSAGE_CHUNK,
     SignalType.RECEIPT_BATCH, SignalType.FILE_TRANSPORT_ACK, SignalType.FILE_CHUNK_NACK,
     SignalType.FILE_TRANSFER_CANCEL, SignalType.EDIT_MESSAGE, SignalType.DELETE_MESSAGE,
     SignalType.REACTION_ADD, SignalType.REACTION_REMOVE, SignalType.TYPING_START,
@@ -383,7 +383,7 @@ test('every peer signal waits past three seconds for a successful P2P dial', asy
 });
 
 test('P2P surfaces the actual bounded dial failure and never sends before readiness', async () => {
-  const { createPeerSignalSender } = loadSource('src/lib/transport/peer-signal-sender.ts');
+  const { createPeerSignalSender } = loadSource('src/lib/transport/peer-signal-sender.ts', { SignalType });
   let sent = false;
   const dial = deferred();
   const sender = createPeerSignalSender({

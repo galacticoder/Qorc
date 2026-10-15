@@ -265,7 +265,7 @@ class P2PStream implements SecureStream {
 
     // Write data to stream
     async write(data: Uint8Array, options?: StreamWriteOptions): Promise<void> {
-
+        options?.signal?.throwIfAborted();
         if (this._closed || !this._writable) {
             console.error('[P2PStream] Stream not writable:', { closed: this._closed, writable: this._writable });
             throw new Error('Stream is not writable');
@@ -293,6 +293,7 @@ class P2PStream implements SecureStream {
         }
 
         try {
+            options?.signal?.throwIfAborted();
             if (
                 this._closed ||
                 !this._writable ||
@@ -1703,6 +1704,7 @@ class P2PConnection implements SecureConnection {
     }
 
     private async sendRaw(data: Uint8Array | any, options?: StreamWriteOptions): Promise<void> {
+        options?.signal?.throwIfAborted();
         if (!this.bridgeConnectionId || !this.nativeConnectionToken) {
             throw new Error('Native P2P bridge connection is unavailable');
         }

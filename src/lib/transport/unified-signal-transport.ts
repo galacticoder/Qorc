@@ -98,7 +98,7 @@ class UnifiedSignalTransport {
     private deliveryAckGeneration = 0;
     private encryptionProvider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null = null;
     private lastEncryptionDenial: { to: string; type: string; reason: string; at: number } | null = null;
-    private p2pSender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null = null;
+    private p2pSender: ((to: string, payload: any, type: SignalType, signal?: AbortSignal) => Promise<void>) | null = null;
     private peerPreparer: ((to: string) => Promise<void>) | null = null;
     private pendingRedelivery: Map<string, {
         to: string;
@@ -326,7 +326,7 @@ class UnifiedSignalTransport {
 
     // Register a sender that can sign and send P2P messages with route proofs
     setP2PSender(
-        sender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null,
+        sender: ((to: string, payload: any, type: SignalType, signal?: AbortSignal) => Promise<void>) | null,
         prepare: ((to: string) => Promise<void>) | null = null,
     ): void {
         this.p2pSender = sender;
@@ -750,8 +750,10 @@ class UnifiedSignalTransport {
     async send(
         to: string,
         payload: any,
-        type: SignalType
+        type: SignalType,
+        signal?: AbortSignal
     ): Promise<SendResult> {
+        if (signal?.aborted) return { success: false, transport: 'server', error: 'send-cancelled' };
         const generation = this.accountGeneration;
         const canonicalRecipient = typeof to === 'string' ? to.trim().toLowerCase() : '';
         if (to !== canonicalRecipient || canonicalRecipient === 'server' || !AUTH_USERNAME_REGEX.test(canonicalRecipient)) {
@@ -789,6 +791,7 @@ class UnifiedSignalTransport {
             const finish = (value: SendResult) => {
                 if (settled) return;
                 settled = true;
+                signal?.removeEventListener('abort', onAbort);
                 resolve(value);
             };
             const releaseTask = () => {
@@ -802,6 +805,7 @@ class UnifiedSignalTransport {
                 run: async () => {
                     let releasePermit: (() => void) | null = null;
                     try {
+                        if (settled || signal?.aborted) return;
                         if (
                             type === SignalType.CALL_SIGNAL &&
                             Date.now() - queuedAt >= CALL_SIGNAL_QUEUE_MAX_WAIT_MS
@@ -818,7 +822,8 @@ class UnifiedSignalTransport {
                             finish({ success: false, transport: 'server', error: queuedPolicyError });
                             return;
                         }
-                        releasePermit = await this.acquireSendPermit(generation);
+                        releasePermit = await this.acquireSendPermit(generation, signal);
+                        if (settled || signal?.aborted) return;
                         if (
                             releasePermit &&
                             type === SignalType.CALL_SIGNAL &&
@@ -841,7 +846,7 @@ class UnifiedSignalTransport {
                             return;
                         }
                         try {
-                            finish(await this.performSend(to, payload, type, sendPolicy));
+                            finish(await this.performSend(to, payload, type, sendPolicy, signal));
                         } catch (error: any) {
                             finish({ success: false, transport: 'server', error: error?.message || String(error) });
                         }
@@ -855,21 +860,44 @@ class UnifiedSignalTransport {
                     releaseTask();
                 }
             };
-            if (isPriority) q!.high.push(task);
+            const onAbort = () => {
+                task.cancel('send-cancelled');
+                for (const queue of [q!.high, q!.low]) {
+                    const index = queue.indexOf(task);
+                    if (index >= 0) queue.splice(index, 1);
+                }
+            };
+            signal?.addEventListener('abort', onAbort, { once: true });
+            if (signal?.aborted) task.cancel('send-cancelled');
+            else if (isPriority) q!.high.push(task);
             else q!.low.push(task);
         });
         this.drainSendQueue(key);
         return result;
     }
 
-    private acquireSendPermit(generation: number): Promise<(() => void) | null> {
-        if (generation !== this.accountGeneration) return Promise.resolve(null);
+    private acquireSendPermit(generation: number, signal?: AbortSignal): Promise<(() => void) | null> {
+        if (signal?.aborted || generation !== this.accountGeneration) return Promise.resolve(null);
         if (this.activeSendTasks < MAX_CONCURRENT_SEND_TASKS) {
             this.activeSendTasks += 1;
             return Promise.resolve(this.createSendPermitRelease(generation));
         }
         return new Promise((resolve) => {
-            this.sendPermitWaiters.push({ generation, resolve });
+            const waiter = {
+                generation,
+                resolve: (release: (() => void) | null) => {
+                    signal?.removeEventListener('abort', onAbort);
+                    resolve(release);
+                },
+            };
+            const onAbort = () => {
+                const index = this.sendPermitWaiters.indexOf(waiter);
+                if (index >= 0) this.sendPermitWaiters.splice(index, 1);
+                waiter.resolve(null);
+            };
+            this.sendPermitWaiters.push(waiter);
+            signal?.addEventListener('abort', onAbort, { once: true });
+            if (signal?.aborted) onAbort();
         });
     }
 
@@ -971,9 +999,11 @@ class UnifiedSignalTransport {
         to: string,
         payload: any,
         type: SignalType,
-        sendPolicy: SendPolicyContext
+        sendPolicy: SendPolicyContext,
+        signal?: AbortSignal
     ): Promise<SendResult> {
         const policyFailure = (): SendResult | null => {
+            if (signal?.aborted) return { success: false, transport: 'server', error: 'send-cancelled' };
             const error = this.recipientPolicyError(to, sendPolicy);
             return error ? { success: false, transport: 'server', error } : null;
         };
@@ -1026,7 +1056,7 @@ class UnifiedSignalTransport {
             try {
                 const preP2PPolicyFailure = policyFailure();
                 if (preP2PPolicyFailure) return preP2PPolicyFailure;
-                await p2pSender(to, this.directP2PPayload(envelopeToSend, type, payload), type);
+                await p2pSender(to, this.directP2PPayload(envelopeToSend, type, payload), type, signal);
                 const postP2PPolicyFailure = policyFailure();
                 if (postP2PPolicyFailure) return postP2PPolicyFailure;
                 await this.trackDeliveryAck(to, { ...envelopeToSend }, type, sendPolicy);
@@ -1060,9 +1090,9 @@ class UnifiedSignalTransport {
 
             const requestId = crypto.randomUUID();
             activeRequestId = requestId;
-            const ackResult = await this.awaitBlindRouteAck(requestId, WS_CONTROL_RESPONSE_TIMEOUT_MS, async (signal) => {
+            const ackResult = await this.awaitBlindRouteAck(requestId, WS_CONTROL_RESPONSE_TIMEOUT_MS, async (writeSignal) => {
                 const deliveryReady = await websocketClient.checkDeliveryReadyForSend();
-                signal.throwIfAborted();
+                writeSignal.throwIfAborted();
                 const preWritePolicyFailure = policyFailure();
                 if (preWritePolicyFailure) throw new Error(preWritePolicyFailure.error);
                 if (!deliveryReady) throw new Error('delivery-not-activated');
@@ -1073,8 +1103,8 @@ class UnifiedSignalTransport {
                     ...(isLiveOnlySignalType(type)
                         ? { deliveryPolicy: LIVE_ONLY_DELIVERY_POLICY }
                         : {})
-                }), { queueOnFailure: false, signal });
-            });
+                }), { queueOnFailure: false, signal: writeSignal });
+            }, signal);
             activeRequestId = null;
             const postAckPolicyFailure = policyFailure();
             if (postAckPolicyFailure) return postAckPolicyFailure;
@@ -1150,6 +1180,7 @@ class UnifiedSignalTransport {
         requestId: string,
         timeoutMs: number,
         send: (signal: AbortSignal) => Promise<boolean>,
+        signal?: AbortSignal,
     ): Promise<{ acked: boolean; success?: boolean; error?: string }> {
         if (!this.checkBlindAckHandler()) throw new Error('Blind-route acknowledgement handler unavailable');
         if (this.blindAckWaiters.size >= MAX_BLIND_ACK_WAITERS || this.blindAckWaiters.has(requestId)) {
@@ -1167,6 +1198,7 @@ class UnifiedSignalTransport {
                 clearInterval(liveness);
                 this.blindAckWaiters.delete(requestId);
                 unregisterConnectionCancel();
+                signal?.removeEventListener('abort', onAbort);
                 controller.abort();
                 resolve(r);
             };
@@ -1178,6 +1210,9 @@ class UnifiedSignalTransport {
                 }
             }, BLIND_ROUTE_ACK_LIVENESS_POLL_MS);
             this.blindAckWaiters.set(requestId, settle);
+            const onAbort = () => settle({ acked: false, error: 'send-cancelled' });
+            signal?.addEventListener('abort', onAbort, { once: true });
+            if (signal?.aborted) { onAbort(); return; }
             unregisterConnectionCancel = websocketClient.registerConnectionWaiterCancel(() => {
                 settle({ acked: false, error: 'disconnected' });
             });

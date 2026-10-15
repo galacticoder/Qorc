@@ -55,6 +55,7 @@ export interface StreamOptions {
 }
 
 export interface StreamWriteOptions {
+    readonly signal?: AbortSignal;
     readonly deadline?: number;
     readonly priority?: 'normal' | 'realtime' | 'visual';
     readonly transferOwnership?: boolean;

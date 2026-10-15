@@ -194,7 +194,7 @@ export const useCalling = (
   }, [currentUsername, isFullyAuthenticated]);
 
   const startCall = useCallback(
-    createStartCall(actionRefs, actionSetters, currentUsername),
+    createStartCall(actionRefs, currentUsername),
     [currentUsername, options?.getPeerCertificate, options?.checkPeerSession]
   );
 

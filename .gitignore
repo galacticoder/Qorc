@@ -161,3 +161,5 @@ server/test/*
 !server/test/saved-servers.test.js
 !server/test/websocket-bootstrap-ownership.test.js
 !server/test/call-audio-playout.test.js
+!server/test/call-event-history.test.js
+!server/test/call-startup.test.js

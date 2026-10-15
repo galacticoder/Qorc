@@ -129,7 +129,7 @@ export function useCallEventHandlers({
         : undefined;
 
       const newMessage: Message = {
-        id: `call-log-${callId}-${eventType}-${at}`,
+        id: `call-log-${callId}-${eventType}`,
         content: JSON.stringify({
           label,
           actionsType: actions ? 'callback' : undefined,
@@ -146,7 +146,8 @@ export function useCallEventHandlers({
       } as Message;
 
       if (peer === selectedConversation) {
-        setMessages((prev) => isCurrent() ? [...prev, newMessage] : prev);
+        setMessages((prev) => isCurrent() && !prev.some(message => message.id === newMessage.id)
+          ? [...prev, newMessage] : prev);
       }
       if (isCurrent()) void saveMessageToLocalDB(newMessage, peer).catch(() => { });
     } catch { }

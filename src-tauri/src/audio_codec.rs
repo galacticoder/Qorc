@@ -27,8 +27,8 @@ impl AudioCodecState {
         validate_session_id(session_id)?;
         let mut encoder = OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::RestrictedLowDelay)
             .map_err(|_| "failed to initialize Opus encoder".to_string())?;
-        encoder.bitrate_bps = 24_000;
-        encoder.complexity = 8;
+        encoder.bitrate_bps = 48_000;
+        encoder.complexity = 10;
         encoder.use_cbr = false;
         encoder.use_dtx = true;
         encoder.packet_loss_perc = 10;
@@ -181,6 +181,50 @@ mod tests {
 
     fn silence_bytes() -> Vec<u8> {
         vec![0; FRAME_SAMPLES * 4]
+    }
+
+    fn voice_samples(frame: usize) -> Vec<f32> {
+        (0..FRAME_SAMPLES)
+            .map(|index| {
+                let n = frame * FRAME_SAMPLES + index;
+                let t = n as f32 / 48_000.0;
+                let phase = std::f32::consts::TAU * 125.0 * t + 0.5 * (t * 7.0).sin();
+                let voiced = phase.sin() * 0.08
+                    + (phase * 2.0).sin() * 0.04
+                    + (phase * 3.0).sin() * 0.025
+                    + (phase * 5.0).sin() * 0.02
+                    + (phase * 9.0).sin() * 0.015
+                    + (phase * 15.0).sin() * 0.01
+                    + (phase * 32.0).sin() * 0.005;
+                let hash = (n as u32).wrapping_mul(747796405).wrapping_add(2891336453);
+                let noise = ((hash ^ (hash >> 16)) as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32;
+                voiced * (0.7 + 0.3 * (t * 11.0).sin()) + noise * 0.004
+            })
+            .collect()
+    }
+
+    fn voice_error_db(reference: &[f32], decoded: &[f32]) -> f64 {
+        let start = FRAME_SAMPLES * 10;
+        let end = reference.len() - FRAME_SAMPLES;
+        let lag = (0..=480)
+            .min_by(|left, right| {
+                let error = |lag: usize| {
+                    (start..end)
+                        .step_by(16)
+                        .map(|i| (f64::from(reference[i]) - f64::from(decoded[i + lag])).powi(2))
+                        .sum::<f64>()
+                };
+                error(*left).total_cmp(&error(*right))
+            })
+            .unwrap();
+        let signal = reference[start..end]
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>();
+        let noise = (start..end)
+            .map(|i| (f64::from(reference[i]) - f64::from(decoded[i + lag])).powi(2))
+            .sum::<f64>();
+        10.0 * (signal / noise).log10()
     }
 
     #[test]
@@ -365,5 +409,97 @@ mod tests {
                 assert_eq!(state.decode(session, &packet, false).is_ok(), valid);
             }
         }
+    }
+
+    #[test]
+    fn digital_silence_does_not_generate_audible_codec_noise() {
+        let state = AudioCodecState::new();
+        let session = "00112233445566778899aabbccddeeff";
+        state.start(session).unwrap();
+        for frame in 0..50 {
+            let packet = state
+                .encode(session, &pcm_bytes(frame as f32 * 57.6))
+                .unwrap();
+            state.decode(session, &packet, false).unwrap();
+        }
+        for frame in 0..250 {
+            let packet = state.encode(session, &silence_bytes()).unwrap();
+            let output = state.decode(session, &packet, false).unwrap();
+            if frame >= 5 {
+                assert!(
+                    output.chunks_exact(4).all(|bytes| f32::from_le_bytes(
+                        bytes.try_into().unwrap()
+                    )
+                    .abs()
+                        < 1e-7),
+                    "digital silence must not generate audible synthesized audio"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configured_voice_fidelity_matches_the_higher_quality_profile() {
+        let state = AudioCodecState::new();
+        let session = "00112233445566778899aabbccddeeff";
+        state.start(session).unwrap();
+        let mut input = Vec::new();
+        let mut output = Vec::new();
+        for frame in 0..100 {
+            let samples = voice_samples(frame);
+            let pcm = samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>();
+            let packet = state.encode(session, &pcm).unwrap();
+            let decoded = state.decode(session, &packet, false).unwrap();
+            input.extend(samples);
+            output.extend(
+                decoded
+                    .chunks_exact(4)
+                    .map(|sample| f32::from_le_bytes(sample.try_into().unwrap())),
+            );
+        }
+        let fidelity = voice_error_db(&input, &output);
+        assert!(
+            fidelity >= 20.0,
+            "configured voice fidelity must reach 20 dB SNR; measured {fidelity}"
+        );
+    }
+
+    #[test]
+    fn quiet_speech_keeps_its_detail_without_being_gated_to_silence() {
+        let state = AudioCodecState::new();
+        let session = "00112233445566778899aabbccddeeff";
+        state.start(session).unwrap();
+        let mut input = Vec::new();
+        let mut output = Vec::new();
+        for frame in 0..100 {
+            let samples = voice_samples(frame)
+                .into_iter()
+                .map(|sample| sample * 0.001)
+                .collect::<Vec<_>>();
+            let pcm = samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>();
+            let packet = state.encode(session, &pcm).unwrap();
+            assert!(
+                packet.len() > 2,
+                "quiet speech must not become a synthesized silence packet"
+            );
+            let decoded = state.decode(session, &packet, false).unwrap();
+            input.extend(samples);
+            output.extend(
+                decoded
+                    .chunks_exact(4)
+                    .map(|sample| f32::from_le_bytes(sample.try_into().unwrap())),
+            );
+        }
+        let fidelity = voice_error_db(&input, &output);
+        assert!(
+            fidelity >= 18.0,
+            "quiet voice fidelity must reach 18 dB SNR; measured {fidelity}"
+        );
     }
 }

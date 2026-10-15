@@ -608,7 +608,7 @@ const ChatApp: React.FC = () => {
         isCurrent: () => service === p2pServiceRef.current,
         isPeerConnected: p2pMessaging.isPeerConnected,
         connectToPeer: p2pMessaging.connectToPeer,
-        sendMessage: (to, payload) => service.sendMessage(to, payload, SignalType.SEALED_ENVELOPE),
+        sendMessage: (to, payload, signal) => service.sendMessage(to, payload, SignalType.SEALED_ENVELOPE, signal),
       }), async (to) => {
         if (service !== p2pServiceRef.current) return;
         await p2pMessaging.connectToPeer(to);
