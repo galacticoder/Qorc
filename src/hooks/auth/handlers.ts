@@ -27,6 +27,7 @@ import {
 } from "../../lib/auth/auth-lifecycle";
 import { keyTransparencyClient } from "../../lib/key-transparency/client";
 import { startupConnection } from "../../lib/transport/startup-connection";
+import { beginBackgroundWork } from '../../lib/runtime/background-work';
 import {
   PASSPHRASE_MAX_LENGTH,
   PASSPHRASE_MIN_LENGTH,
@@ -391,6 +392,7 @@ export const createHandleAccountSubmit = (
 
     let nativeUnlockedForAttempt = false;
     let retainNativeSession = false;
+    let releaseBackgroundWork = async () => {};
 
     const unlockNativeAccountForTokens = async (): Promise<void> => {
       if (!nativeUnlockedForAttempt) {
@@ -418,6 +420,8 @@ export const createHandleAccountSubmit = (
     };
 
     try {
+      releaseBackgroundWork = await beginBackgroundWork(operation.signal);
+      assertCurrent();
       await awaitCurrent(startupConnection.prepareAuthenticationTransport());
       if (recoverLocalAccount) {
         refs.passphrasePlaintextRef.current = passphrase;
@@ -1018,7 +1022,7 @@ export const createHandleAccountSubmit = (
           : (errorMessage || 'Authentication request failed');
         setters.setLoginError(friendlyMessage);
         setters.setIsSubmittingAuth(false);
-        
+
         try { setters.setTokenValidationInProgress(false); } catch { }
       } finally {
         compositeSecret?.fill(0);
@@ -1035,13 +1039,17 @@ export const createHandleAccountSubmit = (
         : errorMessage || 'Authentication could not be started. Please try again.');
       setters.setIsSubmittingAuth(false);
     } finally {
-      if (helpers.lifecycle.isCurrent(operation)) {
-        await releaseFailedNativeAccount();
-        refs.passwordRef.current = '';
-        refs.confirmPasswordRef.current = '';
-        refs.passphrasePlaintextRef.current = '';
-        refs.accountSubmitInFlightRef.current = false;
-        setters.setAuthStatus('');
+      try {
+        if (helpers.lifecycle.isCurrent(operation)) {
+          await releaseFailedNativeAccount();
+          refs.passwordRef.current = '';
+          refs.confirmPasswordRef.current = '';
+          refs.passphrasePlaintextRef.current = '';
+          refs.accountSubmitInFlightRef.current = false;
+          setters.setAuthStatus('');
+        }
+      } finally {
+        await releaseBackgroundWork();
       }
     }
   };

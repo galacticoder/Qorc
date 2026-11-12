@@ -10,8 +10,10 @@ import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import { nativeCamera, nativeMicrophone } from '../../../lib/tauri-bindings';
 import { getDefaultAvatarColor } from '../../../lib/utils/avatar-utils';
 import type { CallState } from '../../../lib/types/calling-types';
+import { uniqueMediaDevices } from '../../../lib/ui/media-device-options';
 
 interface CallModalProps {
+  readonly uiActive?: boolean;
   readonly call: CallState | null;
   readonly localUsername: string;
   readonly localMediaActive: boolean;
@@ -216,7 +218,7 @@ const MediaDeviceControl = ({
         aria-pressed={enabled}
         className={cn(
           'relative flex h-full w-full cursor-pointer items-center justify-center rounded-xl bg-black/40 text-white backdrop-blur-xl hover:bg-black/55 disabled:cursor-not-allowed disabled:opacity-50',
-          !enabled && 'bg-red-600/75 hover:bg-red-500/85'
+          !enabled && 'qorc-danger-button'
         )}
         title={toggleTitle}
       >
@@ -323,6 +325,7 @@ const OutputDeviceControl = ({
 );
 
 export const CallModal: React.FC<CallModalProps> = memo(({
+  uiActive = true,
   call,
   localUsername,
   localMediaActive,
@@ -389,8 +392,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     setInternalPosition(next);
   }, [onFloatingPositionChange]);
 
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStartRef = useRef<{ x: number, y: number } | null>(null);
+  const dragStartRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const initialPosRef = useRef<{ x: number, bottom: number } | null>(null);
 
   const displayPeerName = useDisplayUsername({
@@ -492,9 +494,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
           isVideoCall ? nativeCamera.devices() : Promise.resolve([]),
         ]);
         if (cancelled) return;
-        setMicDevices(microphones.map(microphone => ({ deviceId: microphone.device_id, label: microphone.label })));
-        setSpeakerDevices(speakers.map(speaker => ({ deviceId: speaker.device_id, label: speaker.label })));
-        setVideoDevices(cameras.map(camera => ({ deviceId: camera.device_id, label: camera.label })));
+        setMicDevices(uniqueMediaDevices(microphones.map(microphone => ({ deviceId: microphone.device_id, label: microphone.label })), 'Microphone'));
+        setSpeakerDevices(uniqueMediaDevices(speakers.map(speaker => ({ deviceId: speaker.device_id, label: speaker.label })), 'Speaker'));
+        setVideoDevices(uniqueMediaDevices(cameras.map(camera => ({ deviceId: camera.device_id, label: camera.label })), 'Camera'));
 
         const settings = await readAppSettingsAsync();
         setPreferredCameraId(settings.preferredCameraId || null);
@@ -516,48 +518,42 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   }, [localMediaActive, isVideoCall, call?.id]);
 
   useEffect(() => {
+    if (!uiActive) return;
     if (isConnected && call?.startTime) {
-      const interval = setInterval(() => {
-        setCallDuration(Math.floor((Date.now() - call.startTime!) / 1000));
-      }, 1000);
+      const updateDuration = () => setCallDuration(Math.floor((Date.now() - call.startTime!) / 1000));
+      updateDuration();
+      const interval = setInterval(updateDuration, 1000);
       return () => clearInterval(interval);
     }
     setCallDuration(0);
-  }, [isConnected, call?.startTime]);
+  }, [uiActive, isConnected, call?.startTime]);
 
-  const handleDragStart = (e: React.MouseEvent) => {
-    setIsDragging(true);
-    dragStartRef.current = { x: e.clientX, y: e.clientY };
+  const handleDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.isPrimary || e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    holdControls();
+    dragStartRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
     initialPosRef.current = { x: position.x, bottom: position.bottom };
   };
 
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDragging || !dragStartRef.current || !initialPosRef.current) return;
-      const dx = e.clientX - dragStartRef.current.x;
-      const dy = e.clientY - dragStartRef.current.y;
-
-      const bounds = wrapperRef.current?.getBoundingClientRect();
-      const width = bounds?.width ?? 320;
-      const height = bounds?.height ?? 80;
-      setPosition({
-        x: Math.max(0, Math.min(window.innerWidth - width, initialPosRef.current.x + dx)),
-        bottom: Math.max(0, Math.min(window.innerHeight - height, initialPosRef.current.bottom - dy))
-      });
-    };
-    const handleMouseUp = () => {
-      setIsDragging(false);
-    };
-
-    if (isDragging) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-    }
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isDragging, setPosition]);
+  const handleDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current;
+    if (!start || start.pointerId !== e.pointerId || !initialPosRef.current) return;
+    e.preventDefault();
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    setPosition({
+      x: Math.max(0, Math.min(window.innerWidth - (bounds?.width ?? 320), initialPosRef.current.x + e.clientX - start.x)),
+      bottom: Math.max(0, Math.min(window.innerHeight - (bounds?.height ?? 80), initialPosRef.current.bottom - e.clientY + start.y)),
+    });
+  };
+  const handleDragEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStartRef.current?.pointerId !== e.pointerId) return;
+    dragStartRef.current = null;
+    initialPosRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    revealControls();
+  };
 
   const handleCameraChange = async (deviceId: string) => {
     try {
@@ -802,9 +798,13 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             className={cn(
               'flex select-none items-center gap-2',
               !isDocked && 'drop-shadow-lg',
-              !isExpandedScreenShare && !isDocked && 'cursor-move'
+              !isExpandedScreenShare && !isDocked && 'cursor-move touch-none'
             )}
-            onMouseDown={!isExpandedScreenShare && !isDocked ? handleDragStart : undefined}
+            onPointerDown={!isExpandedScreenShare && !isDocked ? handleDragStart : undefined}
+            onPointerMove={handleDragMove}
+            onPointerUp={handleDragEnd}
+            onPointerCancel={handleDragEnd}
+            onLostPointerCapture={handleDragEnd}
           >
             <CallSpeakingAvatar
               callId={call.id}
@@ -855,7 +855,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               <button
                 type="button"
                 onClick={onDecline}
-                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-red-600/90 text-white backdrop-blur-xl hover:bg-red-500"
+                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl qorc-danger-button text-white backdrop-blur-xl"
                 title="Decline"
               >
                 <PhoneOff className="h-4 w-4" />
@@ -916,7 +916,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               <button
                 type="button"
                 onClick={onEndCall}
-                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-red-600/90 text-white backdrop-blur-xl hover:bg-red-500"
+                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl qorc-danger-button text-white backdrop-blur-xl"
                 title={isConnected ? 'End Call' : 'Cancel Call'}
               >
                 <PhoneOff className="h-4 w-4" />

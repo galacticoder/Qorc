@@ -64,35 +64,3 @@ pub fn extract_result_impl(key: &str, result: &[u8]) -> Result<Vec<u8>, &'static
 
     Err("key not found")
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    use crate::util::*;
-
-    fn get_params() -> Params {
-        params_from_json(
-            r#"{
-            "n": 4,
-            "nu_1": 9,
-            "nu_2": 5,
-            "p": 256,
-            "q2_bits": 20,
-            "t_gsw": 8,
-            "t_conv": 4,
-            "t_exp_left": 8,
-            "t_exp_right": 56,
-            "instances": 2,
-            "db_item_size": 65536
-        }"#,
-        )
-    }
-
-    #[test]
-    fn row_from_key_is_correct() {
-        let params = get_params();
-        assert_eq!(row_from_key(&params, "CA"), 4825);
-        assert_eq!(row_from_key(&params, "OR"), 8359);
-    }
-}

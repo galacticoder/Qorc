@@ -16,13 +16,13 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
   return (
     <div className="flex items-center justify-center my-2 select-none">
       <div className={cn(
-        'text-xs rounded-lg px-3 py-1.5 flex items-center gap-2',
+        'text-xs rounded-lg px-3 py-1.5 flex flex-wrap items-center justify-center gap-2 min-w-0 max-w-full',
         isError
-          ? 'bg-red-500 text-white font-medium'
+          ? 'qorc-danger-surface text-white font-medium'
           : 'qorc-system-message-call text-zinc-100'
         )}>
         {(isError || showCallIcon) && callType && <CallIcon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />}
-        <span>{content}</span>
+        <span className="min-w-0 break-words">{content}</span>
         {timestamp && (
           <time className="ml-1 whitespace-nowrap text-[10px] opacity-70" aria-label={`Call event at ${timestamp}`}>
             {timestamp}
@@ -37,7 +37,7 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
                 className={cn(
                   'qorc-system-message-action ml-1 cursor-pointer px-2 py-0.5 rounded-md font-semibold',
                   isError
-                    ? 'qorc-system-message-action--error bg-red-600 text-white'
+                    ? 'qorc-system-message-action--error qorc-danger-button text-white'
                     : 'border border-border bg-background text-foreground hover:bg-accent'
                 )}
                 style={{ fontSize: '0.7rem' }}

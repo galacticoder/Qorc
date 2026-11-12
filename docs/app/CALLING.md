@@ -535,7 +535,7 @@ Code references:
 - `src/lib/transport/p2p-transport.ts`
 - `src/lib/transport/secure-calling-service.ts`
 - `src/lib/cryptography/aead.ts`
-- `src/lib/cryptography/hash.ts`
+- `shared/post-quantum-hash.js`
 
 ## Audio Pipeline
 

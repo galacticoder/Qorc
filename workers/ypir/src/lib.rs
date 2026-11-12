@@ -1,5 +1,5 @@
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-compile_error!("qorc YPIR supports only Linux and Windows");
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "android")))]
+compile_error!("qorc YPIR supports Linux, Windows, and Android");
 
 pub mod bits;
 pub mod client;

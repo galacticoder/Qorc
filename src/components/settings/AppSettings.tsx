@@ -1,29 +1,35 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTheme } from '../../contexts/ThemeContext';
 import { toast } from 'sonner';
 import {
   Ban,
+  ArrowLeft,
   Bell,
   Camera,
   Check,
+  ChevronRight,
   Copy,
+  ExternalLink,
+  FileText,
   Headphones,
   LoaderCircle,
   LogOut,
-  RefreshCw,
   ShieldCheck,
   Server,
   SlidersHorizontal,
   Trash2,
-  UserRound,
   X,
 } from 'lucide-react';
-import { encryptedStorage } from '../../lib/database/encrypted-storage';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 import { nativeCamera, nativeMicrophone, notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
 import { copyTextToClipboard } from '../../lib/clipboard';
+import { isAndroidPlatform } from '../../lib/runtime/platform';
+import { useMobileLayout } from '../../hooks/useMobileLayout';
+import { useAppBack } from '../../hooks/useAppBack';
+import { useSettingFeedback, type SettingFeedbackState } from '../../hooks/useSettingFeedback';
+import { animateView } from '../../lib/ui/motion';
 import {
   hasPrototypePollutionKeys,
   isPlainObject,
@@ -40,25 +46,26 @@ import {
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../ui/UserAvatar';
-import { SavedServersDialog } from '../servers/SavedServersDialog';
+import { SavedServersScreen } from '../servers/SavedServersScreen';
 import { AppSelect } from '../ui/AppSelect';
+import { StandaloneScreen } from '../ui/StandaloneScreen';
 import { installAppSettingsStyles } from './sections/AppSettingsStyles';
 import {
   readAppSettings,
-  updateAppSettings,
+  updateAppSettingsConfirmed,
   type AppSettingsState,
 } from '../../lib/ui/app-settings';
-import { STORAGE_KEYS } from '../../lib/database/storage-keys';
 import {
   readNavigationLayout,
-  writeNavigationLayout,
+  writeNavigationLayoutConfirmed,
   type NavigationLayout,
 } from '../../lib/ui/navigation-layout';
-import { SettingsSkeleton } from '../ui/ViewSkeletons';
 import { SettingsIcon } from '../chat/assets/icons';
 import { type BlockedUser } from '../../lib/types/blocking-types';
 import { useNotificationPreferences } from '../../hooks/useNotificationPreferences';
-import { setDoNotDisturb, type NotificationMutes } from '../../lib/ui/notification-preferences';
+import { setDoNotDisturbConfirmed, type NotificationMutes } from '../../lib/ui/notification-preferences';
+import { uniqueMediaDevices } from '../../lib/ui/media-device-options';
+import { TERMS_URL, PRIVACY_URL } from '../../lib/ui/legal-links';
 
 installAppSettingsStyles();
 
@@ -66,11 +73,102 @@ interface AppSettingsProps {
   currentUsername: string;
   currentDisplayName: string;
   onLogout: () => void | Promise<void>;
+  onClearLocalData: () => Promise<void>;
+  onResetAllLocalData: () => Promise<void>;
   onOpenBlockConversationChooser: () => void;
 }
 
 interface NotificationSettings {
   desktop: boolean;
+}
+
+const SETTINGS_SECTIONS = [
+  { id: 'general', label: 'General', description: 'Theme and app appearance', icon: SlidersHorizontal },
+  { id: 'servers', label: 'Servers', description: 'Manage saved servers', icon: Server },
+  { id: 'notifications', label: 'Notifications', description: 'Message and call alerts', icon: Bell },
+  { id: 'devices', label: 'Devices', description: 'Microphone, speaker and camera', icon: Headphones },
+  { id: 'privacy', label: 'Privacy & Safety', description: 'Blocked users, privacy and local account data', icon: ShieldCheck },
+] as const;
+type SettingsSection = typeof SETTINGS_SECTIONS[number]['id'];
+type SettingsAction = 'logout' | 'clear' | 'reset';
+
+function SettingCopy({ children }: { children: React.ReactNode }) {
+  return <div className="setting-copy">
+    <div className="setting-copy-text">{children}</div>
+  </div>;
+}
+
+function SettingsActionDialog({ title, description, confirmLabel, busyLabel, busy, error, themeClass, onCancel, onConfirm }: {
+  title: string; description: string; confirmLabel: string; busyLabel: string;
+  busy: boolean; error: string | null; themeClass: 'light' | 'dark';
+  onCancel: () => void; onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId(), descriptionId = useId();
+  useAppBack(true, () => { if (!busy) onCancel(); }, 100);
+  useLayoutEffect(() => {
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialogRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      queueMicrotask(() => {
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+      });
+    };
+  }, []);
+  useEffect(() => {
+    if (busy) dialogRef.current?.focus({ preventScroll: true });
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault(); event.stopPropagation();
+        if (!busy) onCancel();
+      } else if (event.key === 'Tab') {
+        const buttons = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        if (index < 0 || (event.shiftKey ? index === 0 : index === buttons.length - 1)) {
+          event.preventDefault();
+          if (buttons.length) buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+          else dialogRef.current?.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', keydown, true);
+    return () => document.removeEventListener('keydown', keydown, true);
+  }, [busy, onCancel]);
+  return createPortal(<div className={`qorc-settings-host ${themeClass} qorc-unblock-overlay qorc-screen-overlay settings-action-overlay`}
+    data-state="open" onClick={() => { if (!busy) onCancel(); }}>
+    <div ref={dialogRef} tabIndex={-1} className="qorc-unblock-dialog settings-action-dialog" role="alertdialog" aria-modal="true"
+      aria-labelledby={titleId} aria-describedby={descriptionId} aria-busy={busy} onClick={event => event.stopPropagation()}>
+      <div className="settings-action-dialog-copy"><h2 id={titleId}>{title}</h2><p id={descriptionId}>{description}</p>
+        {error && <p className="settings-action-dialog-error" role="alert">{error}</p>}
+        {busy && <p className="settings-action-dialog-status" role="status">{busyLabel}</p>}
+      </div>
+      <div className="settings-action-dialog-buttons">
+        <button className="action" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button className="danger-action" type="button" disabled={busy} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
+      </div>
+    </div>
+  </div>, document.body);
+}
+
+function SettingFeedback({ state }: { state?: SettingFeedbackState }) {
+  if (!state) return null;
+  return <span className="setting-feedback is-error" role="alert">
+    <X size={13} aria-hidden="true" />
+    <span>{state.message}</span>
+  </span>;
+}
+
+function mediaOptions(devices: Array<{ deviceId: string; label: string }>, selected: string, name: string) {
+  const unique = uniqueMediaDevices(devices, name);
+  return [
+    { value: '', label: 'Default' },
+    ...(selected && !unique.some(device => device.deviceId === selected)
+      ? [{ value: selected, label: `Saved ${name.toLowerCase()}` }] : []),
+    ...unique.map(device => ({ value: device.deviceId, label: device.label })),
+  ];
 }
 
 function SwitchButton({
@@ -127,21 +225,57 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
   username,
   busy,
   themeClass,
+  error,
   onCancel,
   onConfirm,
 }: {
   username: string;
   busy: boolean;
   themeClass: 'light' | 'dark';
+  error?: string | null;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const displayName = useDisplayUsername({ username });
   const showUsername = displayName.trim().toLowerCase() !== username.trim().toLowerCase();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useAppBack(true, () => { if (!busy) onCancel(); }, 100);
+
+  useLayoutEffect(() => {
+    const previousFocus = document.activeElement;
+    dialogRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    return () => {
+      queueMicrotask(() => {
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!busy) onCancel();
+      } else if (event.key === 'Tab') {
+        const buttons = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        if (!buttons.length || index < 0 || (event.shiftKey ? index === 0 : index === buttons.length - 1)) {
+          event.preventDefault();
+          if (buttons.length) buttons[event.shiftKey ? buttons.length - 1 : 0].focus();
+          else dialogRef.current?.focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', keydown, true);
+    return () => document.removeEventListener('keydown', keydown, true);
+  }, [busy, onCancel]);
 
   return createPortal(
-    <div className={`qorc-settings-host ${themeClass} qorc-unblock-overlay`} onClick={onCancel}>
+    <div className={`qorc-settings-host ${themeClass} qorc-unblock-overlay qorc-screen-overlay`} data-state="open" onClick={onCancel}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="qorc-unblock-dialog"
         role="dialog"
         aria-modal="true"
@@ -177,6 +311,7 @@ const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
             <span>{busy ? 'Unblocking…' : 'Unblock'}</span>
           </button>
         </div>
+        {error && <div className="settings-error" role="alert">{error}</div>}
       </div>
     </div>,
     document.body,
@@ -187,47 +322,82 @@ export const AppSettings = React.memo(function AppSettings({
   currentUsername,
   currentDisplayName,
   onLogout,
+  onClearLocalData,
+  onResetAllLocalData,
   onOpenBlockConversationChooser,
 }: AppSettingsProps) {
-  const { theme, resolvedTheme } = useTheme();
-  const [isClearingData, setIsClearingData] = useState(false);
-  const [clearArmed, setClearArmed] = useState(false);
-  const clearArmTimerRef = useRef<number | null>(null);
-  const [logoutArmed, setLogoutArmed] = useState(false);
-  const logoutTimerRef = useRef<number | null>(null);
-  const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true });
+  const { theme, resolvedTheme, setTheme } = useTheme();
+  const mobile = useMobileLayout();
+  const android = isAndroidPlatform();
+  const [sectionId, setSectionId] = useState<SettingsSection | null>(null);
+  const settingsContentRef = useRef<HTMLElement>(null);
+  const overviewScrollRef = useRef(0);
+  const settingsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const sectionNavigationRef = useRef(false);
+  const previousSectionRef = useRef(sectionId);
+  const feedback = useSettingFeedback();
+  const [confirmationAction, setConfirmationAction] = useState<SettingsAction | null>(null);
+  const [pendingAction, setPendingAction] = useState<SettingsAction | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const actionBusyRef = useRef(false);
+  const actionBusy = pendingAction !== null;
+  const [storedSettings] = useState(readAppSettings);
+  const [notifications, setNotifications] = useState<NotificationSettings>(() => storedSettings.notifications ?? { desktop: true });
   const { doNotDisturb } = useNotificationPreferences();
   const [navigationLayout, setNavigationLayout] = useState<NavigationLayout>(readNavigationLayout);
   const [closeToTray, setCloseToTray] = useState(true);
   const [isTrayLoading, setIsTrayLoading] = useState(true);
-  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(() => profilePictureSystem.getOwnAvatar());
   const [copiedUsername, setCopiedUsername] = useState(false);
   const [micDevices, setMicDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [speakerDevices, setSpeakerDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [cameraDevices, setCameraDevices] = useState<Array<{ deviceId: string; label: string }>>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const devicesLoadingRef = useRef(false);
-  const [preferredMicId, setPreferredMicId] = useState('');
-  const [preferredSpeakerId, setPreferredSpeakerId] = useState('');
-  const [preferredCameraId, setPreferredCameraId] = useState('');
+  const [preferredMicId, setPreferredMicId] = useState(storedSettings.preferredCallMicId ?? '');
+  const [preferredSpeakerId, setPreferredSpeakerId] = useState(storedSettings.preferredSpeakerId ?? '');
+  const [preferredCameraId, setPreferredCameraId] = useState(storedSettings.preferredCameraId ?? '');
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
   const [blockedUsersLoading, setBlockedUsersLoading] = useState(false);
   const [blockedUsersError, setBlockedUsersError] = useState<string | null>(null);
   const [unblockTarget, setUnblockTarget] = useState<string | null>(null);
   const [unblocking, setUnblocking] = useState(false);
-  const [initialSettingsReady, setInitialSettingsReady] = useState(false);
   const [savedServersOpen, setSavedServersOpen] = useState(false);
+  const [blockedUsersOpen, setBlockedUsersOpen] = useState(false);
+  const blockedUsersTitleId = useId();
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const profilePictureEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
   const blockStatusEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
+  const selectedSection = SETTINGS_SECTIONS.find(section => section.id === sectionId);
+
+  useLayoutEffect(() => {
+    if (settingsContentRef.current) settingsContentRef.current.scrollTop = sectionId ? 0 : overviewScrollRef.current;
+    if (sectionNavigationRef.current) {
+      settingsHeadingRef.current?.focus({ preventScroll: true });
+      sectionNavigationRef.current = false;
+    }
+    if (previousSectionRef.current === sectionId) return;
+    previousSectionRef.current = sectionId;
+    if (!mobile) return;
+    const animation = animateView(settingsContentRef.current, sectionId ? 'forward' : 'back');
+    return () => animation?.cancel();
+  }, [mobile, sectionId]);
 
   const activeTheme = theme === 'system' ? resolvedTheme : theme;
   const themeClass = activeTheme === 'light' ? 'light' : 'dark';
   const displayUsername = currentDisplayName || currentUsername;
   const copyUsername = currentDisplayName || currentUsername;
 
-  const saveSettings = useCallback((updates: Partial<AppSettingsState>) => {
-    updateAppSettings(updates);
+  const handleOpenLegalLink = useCallback(async (url: string) => {
+    try {
+      await system.openExternal(url);
+    } catch {
+      toast.error('Could not open the document. Please try again.');
+    }
+  }, []);
+
+  const saveSettings = useCallback(async (updates: Partial<AppSettingsState>) => {
+    await updateAppSettingsConfirmed(updates);
   }, []);
 
   const loadBlockedUsers = useCallback(async () => {
@@ -251,46 +421,42 @@ export const AppSettings = React.memo(function AppSettings({
     devicesLoadingRef.current = true;
     setDevicesLoading(true);
     try {
-      if (!await system.requestMediaAccess('enumerate')) return;
-      const [microphones, speakers, cameras] = await Promise.all([
-        nativeMicrophone.devices(),
-        nativeMicrophone.outputDevices(),
-        nativeCamera.devices(),
-      ]);
-      if (microphones.length > 64 || speakers.length > 64 || cameras.length > 32) {
-        throw new Error('Invalid media device list');
-      }
-      setMicDevices(microphones.map(device => ({ deviceId: device.device_id, label: device.label })));
-      setSpeakerDevices(speakers.map(device => ({ deviceId: device.device_id, label: device.label })));
-      setCameraDevices(cameras.map(device => ({ deviceId: device.device_id, label: device.label })));
-    } catch {
-      toast.error('Could not load media devices');
+      await feedback.run('devices', async () => {
+        if (!await system.requestMediaAccess('enumerate')) return false;
+        const [microphones, speakers, cameras] = await Promise.all([
+          nativeMicrophone.devices(), nativeMicrophone.outputDevices(), nativeCamera.devices(),
+        ]);
+        if (microphones.length > 64 || speakers.length > 64 || cameras.length > 32) throw new Error('Invalid media device list');
+        setMicDevices(microphones.map(device => ({ deviceId: device.device_id, label: device.label })));
+        setSpeakerDevices(speakers.map(device => ({ deviceId: device.device_id, label: device.label })));
+        setCameraDevices(cameras.map(device => ({ deviceId: device.device_id, label: device.label })));
+      }, 'Could not load media devices. Please try again.');
     } finally {
       devicesLoadingRef.current = false;
       setDevicesLoading(false);
     }
-  }, []);
+  }, [feedback.run]);
 
   useEffect(() => {
     let cancelled = false;
 
     const initTraySettings = async () => {
-      setCloseToTray(await tray.getCloseToTray());
-      setIsTrayLoading(false);
+      try {
+        const enabled = await tray.getCloseToTray();
+        if (!cancelled) setCloseToTray(enabled);
+      }
+      catch {
+        if (!cancelled) {
+          setCloseToTray(false);
+          toast.error(android ? 'Android could not start background mode' : 'Failed to read tray setting');
+        }
+      } finally { if (!cancelled) setIsTrayLoading(false); }
     };
 
     const initProfilePicture = async () => {
       await profilePictureSystem.initialize();
-      setAvatarUrl(profilePictureSystem.getOwnAvatar());
+      if (!cancelled) setAvatarUrl(profilePictureSystem.getOwnAvatar());
     };
-
-    const storedSettings = readAppSettings();
-    if (storedSettings.notifications) {
-      setNotifications(storedSettings.notifications);
-    }
-    if (storedSettings.preferredCallMicId !== undefined) setPreferredMicId(storedSettings.preferredCallMicId);
-    if (storedSettings.preferredSpeakerId !== undefined) setPreferredSpeakerId(storedSettings.preferredSpeakerId);
-    if (storedSettings.preferredCameraId !== undefined) setPreferredCameraId(storedSettings.preferredCameraId);
 
     const initialize = async () => {
       try {
@@ -299,7 +465,6 @@ export const AppSettings = React.memo(function AppSettings({
           initProfilePicture(),
           loadBlockedUsers(),
         ]);
-        if (!cancelled) setInitialSettingsReady(true);
       } catch (error) {
         if (!cancelled) console.error('[AppSettings] Failed to initialize settings', error);
       }
@@ -395,144 +560,121 @@ export const AppSettings = React.memo(function AppSettings({
     event.target.value = '';
 
     if (selectedFile.size > MAX_PROFILE_IMAGE_SIZE) {
-      toast.error(`Image too large (max ${MAX_PROFILE_IMAGE_SIZE / 1024 / 1024}MB)`);
+      feedback.fail('avatar', `Image too large (max ${MAX_PROFILE_IMAGE_SIZE / 1024 / 1024}MB)`);
       return;
     }
 
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      try {
-        const uploadResult = await profilePictureSystem.setOwnAvatar(reader.result as string);
-        if (uploadResult.success) {
-          setAvatarUrl(profilePictureSystem.getOwnAvatar());
-          toast.success('Profile picture updated');
-        } else {
-          toast.error(uploadResult.error || 'Failed to upload avatar');
-        }
-      } catch {
-        toast.error('Failed to process image');
-      }
-    };
-    reader.onerror = () => toast.error('Failed to read image file');
-    reader.readAsDataURL(selectedFile);
+    await feedback.run('avatar', async isCurrent => {
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Invalid image'));
+        reader.onerror = () => reject(new Error('Image could not be read'));
+        reader.onabort = () => reject(new Error('Image read was cancelled'));
+        reader.readAsDataURL(selectedFile);
+      });
+      if (!isCurrent()) return false;
+      const result = await profilePictureSystem.setOwnAvatar(data);
+      if (!result.success) throw new Error('Avatar upload failed');
+      setAvatarUrl(profilePictureSystem.getOwnAvatar());
+    }, 'Could not update your picture. Please try again.');
   };
 
   const handleCloseToTrayChange = async (enabled: boolean) => {
     const previous = closeToTray;
-    setCloseToTray(enabled);
-    try {
-      await tray.setCloseToTray(enabled);
-    } catch {
-      setCloseToTray(previous);
-      toast.error('Failed to update tray setting');
-    }
+    await feedback.run('background', async () => {
+      setCloseToTray(enabled);
+      try { if (!await tray.setCloseToTray(enabled)) throw new Error('Background setting was rejected'); }
+      catch (error) { setCloseToTray(previous); throw error; }
+    }, android ? 'Failed to update background setting' : 'Failed to update tray setting');
   };
 
-  const handleDesktopNotificationsToggle = (checked: boolean) => {
+  const handleDesktopNotificationsToggle = async (checked: boolean) => {
+    const previous = notifications;
     const updated = { ...notifications, desktop: checked };
-    setNotifications(updated);
-    saveSettings({ notifications: updated });
-    tauriNotifications.setEnabled(checked && !(doNotDisturb.messages && doNotDisturb.calls)).catch(() => { });
+    await feedback.run('notifications', async isCurrent => {
+      setNotifications(updated);
+      try {
+        await tauriNotifications.setEnabled(checked && !(doNotDisturb.messages && doNotDisturb.calls));
+        if (!isCurrent()) return false;
+        await saveSettings({ notifications: updated });
+      } catch (error) {
+        setNotifications(previous);
+        if (isCurrent()) await tauriNotifications.setEnabled(previous.desktop && !(doNotDisturb.messages && doNotDisturb.calls)).catch(() => { });
+        throw error;
+      }
+    }, 'Could not save notification settings. Please try again.');
   };
 
-  const handleDoNotDisturb = (type: keyof NotificationMutes, checked: boolean) => {
-    try {
-      setDoNotDisturb(type, checked);
-    } catch {
-      toast.error('Failed to update do not disturb');
-    }
+  const handleDoNotDisturb = async (type: keyof NotificationMutes, checked: boolean) => {
+    await feedback.run(`mute-${type}`, () => setDoNotDisturbConfirmed(type, checked), 'Could not save mute settings. Please try again.');
   };
 
-  const handleNavigationLayoutChange = (layout: NavigationLayout) => {
+  const handleNavigationLayoutChange = async (layout: NavigationLayout) => {
     if (layout === navigationLayout) return;
-    try {
-      writeNavigationLayout(layout);
+    const previous = navigationLayout;
+    await feedback.run('navigation', async () => {
       setNavigationLayout(layout);
-    } catch {
-      toast.error('Failed to update navigation layout');
-    }
+      try { await writeNavigationLayoutConfirmed(layout); }
+      catch (error) { setNavigationLayout(previous); throw error; }
+    }, 'Failed to update navigation layout');
   };
 
-  const handleDevicePreference = (
+  const handleDevicePreference = async (
     key: 'preferredMicId' | 'preferredSpeakerId' | 'preferredCameraId',
     value: string
   ) => {
-    if (key === 'preferredMicId') setPreferredMicId(value);
-    if (key === 'preferredSpeakerId') setPreferredSpeakerId(value);
-    if (key === 'preferredCameraId') setPreferredCameraId(value);
-    saveSettings(key === 'preferredMicId' ? { preferredCallMicId: value } : { [key]: value });
+    const setValue = key === 'preferredMicId' ? setPreferredMicId : key === 'preferredSpeakerId' ? setPreferredSpeakerId : setPreferredCameraId;
+    const previous = key === 'preferredMicId' ? preferredMicId : key === 'preferredSpeakerId' ? preferredSpeakerId : preferredCameraId;
+    await feedback.run(key, async () => {
+      setValue(value);
+      try { await saveSettings(key === 'preferredMicId' ? { preferredCallMicId: value } : { [key]: value }); }
+      catch (error) { setValue(previous); throw error; }
+    }, 'Could not save this device. Please try again.');
   };
 
-  const armClearData = useCallback(() => {
-    setLogoutArmed(false);
-    if (logoutTimerRef.current) {
-      clearTimeout(logoutTimerRef.current);
-      logoutTimerRef.current = null;
-    }
-    setClearArmed(true);
-    if (clearArmTimerRef.current) clearTimeout(clearArmTimerRef.current);
-    clearArmTimerRef.current = window.setTimeout(() => setClearArmed(false), 5000);
+  const handleThemeChange = async (value: string) => {
+    if (value !== 'light' && value !== 'dark' && value !== 'system') return;
+    await feedback.run('theme', () => setTheme(value), 'Could not save your theme. Please try again.');
+  };
+
+  const openActionConfirmation = useCallback((action: SettingsAction) => {
+    if (actionBusyRef.current || confirmationAction) return;
+    setActionError(null);
+    setConfirmationAction(action);
+  }, [confirmationAction]);
+
+  const closeActionConfirmation = useCallback(() => {
+    if (actionBusyRef.current) return;
+    setConfirmationAction(null);
+    setActionError(null);
   }, []);
 
-  const cancelClearData = useCallback(() => {
-    setClearArmed(false);
-    if (clearArmTimerRef.current) {
-      clearTimeout(clearArmTimerRef.current);
-      clearArmTimerRef.current = null;
-    }
-  }, []);
-
-  const handleClearData = useCallback(async () => {
-    if (isClearingData) return;
-    if (clearArmTimerRef.current) {
-      clearTimeout(clearArmTimerRef.current);
-      clearArmTimerRef.current = null;
-    }
-
-    setIsClearingData(true);
+  const confirmAction = useCallback(async () => {
+    if (actionBusyRef.current || !confirmationAction) return;
+    const action = confirmationAction;
+    actionBusyRef.current = true;
+    setPendingAction(action);
+    setActionError(null);
     try {
-      await encryptedStorage.removeItem(STORAGE_KEYS.APP_SETTINGS);
-      window.location.reload();
+      if (action === 'clear') { await onClearLocalData(); window.location.reload(); }
+      else if (action === 'reset') await onResetAllLocalData();
+      else {
+        await onLogout();
+        actionBusyRef.current = false;
+        setPendingAction(null);
+        setConfirmationAction(null);
+      }
     } catch {
-      toast.error('Failed to clear data');
-      setIsClearingData(false);
-      setClearArmed(false);
+      actionBusyRef.current = false;
+      setPendingAction(null);
+      setActionError(action === 'clear' ? 'Could not finish deleting local account data. Please try again.'
+        : action === 'reset' ? 'Could not finish resetting local app data. Restart Qorc to retry.'
+        : 'Could not log out. Please try again.');
     }
-  }, [isClearingData]);
-
-  const armLogout = useCallback(() => {
-    setClearArmed(false);
-    if (clearArmTimerRef.current) {
-      clearTimeout(clearArmTimerRef.current);
-      clearArmTimerRef.current = null;
-    }
-    setLogoutArmed(true);
-    if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
-    logoutTimerRef.current = window.setTimeout(() => setLogoutArmed(false), 5000);
-  }, []);
-
-  const cancelLogout = useCallback(() => {
-    setLogoutArmed(false);
-    if (logoutTimerRef.current) {
-      clearTimeout(logoutTimerRef.current);
-      logoutTimerRef.current = null;
-    }
-  }, []);
-
-  const handleLogout = useCallback(() => {
-    if (logoutTimerRef.current) {
-      clearTimeout(logoutTimerRef.current);
-      logoutTimerRef.current = null;
-    }
-    void onLogout();
-  }, [onLogout]);
-
-  useEffect(() => () => {
-    if (clearArmTimerRef.current) clearTimeout(clearArmTimerRef.current);
-    if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
-  }, []);
+  }, [confirmationAction, onClearLocalData, onResetAllLocalData, onLogout]);
 
   const openUnblockModal = useCallback((username: string) => {
+    setBlockedUsersError(null);
     setUnblockTarget(username);
   }, []);
 
@@ -557,35 +699,34 @@ export const AppSettings = React.memo(function AppSettings({
     }
   }, [unblockTarget, unblocking, loadBlockedUsers]);
 
-  if (!initialSettingsReady) {
-    return (
-      <div className={`qorc-settings-host ${themeClass}`}>
-        <main className="settings-screen">
-          <SettingsSkeleton />
-        </main>
-      </div>
-    );
-  }
+  const closeBlockedUsers = useCallback(() => {
+    if (unblockTarget || unblocking) return;
+    setBlockedUsersOpen(false);
+  }, [unblockTarget, unblocking]);
+
+  const navigateSection = (section: SettingsSection | null) => {
+    if (actionBusyRef.current || confirmationAction) return;
+    if (section && !sectionId) overviewScrollRef.current = settingsContentRef.current?.scrollTop || 0;
+    sectionNavigationRef.current = true;
+    setSectionId(section);
+  };
+  useAppBack(!!sectionId, () => navigateSection(null), 20);
 
   return (
     <>
-      <div className={`qorc-settings-host ${themeClass}`}>
-        <main className="settings-screen">
-          <h1 className="settings-brand">
-            <SettingsIcon className="settings-brand-icon" aria-hidden="true" />
-            <strong>Settings</strong>
-          </h1>
-          <section className="settings-content">
-            <section className="pane account-pane" data-settings-pane="account" aria-label="Account">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <UserRound className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">My Account</h2>
-                  </div>
-                </div>
-              </header>
-
+      <div className={`qorc-settings-host ${themeClass}${mobile ? ' is-mobile' : ''}`}>
+        <main className="settings-screen" inert={!!confirmationAction || actionBusy}>
+          <header className="settings-header">
+            {selectedSection && <button className="settings-back" type="button" disabled={actionBusy} aria-label="Back to Settings" onClick={() => navigateSection(null)}>
+              <ArrowLeft size={22} aria-hidden="true" />
+            </button>}
+            <h1 className="settings-brand" ref={settingsHeadingRef} tabIndex={-1}>
+              {!selectedSection && <SettingsIcon className="settings-brand-icon" aria-hidden="true" />}
+              <strong>{selectedSection?.label || 'Settings'}</strong>
+            </h1>
+          </header>
+          <section ref={settingsContentRef} className={`settings-content${selectedSection ? ' is-section' : ''}`} inert={!!confirmationAction || actionBusy} aria-busy={actionBusy} aria-label={selectedSection ? `${selectedSection.label} settings` : 'Application settings'}>
+            {!sectionId && <section className="pane account-pane" data-settings-pane="account" aria-label="Account">
               <div className="settings-section">
                 <div className="account-editor">
                   <div className="account-preview">
@@ -593,6 +734,7 @@ export const AppSettings = React.memo(function AppSettings({
                       className="avatar-preview-button"
                       type="button"
                       aria-label="Change profile picture"
+                      disabled={feedback.busy}
                       onClick={() => avatarInputRef.current?.click()}
                     >
                       <div className={`avatar-preview ${avatarUrl ? 'has-image' : ''}`} aria-hidden="true">
@@ -610,6 +752,7 @@ export const AppSettings = React.memo(function AppSettings({
                       type="file"
                       accept="image/*"
                       onChange={handleAvatarChange}
+                      disabled={feedback.busy}
                     />
                     <div className="account-name-row">
                       <div className="account-username">{displayUsername}</div>
@@ -622,68 +765,38 @@ export const AppSettings = React.memo(function AppSettings({
                       >
                         {copiedUsername ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
                       </button>
+                      <SettingFeedback state={feedback.states.avatar} />
                     </div>
 
-                    <section className="account-actions" aria-label="Account actions">
-                      {clearArmed ? (
-                        <div className="confirm-inline">
-                          <button className="action" type="button" onClick={cancelClearData} disabled={isClearingData}>
-                            Cancel
-                          </button>
-                          <button className="danger-action is-armed" type="button" onClick={handleClearData} disabled={isClearingData}>
-                            {isClearingData ? 'Clearing…' : 'Are you sure?'}
-                          </button>
-                        </div>
-                      ) : logoutArmed ? (
-                        <div className="confirm-inline">
-                          <button className="action" type="button" onClick={cancelLogout}>
-                            Cancel
-                          </button>
-                          <button className="danger-action is-armed" type="button" onClick={handleLogout}>
-                            Are you sure?
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="account-action-controls">
-                          <button className="danger-action" type="button" onClick={armLogout}>
-                            <LogOut aria-hidden="true" />
-                            <span>Log Out</span>
-                          </button>
-                          <button className="danger-action" type="button" disabled={isClearingData} onClick={armClearData}>
-                            <Trash2 aria-hidden="true" />
-                            <span>Clear Data</span>
-                          </button>
-                        </div>
-                      )}
-                    </section>
+
                   </div>
                 </div>
               </div>
-            </section>
+            </section>}
 
-            <section className="pane" data-settings-pane="general">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <SlidersHorizontal className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">General</h2>
-                  </div>
-                  <p className="pane-subtitle">Basic app behavior.</p>
-                </div>
-              </header>
+            {!sectionId && <nav className="settings-section-menu" aria-label="Settings sections">
+              {SETTINGS_SECTIONS.map(section => <button key={section.id} type="button" className="settings-section-link" onClick={() => navigateSection(section.id)}>
+                <section.icon className="settings-section-icon" size={22} aria-hidden="true" />
+                <span className="settings-section-copy"><strong>{section.label}</strong><span>{section.description}</span></span>
+                <ChevronRight size={20} aria-hidden="true" />
+              </button>)}
+            </nav>}
+
+            {sectionId === 'general' && <section className="pane" data-settings-pane="general">
 
               <div className="settings-section">
                 <div className="settings-list">
-                  <div className="setting-row">
+                  <h3 className="settings-subsection-title">Appearance</h3>
+                  {!mobile && <div className="setting-row">
                     <div>
-                      <div className="setting-label">Navigation layout</div>
+                      <div className="setting-label">Navigation layout<SettingFeedback state={feedback.states['navigation']} /></div>
                       <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
                     </div>
                     <div className="navigation-layout-picker" role="group" aria-label="Navigation layout">
                       <button
                         type="button"
                         className={navigationLayout === 'sidebar' ? 'is-active' : ''}
-                        aria-pressed={navigationLayout === 'sidebar'}
+                        aria-pressed={navigationLayout === 'sidebar'} disabled={feedback.busy}
                         onClick={() => handleNavigationLayoutChange('sidebar')}
                       >
                         Sidebar
@@ -691,185 +804,228 @@ export const AppSettings = React.memo(function AppSettings({
                       <button
                         type="button"
                         className={navigationLayout === 'top' ? 'is-active' : ''}
-                        aria-pressed={navigationLayout === 'top'}
+                        aria-pressed={navigationLayout === 'top'} disabled={feedback.busy}
                         onClick={() => handleNavigationLayoutChange('top')}
                       >
                         Top
                       </button>
                     </div>
-                  </div>
+                  </div>}
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Minimize to system tray on close</div>
-                      <div className="setting-description">Closing the window keeps Qorc running in the background.</div>
-                    </div>
-                    <SwitchButton checked={closeToTray} disabled={isTrayLoading} label="Minimize to system tray" onChange={handleCloseToTrayChange} />
+                    <SettingCopy>
+                      <div className="setting-label">Theme<SettingFeedback state={feedback.states['theme']} /></div>
+                      <div className="setting-description">Choose a light or dark appearance, or follow your device.</div>
+                    </SettingCopy>
+                    <AppSelect className="theme-select" label="Theme" value={theme}
+                      onValueChange={handleThemeChange} disabled={feedback.busy}
+                      options={[{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} />
                   </div>
+                  {(!mobile || android) && <h3 className="settings-subsection-title">Background activity</h3>}
+                  {(!mobile || android) && <div className="setting-row">
+                    <div>
+                      <div className="setting-label">{android ? 'Keep running in background' : 'Minimize to system tray on close'}<SettingFeedback state={feedback.states.background} /></div>
+                      <div className="setting-description">{android ? 'Keep messages and calls connected after closing the app.' : 'Closing the window keeps Qorc running in the background.'}</div>
+                    </div>
+                    <SwitchButton checked={closeToTray} disabled={isTrayLoading || feedback.busy} label={android ? 'Keep running in background' : 'Minimize to system tray'} onChange={handleCloseToTrayChange} />
+                  </div>}
+                  {android && <div className="setting-row">
+                    <div>
+                      <div className="setting-label">Background connection notice<SettingFeedback state={feedback.states['background-notice']} /></div>
+                      <div className="setting-description">Open Android notification settings to manage the connection notice. Hiding it keeps Qorc running.</div>
+                    </div>
+                    <button className="action" type="button" onClick={() => {
+                      void tray.openBackgroundNoticeSettings().catch(() => feedback.fail('background-notice', 'Could not open Android notification settings. Please try again.'));
+                    }}>Manage</button>
+                  </div>}
                 </div>
               </div>
-            </section>
+            </section>}
 
-            <section className="pane" data-settings-pane="servers">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <Server className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">Servers</h2>
-                  </div>
-                </div>
-              </header>
-              <div className="settings-section"><div className="settings-list"><div className="setting-row">
-                <div><div className="setting-label">Saved servers</div><div className="setting-description">Add, edit, or remove saved servers.</div></div>
-                <button type="button" className="action" aria-haspopup="dialog" onClick={() => setSavedServersOpen(true)}><Server size={17} aria-hidden="true" /><span>Manage servers</span></button>
+            {sectionId === 'servers' && <section className="pane" data-settings-pane="servers">
+              <div className="settings-section"><div className="settings-list"><h3 className="settings-subsection-title">Connections</h3><div className="setting-row">
+                <SettingCopy><div className="setting-label">Saved servers</div><div className="setting-description">Add or remove server addresses available on the sign-in screen.</div></SettingCopy>
+                <button type="button" className="action" onClick={() => setSavedServersOpen(true)}>Manage servers</button>
               </div></div></div>
-            </section>
+            </section>}
 
-            <section className="pane" data-settings-pane="notifications">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <Bell className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">Notifications</h2>
-                  </div>
-                </div>
-              </header>
+            {sectionId === 'notifications' && <section className="pane" data-settings-pane="notifications">
               <div className="settings-section">
                 <div className="settings-list">
+                  <h3 className="settings-subsection-title">Alerts</h3>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Desktop Notifications</div>
-                      <div className="setting-description">Show desktop alerts for unmuted messages and calls.</div>
-                    </div>
-                    <SwitchButton checked={notifications.desktop && !(doNotDisturb.messages && doNotDisturb.calls)} disabled={doNotDisturb.messages && doNotDisturb.calls} label="Desktop Notifications" onChange={handleDesktopNotificationsToggle} />
+                    <SettingCopy>
+                      <div className="setting-label">{mobile ? 'Notifications' : 'Desktop Notifications'}<SettingFeedback state={feedback.states.notifications} /></div>
+                      <div className="setting-description">Show alerts for unmuted messages and calls.</div>
+                    </SettingCopy>
+                    <SwitchButton checked={notifications.desktop && !(doNotDisturb.messages && doNotDisturb.calls)} disabled={feedback.busy || (doNotDisturb.messages && doNotDisturb.calls)} label={mobile ? 'Notifications' : 'Desktop Notifications'} onChange={handleDesktopNotificationsToggle} />
+                  </div>
+                  <h3 className="settings-subsection-title">Do Not Disturb</h3>
+                  <div className="setting-row">
+                    <SettingCopy>
+                      <div className="setting-label">Mute message alerts<SettingFeedback state={feedback.states['mute-messages']} /></div>
+                      <div className="setting-description">Silence message alerts while keeping messages available in your chats.</div>
+                    </SettingCopy>
+                    <SwitchButton checked={doNotDisturb.messages} disabled={feedback.busy} label="Mute message alerts" onChange={checked => handleDoNotDisturb('messages', checked)} />
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Mute message alerts</div>
-                      <div className="setting-description">Mute all notification alerts for messages.</div>
-                    </div>
-                    <SwitchButton checked={doNotDisturb.messages} label="Mute message alerts" onChange={checked => handleDoNotDisturb('messages', checked)} />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Mute call alerts</div>
-                      <div className="setting-description">Mute all notification alerts for calls.</div>
-                    </div>
-                    <SwitchButton checked={doNotDisturb.calls} label="Mute call alerts" onChange={checked => handleDoNotDisturb('calls', checked)} />
+                    <SettingCopy>
+                      <div className="setting-label">Mute call alerts<SettingFeedback state={feedback.states['mute-calls']} /></div>
+                      <div className="setting-description">Silence incoming call alerts without changing your message alerts.</div>
+                    </SettingCopy>
+                    <SwitchButton checked={doNotDisturb.calls} disabled={feedback.busy} label="Mute call alerts" onChange={checked => handleDoNotDisturb('calls', checked)} />
                   </div>
                 </div>
               </div>
-            </section>
+            </section>}
 
-            <section className="pane" data-settings-pane="devices">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <Headphones className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">Devices</h2>
-                  </div>
-                  <p className="pane-subtitle">Hardware used for calls.</p>
-                </div>
-                <button
-                  className="settings-icon-action"
-                  type="button"
-                  disabled={devicesLoading}
-                  aria-label="Refresh media devices"
-                  title="Refresh media devices"
-                  onClick={() => { void refreshMediaDevices(); }}
-                >
-                  <RefreshCw className={devicesLoading ? 'animate-spin' : ''} aria-hidden="true" />
-                </button>
-              </header>
+            {sectionId === 'devices' && <section className="pane" data-settings-pane="devices">
 
               <div className="settings-section">
                 <div className="settings-list">
-                  <div className="setting-row">
+                  <div className="setting-row settings-refresh-row">
                     <div>
-                      <div className="setting-label">Microphone</div>
+                      <div className="setting-label">Available devices<SettingFeedback state={feedback.states.devices} /></div>
+                      <div className="setting-description" id="settings-refresh-description">Find connected microphones, speakers and cameras. May request device access.</div>
+                    </div>
+                    <button className="action settings-refresh-button" type="button"
+                      disabled={devicesLoading || feedback.busy} aria-busy={devicesLoading}
+                      aria-label="Refresh media devices" aria-describedby="settings-refresh-description"
+                      onClick={() => { void refreshMediaDevices(); }}>
+                      {devicesLoading ? 'Loading…' : 'Refresh devices'}
+                    </button>
+                  </div>
+                  <h3 className="settings-subsection-title">Audio</h3>
+                  <div className="setting-row">
+                    <SettingCopy>
+                      <div className="setting-label">Microphone<SettingFeedback state={feedback.states['preferredMicId']} /></div>
                       <div className="setting-description">Default microphone for calls.</div>
-                    </div>
-                    <AppSelect className="device-select" label="Microphone" value={preferredMicId} onValueChange={(value) => handleDevicePreference('preferredMicId', value)} options={[
-                      { value: '', label: 'System Default' },
-                      ...micDevices.map((device) => ({ value: device.deviceId, label: device.label || `Microphone ${device.deviceId.slice(0, 8)}` })),
-                    ]} />
+                    </SettingCopy>
+                    <AppSelect className="device-select" disabled={feedback.busy} label="Microphone" value={preferredMicId} onValueChange={(value) => handleDevicePreference('preferredMicId', value)} options={mediaOptions(micDevices, preferredMicId, 'Microphone')} />
                   </div>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Speaker</div>
+                    <SettingCopy>
+                      <div className="setting-label">Speaker<SettingFeedback state={feedback.states['preferredSpeakerId']} /></div>
                       <div className="setting-description">Default speaker for call audio output.</div>
-                    </div>
-                    <AppSelect className="device-select" label="Speaker" value={preferredSpeakerId} onValueChange={(value) => handleDevicePreference('preferredSpeakerId', value)} options={[
-                      { value: '', label: 'System Default' },
-                      ...speakerDevices.map((device) => ({ value: device.deviceId, label: device.label || `Speaker ${device.deviceId.slice(0, 8)}` })),
-                    ]} />
+                    </SettingCopy>
+                    <AppSelect className="device-select" disabled={feedback.busy} label="Speaker" value={preferredSpeakerId} onValueChange={(value) => handleDevicePreference('preferredSpeakerId', value)} options={mediaOptions(speakerDevices, preferredSpeakerId, 'Speaker')} />
                   </div>
+                  <h3 className="settings-subsection-title">Video</h3>
                   <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Camera</div>
+                    <SettingCopy>
+                      <div className="setting-label">Camera<SettingFeedback state={feedback.states['preferredCameraId']} /></div>
                       <div className="setting-description">Default camera for video calls.</div>
-                    </div>
-                    <AppSelect className="device-select" label="Camera" value={preferredCameraId} onValueChange={(value) => handleDevicePreference('preferredCameraId', value)} options={[
-                      { value: '', label: 'System Default' },
-                      ...cameraDevices.map((device) => ({ value: device.deviceId, label: device.label || `Camera ${device.deviceId.slice(0, 8)}` })),
-                    ]} />
+                    </SettingCopy>
+                    <AppSelect className="device-select" disabled={feedback.busy} label="Camera" value={preferredCameraId} onValueChange={(value) => handleDevicePreference('preferredCameraId', value)} options={mediaOptions(cameraDevices, preferredCameraId, 'Camera')} />
                   </div>
                 </div>
               </div>
-            </section>
+            </section>}
 
-            <section className="pane" data-settings-pane="privacy">
-              <header className="pane-head">
-                <div className="pane-heading">
-                  <div className="pane-title-row">
-                    <ShieldCheck className="pane-title-icon" aria-hidden="true" />
-                    <h2 className="pane-title">Privacy & Safety</h2>
-                  </div>
-                  <p className="pane-subtitle">Manage who can reach you.</p>
-                </div>
-                <button
-                  className="settings-head-action"
-                  type="button"
-                  onClick={onOpenBlockConversationChooser}
-                >
-                  <Ban aria-hidden="true" />
-                  <span>Block user</span>
-                </button>
-              </header>
+            {sectionId === 'privacy' && <section className="pane" data-settings-pane="privacy">
 
               <div className="settings-section">
-                {blockedUsersError && <div className="settings-error">{blockedUsersError}</div>}
+                <h3 className="settings-subsection-title">Contacts</h3>
+                <button className="settings-section-link" type="button" aria-label="Blocked users" onClick={() => setBlockedUsersOpen(true)}>
+                  <Ban size={22} aria-hidden="true" />
+                  <span className="settings-section-copy"><strong>Blocked users</strong><span>View blocked people and choose who to unblock.</span></span>
+                  <ChevronRight size={20} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="settings-legal-links" role="group" aria-label="Legal documents">
+                <h3 className="settings-subsection-title">Terms and privacy</h3>
+                <button className="settings-section-link" type="button" onClick={() => handleOpenLegalLink(TERMS_URL)}>
+                  <FileText size={22} aria-hidden="true" />
+                  <span className="settings-section-copy"><strong>Terms and Conditions</strong></span>
+                  <ExternalLink size={20} aria-hidden="true" />
+                </button>
+                <button className="settings-section-link" type="button" onClick={() => handleOpenLegalLink(PRIVACY_URL)}>
+                  <ShieldCheck size={22} aria-hidden="true" />
+                  <span className="settings-section-copy"><strong>Privacy Policy</strong></span>
+                  <ExternalLink size={20} aria-hidden="true" />
+                </button>
+              </div>
+              <div className="settings-local-data" role="group" aria-labelledby="settings-local-data-title">
+                <h3 id="settings-local-data-title" className="settings-subsection-title">Local account data</h3>
+                <div className="setting-row setting-row-destructive">
+                  <div>
+                    <div className="setting-label">Remove this account from this device</div>
+                    <div className="setting-description">Delete this account’s local messages, files and keys, then sign out. Other accounts, shared settings and exported copies are kept. Your server account remains.</div>
+                  </div>
+                  <div className="settings-clear-controls">
+                    <button className="danger-action" type="button" disabled={actionBusy || feedback.busy} onClick={() => openActionConfirmation('clear')}><Trash2 aria-hidden="true" /><span>Clear Data</span></button>
+                  </div>
+                </div>
+              </div>
+              <div className="settings-local-data" role="group" aria-labelledby="settings-app-reset-title">
+                <h3 id="settings-app-reset-title" className="settings-subsection-title">All local Qorc data</h3>
+                <div className="setting-row setting-row-destructive">
+                  <div><div className="setting-label">Reset this Qorc installation</div><div className="setting-description">Delete every local account, message, attachment, encryption key, saved server and app setting. Accounts on the server and exported copies remain.</div></div>
+                  <div className="settings-clear-controls">
+                    <button className="danger-action" type="button" disabled={actionBusy || feedback.busy} onClick={() => openActionConfirmation('reset')}><Trash2 aria-hidden="true" /><span>Reset All Local Qorc Data</span></button>
+                  </div>
+                </div>
+              </div>
+            </section>}
+            {!sectionId && <section className="account-actions settings-account-footer" aria-label="Account actions">
+              <div className="settings-account-action-copy">
+                <div className="account-action-controls">
+                  <button className="danger-action" type="button" disabled={actionBusy || feedback.busy} onClick={() => openActionConfirmation('logout')}><LogOut aria-hidden="true" /><span>Log Out</span></button>
+                </div>
+              </div>
+            </section>}
+          </section>
+        </main>
 
+        {confirmationAction && <SettingsActionDialog
+          themeClass={themeClass} busy={actionBusy} error={actionError}
+          title={confirmationAction === 'logout' ? 'Log out?' : confirmationAction === 'clear' ? 'Clear this account’s local data?' : 'Reset all local Qorc data?'}
+          description={confirmationAction === 'logout' ? 'Sign out of Qorc on this device. Your local messages and files will be kept.'
+            : confirmationAction === 'clear' ? `Permanently delete local messages, attachments, encryption keys, saved sign-in and settings for ${displayUsername}, then sign out. Other local accounts and your account on the server remain. This cannot be undone.`
+            : `Permanently delete every local account, message, attachment, encryption key, saved server and app setting. Server accounts and exported copies remain. ${android ? 'Qorc will close; reopen it to start from setup.' : 'Qorc will restart and return to setup.'} This cannot be undone.`}
+          confirmLabel={confirmationAction === 'logout' ? 'Log Out' : confirmationAction === 'clear' ? 'Delete local data' : 'Reset all local data'}
+          busyLabel={confirmationAction === 'logout' ? 'Logging out…' : confirmationAction === 'clear' ? 'Deleting…' : 'Resetting…'}
+          onCancel={closeActionConfirmation} onConfirm={confirmAction}
+        />}
+        <SavedServersScreen open={savedServersOpen} onOpenChange={setSavedServersOpen} />
+        {blockedUsersOpen && <StandaloneScreen open onBack={closeBlockedUsers} className="qorc-blocked-users-screen" labelledBy={blockedUsersTitleId}>
+          <div className={`qorc-settings-host ${themeClass}${mobile ? ' is-mobile' : ''}`}>
+            <main className="settings-screen blocked-users-screen" inert={!!unblockTarget}>
+              <header className="settings-header blocked-users-header">
+                <button className="settings-back" type="button" data-screen-back="" aria-label="Back to Privacy & Safety" onClick={closeBlockedUsers}>
+                  <ArrowLeft size={22} aria-hidden="true" />
+                </button>
+                <h1 className="settings-brand" id={blockedUsersTitleId}><strong>Blocked users</strong></h1>
+              </header>
+              <section className="settings-content" aria-label="Blocked users list">
+                <button className="settings-section-link" type="button" aria-label="Block a user" onClick={() => { setBlockedUsersOpen(false); onOpenBlockConversationChooser(); }}>
+                  <Ban size={22} aria-hidden="true" />
+                  <span className="settings-section-copy"><strong>Block a user</strong></span>
+                  <ChevronRight size={20} aria-hidden="true" />
+                </button>
+                {blockedUsersError && <div className="settings-error" role="alert">{blockedUsersError}</div>}
                 {blockedUsersLoading && blockedUsers.length === 0 ? (
                   <div className="blocked-empty" role="status" aria-label="Loading blocked users">
                     <LoaderCircle className="blocked-spinner" size={20} aria-hidden="true" />
                   </div>
                 ) : blockedUsers.length === 0 ? (
-                  <div className="blocked-empty">
+                  !blockedUsersError && <div className="blocked-empty">
                     <div><strong>No blocked users</strong><span>Users you block will appear here.</span></div>
                   </div>
                 ) : (
                   <div className="blocked-user-list">
-                    {blockedUsers.map((user) => (
-                      <BlockedUserRow
-                        key={user.username}
-                        user={user}
-                        loading={unblocking}
-                        onUnblock={openUnblockModal}
-                      />
-                    ))}
+                    {blockedUsers.map((user) => <BlockedUserRow key={user.username} user={user} loading={unblocking} onUnblock={openUnblockModal} />)}
                   </div>
                 )}
-              </div>
-            </section>
-          </section>
-        </main>
-
-        <SavedServersDialog open={savedServersOpen} onOpenChange={setSavedServersOpen} />
+              </section>
+            </main>
+          </div>
+        </StandaloneScreen>}
         {unblockTarget && (
           <UnblockConfirmModal
             username={unblockTarget}
             busy={unblocking}
             themeClass={themeClass}
+            error={blockedUsersError}
             onCancel={closeUnblockModal}
             onConfirm={confirmUnblock}
           />

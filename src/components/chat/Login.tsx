@@ -7,6 +7,8 @@ import { SignInForm } from './Login/SignIn';
 import { SignUpForm } from './Login/SignUp';
 import { ServerPasswordForm } from './Login/ServerPassword';
 import { EventType } from '../../lib/types/event-types';
+import { useAppBack } from '../../hooks/useAppBack';
+import { TERMS_URL, PRIVACY_URL } from '../../lib/ui/legal-links';
 
 interface LoginProps {
   readonly isGeneratingKeys: boolean;
@@ -25,9 +27,6 @@ interface LoginProps {
   readonly handleServerPasswordSubmit: (password: string) => Promise<void>;
   readonly setIsRegistrationMode: (val: boolean) => void;
 }
-
-const TERMS_URL = "https://www.qorc.com/terms";
-const PRIVACY_URL = "https://www.qorc.com/privacy";
 
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
   try {
@@ -145,6 +144,7 @@ export const Login = React.memo<LoginProps>(({
   }, []);
 
   const isBusy = isSubmitting || isGeneratingKeys || isRateLimited;
+  useAppBack(!isBusy, handleBackToSetup);
 
   const isSignup = mode === "register" && !showPasswordPrompt;
   const prefix = isSignup ? "signup" : "login";
@@ -161,11 +161,10 @@ export const Login = React.memo<LoginProps>(({
             <QorcBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
             <span className={`${prefix}-brand-name`}>Qorc</span>
           </div>
-
+          <ThemeToggleButton className="auth-theme-toggle" />
         </header>
 
         <div className="auth-bottom-actions">
-          <ThemeToggleButton className="auth-theme-toggle" />
           <div>
             <button
               type="button"

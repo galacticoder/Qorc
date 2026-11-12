@@ -21,7 +21,7 @@ const FRAME_WAIT: Duration = Duration::from_secs(1);
 const START_WAIT: Duration = Duration::from_secs(10);
 const MAX_SESSIONS: usize = 2;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct MicrophoneDevice {
     pub device_id: String,
     pub label: String,
@@ -63,14 +63,36 @@ impl MicrophoneSession {
         }
     }
 
-    fn publish(&self, frame: MicrophoneFrame) {
+    fn publish(&self, mut frame: MicrophoneFrame) {
         if let Ok(mut slot) = self.slot.lock() {
+            if !self.enabled.load(Ordering::Acquire) || !frame.enabled {
+                frame.samples.fill(0.0);
+                frame.enabled = false;
+            }
             if let Some(previous) = slot.frame.as_mut() {
                 previous.samples.fill(0.0);
             }
             slot.frame = Some(frame);
             self.ready.notify_all();
+            return;
         }
+        frame.samples.fill(0.0);
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut slot = self
+            .slot
+            .lock()
+            .map_err(|_| "microphone frame queue unavailable".to_string())?;
+        self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            if let Some(frame) = slot.frame.as_mut() {
+                frame.samples.fill(0.0);
+                frame.enabled = false;
+            }
+        }
+        self.ready.notify_all();
+        Ok(())
     }
 
     fn fail(&self, message: String) {
@@ -101,7 +123,12 @@ impl MicrophoneSession {
                 .as_ref()
                 .is_some_and(|frame| sequence_after(frame.sequence, after_sequence))
             {
-                return Ok(slot.frame.take());
+                let mut frame = slot.frame.take().unwrap();
+                if !self.enabled.load(Ordering::Acquire) || !frame.enabled {
+                    frame.samples.fill(0.0);
+                    frame.enabled = false;
+                }
+                return Ok(Some(frame));
             }
             if let Some(failure) = slot.failure.take() {
                 return Err(failure);
@@ -220,8 +247,7 @@ impl MicrophoneCaptureState {
     pub fn set_enabled(&self, session_id: &str, enabled: bool) -> Result<(), String> {
         validate_session_id(session_id)?;
         let session = self.session(session_id)?;
-        session.enabled.store(enabled, Ordering::Release);
-        Ok(())
+        session.set_enabled(enabled)
     }
 
     pub fn pull(
@@ -483,6 +509,67 @@ fn enumerate_output_devices() -> Result<Vec<MicrophoneDevice>, String> {
             Some(MicrophoneDevice { device_id, label })
         })
         .collect())
+}
+
+#[cfg(target_os = "android")]
+fn enumerate_input_devices() -> Result<Vec<MicrophoneDevice>, String> {
+    crate::android_media::devices("microphoneDevices")
+}
+#[cfg(target_os = "android")]
+fn enumerate_output_devices() -> Result<Vec<MicrophoneDevice>, String> {
+    crate::android_media::devices("outputDevices")
+}
+#[cfg(target_os = "android")]
+fn run_capture(
+    session: Arc<MicrophoneSession>,
+    device_id: Option<&str>,
+    started: std::sync::mpsc::SyncSender<Result<(), String>>,
+) {
+    let result = (|| -> Result<(), String> {
+        let capture = crate::android_media::Capture::start("microphone", device_id, 0, 0, 0)?;
+        let _ = started.send(Ok(()));
+        let mut enabled = true;
+        while !session.stop.load(Ordering::Acquire) {
+            let current = session.enabled.load(Ordering::Acquire);
+            if enabled != current {
+                capture.enabled(current)?;
+                enabled = current;
+            }
+            if let Some(mut frame) = capture.poll()? {
+                let mut bytes = frame.decode(FRAME_SAMPLES * 4)?;
+                if bytes.len() != FRAME_SAMPLES * 4 {
+                    bytes.fill(0);
+                    return Err("Invalid Android microphone frame".into());
+                }
+                let samples = bytes
+                    .chunks_exact(4)
+                    .map(|b| {
+                        let value = f32::from_le_bytes(b.try_into().unwrap());
+                        if current && value.is_finite() {
+                            value.clamp(-1.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                bytes.fill(0);
+                session.publish(MicrophoneFrame {
+                    sequence: u32::try_from(frame.sequence)
+                        .map_err(|_| "Invalid microphone sequence")?,
+                    captured_at: frame.captured_at,
+                    enabled: current && frame.enabled,
+                    samples,
+                });
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        capture.finish()
+    })();
+    if let Err(error) = result {
+        let _ = started.send(Err(error.clone()));
+        session.fail(error);
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -301,12 +301,7 @@ pub async fn message_content_copy(
                 "Native message content is not valid UTF-8".to_string(),
             )
         })?;
-        let mut clipboard = arboard::Clipboard::new().map_err(|_| {
-            crate::error::QorcError::Internal("System clipboard is unavailable".to_string())
-        })?;
-        clipboard.set_text(plaintext).map_err(|_| {
-            crate::error::QorcError::Internal("System clipboard write failed".to_string())
-        })?;
+        crate::system::platform::copy_text(&app, plaintext)?;
         Ok::<bool, crate::error::QorcError>(true)
     })
     .await

@@ -1,32 +1,61 @@
-import { useEffect, useId, useState, useRef, type PointerEvent } from 'react';
-import { LogOut } from 'lucide-react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
 import { cn } from '@/lib/utils/shared-utils';
 import { UserAvatar } from './UserAvatar';
 import { useTheme } from '../../contexts/ThemeContext';
 import { QorcBrandLogo } from './QorcBrandLogo';
+import type { SectionNavigationMotion } from '../../lib/ui/section-navigation';
+
+const sectionIds = ['chats', 'calls', 'settings'] as const;
+type HighlightRect = { x: number; y: number; width: number; height: number };
+
+function useNavigationHighlight(variant: string, expanded: boolean, activeTab: string, motion?: SectionNavigationMotion | null) {
+    const ref = useRef<HTMLElement>(null);
+    const [rects, setRects] = useState<HighlightRect[]>([]);
+    useLayoutEffect(() => {
+        const element = ref.current;
+        if (!element) return;
+        const measure = () => {
+            const parent = element.getBoundingClientRect();
+            const next = sectionIds.map(id => {
+                const rect = element.querySelector<HTMLElement>(`[data-nav-section="${id}"]`)!.getBoundingClientRect();
+                return { x: rect.left - parent.left, y: rect.top - parent.top, width: rect.width, height: rect.height };
+            });
+            setRects(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+        };
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        element.querySelectorAll('[data-nav-section]').forEach(button => observer.observe(button));
+        window.addEventListener('resize', measure);
+        return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
+    }, [variant, expanded]);
+    const index = Math.max(0, Math.min(2, motion?.index ?? sectionIds.indexOf(activeTab as typeof sectionIds[number])));
+    const from = rects[Math.floor(index)], to = rects[Math.ceil(index)];
+    const amount = index % 1;
+    const mix = (key: keyof HighlightRect) => from[key] + (to[key] - from[key]) * amount;
+    const highlight = <span aria-hidden="true" className="qorc-nav-highlight" style={from && to ? {
+        width: mix('width'), height: mix('height'), transform: `translate3d(${mix('x')}px, ${mix('y')}px, 0)`,
+    } : { display: 'none' }} />;
+    return { ref, highlight };
+}
 
 interface SidebarProps {
-    variant?: 'sidebar' | 'top';
+    variant?: 'sidebar' | 'top' | 'bottom';
     activeTab: 'chats' | 'calls' | 'settings';
     onTabChange: (tab: 'chats' | 'calls' | 'settings') => void;
+    navigationMotion?: SectionNavigationMotion | null;
     currentUser: {
         username: string;
         avatarUrl?: string;
     };
-    onLogout: () => void;
 }
 
-export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUser, onLogout }: SidebarProps) {
+export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUser, navigationMotion }: SidebarProps) {
     const { theme, resolvedTheme, setTheme } = useTheme();
     const themeMaskId = useId();
     const [isCollapsed, setIsCollapsed] = useState(true);
-    const logoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const logoutHoldGenerationRef = useRef(0);
-    const logoutHoldActiveRef = useRef(false);
-    const logoutCommittedRef = useRef(false);
-    const [logoutProgress, setLogoutProgress] = useState(0);
-    const [isHoldingLogout, setIsHoldingLogout] = useState(false);
+    const { ref: navigationRef, highlight } = useNavigationHighlight(variant, !isCollapsed, activeTab, navigationMotion);
     const activeTheme = theme === 'system' ? resolvedTheme : theme;
 
     const navItems = [
@@ -34,63 +63,25 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
         { id: 'calls', icon: CallIcon, label: 'Calls' },
     ] as const;
 
-    useEffect(() => {
-        logoutCommittedRef.current = false;
-        logoutHoldActiveRef.current = false;
-        logoutHoldGenerationRef.current += 1;
-        setIsHoldingLogout(false);
-        setLogoutProgress(0);
-        return () => {
-            logoutHoldActiveRef.current = false;
-            logoutHoldGenerationRef.current += 1;
-            if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
-            logoutTimerRef.current = null;
-        };
-    }, [currentUser?.username]);
-
-    const handleLogoutPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
-        if (event.button !== 0 || logoutHoldActiveRef.current || logoutCommittedRef.current) return;
-        event.preventDefault();
-        logoutHoldActiveRef.current = true;
-        const generation = ++logoutHoldGenerationRef.current;
-        setIsHoldingLogout(true);
-        const startTime = Date.now();
-        const duration = 2500;
-
-        const updateProgress = () => {
-            if (
-                !logoutHoldActiveRef.current ||
-                logoutHoldGenerationRef.current !== generation ||
-                logoutCommittedRef.current
-            ) return;
-            const elapsed = Date.now() - startTime;
-            const progress = Math.min((elapsed / duration) * 100, 100);
-            setLogoutProgress(progress);
-
-            if (progress < 100) {
-                logoutTimerRef.current = setTimeout(updateProgress, 16);
-            } else {
-                logoutTimerRef.current = null;
-                logoutHoldActiveRef.current = false;
-                logoutCommittedRef.current = true;
-                setIsHoldingLogout(false);
-                onLogout();
-            }
-        };
-
-        updateProgress();
-    };
-
-    const cancelLogoutHold = () => {
-        logoutHoldGenerationRef.current += 1;
-        logoutHoldActiveRef.current = false;
-        setIsHoldingLogout(false);
-        setLogoutProgress(0);
-        if (logoutTimerRef.current) {
-            clearTimeout(logoutTimerRef.current);
-            logoutTimerRef.current = null;
-        }
-    };
+    if (variant === 'bottom') {
+        const mobileItems = [
+            { id: 'chats', icon: ChatBubbleIcon, label: 'Chats' },
+            { id: 'calls', icon: CallIcon, label: 'Calls' },
+            { id: 'settings', icon: SettingsIcon, label: 'Settings' },
+        ] as const;
+        return (
+            <nav ref={navigationRef} className="qorc-bottom-nav" aria-label="Qorc sections" data-nav-motion={navigationMotion?.phase ?? 'idle'}>
+                {highlight}
+                {mobileItems.map(item => (
+                    <button key={item.id} data-nav-section={item.id} type="button" className={cn('qorc-bottom-nav-button', activeTab === item.id && 'is-active')}
+                        onClick={() => onTabChange(item.id)} aria-pressed={activeTab === item.id}>
+                        <item.icon className={activeTab === item.id ? 'fill-current' : 'fill-none'} width={23} height={23} strokeWidth={2} aria-hidden="true" />
+                        <span>{item.label}</span>
+                    </button>
+                ))}
+            </nav>
+        );
+    }
 
     const themeIcon = (
         <span className="themeToggle st-sunMoonThemeToggleBtn" aria-hidden="true">
@@ -133,10 +124,12 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                     <div className="qorc-top-nav-brand" aria-hidden="true">
                         <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
                     </div>
-                    <nav className="qorc-top-nav-sections" aria-label="Qorc sections">
+                    <nav ref={navigationRef} className="qorc-top-nav-sections" aria-label="Qorc sections" data-nav-motion={navigationMotion?.phase ?? 'idle'}>
+                        {highlight}
                         {navItems.map((item) => (
                             <button
                                 key={item.id}
+                                data-nav-section={item.id}
                                 type="button"
                                 onClick={() => onTabChange(item.id)}
                                 className={cn("qorc-top-nav-button", activeTab === item.id && "is-active")}
@@ -157,6 +150,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                             type="button"
                             onClick={() => onTabChange('settings')}
                             className={cn("qorc-top-nav-button qorc-top-nav-settings", activeTab === 'settings' && "is-active")}
+                            data-nav-section="settings"
                             aria-label="Settings"
                             title="Settings"
                             aria-pressed={activeTab === 'settings'}
@@ -179,20 +173,14 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                             {themeIcon}
                         </button>
                         {currentUser && (
-                            <button
-                                type="button"
-                                className={cn("qorc-top-nav-button qorc-top-nav-profile", isHoldingLogout && "is-holding")}
-                                onPointerDown={handleLogoutPointerDown}
-                                onPointerUp={cancelLogoutHold}
-                                onPointerLeave={cancelLogoutHold}
-                                onPointerCancel={cancelLogoutHold}
-                                aria-label="Hold to logout"
-                                title="Hold to logout"
+                            <div
+                                className="qorc-top-nav-profile"
+                                role="img"
+                                aria-label={currentUser.username}
+                                title={currentUser.username}
                             >
-                                <span className="qorc-logout-progress" style={{ width: `${logoutProgress}%` }} aria-hidden="true" />
-                                <UserAvatar username={currentUser.username} isCurrentUser={true} size="sm" className="qorc-profile-avatar" />
-                                <LogOut className="qorc-logout-icon" aria-hidden="true" />
-                            </button>
+                                <UserAvatar username={currentUser.username} isCurrentUser={true} size="sm" />
+                            </div>
                         )}
                     </nav>
                 </div>
@@ -201,7 +189,8 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
     }
 
     return (
-        <aside className={cn("qorc-rail", !isCollapsed && "is-expanded")}>
+        <aside ref={navigationRef} className={cn("qorc-rail", !isCollapsed && "is-expanded")} data-nav-motion={navigationMotion?.phase ?? 'idle'}>
+            {highlight}
             <button
                 type="button"
                 className="qorc-rail-row qorc-rail-head"
@@ -219,6 +208,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                 {navItems.map((item) => (
                     <button
                         key={item.id}
+                        data-nav-section={item.id}
                         type="button"
                         onClick={() => onTabChange(item.id)}
                         className={cn(
@@ -253,6 +243,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                         activeTab === 'settings' && "is-active"
                     )}
                     aria-pressed={activeTab === 'settings'}
+                    data-nav-section="settings"
                 >
                     <span className="qorc-rail-icon-slot">
                         <SettingsIcon
@@ -282,37 +273,21 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                 </button>
 
                 {currentUser && (
-                    <button
-                        type="button"
-                        className={cn(
-                            "qorc-rail-row qorc-rail-profile",
-                            isHoldingLogout && "is-holding"
-                        )}
-                        onPointerDown={handleLogoutPointerDown}
-                        onPointerUp={cancelLogoutHold}
-                        onPointerLeave={cancelLogoutHold}
-                        onPointerCancel={cancelLogoutHold}
-                        aria-label="Hold to logout"
+                    <div
+                        className="qorc-rail-row qorc-rail-profile"
+                        role="img"
+                        aria-label={currentUser.username}
+                        title={currentUser.username}
                     >
-                        <span
-                            className="qorc-logout-progress"
-                            style={{ width: `${logoutProgress}%` }}
-                            aria-hidden="true"
-                        />
-                        <span className="qorc-rail-icon-slot qorc-profile-icon-slot">
+                        <span className="qorc-rail-icon-slot">
                             <UserAvatar
                                 username={currentUser.username}
                                 isCurrentUser={true}
                                 size="sm"
-                                className="qorc-profile-avatar"
                             />
-                            <LogOut className="qorc-logout-icon" aria-hidden="true" />
                         </span>
-                        <span className="qorc-profile-stack">
-                            <span className="qorc-profile-name">{isHoldingLogout ? 'Logging out' : currentUser.username}</span>
-                            <span className="qorc-profile-help">{isHoldingLogout ? 'Hold to confirm' : 'Hold to logout'}</span>
-                        </span>
-                    </button>
+                        <span className="qorc-rail-label qorc-profile-name">{currentUser.username}</span>
+                    </div>
                 )}
             </div>
         </aside>

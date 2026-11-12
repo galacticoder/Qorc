@@ -66,6 +66,14 @@ function main() {
 
   const target = requestedTarget || hostTriple();
   validateTarget(target);
+  if (target.endsWith('-linux-android')) {
+    if (!clientOnly) throw new Error('Android packages the PIR client only, use --client-only');
+    const abi = { aarch64: 'arm64-v8a', x86_64: 'x86_64' }[target.split('-')[0]];
+    execFileSync(process.execPath, [path.join(repoRoot, 'scripts/build-android-pir.cjs'), '--abi', abi], {
+      cwd: repoRoot, stdio: 'inherit', env: process.env,
+    });
+    return;
+  }
   const binaries = clientOnly ? ['qorc-pir-client'] : ALL_BINARIES;
   const cargoArgs = ['build', '--release', '--offline'];
   if (requestedTarget) cargoArgs.push('--target', target);

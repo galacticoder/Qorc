@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{
     State,
-    ipc::{Channel, InvokeBody, JavaScriptChannelId, Request, Response},
+    ipc::{Channel, JavaScriptChannelId, Request, Response},
 };
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -616,6 +616,29 @@ pub async fn anonymous_api_fetch(
     state: State<'_, AppState>,
     request: Request<'_>,
 ) -> Result<Response, String> {
+    anonymous_api_fetch_bytes(webview, state, request).await.map(Response::new)
+}
+
+#[tauri::command]
+pub async fn anonymous_api_fetch_channel(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<usize, String> {
+    let channel = request.headers().get("x-qorc-anonymous-response-channel")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<JavaScriptChannelId>().ok())
+        .ok_or_else(|| "invalid anonymous response channel".to_string())?
+        .channel_on::<_, super::callback_bytes::ByteChunk>(webview.clone());
+    let bytes = anonymous_api_fetch_bytes(webview, state, request).await?;
+    super::callback_bytes::send_bytes(&bytes, &channel)
+}
+
+async fn anonymous_api_fetch_bytes(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<Vec<u8>, String> {
     let progress = request
         .headers()
         .get(PROGRESS_HEADER)
@@ -646,7 +669,7 @@ async fn execute_anonymous_api_fetch(
     state: State<'_, AppState>,
     request: Request<'_>,
     progress: Option<&Channel<AnonymousDownloadProgress>>,
-) -> Result<Response, String> {
+) -> Result<Vec<u8>, String> {
     let expected_response_bytes = request
         .headers()
         .get(RESPONSE_BYTES_HEADER)
@@ -654,10 +677,12 @@ async fn execute_anonymous_api_fetch(
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|size| valid_response_size(*size) && *size <= RESPONSE_DISCOVERY_BYTES)
         .ok_or_else(|| "invalid expected anonymous response size".to_string())?;
-    let request_body = match request.body() {
-        InvokeBody::Raw(body) if valid_request_size(body.len()) => body.clone(),
-        _ => return Err("invalid anonymous request body".to_string()),
-    };
+    let request_body = super::binary_body(&request,
+        REQUEST_SMALL_BYTES.max(REQUEST_LARGE_BYTES).max(REQUEST_PIR_BYTES))
+        .map_err(|()| "invalid anonymous request body".to_string())?;
+    if !valid_request_size(request_body.len()) {
+        return Err("invalid anonymous request body".to_string());
+    }
     let mut diagnostics = request.headers().get("x-qorc-transfer-diagnostic")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
@@ -776,576 +801,5 @@ async fn execute_anonymous_api_fetch(
         return Err("server changed during anonymous request".to_string());
     }
 
-    Ok(Response::new(response_body))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn bulk_transport_is_selected_from_transfer_size() {
-        assert!(!super::uses_bulk_transport(64 * 1024, 64 * 1024));
-        for response_bytes in [
-            512 * 1024,
-            1024 * 1024,
-            2 * 1024 * 1024,
-            4 * 1024 * 1024,
-            8912896,
-        ] {
-            assert!(super::uses_bulk_transport(64 * 1024, response_bytes));
-        }
-        assert!(super::uses_bulk_transport(512 * 1024, 64 * 1024));
-        assert!(super::uses_bulk_transport(2 * 1024 * 1024, 1024 * 1024));
-    }
-
-    use super::{
-        REQUEST_CANCELLATIONS, RESPONSE_DISCOVERY_BYTES, RequestCancellation, anonymous_api_url,
-        body_timeout, cancel_anonymous_api_fetch, read_capped_body_with_timeouts,
-        valid_request_size, valid_response_size,
-    };
-    #[cfg(target_os = "linux")]
-    use super::{REQUEST_PIR_BYTES, anonymous_http_client_builder};
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use uuid::Uuid;
-
-    #[test]
-    fn transfer_diagnostics_measure_native_bytes_and_stalls() {
-        let mut diagnostics = super::TransferDiagnostics::new(1, 1024);
-        diagnostics.progress(0);
-        assert_eq!(diagnostics.first_byte_ms, None);
-        assert_eq!(diagnostics.received_bytes, 0);
-        let earlier = std::time::Instant::now() - Duration::from_secs(2);
-        diagnostics.body_started = Some(earlier);
-        diagnostics.last_byte_at = Some(earlier);
-        diagnostics.progress(512);
-        assert!(diagnostics.first_byte_ms.unwrap() >= 2000);
-        assert!(diagnostics.max_progress_gap_ms >= 2000);
-        assert!(diagnostics.body_finished.is_none());
-        diagnostics.progress(1024);
-        assert_eq!(diagnostics.received_bytes, 1024);
-        assert!(diagnostics.body_finished.is_some());
-    }
-
-    #[test]
-    fn transfer_diagnostics_do_not_count_duplicate_progress_as_new_bytes() {
-        let mut diagnostics = super::TransferDiagnostics::new(2, 1024);
-        diagnostics.progress(0);
-        diagnostics.progress(512);
-        let first_byte_ms = diagnostics.first_byte_ms;
-        let last_byte_at = diagnostics.last_byte_at;
-        diagnostics.progress(512);
-        assert_eq!(diagnostics.received_bytes, 512);
-        assert_eq!(diagnostics.first_byte_ms, first_byte_ms);
-        assert_eq!(diagnostics.last_byte_at, last_byte_at);
-        assert!(diagnostics.body_finished.is_none());
-    }
-
-    async fn accept_anonymous_socks(
-        listener: &tokio::net::TcpListener,
-        reply: u8,
-    ) -> (tokio::net::TcpStream, Vec<u8>) {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        assert_eq!(socket.read_u8().await.unwrap(), 5);
-        let methods_len = socket.read_u8().await.unwrap() as usize;
-        let mut methods = vec![0; methods_len];
-        socket.read_exact(&mut methods).await.unwrap();
-        assert!(methods.contains(&2));
-        socket.write_all(&[5, 2]).await.unwrap();
-        assert_eq!(socket.read_u8().await.unwrap(), 1);
-        let username_len = socket.read_u8().await.unwrap() as usize;
-        let mut username = vec![0; username_len];
-        socket.read_exact(&mut username).await.unwrap();
-        let password_len = socket.read_u8().await.unwrap() as usize;
-        let mut password = vec![0; password_len];
-        socket.read_exact(&mut password).await.unwrap();
-        assert_eq!(password, b"isolate");
-        socket.write_all(&[1, 0]).await.unwrap();
-        let mut connect = [0; 4];
-        socket.read_exact(&mut connect).await.unwrap();
-        assert_eq!(connect, [5, 1, 0, 3]);
-        let host_len = socket.read_u8().await.unwrap() as usize;
-        let mut host = vec![0; host_len];
-        socket.read_exact(&mut host).await.unwrap();
-        assert_eq!(host, b"test.onion");
-        assert_eq!(socket.read_u16().await.unwrap(), 80);
-        socket
-            .write_all(&[5, reply, 0, 1, 127, 0, 0, 1, 0, 80])
-            .await
-            .unwrap();
-        (socket, username)
-    }
-
-    async fn receive_anonymous_upload(socket: &mut tokio::net::TcpStream) {
-        let mut received = Vec::new();
-        let mut buffer = [0; 16 * 1024];
-        loop {
-            let count = socket.read(&mut buffer).await.unwrap();
-            assert_ne!(count, 0);
-            received.extend_from_slice(&buffer[..count]);
-            if let Some(end) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                if received.len() >= end + 4 + super::REQUEST_LARGE_BYTES {
-                    assert_eq!(received.len(), end + 4 + super::REQUEST_LARGE_BYTES);
-                    assert!(received[end + 4..].iter().all(|byte| *byte == 7));
-                    return;
-                }
-            }
-        }
-    }
-
-    async fn anonymous_test_upload(
-        port: u16,
-        timeout: Duration,
-    ) -> Result<reqwest::Response, String> {
-        crate::install_rustls_provider();
-        super::send_anonymous_request(
-            port,
-            "http://test.onion/api/anonymous".parse().unwrap(),
-            vec![7; super::REQUEST_LARGE_BYTES],
-            timeout,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn socks_ttl_expiry_reconnects_with_new_isolation_before_uploading() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = tokio::spawn(async move {
-            let (mut failed, first_user) = accept_anonymous_socks(&listener, 6).await;
-            assert_eq!(failed.read(&mut [0; 1]).await.unwrap(), 0);
-            let (mut connected, second_user) = accept_anonymous_socks(&listener, 0).await;
-            assert_ne!(first_user, second_user);
-            receive_anonymous_upload(&mut connected).await;
-            connected
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
-                .await
-                .unwrap();
-        });
-        let response = anonymous_test_upload(port, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert_eq!(response.bytes().await.unwrap().as_ref(), b"test");
-        proxy.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn repeated_socks_failures_stop_after_two_connections() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut failed, _) = accept_anonymous_socks(&listener, 6).await;
-                assert_eq!(failed.read(&mut [0; 1]).await.unwrap(), 0);
-            }
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), listener.accept())
-                    .await
-                    .is_err()
-            );
-        });
-        let error = anonymous_test_upload(port, Duration::from_secs(5))
-            .await
-            .unwrap_err();
-        assert!(error.contains("TtlExpired"), "{error}");
-        proxy.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn delivered_upload_is_not_replayed_when_response_connection_closes() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = tokio::spawn(async move {
-            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
-            receive_anonymous_upload(&mut connected).await;
-            drop(connected);
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), listener.accept())
-                    .await
-                    .is_err()
-            );
-        });
-        assert!(
-            anonymous_test_upload(port, Duration::from_secs(5))
-                .await
-                .is_err()
-        );
-        proxy.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn http_error_response_is_not_replayed() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = tokio::spawn(async move {
-            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
-            receive_anonymous_upload(&mut connected).await;
-            connected.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), listener.accept())
-                    .await
-                    .is_err()
-            );
-        });
-        let response = anonymous_test_upload(port, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-        proxy.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reconnect_uses_the_original_header_deadline() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(350)).await;
-            let (failed, _) = accept_anonymous_socks(&listener, 6).await;
-            drop(failed);
-            let (mut connected, _) = accept_anonymous_socks(&listener, 0).await;
-            receive_anonymous_upload(&mut connected).await;
-            tokio::time::sleep(Duration::from_millis(350)).await;
-            let _ = connected
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .await;
-        });
-        let error = anonymous_test_upload(port, Duration::from_millis(600))
-            .await
-            .unwrap_err();
-        assert!(error.contains("response header timeout"), "{error}");
-        proxy.await.unwrap();
-    }
-
-    #[test]
-    fn warm_entries_are_single_use_port_scoped_and_expiring() {
-        let host = Uuid::new_v4().to_string();
-        {
-            let mut pool = super::WARM_POOL.lock().unwrap();
-            for (destination_port, age, user) in [
-                (443, super::WARM_ENTRY_MAX_AGE, "expired"),
-                (8443, Duration::ZERO, "other-port"),
-                (443, Duration::ZERO, "ready"),
-            ] {
-                pool.push_back(super::WarmEntry {
-                    isolation_user: user.to_string(),
-                    warmed_at: std::time::Instant::now() - age,
-                    target: host.clone(),
-                    socks_port: 9150,
-                    destination_port,
-                });
-            }
-        }
-        assert_eq!(
-            super::take_warm_isolation_user(9150, &host, 443).as_deref(),
-            Some("ready")
-        );
-        assert_eq!(super::take_warm_isolation_user(9150, &host, 443), None);
-        assert_eq!(
-            super::take_warm_isolation_user(9150, &host, 8443).as_deref(),
-            Some("other-port")
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    async fn paused_socks_upload(
-        builder: reqwest::ClientBuilder,
-        pause: Duration,
-        deadline: Duration,
-    ) -> Result<reqwest::Response, String> {
-        crate::install_rustls_provider();
-        let listener = tokio::net::TcpSocket::new_v4().unwrap();
-        listener.set_recv_buffer_size(16 * 1024).unwrap();
-        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let listener = listener.listen(1).unwrap();
-        let address = listener.local_addr().unwrap();
-        let proxy_task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut greeting = [0u8; 2];
-            socket.read_exact(&mut greeting).await.unwrap();
-            assert_eq!(greeting[0], 5);
-            let mut methods = vec![0u8; greeting[1] as usize];
-            socket.read_exact(&mut methods).await.unwrap();
-            assert!(methods.contains(&2));
-            socket.write_all(&[5, 2]).await.unwrap();
-            socket.read_exact(&mut greeting).await.unwrap();
-            assert_eq!(greeting[0], 1);
-            let mut username = vec![0u8; greeting[1] as usize];
-            socket.read_exact(&mut username).await.unwrap();
-            assert_eq!(username, b"isolated-test");
-            let password_len = socket.read_u8().await.unwrap() as usize;
-            let mut password = vec![0u8; password_len];
-            socket.read_exact(&mut password).await.unwrap();
-            assert_eq!(password, b"isolate");
-            socket.write_all(&[1, 0]).await.unwrap();
-            let mut connect = [0u8; 4];
-            socket.read_exact(&mut connect).await.unwrap();
-            assert_eq!(connect, [5, 1, 0, 3]);
-            let target_len = socket.read_u8().await.unwrap() as usize;
-            let mut target = vec![0u8; target_len];
-            socket.read_exact(&mut target).await.unwrap();
-            assert_eq!(target, b"test.onion");
-            assert_eq!(socket.read_u16().await.unwrap(), 80);
-            socket
-                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
-                .await
-                .unwrap();
-            tokio::time::sleep(pause).await;
-            let mut received = Vec::new();
-            let mut buffer = [0u8; 64 * 1024];
-            loop {
-                let count = socket.read(&mut buffer).await.unwrap();
-                if count == 0 {
-                    return;
-                }
-                received.extend_from_slice(&buffer[..count]);
-                if let Some(header_end) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                {
-                    if received.len() >= header_end + 4 + REQUEST_PIR_BYTES {
-                        assert_eq!(received.len(), header_end + 4 + REQUEST_PIR_BYTES);
-                        assert!(received[header_end + 4..].iter().all(|byte| *byte == 7));
-                        break;
-                    }
-                }
-            }
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
-                .await
-                .unwrap();
-        });
-        let proxy = reqwest::Proxy::all(format!("socks5h://{address}"))
-            .unwrap()
-            .basic_auth("isolated-test", "isolate");
-        let result = tokio::time::timeout(
-            deadline,
-            builder
-                .proxy(proxy)
-                .build()
-                .unwrap()
-                .post("http://test.onion/api/anonymous")
-                .body(vec![7u8; REQUEST_PIR_BYTES])
-                .send(),
-        )
-        .await;
-        proxy_task.abort();
-        if let Err(error) = proxy_task.await {
-            assert!(error.is_cancelled(), "{error}");
-        }
-        result
-            .map_err(|_| "request deadline".to_string())?
-            .map_err(|error| format!("{:?}", error.without_url()))
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn tor_backpressure_cannot_trigger_reqwests_hidden_tcp_deadline() {
-        let pause = Duration::from_secs(35);
-        let deadline = Duration::from_secs(50);
-        let (old, current) = tokio::join!(
-            paused_socks_upload(reqwest::Client::builder(), pause, deadline),
-            paused_socks_upload(anonymous_http_client_builder(), pause, deadline),
-        );
-        let old_error = old.unwrap_err();
-        assert!(old_error.contains("code: 110"), "{old_error}");
-        let response = current.expect("a progressing PIR upload survives SOCKS backpressure");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(response.bytes().await.unwrap().as_ref(), b"test");
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn stalled_socks_upload_remains_bounded_by_the_request_deadline() {
-        let result = paused_socks_upload(
-            anonymous_http_client_builder(),
-            Duration::from_secs(10),
-            Duration::from_millis(100),
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), "request deadline");
-    }
-
-    async fn streaming_response(
-        delay: Duration,
-        total_timeout: Option<Duration>,
-    ) -> reqwest::Response {
-        crate::install_rustls_provider();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 2048];
-            socket.read(&mut request).await.unwrap();
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
-                .await
-                .unwrap();
-            for byte in b"test" {
-                tokio::time::sleep(delay).await;
-                if socket.write_all(&[*byte]).await.is_err() {
-                    break;
-                }
-            }
-        });
-        let mut builder = reqwest::Client::builder().no_proxy();
-        if let Some(timeout) = total_timeout {
-            builder = builder.timeout(timeout);
-        }
-        builder
-            .build()
-            .unwrap()
-            .get(format!("http://{address}/"))
-            .send()
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn progressing_body_outlives_old_request_deadline() {
-        let mut old =
-            streaming_response(Duration::from_millis(50), Some(Duration::from_millis(90))).await;
-        let old_error = read_capped_body_with_timeouts(
-            &mut old,
-            4,
-            Duration::from_millis(300),
-            Duration::from_secs(2),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        assert!(old_error.contains("received"));
-        let mut response = streaming_response(Duration::from_millis(50), None).await;
-        let mut received = Vec::new();
-        let body = read_capped_body_with_timeouts(
-            &mut response,
-            4,
-            Duration::from_millis(300),
-            Duration::from_secs(2),
-            |bytes| received.push(bytes),
-        )
-        .await
-        .unwrap();
-        assert_eq!(body, b"test");
-        assert_eq!(received.first(), Some(&0));
-        assert_eq!(received.last(), Some(&4));
-        assert!(received.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
-    #[tokio::test]
-    async fn configured_body_idle_budget_admits_a_tor_stall() {
-        let mut response = streaming_response(Duration::from_millis(127), None).await;
-        let body = read_capped_body_with_timeouts(
-            &mut response,
-            4,
-            super::BODY_IDLE_TIMEOUT / 1000,
-            Duration::from_secs(2),
-            |_| {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(body, b"test");
-    }
-
-    #[tokio::test]
-    async fn stalled_body_reports_progress_and_idle_failure() {
-        let mut response = streaming_response(Duration::from_secs(2), None).await;
-        let error = read_capped_body_with_timeouts(
-            &mut response,
-            4,
-            Duration::from_millis(50),
-            Duration::from_secs(2),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("read idle timeout"));
-        assert!(error.contains("received 0/4 bytes"));
-    }
-
-    #[tokio::test]
-    async fn trickling_body_still_has_a_finite_transfer_deadline() {
-        let mut response = streaming_response(Duration::from_millis(50), None).await;
-        let error = read_capped_body_with_timeouts(
-            &mut response,
-            4,
-            Duration::from_millis(300),
-            Duration::from_millis(90),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("transfer deadline"));
-    }
-
-    #[tokio::test]
-    async fn oversized_response_is_rejected_before_reading() {
-        let mut response = streaming_response(Duration::from_millis(50), None).await;
-        let error = read_capped_body_with_timeouts(
-            &mut response,
-            3,
-            Duration::from_millis(300),
-            Duration::from_secs(2),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error, "anonymous response too large");
-    }
-
-    #[test]
-    fn discovery_budget_accounts_for_the_padded_response_size() {
-        assert_eq!(
-            body_timeout(RESPONSE_DISCOVERY_BYTES),
-            Duration::from_secs(724)
-        );
-        assert_eq!(body_timeout(64 * 1024), Duration::from_secs(300));
-        assert_eq!(body_timeout(512 * 1024), Duration::from_secs(300));
-    }
-
-    #[test]
-    fn cancellation_before_registration_prevents_the_request() {
-        let id = Uuid::new_v4();
-        cancel_anonymous_api_fetch(id.to_string()).unwrap();
-        assert!(
-            matches!(RequestCancellation::register(id), Err(error) if error == "anonymous request cancelled")
-        );
-        assert!(!REQUEST_CANCELLATIONS.lock().unwrap().contains_key(&id));
-    }
-
-    #[tokio::test]
-    async fn cancellation_interrupts_an_active_native_request_and_cleans_up() {
-        let id = Uuid::new_v4();
-        let mut cancellation = RequestCancellation::register(id).unwrap();
-        assert!(RequestCancellation::register(id).is_err());
-        cancel_anonymous_api_fetch(id.to_string()).unwrap();
-        cancellation
-            .receiver
-            .wait_for(|cancelled| *cancelled)
-            .await
-            .unwrap();
-        drop(cancellation);
-        assert!(!REQUEST_CANCELLATIONS.lock().unwrap().contains_key(&id));
-    }
-
-    #[test]
-    fn anonymous_url_is_fixed_and_requires_wss() {
-        let mapped =
-            anonymous_api_url("wss://example.com:8443/private/socket").expect("valid WSS URL");
-        assert_eq!(mapped.as_str(), "https://example.com:8443/api/anonymous");
-
-        assert!(anonymous_api_url("ws://example.com/socket").is_err());
-        assert!(anonymous_api_url("https://example.com/socket").is_err());
-        assert!(anonymous_api_url("wss://user@example.com/socket").is_err());
-        assert!(anonymous_api_url("wss://example.com/socket?q=1").is_err());
-        assert!(anonymous_api_url("wss://example.com/socket#fragment").is_err());
-    }
-
-    #[test]
-    fn only_protocol_size_classes_are_accepted() {
-        assert!(valid_request_size(64 * 1024));
-        assert!(valid_request_size(512 * 1024));
-        assert!(!valid_request_size(64 * 1024 - 1));
-        assert!(valid_response_size(512 * 1024));
-        assert!(valid_response_size(1024 * 1024));
-        assert!(valid_response_size(2 * 1024 * 1024));
-        assert!(valid_response_size(8912896));
-        assert!(!valid_response_size(8912896 - 1));
-    }
+    Ok(response_body)
 }

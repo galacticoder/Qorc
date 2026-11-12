@@ -755,11 +755,13 @@ export class RealtimeVisualEncoder {
                         this.noteBackoffDrop();
                         continue;
                     }
-                    const decodeStartedAt = performance.now();
-                    const jpegBuffer = new ArrayBuffer(frame.jpeg.byteLength);
-                    new Uint8Array(jpegBuffer).set(frame.jpeg);
-                    image = await createImageBitmap(new Blob([jpegBuffer], { type: 'image/jpeg' }));
-                    this.callbacks.onCaptureTiming('decode', performance.now() - decodeStartedAt);
+                    if (this.callbacks.isSourceEnabled() && frame.enabled) {
+                        const decodeStartedAt = performance.now();
+                        const jpegBuffer = new ArrayBuffer(frame.jpeg.byteLength);
+                        new Uint8Array(jpegBuffer).set(frame.jpeg);
+                        image = await createImageBitmap(new Blob([jpegBuffer], { type: 'image/jpeg' }));
+                        this.callbacks.onCaptureTiming('decode', performance.now() - decodeStartedAt);
+                    }
                     if (this.stopped || !this.callbacks.isActive() || this.nativeSource !== source) break;
                     this.sourceCapturedAt = frame.capturedAt;
                     const sourceEnabled = this.callbacks.isSourceEnabled() && frame.enabled;

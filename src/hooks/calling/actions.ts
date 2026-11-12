@@ -1,7 +1,7 @@
 import React from 'react';
-import { flushSync, unstable_batchedUpdates } from 'react-dom';
+import { flushSync } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
-import { clearCallMediaState, isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
+import { isValidCallingUsername, isValidCallId } from '../../lib/utils/calling-utils';
 import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { preparePeerTransport } from '../../lib/p2p/prepare-peer';
 import { toast } from 'sonner';

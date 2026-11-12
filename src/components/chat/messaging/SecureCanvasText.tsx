@@ -124,6 +124,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
         <div
             ref={containerRef}
             className="secure-canvas-text"
+            data-private-rendered={imageSource ? 'true' : 'false'}
             style={{
                 width,
                 height,

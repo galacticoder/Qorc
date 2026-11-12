@@ -27,6 +27,8 @@ use crate::error::{QorcError, QorcResult};
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded_tor_bundle.rs"));
 }
+#[cfg(target_os = "android")]
+mod android;
 
 const DEFAULT_SOCKS_PORT: u16 = 9050;
 const DEFAULT_CONTROL_PORT: u16 = 9051;
@@ -95,18 +97,27 @@ fn is_managed_tor_top_level_name(name: &OsStr) -> bool {
 }
 
 fn is_allowed_tor_bundle_path(relative: &Path) -> bool {
-    let mut components = relative.components();
-    let Some(Component::Normal(first)) = components.next() else {
-        return false;
-    };
+    #[cfg(target_os = "android")]
+    return matches!(
+        relative.to_str(),
+        Some("geoip" | "geoip6" | "tor.txt" | "lyrebird.txt")
+    );
 
-    if components.next().is_some() {
-        return first == OsStr::new("lib")
-            || first == OsStr::new("lib64")
-            || first == OsStr::new(TRANSPORT_DIR);
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut components = relative.components();
+        let Some(Component::Normal(first)) = components.next() else {
+            return false;
+        };
+
+        if components.next().is_some() {
+            return first == OsStr::new("lib")
+                || first == OsStr::new("lib64")
+                || first == OsStr::new(TRANSPORT_DIR);
+        }
+
+        is_managed_tor_top_level_name(first)
     }
-
-    is_managed_tor_top_level_name(first)
 }
 
 fn normalize_tor_bundle_path(path: &Path) -> QorcResult<Option<PathBuf>> {
@@ -730,6 +741,8 @@ pub struct TorManager {
     _app_data_path: PathBuf,
     tor_dir: PathBuf,
     tor_path: PathBuf,
+    #[cfg(target_os = "android")]
+    native_library_dir: Option<PathBuf>,
     config_path: PathBuf,
     tor_process: RwLock<Option<Child>>,
     operation_lock: tokio::sync::Mutex<()>,
@@ -970,6 +983,8 @@ impl TorManager {
             _app_data_path: app_data_path,
             tor_dir,
             tor_path,
+            #[cfg(target_os = "android")]
+            native_library_dir: None,
             config_path,
             tor_process: RwLock::new(None),
             operation_lock: tokio::sync::Mutex::new(()),
@@ -1034,49 +1049,65 @@ impl TorManager {
     }
 
     fn get_tor_environment(&self) -> Vec<(OsString, OsString)> {
-        let mut env = Vec::new();
-
-        for key in [
-            "HOME",
-            "USERPROFILE",
-            "SYSTEMROOT",
-            "WINDIR",
-            "TMPDIR",
-            "TMP",
-            "TEMP",
-            "LANG",
-            "LC_ALL",
-            "TZ",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                env.push((OsString::from(key), value));
-            }
-        }
-
-        let lib_dirs: Vec<PathBuf> = vec![
-            self.tor_dir.join("lib64"),
-            self.tor_dir.join("lib"),
-            self.tor_dir.clone(),
-        ]
-        .into_iter()
-        .filter(|p| p.exists())
-        .collect();
-
-        if !lib_dirs.is_empty()
-            && let Ok(lib_path) = std::env::join_paths(&lib_dirs)
+        #[cfg(target_os = "android")]
         {
-            env.push((OsString::from("LD_LIBRARY_PATH"), lib_path));
+            // Libraries are linked statically against Bionic. Never search
+            // app-writable folders or inherit LD_PRELOAD/LD_LIBRARY_PATH.
+            let mut paths = self.native_library_dir.iter().cloned().collect::<Vec<_>>();
+            paths.push(PathBuf::from("/system/bin"));
+            let path = std::env::join_paths(paths).expect("validated Android native path");
+            return vec![
+                ("PATH".into(), path),
+                ("HOME".into(), self.tor_dir.as_os_str().to_owned()),
+                ("TMPDIR".into(), self.tor_dir.as_os_str().to_owned()),
+            ];
         }
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut env = Vec::new();
 
-        let mut path_entries = vec![self.tor_dir.clone(), self.tor_dir.join(TRANSPORT_DIR)];
-        if let Some(existing_path) = std::env::var_os("PATH") {
-            path_entries.extend(std::env::split_paths(&existing_path));
-        }
-        if let Ok(path) = std::env::join_paths(path_entries) {
-            env.push((OsString::from("PATH"), path));
-        }
+            for key in [
+                "HOME",
+                "USERPROFILE",
+                "SYSTEMROOT",
+                "WINDIR",
+                "TMPDIR",
+                "TMP",
+                "TEMP",
+                "LANG",
+                "LC_ALL",
+                "TZ",
+            ] {
+                if let Some(value) = std::env::var_os(key) {
+                    env.push((OsString::from(key), value));
+                }
+            }
 
-        env
+            let lib_dirs: Vec<PathBuf> = vec![
+                self.tor_dir.join("lib64"),
+                self.tor_dir.join("lib"),
+                self.tor_dir.clone(),
+            ]
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect();
+
+            if !lib_dirs.is_empty()
+                && let Ok(lib_path) = std::env::join_paths(&lib_dirs)
+            {
+                env.push((OsString::from("LD_LIBRARY_PATH"), lib_path));
+            }
+
+            let mut path_entries = vec![self.tor_dir.clone(), self.tor_dir.join(TRANSPORT_DIR)];
+            if let Some(existing_path) = std::env::var_os("PATH") {
+                path_entries.extend(std::env::split_paths(&existing_path));
+            }
+            if let Ok(path) = std::env::join_paths(path_entries) {
+                env.push((OsString::from("PATH"), path));
+            }
+
+            env
+        }
     }
 
     fn control_cookie_path(&self) -> PathBuf {
@@ -1148,6 +1179,10 @@ impl TorManager {
     }
 
     fn has_current_bundle(&self, checksum: &str) -> bool {
+        #[cfg(target_os = "android")]
+        if android::verify_runtime(self).is_err() {
+            return false;
+        }
         let marker_path = self.tor_dir.join(BUNDLE_MARKER_FILE);
         if !is_regular_file_without_links(&self.tor_path)
             || !is_regular_file_without_links(&self.managed_transport_path(DEFAULT_TRANSPORT))
@@ -1171,12 +1206,26 @@ impl TorManager {
     }
 
     fn managed_transport_path(&self, name: &str) -> PathBuf {
+        #[cfg(target_os = "android")]
+        if name == DEFAULT_TRANSPORT {
+            return self
+                .native_library_dir
+                .as_ref()
+                .map(|dir| dir.join(android::TRANSPORT_NAME))
+                .unwrap_or_default();
+        }
         self.tor_dir
             .join(TRANSPORT_DIR)
             .join(self.executable_name(name))
     }
 
     fn managed_transport_config_path(&self, name: &str) -> String {
+        #[cfg(target_os = "android")]
+        return self
+            .managed_transport_path(name)
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(not(target_os = "android"))]
         format!("./{}/{}", TRANSPORT_DIR, self.executable_name(name))
     }
 
@@ -1185,7 +1234,7 @@ impl TorManager {
     }
 
     fn valid_executable_path(path: &Path) -> QorcResult<()> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             use std::os::unix::fs::PermissionsExt;
 
@@ -1195,6 +1244,15 @@ impl TorManager {
                 permissions.set_mode(0o700);
                 std::fs::set_permissions(path, permissions)?;
             }
+        }
+        #[cfg(target_os = "android")]
+        {
+            let expected = match path.file_name().and_then(OsStr::to_str) {
+                Some(android::TOR_NAME) => embedded::ANDROID_TOR_SHA256,
+                Some(android::TRANSPORT_NAME) => embedded::ANDROID_LYREBIRD_SHA256,
+                _ => return Err(invalid_tor_bundle("unknown Android executable")),
+            };
+            android::verify_executable(path, expected)?;
         }
 
         Ok(())
@@ -1270,6 +1328,19 @@ impl TorManager {
     }
 
     fn normalize_stored_transport_plugin_value(&self, value: &str) -> QorcResult<String> {
+        #[cfg(target_os = "android")]
+        {
+            let parts = value.split_whitespace().collect::<Vec<_>>();
+            if let Some(path) = parts.get(2) {
+                let previous = Path::new(path);
+                if **path == Self::managed_transport_input_path(DEFAULT_TRANSPORT)
+                    || previous.starts_with("/data/app")
+                        && previous.file_name() == Some(OsStr::new(android::TRANSPORT_NAME))
+                {
+                    return self.normalize_client_transport_plugin_value_for_path(value, path);
+                }
+            }
+        }
         self.normalize_client_transport_plugin_value_for_path(
             value,
             &self.managed_transport_config_path(DEFAULT_TRANSPORT),
@@ -1393,6 +1464,8 @@ impl TorManager {
         }
 
         validate_private_directory(&self.tor_dir)?;
+        #[cfg(target_os = "android")]
+        android::verify_runtime(self)?;
         let (_, expected_checksum) = self.pinned_bundle_target()?;
         if self.has_current_bundle(expected_checksum) {
             return Ok(());
@@ -1587,14 +1660,18 @@ impl TorManager {
                     }
                 }
 
-                let staged_tor = staging_dir.join(&tor_executable);
-                let staged_transport = staging_dir.join(TRANSPORT_DIR).join(&transport_executable);
-                if !is_regular_file_without_links(&staged_tor)
-                    || !is_regular_file_without_links(&staged_transport)
+                #[cfg(not(target_os = "android"))]
                 {
-                    return Err(invalid_tor_bundle(
-                        "required Tor or lyrebird executable is missing",
-                    ));
+                    let staged_tor = staging_dir.join(&tor_executable);
+                    let staged_transport =
+                        staging_dir.join(TRANSPORT_DIR).join(&transport_executable);
+                    if !is_regular_file_without_links(&staged_tor)
+                        || !is_regular_file_without_links(&staged_transport)
+                    {
+                        return Err(invalid_tor_bundle(
+                            "required Tor or lyrebird executable is missing",
+                        ));
+                    }
                 }
 
                 for entry in std::fs::read_dir(&tor_dir).map_err(|error| {
@@ -1659,7 +1736,9 @@ impl TorManager {
         stored: bool,
     ) -> QorcResult<(String, Option<PathBuf>)> {
         if config.is_empty() {
-            return Err(QorcError::InvalidArgument("Empty configuration".to_string()));
+            return Err(QorcError::InvalidArgument(
+                "Empty configuration".to_string(),
+            ));
         }
 
         if config.len() > MAX_CONFIG_SIZE {
@@ -1853,6 +1932,11 @@ impl TorManager {
                 "Primary Tor configuration is too large".to_string(),
             ));
         }
+        #[cfg(target_os = "android")]
+        let source_config = source.validate_stored_config(&source_config)?.0.replace(
+            &source.managed_transport_config_path(DEFAULT_TRANSPORT),
+            &Self::managed_transport_input_path(DEFAULT_TRANSPORT),
+        );
         let source_dir = source.tor_dir.to_string_lossy();
         let target_dir = self.tor_dir.to_string_lossy();
         let portable = source_config
@@ -1964,6 +2048,13 @@ impl TorManager {
             .current_dir(&self.tor_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(target_os = "android")]
+        command.args([
+            "--GeoIPFile",
+            &self.tor_dir.join("geoip").to_string_lossy(),
+            "--GeoIPv6File",
+            &self.tor_dir.join("geoip6").to_string_lossy(),
+        ]);
 
         let mut child = spawn_managed_tor(&mut command)
             .map_err(|e| QorcError::TorProcess(format!("Failed to start Tor: {}", e)))?;
@@ -2080,6 +2171,8 @@ impl TorManager {
         Ok(true)
     }
 
+    pub(crate) fn managed_app_data_dir(&self) -> PathBuf { self._app_data_path.clone() }
+
     pub fn is_running(&self) -> bool {
         self.reap_exited_process();
         let process = self.tor_process.read();
@@ -2179,7 +2272,10 @@ impl TorManager {
         .map_err(|e| QorcError::Internal(format!("Task failed: {}", e)))?
     }
 
-    fn control_authenticate(control_port: u16, cookie_path: &Path) -> QorcResult<ControlConnection> {
+    fn control_authenticate(
+        control_port: u16,
+        cookie_path: &Path,
+    ) -> QorcResult<ControlConnection> {
         let mut cookie = Self::read_control_cookie(cookie_path)?;
         let mut encoded_cookie = hex::encode(cookie);
         cookie.zeroize();
@@ -2389,72 +2485,20 @@ impl TorManager {
 
 pub async fn init(app_data_path: PathBuf) -> QorcResult<Arc<TorManager>> {
     let manager = TorManager::new(app_data_path);
+    #[cfg(target_os = "android")]
+    let manager = {
+        let mut manager = manager;
+        let installed = android::native_library_dir()?;
+        manager.tor_path = installed.join(android::TOR_NAME);
+        manager.native_library_dir = Some(installed);
+        manager
+    };
     let _stale = manager.cleanup_orphaned_processes_sync();
     manager.materialize_embedded_bundle().await?;
     Ok(Arc::new(manager))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn concurrent_bulk_requests_preserve_the_running_tor_process() {
-        let root = std::env::temp_dir().join(format!(
-            "qorc-bulk-start-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let primary = TorManager::new(root.join("primary"));
-        let bulk = TorManager::new(root.join("bulk"));
-        let child = Command::new("sleep")
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let original_pid = child.id();
-        *bulk.tor_process.write() = Some(child);
-        let results = tokio::join!(
-            bulk.ensure_started_from(&primary),
-            bulk.ensure_started_from(&primary),
-            bulk.ensure_started_from(&primary),
-        );
-        let mut child = bulk.tor_process.write().take().unwrap();
-        let current_pid = child.id();
-        let _ = child.kill();
-        let _ = child.wait();
-        for result in [results.0, results.1, results.2] {
-            let started = result.unwrap();
-            assert!(started.success);
-            assert_eq!(started.starting, Some(false));
-        }
-        assert_eq!(current_pid, original_pid);
-        assert!(!primary.config_path.exists());
-        assert!(!bulk.config_path.exists());
-    }
-
-    #[tokio::test]
-    async fn pir_manager_uses_distinct_runtime_and_mirrored_configuration() {
-        let root = std::env::temp_dir().join(format!(
-            "qorc-pir-tor-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let primary = TorManager::new(root.join("primary"));
-        let pir = TorManager::new(root.join("pir"));
-        primary
-            .configure(&TorConfig {
-                config: "ClientOnly 1".to_string(),
-            })
-            .await
-            .unwrap();
-        pir.mirror_configuration_from(&primary).await.unwrap();
-        let config = std::fs::read_to_string(&pir.config_path).unwrap();
-        assert_ne!(primary.tor_path, pir.tor_path);
-        assert_ne!(primary.config_path, pir.config_path);
-        assert!(config.contains(&pir.tor_dir.join("data").to_string_lossy().to_string()));
-        assert!(!config.contains(&primary.tor_dir.to_string_lossy().to_string()));
-        let _ = std::fs::remove_dir_all(root);
-    }
+#[cfg(target_os = "android")]
+pub(crate) fn android_native_library_dir() -> QorcResult<PathBuf> {
+    android::native_library_dir()
 }

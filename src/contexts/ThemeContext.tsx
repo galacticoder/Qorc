@@ -39,8 +39,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(theme));
 
   const setTheme = useCallback((nextTheme: Theme) => {
-    setThemeState(nextTheme);
     window.localStorage.setItem(STORAGE_KEYS.THEME, nextTheme);
+    setThemeState(nextTheme);
   }, []);
 
   useEffect(() => {

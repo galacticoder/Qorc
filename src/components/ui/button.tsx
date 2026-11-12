@@ -9,7 +9,7 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: 'bg-primary text-primary-foreground hover:bg-primary/80',
-        destructive: 'bg-destructive text-destructive-foreground hover:bg-destructive/80',
+        destructive: 'qorc-danger-button text-destructive-foreground',
         outline: 'border border-input bg-background hover:bg-accent/50 hover:text-accent-foreground',
         secondary: 'bg-secondary text-secondary-foreground hover:bg-secondary/70',
         ghost: 'hover:bg-accent/50 hover:text-accent-foreground',

@@ -15,6 +15,7 @@ interface ConversationOptionsPopoverProps {
   readonly compact?: boolean;
   readonly isPinned?: boolean;
   readonly onTogglePin?: (username: string) => void;
+  readonly onAction?: () => void;
 }
 
 export function ConversationOptionsPopover({
@@ -25,6 +26,7 @@ export function ConversationOptionsPopover({
   compact = false,
   isPinned = false,
   onTogglePin,
+  onAction,
 }: ConversationOptionsPopoverProps) {
   const [open, setOpen] = useState(false);
   const [updating, setUpdating] = useState(false);
@@ -32,7 +34,13 @@ export function ConversationOptionsPopover({
   const preferences = useNotificationPreferences();
   const mutes = preferences.conversations.find(entry => entry.username === username);
 
+  const dismiss = useCallback(() => {
+    setOpen(false);
+    onAction?.();
+  }, [onAction]);
+
   const toggleMute = (type: keyof NotificationMutes) => {
+    dismiss();
     try {
       setConversationNotificationMutes(username, {
         messages: mutes?.messages === true,
@@ -58,6 +66,7 @@ export function ConversationOptionsPopover({
     const operation = {};
     operationRef.current = operation;
     setUpdating(true);
+    dismiss();
     try {
       await onToggleBlock(username, !blocked);
       if (operationRef.current === operation) setOpen(false);
@@ -67,7 +76,7 @@ export function ConversationOptionsPopover({
         setUpdating(false);
       }
     }
-  }, [blocked, onToggleBlock, username]);
+  }, [blocked, dismiss, onToggleBlock, username]);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -83,11 +92,10 @@ export function ConversationOptionsPopover({
           <MoreVertical className="w-4 h-4" aria-hidden="true" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="qorc-conversation-options-popover select-none" align="end" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+      <PopoverContent className="qorc-conversation-options-popover select-none" align="end" onCloseAutoFocus={event => { if (onAction) event.preventDefault(); }} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
         <div className="qorc-conversation-options-menu">
-          <div className="qorc-conversation-options-title">Options</div>
           {onTogglePin && (
-            <button type="button" className="qorc-conversation-options-action" onClick={() => onTogglePin(username)}>
+            <button type="button" className="qorc-conversation-options-action" onClick={() => { dismiss(); onTogglePin(username); }}>
               {isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
               <span>{isPinned ? 'Unpin' : 'Pin'}</span>
             </button>

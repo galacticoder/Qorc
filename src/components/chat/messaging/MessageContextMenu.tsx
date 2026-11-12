@@ -1,6 +1,7 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { Pencil, Reply, Trash2, Check, Download, Loader2, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import { useAppBack } from '../../../hooks/useAppBack';
 
 interface MessageAnchorRect {
     readonly top: number;
@@ -53,6 +54,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
     const [position, setPosition] = useState<MenuPosition | null>(null);
+    useAppBack(true, onClose, 100);
 
     const QUICK_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢'];
 
@@ -66,18 +68,25 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
             }
         };
 
-        const handleScroll = () => {
-            onClose();
+        const handleWheel = (event: WheelEvent) => {
+            if (!menuRef.current?.contains(event.target as Node)) onClose();
         };
+        const handleKey = (event: KeyboardEvent) => {
+            if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key) &&
+                !menuRef.current?.contains(event.target as Node)) onClose();
+        };
+        const handleResize = () => onClose();
 
-        document.addEventListener('mousedown', handleClickOutside);
-        window.addEventListener('scroll', handleScroll, true);
-        window.addEventListener('resize', handleScroll);
+        document.addEventListener('pointerdown', handleClickOutside);
+        document.addEventListener('keydown', handleKey);
+        window.addEventListener('wheel', handleWheel, { capture: true, passive: true });
+        window.addEventListener('resize', handleResize);
 
         return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
-            window.removeEventListener('scroll', handleScroll, true);
-            window.removeEventListener('resize', handleScroll);
+            document.removeEventListener('pointerdown', handleClickOutside);
+            document.removeEventListener('keydown', handleKey);
+            window.removeEventListener('wheel', handleWheel, true);
+            window.removeEventListener('resize', handleResize);
         };
     }, [onClose, triggerId]);
 
@@ -137,7 +146,9 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                 top: position?.top ?? 0,
                 left: position?.left ?? 0,
                 visibility: position ? 'visible' : 'hidden',
+                transformOrigin: `${Math.max(0, Math.min((menuRef.current?.offsetWidth ?? 0), (anchorRect.left + anchorRect.right) / 2 - (position?.left ?? 0)))}px ${position && position.top < anchorRect.top ? 'bottom' : 'top'}`,
             }}
+            data-positioned={!!position}
         >
             {(onReactionSelect || onReact) && (
             <div className="qorc-message-context-reactions">
@@ -215,8 +226,8 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                         onClick={async (e) => {
                             e.stopPropagation();
                             if (isDownloading || isDownloaded) return;
-                            try { await onDownload?.(); }
-                            finally { if (menuRef.current) onClose(); }
+                            onClose();
+                            await onDownload?.();
                         }}
                         className="qorc-message-context-action"
                         disabled={isDownloading || isDownloaded}

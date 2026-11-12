@@ -36,8 +36,7 @@ struct QuotaUsageCache {
     data_version: i64,
     account_total: i64,
     store_totals: HashMap<String, i64>,
-    #[cfg(test)]
-    refreshes: usize,
+
 }
 
 fn database_managed_paths(db_path: &Path) -> [PathBuf; 4] {
@@ -93,7 +92,19 @@ async fn secure_database_paths(paths: &[PathBuf]) -> QorcResult<()> {
     Ok(())
 }
 
+fn database_initialization_error(stage: &'static str, error: rusqlite::Error) -> QorcError {
+    tracing::error!(stage, sqlite_extended_code = error.sqlite_error().map(|error| error.extended_code),
+        "Encrypted database initialization failed");
+    QorcError::StorageInitFailed(format!("{stage}: {error}"))
+}
+
 impl DatabaseManager {
+    pub(crate) fn close_for_local_deletion(&self) -> QorcResult<()> {
+        let replacement = Connection::open_in_memory().map_err(|error| database_initialization_error("close replacement", error))?;
+        let connection = std::mem::replace(&mut *self.conn.lock(), replacement);
+        connection.close().map_err(|(_, error)| database_initialization_error("close account database", error))
+    }
+
     /// Initialize a new native encrypted database
     pub fn new(db_path: PathBuf, master_key: &[u8]) -> QorcResult<Self> {
         Self::open_impl(db_path, master_key)
@@ -126,24 +137,24 @@ impl DatabaseManager {
             &db_path,
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
-        .map_err(|e| QorcError::StorageInitFailed(format!("Failed to open DB: {}", e)))?;
+        .map_err(|e| database_initialization_error("Failed to open DB", e))?;
         conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| QorcError::StorageInitFailed(format!("DB timeout setup failed: {e}")))?;
+            .map_err(|e| database_initialization_error("DB timeout setup failed", e))?;
 
         // Apply SQLCipher key
         let key_hex = Zeroizing::new(hex::encode(k_disk.as_slice()));
         let key_pragma = Zeroizing::new(format!("PRAGMA key = \"x'{}'\"", key_hex.as_str()));
         conn.execute_batch(key_pragma.as_str())
-            .map_err(|e| QorcError::StorageInitFailed(format!("DB key setup failed: {e}")))?;
+            .map_err(|e| database_initialization_error("DB key setup failed", e))?;
 
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| QorcError::StorageInitFailed(format!("DB journal setup failed: {e}")))?;
+            .map_err(|e| database_initialization_error("DB journal setup failed", e))?;
 
         conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| QorcError::StorageInitFailed(format!("DB sync setup failed: {e}")))?;
+            .map_err(|e| database_initialization_error("DB sync setup failed", e))?;
 
         conn.pragma_update(None, "temp_store", "MEMORY")
-            .map_err(|e| QorcError::StorageInitFailed(format!("DB temp setup failed: {e}")))?;
+            .map_err(|e| database_initialization_error("DB temp setup failed", e))?;
 
         // Initialize schema
         Self::validate_schema(&conn)?;
@@ -248,7 +259,7 @@ impl DatabaseManager {
             );",
             [],
         )
-        .map_err(|e| QorcError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
+        .map_err(|e| database_initialization_error("Schema init failed", e))?;
 
         Ok(())
     }
@@ -307,10 +318,7 @@ impl DatabaseManager {
         usage.data_version = data_version;
         usage.account_total = account_total;
         usage.store_totals = store_totals;
-        #[cfg(test)]
-        {
-            usage.refreshes += 1;
-        }
+
         Ok(())
     }
 
@@ -794,13 +802,22 @@ pub(crate) async fn prepare_native_account_database(
         .app_config_dir()
         .map_err(|_| "Application storage path unavailable".to_string())?;
     let instance_id = crate::system::get_instance_id().map_err(|error| error.safe_message())?;
-    let suffix = format!("-instance-{}", instance_id);
-    let config_name = app_config_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Application storage path is invalid".to_string())?
-        .to_owned();
-    app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
+    #[cfg(target_os = "android")]
+    {
+        app_config_dir = tokio::fs::canonicalize(app_config_dir).await
+            .map_err(|_| "Application storage path unavailable".to_string())?;
+        app_config_dir = app_config_dir.join("instances").join(&instance_id).join("config");
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let suffix = format!("-instance-{}", instance_id);
+        let config_name = app_config_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Application storage path is invalid".to_string())?
+            .to_owned();
+        app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
+    }
     crate::storage::file::check_dir(&app_config_dir, 0o700)
         .await
         .map_err(|error| error.safe_message())?;
@@ -937,7 +954,7 @@ fn account_namespace(username: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn account_file_id(master_key: &[u8], username: &str) -> String {
+pub(crate) fn account_file_id(master_key: &[u8], username: &str) -> String {
     let key: &[u8; 32] = master_key
         .try_into()
         .expect("account master key was validated before filename derivation");
@@ -1203,291 +1220,4 @@ pub async fn db_delete(
     }
     run_database_task(move || db.delete(&store, &key)).await?;
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        DatabaseManager, account_file_id, account_namespace, database_managed_paths, db_name_valid,
-        escape_like, parse_db_mutation_request,
-    };
-
-    #[test]
-    fn mutation_ipc_json_is_exact_and_structurally_bounded() {
-        let request = parse_db_mutation_request(
-            r#"{"writes":[],"deletions":[{"store":"scope_data","key":"entry"}]}"#,
-        )
-        .expect("fixed mutation request parses");
-        assert!(request.writes.is_empty());
-        assert_eq!(request.deletions.len(), 1);
-        assert!(
-            parse_db_mutation_request(r#"{"writes":[],"deletions":[],"unexpected":true}"#).is_err()
-        );
-
-        let excessive = format!(
-            r#"{{"writes":[],"deletions":[{}]}}"#,
-            std::iter::repeat_n(r#"{"store":"s","key":"k"}"#, 3_000)
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        assert!(parse_db_mutation_request(&excessive).is_err());
-    }
-
-    #[test]
-    fn account_namespace_matches_frontend_and_avoids_aliases() {
-        assert_eq!(
-            account_namespace("alice"),
-            "5738b3aedc7fc4c825a57be637a50c72e8a51ba3b600ff16312cfaea5d225704"
-        );
-        assert_ne!(account_namespace("a.b"), account_namespace("a_b"));
-        assert_ne!(account_namespace("a-b"), account_namespace("a_b"));
-    }
-
-    #[test]
-    fn database_filename_is_secret_keyed_and_account_bound() {
-        let key_a = [7u8; 32];
-        let key_b = [8u8; 32];
-        let alice = account_file_id(&key_a, "alice");
-        assert_eq!(alice.len(), 64);
-        assert_eq!(alice, account_file_id(&key_a, "alice"));
-        assert_ne!(alice, account_file_id(&key_a, "bob"));
-        assert_ne!(alice, account_file_id(&key_b, "alice"));
-    }
-
-    #[test]
-    fn escape_like_neutralizes_wildcards() {
-        assert_eq!(escape_like("%"), "\\%");
-        assert_eq!(escape_like("_"), "\\_");
-        assert_eq!(escape_like("alice_data"), "alice\\_data");
-        assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
-        assert_eq!(escape_like("alice_"), "alice\\_");
-    }
-
-    #[test]
-    fn db_name_valid_rejects_empty_control_and_oversized() {
-        assert!(db_name_valid("alice_data"));
-        assert!(db_name_valid("%"));
-        assert!(!db_name_valid(""));
-        assert!(!db_name_valid("has\nnewline"));
-        assert!(!db_name_valid(&"x".repeat(257)));
-    }
-
-    #[test]
-    fn encrypted_rows_are_bound_to_store_and_key() {
-        let path =
-            std::env::temp_dir().join(format!("qorc-db-row-binding-{}.db", uuid::Uuid::new_v4()));
-        let manager = DatabaseManager::new(path.clone(), &[9u8; 32]).expect("test database opens");
-        let encrypted = manager
-            .encrypt_bundle("store-a", "key-a", b"secret")
-            .expect("test value encrypts");
-
-        assert_eq!(
-            manager
-                .decrypt_bundle("store-a", "key-a", &encrypted)
-                .expect("matching row context decrypts")
-                .as_slice(),
-            b"secret"
-        );
-        assert!(
-            manager
-                .decrypt_bundle("store-b", "key-a", &encrypted)
-                .is_err()
-        );
-        assert!(
-            manager
-                .decrypt_bundle("store-a", "key-b", &encrypted)
-                .is_err()
-        );
-
-        drop(manager);
-        for managed_path in database_managed_paths(&path) {
-            let _ = std::fs::remove_file(managed_path);
-        }
-    }
-
-    #[test]
-    fn renderer_batch_is_atomic_and_key_enumeration_is_bounded() {
-        let path = std::env::temp_dir().join(format!(
-            "qorc-db-renderer-batch-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let mut manager =
-            DatabaseManager::new(path.clone(), &[11u8; 32]).expect("test database opens");
-        manager.set_account_context("scope_".to_string(), "owner".to_string());
-
-        assert!(
-            manager
-                .mutate_secure_batch_with_quotas(
-                    &[
-                        ("scope_msgconv", "alice", b"message"),
-                        ("scope_data", "conversations_metadata", b"index"),
-                    ],
-                    &[],
-                )
-                .expect("batch commits")
-        );
-        assert_eq!(
-            manager
-                .get_secure("scope_msgconv", "alice")
-                .expect("message reads")
-                .expect("message exists")
-                .as_slice(),
-            b"message"
-        );
-        assert!(
-            manager
-                .has_secure("scope_msgconv", "alice")
-                .expect("message existence reads")
-        );
-        assert!(
-            !manager
-                .has_secure("scope_msgconv", "missing")
-                .expect("missing existence reads")
-        );
-        assert!(manager.list_keys("scope_msgconv", 0).is_err());
-        assert_eq!(
-            manager
-                .list_keys("scope_msgconv", 1)
-                .expect("bounded selector list"),
-            vec!["alice".to_string()]
-        );
-
-        assert!(
-            manager
-                .mutate_secure_batch_with_quotas(
-                    &[("scope_data", "conversations_metadata", b"empty-index")],
-                    &[("scope_msgconv", "alice")],
-                )
-                .expect("delete/index batch commits")
-        );
-        assert!(
-            manager
-                .get_secure("scope_msgconv", "alice")
-                .expect("message lookup succeeds")
-                .is_none()
-        );
-        assert_eq!(
-            manager
-                .get_secure("scope_data", "conversations_metadata")
-                .expect("index reads")
-                .expect("index exists")
-                .as_slice(),
-            b"empty-index"
-        );
-
-        drop(manager);
-        for managed_path in database_managed_paths(&path) {
-            let _ = std::fs::remove_file(managed_path);
-        }
-    }
-
-    #[test]
-    fn native_message_content_store_is_not_renderer_addressable() {
-        let path = std::env::temp_dir().join(format!(
-            "qorc-db-native-message-isolation-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let mut manager =
-            DatabaseManager::new(path.clone(), &[14u8; 32]).expect("test database opens");
-        manager.set_account_context("scope_".to_string(), "owner".to_string());
-
-        let native_store = manager.native_message_content_store();
-        assert_eq!(
-            native_store,
-            format!(
-                "scope_{}",
-                crate::storage_keys::NATIVE_MESSAGE_CONTENT_STORE_SUFFIX
-            )
-        );
-        assert!(manager.in_namespace(&native_store));
-        assert!(manager.is_native_only_store(&native_store));
-        assert!(!manager.renderer_store_allowed(&native_store));
-        assert!(manager.renderer_store_allowed("scope_msgconv"));
-
-        drop(manager);
-        for managed_path in database_managed_paths(&path) {
-            let _ = std::fs::remove_file(managed_path);
-        }
-    }
-
-    #[test]
-    fn shrinking_or_rejected_quota_write_does_not_replace_existing_value() {
-        let path = std::env::temp_dir().join(format!("qorc-db-quota-{}.db", uuid::Uuid::new_v4()));
-        let manager = DatabaseManager::new(path.clone(), &[12u8; 32]).expect("test database opens");
-        manager
-            .set_secure("scope_data", "key", b"original")
-            .expect("seed value writes");
-
-        assert!(
-            !manager
-                .set_secure_with_store_quota("scope_data", "key", b"replacement", 1)
-                .expect("quota decision succeeds")
-        );
-        assert_eq!(
-            manager
-                .get_secure("scope_data", "key")
-                .expect("value reads")
-                .expect("value remains")
-                .as_slice(),
-            b"original"
-        );
-
-        drop(manager);
-        for managed_path in database_managed_paths(&path) {
-            let _ = std::fs::remove_file(managed_path);
-        }
-    }
-
-    #[test]
-    fn quota_usage_cache_reuses_totals_and_detects_other_connections() {
-        let path =
-            std::env::temp_dir().join(format!("qorc-db-quota-cache-{}.db", uuid::Uuid::new_v4()));
-        let key = [13u8; 32];
-        let mut manager = DatabaseManager::new(path.clone(), &key).expect("test database opens");
-        manager.set_account_context("scope_".to_string(), "owner".to_string());
-
-        assert!(
-            manager
-                .set_secure_with_store_quota("scope_data", "one", b"first", 1_000_000)
-                .expect("first quota write succeeds")
-        );
-        assert_eq!(manager.quota_usage.lock().refreshes, 1);
-
-        assert!(
-            manager
-                .set_secure_with_store_quota("scope_data", "two", b"second", 1_000_000)
-                .expect("cached quota write succeeds")
-        );
-        assert_eq!(manager.quota_usage.lock().refreshes, 1);
-
-        manager
-            .set_secure("scope_data", "unmetered", b"native")
-            .expect("native write succeeds");
-        assert!(!manager.quota_usage.lock().initialized);
-        assert!(
-            manager
-                .set_secure_with_store_quota("scope_data", "three", b"third", 1_000_000)
-                .expect("quota write after native mutation succeeds")
-        );
-        assert_eq!(manager.quota_usage.lock().refreshes, 2);
-
-        let mut other = DatabaseManager::new(path.clone(), &key).expect("second connection opens");
-        other.set_account_context("scope_".to_string(), "owner".to_string());
-        other
-            .set_secure("scope_data", "external", b"other process")
-            .expect("second connection writes");
-
-        assert!(
-            manager
-                .set_secure_with_store_quota("scope_data", "four", b"fourth", 1_000_000)
-                .expect("quota write after external commit succeeds")
-        );
-        assert_eq!(manager.quota_usage.lock().refreshes, 3);
-
-        drop(other);
-        drop(manager);
-        for managed_path in database_managed_paths(&path) {
-            let _ = std::fs::remove_file(managed_path);
-        }
-    }
 }

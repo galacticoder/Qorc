@@ -23,7 +23,7 @@ export const TypingIndicator = memo(function TypingIndicator({ username, classNa
   const displayName = useDisplayUsername({ username });
 
   return (
-    <div className={cn("flex items-center gap-2 mb-2", className)} style={{ marginLeft: '50px' }} aria-live="polite" aria-atomic="true">
+    <div className={cn("qorc-thread-typing flex items-center gap-2 mb-2", className)} aria-live="polite" aria-atomic="true">
       <TypingBubble />
       <span className="sr-only">{displayName} is typing</span>
     </div>

@@ -1,6 +1,6 @@
 type Phase = 'context' | 'discovery-queue' | 'bulk-queue' | 'key-exchange' |
   'admission-pow' | 'request-encryption' | 'connecting-upload-waiting-headers' |
-  'body-download' | 'response-authentication' | 'response-decryption' | 'response-parse';
+  'body-download' | 'native-delivery' | 'response-authentication' | 'response-decryption' | 'response-parse';
 
 let nextId = 0;
 
@@ -51,7 +51,10 @@ export class DiscoveryTransferDiagnostics {
       this.firstByteMs ??= now - this.bodyStarted;
       this.lastByteAt = now;
       this.receivedBytes = bytes;
-      if (bytes === this.expectedBytes) this.bodyFinished = now;
+      if (bytes === this.expectedBytes) {
+        this.bodyFinished = now;
+        this.phase('native-delivery');
+      }
     }
   }
 
@@ -103,6 +106,7 @@ export class DiscoveryTransferDiagnostics {
         (this.phases['admission-pow'] ?? 0) + (this.phases['request-encryption'] ?? 0),
       beforeHeaders: this.phases['connecting-upload-waiting-headers'] ?? 0,
       download: this.phases['body-download'] ?? 0,
+      nativeDelivery: this.phases['native-delivery'] ?? 0,
       clientVerification: (this.phases['response-authentication'] ?? 0) +
         (this.phases['response-decryption'] ?? 0) + (this.phases['response-parse'] ?? 0),
     };
@@ -112,7 +116,8 @@ export class DiscoveryTransferDiagnostics {
       clientPreparation: 'Client CPU/crypto/PoW; phasesMs identifies the expensive step.',
       beforeHeaders: 'Compare native Tor-ready and headers timings. Connect, TLS, upload, and server processing cannot be separated by this client trace.',
       download: 'Compare native body speed/stalls with this trace. If both are slow, inspect the Tor/server delivery path; if native is fast, inspect client event-loop/IPC delay.',
-      clientVerification: 'Client response authentication/decryption/parsing; phasesMs identifies the expensive step.',
+      nativeDelivery: 'Inspect the native-to-WebView response delivery path.',
+      clientVerification: 'Client response authentication/decryption/parsing, phasesMs identifies the expensive step.',
     }[dominantStage];
     console.info('[DISCOVERY-PERF]', JSON.stringify({
       event: 'summary', transfer: this.id, kind: this.kind, outcome, lastPhase: this.currentPhase,

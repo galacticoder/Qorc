@@ -67,6 +67,17 @@ export function setDoNotDisturb(type: keyof NotificationMutes, muted: boolean): 
   saveNotificationPreferences({ ...preferences, doNotDisturb: { ...preferences.doNotDisturb, [type]: muted } });
 }
 
+export async function setDoNotDisturbConfirmed(type: keyof NotificationMutes, muted: boolean): Promise<void> {
+  const preferences = readNotificationPreferences();
+  const serialized = JSON.stringify({ ...preferences, doNotDisturb: { ...preferences.doNotDisturb, [type]: muted } });
+  parseNotificationPreferences(serialized);
+  const commit = syncEncryptedStorage.setItemConfirmed(STORAGE_KEYS.NOTIFICATION_PREFERENCES, serialized);
+  for (const listener of listeners) {
+    try { listener(); } catch (error) { console.error('[Notifications] Settings observer failed', error); }
+  }
+  await commit;
+}
+
 export function setConversationNotificationMutes(username: string, mutes: NotificationMutes): void {
   if (!isCanonicalAuthUsername(username)) throw new Error('Invalid conversation username');
   const preferences = readNotificationPreferences();

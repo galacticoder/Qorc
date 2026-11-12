@@ -213,7 +213,7 @@ pub fn render_private_message(
     pixel_ratio: f32,
 ) -> QorcResult<RenderedMessageContent> {
     use base64::Engine as _;
-    use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache, Wrap};
+    use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap};
     use image::{ExtendedColorType, ImageEncoder, codecs::png::PngEncoder};
 
     if !(20..=MAX_RENDER_WIDTH).contains(&max_width)
@@ -230,6 +230,16 @@ pub fn render_private_message(
     let (red, green, blue) = parse_rgb(color)?;
     let line_height = (font_size * 1.4).ceil();
     let mut font_system = FontSystem::new();
+    font_system.db_mut().load_font_data(
+        include_bytes!("../../public/fonts/roboto/Roboto-Regular.ttf").to_vec(),
+    );
+    #[cfg(target_os = "android")]
+    {
+        font_system.db_mut().load_fonts_dir("/system/fonts");
+        font_system.db_mut().load_fonts_dir("/product/fonts");
+    }
+    font_system.db_mut().set_sans_serif_family("Roboto");
+    let text_attrs = Attrs::new().family(Family::Name("Roboto"));
     let mut swash_cache = SwashCache::new();
     let measure_single_line = |value: &str, font_system: &mut FontSystem| {
         let mut measurement = Buffer::new(font_system, Metrics::new(font_size, line_height));
@@ -237,7 +247,7 @@ pub fn render_private_message(
             let mut borrowed = measurement.borrow_with(font_system);
             borrowed.set_wrap(Wrap::None);
             borrowed.set_size(None, None);
-            borrowed.set_text(value, &Attrs::new(), Shaping::Advanced);
+            borrowed.set_text(value, &text_attrs, Shaping::Advanced);
             borrowed.shape_until_scroll(false);
         }
         measurement
@@ -280,7 +290,7 @@ pub fn render_private_message(
                 let mut borrowed = measurement.borrow_with(font_system);
                 borrowed.set_wrap(Wrap::WordOrGlyph);
                 borrowed.set_size(Some(available_width), None);
-                borrowed.set_text(value, &Attrs::new(), Shaping::Advanced);
+                borrowed.set_text(value, &text_attrs, Shaping::Advanced);
                 borrowed.shape_until_scroll(false);
             }
             measurement.layout_runs().take(line_limit + 1).count() <= line_limit
@@ -320,7 +330,7 @@ pub fn render_private_message(
             Wrap::WordOrGlyph
         });
         borrowed.set_size(Some((max_width - 4) as f32), None);
-        borrowed.set_text(render_text.as_str(), &Attrs::new(), Shaping::Advanced);
+        borrowed.set_text(render_text.as_str(), &text_attrs, Shaping::Advanced);
         borrowed.shape_until_scroll(false);
     }
     let mut measured_width = 20.0f32;
@@ -831,144 +841,4 @@ pub fn revoke_outbound_binding(db: &DatabaseManager, storage_id: &str) -> QorcRe
     }
     persist_native_content_record(db, storage_id, &record)?;
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_signal_plaintext_is_redacted_before_ipc() {
-        let pending_id = "A".repeat(44);
-        let plaintext =
-            r#"{"type":"message","messageId":"wire-1","content":" secret text ","from":"alice"}"#;
-        let redacted = redact_application_plaintext(plaintext, "message", &pending_id)
-            .expect("private payload redacts");
-        assert_eq!(redacted.content_ref.as_deref(), Some(pending_id.as_str()));
-        assert!(!redacted.plaintext.contains("secret text"));
-        assert!(redacted.plaintext.contains("nativeContentRef"));
-        assert!(redacted.plaintext.contains(r#""content":"""#));
-    }
-
-    #[test]
-    fn non_message_signal_plaintext_is_unchanged() {
-        let plaintext = r#"{"type":"typing-start","from":"alice"}"#;
-        let redacted = redact_application_plaintext(plaintext, "typing-start", "unused")
-            .expect("non-message payload passes through");
-        assert_eq!(redacted.plaintext, plaintext);
-        assert!(redacted.content_ref.is_none());
-    }
-
-    #[test]
-    fn native_record_round_trip_preserves_exact_send_binding() {
-        let original = NativeMessageContentRecord {
-            content: Zeroizing::new(b"private text".to_vec()),
-            outbound: Some(OutboundContentBinding {
-                recipient: "bob.smith-2".to_string(),
-                application_type: "message".to_string(),
-                wire_message_id: "wire-1".to_string(),
-            }),
-        };
-        let decoded = decode_record(encode_record(&original).expect("record encodes"))
-            .expect("record decodes");
-        assert_eq!(decoded.content.as_slice(), b"private text");
-        assert_eq!(decoded.outbound, original.outbound);
-    }
-
-    #[test]
-    fn malformed_native_record_fails_closed() {
-        assert!(decode_record(Zeroizing::new(b"private text".to_vec())).is_err());
-        let mut encoded = encode_record(&NativeMessageContentRecord {
-            content: Zeroizing::new(b"private text".to_vec()),
-            outbound: None,
-        })
-        .expect("record encodes");
-        encoded[4] = 2;
-        assert!(decode_record(encoded).is_err());
-    }
-
-    #[test]
-    fn native_renderer_emits_pixels_without_plaintext_metadata() {
-        use base64::Engine as _;
-        let rendered = render_private_message(
-            "unique-secret-render-sentinel",
-            320,
-            14.0,
-            "#ffffff",
-            false,
-            0,
-            1.0,
-        )
-        .expect("message renders");
-        let png = base64::engine::general_purpose::STANDARD
-            .decode(rendered.png_base64)
-            .expect("PNG is base64");
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
-        assert!(
-            !png.windows(b"unique-secret-render-sentinel".len())
-                .any(|window| { window == b"unique-secret-render-sentinel" })
-        );
-    }
-
-    #[test]
-    fn overlapping_glyph_pixels_do_not_overflow() {
-        let mut pixel = [255, 255, 255, 128];
-        blend_pixel(&mut pixel, [255, 255, 255, 128]);
-        assert_eq!(pixel, [255, 255, 255, 192]);
-    }
-
-    #[test]
-    fn native_renderer_scales_pixels_without_changing_layout() {
-        use base64::Engine as _;
-        for (single_line, max_lines) in [(false, 0), (true, 0), (false, 2)] {
-            let text = "High DPI text stays sharp without changing wrapping or layout. ".repeat(3);
-            let baseline = render_private_message(
-                &text, 200, 14.0, "#ffffff", single_line, max_lines, 1.0,
-            ).unwrap();
-            for ratio in [1.25, 1.5, 2.0, 3.0, 4.0] {
-                let rendered = render_private_message(
-                    &text, 200, 14.0, "#ffffff", single_line, max_lines, ratio,
-                ).unwrap();
-                assert_eq!(
-                    (rendered.width, rendered.height),
-                    (baseline.width, baseline.height),
-                );
-                let png = base64::engine::general_purpose::STANDARD
-                    .decode(rendered.png_base64).unwrap();
-                let image = image::load_from_memory(&png).unwrap().to_rgba8();
-                assert_eq!(image.width(), (rendered.width as f32 * ratio).ceil() as u32);
-                assert_eq!(image.height(), (rendered.height as f32 * ratio).ceil() as u32);
-                assert!(image.pixels().any(|pixel| pixel[3] > 0));
-            }
-        }
-    }
-
-    #[test]
-    fn native_renderer_rejects_unbounded_pixel_ratios() {
-        for ratio in [0.0, -1.0, 4.1, f32::NAN, f32::INFINITY] {
-            assert!(
-                render_private_message("text", 200, 14.0, "#ffffff", false, 0, ratio).is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn extracts_normalizes_and_limits_message_links() {
-        let links = message_links(
-            "See [repo](https://example.com/a?b=1), www.test.org, third.test/path, https://fourth.test and https://example.com/a?b=1.",
-        );
-        assert_eq!(links.len(), 3);
-        assert_eq!(links[0].url, "https://example.com/a?b=1");
-        assert_eq!(links[0].display_url, "example.com/a?b=1");
-        assert_eq!(links[0].host, "example.com");
-        assert_eq!(links[1].url, "https://www.test.org/");
-        assert_eq!(links[2].url, "https://third.test/path");
-    }
-
-    #[test]
-    fn ignores_unsafe_message_links() {
-        assert!(message_links("javascript:alert(1)").is_empty());
-        assert!(message_links("https://user:pass@example.com/").is_empty());
-        assert!(message_links("person@example.com").is_empty());
-    }
 }

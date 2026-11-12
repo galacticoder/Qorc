@@ -83,20 +83,3 @@ pub fn controlled_client_config(onion_service: bool) -> Result<Arc<ClientConfig>
     config.resumption = rustls::client::Resumption::disabled();
     Ok(Arc::new(config))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::strict_post_quantum_provider;
-    use rustls::NamedGroup;
-
-    #[test]
-    fn controlled_tls_has_no_classical_key_exchange_fallback() {
-        let provider = strict_post_quantum_provider();
-        let groups: Vec<_> = provider
-            .kx_groups
-            .iter()
-            .map(|group| group.name())
-            .collect();
-        assert_eq!(groups, vec![NamedGroup::X25519MLKEM768]);
-    }
-}

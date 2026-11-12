@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { format, isThisYear, isToday, isYesterday } from 'date-fns';
 import {
-    Clock3,
-    MessageCircle,
     MoreVertical,
     Search,
     Trash2,
@@ -19,12 +17,13 @@ import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { formatCallDurationSeconds } from '../../../lib/utils/date-utils';
 import { NEAR_BOTTOM_THRESHOLD, SCROLL_THRESHOLD } from '../../../lib/constants';
 import { CallLogRowsSkeleton } from '../../ui/ViewSkeletons';
+import { useMobileLayout } from '../../../hooks/useMobileLayout';
+import { ConversationSwipeRow } from '../messaging/ConversationSwipeRow';
+import { useAppBack } from '../../../hooks/useAppBack';
 
 interface CallLogsProps {
     readonly getDisplayUsername: (username: string) => Promise<string>;
     readonly onOpenConversation: (username: string) => void;
-    readonly onStartCall: (username: string, type: 'audio' | 'video') => void;
-    readonly callsDisabled?: boolean;
 }
 
 interface CallLogGroup {
@@ -52,74 +51,71 @@ const callStatusLabel = (log: CallLogEntry): string => {
     return `${log.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${kind} call`;
 };
 
-interface CallLogOptionsProps {
+interface CallLogDeleteButtonProps {
     readonly id: string;
     readonly displayName: string;
     readonly onDelete: (id: string) => void;
+    readonly onAction?: () => void;
+    readonly swipe?: boolean;
 }
 
-const CallLogOptions = React.memo(function CallLogOptions({
+const CallLogDeleteButton = React.memo(function CallLogDeleteButton({
     id,
     displayName,
     onDelete,
-}: CallLogOptionsProps) {
-    const [open, setOpen] = useState(false);
-
+    onAction,
+    swipe = false,
+}: CallLogDeleteButtonProps) {
     const handleDelete = useCallback(() => {
+        onAction?.();
         onDelete(id);
-        setOpen(false);
-    }, [id, onDelete]);
+    }, [id, onDelete, onAction]);
 
     return (
-        <Popover open={open} onOpenChange={setOpen}>
-            <PopoverTrigger asChild>
-                <Button
-                    size="sm"
-                    variant="ghost"
-                    className="qorc-call-pill-btn"
-                    title="Options"
-                    aria-label={`Options for call with ${displayName}`}
-                >
-                    <MoreVertical className="w-4 h-4" aria-hidden="true" />
-                </Button>
-            </PopoverTrigger>
-            <PopoverContent className="qorc-call-log-popover select-none" align="end">
-                <div className="qorc-call-log-options-menu">
-                    <div className="qorc-call-log-popover-title">Options</div>
-                    <button
-                        type="button"
-                        className="qorc-call-log-popover-action is-danger"
-                        onClick={handleDelete}
-                    >
-                        <Trash2 aria-hidden="true" />
-                        <span>Delete</span>
-                    </button>
-                </div>
-            </PopoverContent>
-        </Popover>
+        <Button
+            size="sm"
+            variant="ghost"
+            className={swipe
+                ? 'qorc-conversation-tiny-btn danger qorc-call-log-delete'
+                : 'qorc-call-pill-btn qorc-call-log-delete'}
+            title="Delete"
+            aria-label={`Delete call with ${displayName}`}
+            onClick={handleDelete}
+        >
+            <Trash2 className="w-4 h-4" aria-hidden="true" />
+        </Button>
     );
 });
 
 interface CallLogItemProps {
+    readonly mobile: boolean;
     readonly log: CallLogEntry;
-    readonly callsDisabled: boolean;
     readonly onDelete: (id: string) => void;
     readonly onOpenConversation: (username: string) => void;
-    readonly onStartCall: (username: string, type: 'audio' | 'video') => void;
 }
 
 const CallLogItem = React.memo(function CallLogItem({
+    mobile,
     log,
-    callsDisabled,
     onDelete,
     onOpenConversation,
-    onStartCall,
 }: CallLogItemProps) {
     const displayName = useDisplayUsername({ username: log.peerUsername });
+    const [swipeOpen, setSwipeOpen] = useState(false);
+    useEffect(() => { setSwipeOpen(false); }, [mobile]);
     const isUnanswered = log.status !== 'completed';
     const hasDistinctDisplayName = displayName.toLowerCase() !== log.peerUsername.toLowerCase();
 
     return (
+        <ConversationSwipeRow
+            enabled={mobile}
+            open={swipeOpen}
+            onOpenChange={setSwipeOpen}
+            actionWidth={56}
+            allowButtonSwipes
+            className="qorc-call-log-swipe"
+            actions={<CallLogDeleteButton swipe id={log.id} displayName={displayName} onDelete={onDelete} onAction={() => setSwipeOpen(false)} />}
+        >
         <article className="qorc-call-log-row">
             <button
                 type="button"
@@ -127,7 +123,7 @@ const CallLogItem = React.memo(function CallLogItem({
                 onClick={() => onOpenConversation(log.peerUsername)}
                 aria-label={`Open conversation with ${displayName}`}
             >
-                <UserAvatar username={log.peerUsername} size="lg" className="qorc-call-log-avatar" />
+                <UserAvatar username={log.peerUsername} size={mobile ? 'lg' : 'md'} className="qorc-call-log-avatar" />
 
                 <span className="qorc-call-log-copy">
                     <span className="qorc-call-log-name-line">
@@ -147,69 +143,29 @@ const CallLogItem = React.memo(function CallLogItem({
                             <span>{callStatusLabel(log)}</span>
                         </span>
 
-                        {log.status === 'completed' && log.duration !== undefined && log.duration > 0 && (
-                            <span className="qorc-call-log-duration">
-                                <Clock3 aria-hidden="true" />
-                                <span>{formatCallDurationSeconds(log.duration)}</span>
-                            </span>
-                        )}
                     </span>
+                    <time className="qorc-call-log-time" dateTime={new Date(log.startTime).toISOString()} title={format(new Date(log.startTime), 'PPpp')}>
+                        {format(new Date(log.startTime), 'h:mm a')}
+                    </time>
+                    {log.status === 'completed' && log.duration !== undefined && log.duration > 0 && (
+                        <span className="qorc-call-log-duration">
+                            <span>{formatCallDurationSeconds(log.duration)}</span>
+                        </span>
+                    )}
                 </span>
             </button>
 
-            <time
-                className="qorc-call-log-time"
-                dateTime={new Date(log.startTime).toISOString()}
-                title={format(new Date(log.startTime), 'PPpp')}
-            >
-                {format(new Date(log.startTime), 'h:mm a')}
-            </time>
-
-            <div className="qorc-call-pill qorc-call-log-actions" role="group" aria-label={`Actions for ${displayName}`}>
-                <Button
-                    size="sm"
-                    variant="ghost"
-                    className="qorc-call-pill-btn"
-                    title="Open chat"
-                    aria-label={`Open chat with ${displayName}`}
-                    onClick={() => onOpenConversation(log.peerUsername)}
-                >
-                    <MessageCircle className="w-4 h-4" aria-hidden="true" />
-                </Button>
-                <Button
-                    size="sm"
-                    variant="ghost"
-                    className="qorc-call-pill-btn"
-                    title="Audio call"
-                    aria-label={`Audio call ${displayName}`}
-                    disabled={callsDisabled}
-                    onClick={() => onStartCall(log.peerUsername, 'audio')}
-                >
-                    <CallIcon className="w-4 h-4" aria-hidden="true" />
-                </Button>
-                <Button
-                    size="sm"
-                    variant="ghost"
-                    className="qorc-call-pill-btn"
-                    title="Video call"
-                    aria-label={`Video call ${displayName}`}
-                    disabled={callsDisabled}
-                    onClick={() => onStartCall(log.peerUsername, 'video')}
-                >
-                    <Video className="w-4 h-4" aria-hidden="true" />
-                </Button>
-                <CallLogOptions id={log.id} displayName={displayName} onDelete={onDelete} />
-            </div>
+            {!mobile && <CallLogDeleteButton id={log.id} displayName={displayName} onDelete={onDelete} />}
         </article>
+        </ConversationSwipeRow>
     );
 });
 
 export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     getDisplayUsername,
     onOpenConversation,
-    onStartCall,
-    callsDisabled = false,
 }) {
+    const mobile = useMobileLayout();
     const {
         logs,
         hasMoreLogs,
@@ -222,6 +178,10 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
         isLoading,
     } = useCallHistory();
     const [searchQuery, setSearchQuery] = useState('');
+    const [searchOpen, setSearchOpen] = useState(false);
+    const searchInput = useRef<HTMLInputElement>(null);
+    const searchButton = useRef<HTMLButtonElement>(null);
+    const wasSearching = useRef(false);
     const [usernameMap, setUsernameMap] = useState<Record<string, string>>({});
     const [optionsOpen, setOptionsOpen] = useState(false);
     const historyControlsDisabled = isLoading || logs.length === 0;
@@ -232,14 +192,25 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
     hasMoreLogsRef.current = hasMoreLogs;
     const isSearchingRef = useRef(isSearching);
     isSearchingRef.current = isSearching;
+    const closeSearch = useCallback(() => {
+        searchInput.current?.blur();
+        setSearchQuery('');
+        setSearchOpen(false);
+    }, []);
+    useAppBack(searchOpen, closeSearch, 30);
+    useEffect(() => {
+        if (searchOpen) searchInput.current?.focus();
+        else if (wasSearching.current) searchButton.current?.focus();
+        wasSearching.current = searchOpen;
+    }, [searchOpen]);
 
     useEffect(() => {
         if (!isLoading && logs.length === 0) setSearchQuery('');
     }, [isLoading, logs.length]);
 
     useEffect(() => {
-        if (historyControlsDisabled) setOptionsOpen(false);
-    }, [historyControlsDisabled]);
+        if (historyControlsDisabled) { setOptionsOpen(false); closeSearch(); }
+    }, [historyControlsDisabled, closeSearch]);
 
     const searchScopeLogs = useMemo(
         () => (isSearching ? getAllLogs() : logs),
@@ -320,35 +291,45 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
 
     return (
         <section className="qorc-call-log-page">
-            <header className="qorc-call-log-header">
-                <div className="qorc-call-log-heading">
+            <header className={`qorc-call-log-header${searchOpen ? ' is-searching' : ''}`}>
+                <div className="qorc-call-log-heading" hidden={mobile && searchOpen}>
                     <CallIcon className="qorc-call-log-heading-icon" aria-hidden="true" />
                     <h1>Calls</h1>
                 </div>
 
                 <div className="qorc-call-log-header-actions">
-                    <div className={`qorc-call-log-search${historyControlsDisabled ? ' is-disabled' : ''}`}>
-                        <Search aria-hidden="true" />
+                    {searchOpen ? <div className="qorc-call-log-search qorc-search-field">
+                        <span className="qorc-search-icon" aria-hidden="true"><Search /></span>
                         <input
+                            ref={searchInput}
+                            autoFocus
                             type="text"
+                            className="qorc-search-input"
                             value={searchQuery}
                             onChange={(event) => setSearchQuery(event.target.value)}
                             placeholder="Search calls"
                             aria-label="Search call history"
                             disabled={historyControlsDisabled}
+                            onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); closeSearch(); } }}
                         />
-                        {searchQuery.length > 0 && (
                             <button
                                 type="button"
-                                onClick={() => setSearchQuery('')}
-                                title="Clear search"
-                                aria-label="Clear call search"
+                                className="qorc-search-action"
+                                onClick={searchQuery ? () => { setSearchQuery(''); searchInput.current?.focus(); } : closeSearch}
+                                onPointerDown={event => event.preventDefault()}
+                                title={searchQuery ? 'Clear search' : 'Close search'}
+                                aria-label={searchQuery ? 'Clear call search' : 'Close call search'}
                                 disabled={historyControlsDisabled}
                             >
                                 <X aria-hidden="true" />
                             </button>
-                        )}
-                    </div>
+                    </div> : <button type="button" ref={searchButton}
+                        className="qorc-call-pill-btn qorc-call-log-search-btn"
+                        aria-label="Search call history" title="Search calls" aria-expanded={false}
+                        disabled={historyControlsDisabled}
+                        onClick={() => { setOptionsOpen(false); setSearchOpen(true); }}>
+                        <Search aria-hidden="true" />
+                    </button>}
 
                     <Popover
                         open={optionsOpen && !historyControlsDisabled}
@@ -368,7 +349,6 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                         </PopoverTrigger>
                         <PopoverContent className="qorc-call-log-popover select-none" align="end">
                             <div className="qorc-call-log-options-menu">
-                                <div className="qorc-call-log-popover-title">Options</div>
                                 <button
                                     type="button"
                                     className="qorc-call-log-popover-action is-danger"
@@ -401,11 +381,10 @@ export const CallLogs = React.memo<CallLogsProps>(function CallLogs({
                                     {group.logs.map((log) => (
                                         <CallLogItem
                                             key={log.id}
+                                            mobile={mobile}
                                             log={log}
-                                            callsDisabled={callsDisabled}
                                             onDelete={deleteLog}
                                             onOpenConversation={onOpenConversation}
-                                            onStartCall={onStartCall}
                                         />
                                     ))}
                                 </div>

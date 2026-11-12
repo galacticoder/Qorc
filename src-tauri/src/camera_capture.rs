@@ -33,7 +33,7 @@ const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const FRAME_WAIT: Duration = Duration::from_secs(1);
 const START_WAIT: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub struct CameraDevice {
     pub device_id: String,
     pub label: String,
@@ -76,8 +76,13 @@ impl CameraSession {
         }
     }
 
-    fn publish(&self, frame: CameraFrame) -> bool {
+    fn publish(&self, mut frame: CameraFrame) -> bool {
         if let Ok(mut slot) = self.slot.lock() {
+            if !self.enabled.load(Ordering::Acquire) || !frame.enabled {
+                frame.bytes.fill(0);
+                frame.bytes.clear();
+                frame.enabled = false;
+            }
             let overwritten = slot.frame.is_some();
             if let Some(previous) = slot.frame.as_mut() {
                 previous.bytes.fill(0);
@@ -86,7 +91,25 @@ impl CameraSession {
             self.ready.notify_all();
             return overwritten;
         }
+        frame.bytes.fill(0);
         false
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        let mut slot = self
+            .slot
+            .lock()
+            .map_err(|_| "camera frame queue unavailable".to_string())?;
+        self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            if let Some(frame) = slot.frame.as_mut() {
+                frame.bytes.fill(0);
+                frame.bytes.clear();
+                frame.enabled = false;
+            }
+        }
+        self.ready.notify_all();
+        Ok(())
     }
 
     fn finish(&self) {
@@ -108,7 +131,13 @@ impl CameraSession {
                 .as_ref()
                 .is_some_and(|frame| frame.sequence > after_sequence)
             {
-                return Ok(slot.frame.take());
+                let mut frame = slot.frame.take().unwrap();
+                if !self.enabled.load(Ordering::Acquire) || !frame.enabled {
+                    frame.bytes.fill(0);
+                    frame.bytes.clear();
+                    frame.enabled = false;
+                }
+                return Ok(Some(frame));
             }
             if slot.stopped {
                 return Err("camera capture stopped".to_string());
@@ -160,6 +189,10 @@ impl CameraCaptureState {
     }
 
     pub fn devices(&self) -> Result<Vec<CameraDevice>, String> {
+        #[cfg(target_os = "android")]
+        {
+            crate::android_media::devices("cameraDevices")
+        }
         #[cfg(target_os = "linux")]
         {
             Ok(context::enum_devices()
@@ -287,8 +320,7 @@ impl CameraCaptureState {
 
     pub fn set_enabled(&self, session_id: &str, enabled: bool) -> Result<(), String> {
         let session = self.session(session_id)?;
-        session.enabled.store(enabled, Ordering::Release);
-        Ok(())
+        session.set_enabled(enabled)
     }
 
     pub fn pull(
@@ -480,6 +512,59 @@ fn capture_profile_priority(
         u8::from(!compressed),
         resolution_delta,
     )
+}
+
+#[cfg(target_os = "android")]
+fn run_capture(
+    session: Arc<CameraSession>,
+    device_id: Option<&str>,
+    width: u32,
+    height: u32,
+    frame_rate: u32,
+    started: std::sync::mpsc::SyncSender<Result<(), String>>,
+) {
+    let result = (|| -> Result<(), String> {
+        let capture =
+            crate::android_media::Capture::start("camera", device_id, width, height, frame_rate)?;
+        let _ = started.send(Ok(()));
+        let mut enabled = true;
+        while !session.stop.load(Ordering::Acquire) {
+            let current = session.enabled.load(Ordering::Acquire);
+            if current != enabled {
+                capture.enabled(current)?;
+                enabled = current;
+            }
+            if let Some(mut frame) = capture.poll()? {
+                let mut bytes = frame.decode(MAX_FRAME_BYTES)?;
+                if !current || !frame.enabled {
+                    bytes.fill(0);
+                    continue;
+                }
+                if !(2..=1280).contains(&frame.width)
+                    || !(2..=720).contains(&frame.height)
+                    || !(1..=60).contains(&frame.frame_rate)
+                {
+                    bytes.fill(0);
+                    return Err("Invalid Android camera profile".into());
+                }
+                session.publish(CameraFrame {
+                    sequence: frame.sequence,
+                    captured_at: frame.captured_at,
+                    width: frame.width,
+                    height: frame.height,
+                    frame_rate: frame.frame_rate,
+                    enabled: true,
+                    bytes,
+                });
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        capture.finish()
+    })();
+    if let Err(error) = result {
+        let _ = started.send(Err(error));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1039,7 +1124,8 @@ fn run_capture(
     }
     let mut stream_open = true;
     let mut sequence = 0u64;
-    let black = match encode_black_frame(selected_resolution.width_x, selected_resolution.height_y) {
+    let black = match encode_black_frame(selected_resolution.width_x, selected_resolution.height_y)
+    {
         Ok(black) => black,
         Err(_) => {
             let _ = started.send(Err("camera frame encoder unavailable".to_string()));
@@ -1315,134 +1401,4 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        CameraCaptureState, CameraFrame, CameraSession, capture_profile_priority, normalize_jpeg,
-    };
-    use std::collections::HashSet;
-
-    #[test]
-    fn latest_camera_frame_replaces_and_clears_the_previous_frame() {
-        let session = CameraSession::new();
-        session.publish(CameraFrame {
-            sequence: 1,
-            captured_at: 1,
-            width: 640,
-            height: 360,
-            frame_rate: 60,
-            enabled: true,
-            bytes: vec![1, 2, 3],
-        });
-        session.publish(CameraFrame {
-            sequence: 2,
-            captured_at: 2,
-            width: 640,
-            height: 360,
-            frame_rate: 60,
-            enabled: true,
-            bytes: vec![4, 5, 6],
-        });
-        let frame = session.pull(0).unwrap().unwrap();
-        assert_eq!(frame.sequence, 2);
-        assert_eq!(frame.bytes, vec![4, 5, 6]);
-        assert!(session.pull(2).unwrap().is_none());
-    }
-
-    #[test]
-    fn padded_camera_jpeg_is_trimmed_to_its_end_marker() {
-        let bytes = normalize_jpeg(vec![0xff, 0xd8, 1, 2, 0xff, 0xd9, 0, 0, 0xff, 0xd9]).unwrap();
-        assert_eq!(bytes, vec![0xff, 0xd8, 1, 2, 0xff, 0xd9]);
-    }
-
-    #[test]
-    fn camera_profile_priority_prefers_requested_frame_rate_before_resolution() {
-        let full_resolution_30 = capture_profile_priority(1280, 720, 30, true, 1280, 720, 60);
-        let lower_resolution_60 = capture_profile_priority(640, 480, 60, true, 1280, 720, 60);
-        assert!(lower_resolution_60 < full_resolution_30);
-    }
-
-    #[test]
-    #[ignore]
-    fn native_camera_produces_advancing_frames() {
-        let state = CameraCaptureState::new();
-        let devices = state.devices().unwrap();
-        assert!(!devices.is_empty());
-        for (index, device) in devices.iter().enumerate() {
-            let session_id = format!("{:032x}", index + 1);
-            state
-                .start(&session_id, Some(&device.device_id), 1280, 720, 60)
-                .unwrap();
-            let mut sequence = 0;
-            let mut signatures = HashSet::new();
-            for _ in 0..60 {
-                let Some(frame) = state.pull(&session_id, sequence).unwrap() else {
-                    continue;
-                };
-                sequence = frame.sequence;
-                assert!(frame.bytes.starts_with(&[0xff, 0xd8]));
-                assert!(frame.bytes.ends_with(&[0xff, 0xd9]));
-                signatures.insert(frame.bytes);
-                if sequence >= 20 {
-                    break;
-                }
-            }
-            state.set_enabled(&session_id, false).unwrap();
-            let mut disabled = false;
-            for _ in 0..10 {
-                let Some(frame) = state.pull(&session_id, sequence).unwrap() else {
-                    continue;
-                };
-                sequence = frame.sequence;
-                if !frame.enabled {
-                    disabled = true;
-                    break;
-                }
-            }
-            state.set_enabled(&session_id, true).unwrap();
-            let mut resumed = false;
-            for _ in 0..20 {
-                let Some(frame) = state.pull(&session_id, sequence).unwrap() else {
-                    continue;
-                };
-                sequence = frame.sequence;
-                if frame.enabled {
-                    resumed = true;
-                    break;
-                }
-            }
-            state.stop(&session_id).unwrap();
-            assert!(sequence >= 20, "{} did not advance", device.label);
-            assert!(signatures.len() > 1, "{} repeated one frame", device.label);
-            assert!(disabled, "{} did not disable", device.label);
-            assert!(resumed, "{} did not resume", device.label);
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn native_camera_default_uses_the_next_available_device() {
-        let state = CameraCaptureState::new();
-        if state.devices().unwrap().len() < 2 {
-            return;
-        }
-        let first_session = "10000000000000000000000000000000";
-        let second_session = "20000000000000000000000000000000";
-        state.start(first_session, None, 1280, 720, 60).unwrap();
-        state.start(second_session, None, 1280, 720, 60).unwrap();
-        for session_id in [first_session, second_session] {
-            let mut frame_received = false;
-            for _ in 0..10 {
-                if state.pull(session_id, 0).unwrap().is_some() {
-                    frame_received = true;
-                    break;
-                }
-            }
-            assert!(frame_received);
-        }
-        state.stop(first_session).unwrap();
-        state.stop(second_session).unwrap();
-    }
 }

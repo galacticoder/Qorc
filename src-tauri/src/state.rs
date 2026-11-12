@@ -22,6 +22,7 @@ use crate::system::notification::NotificationHandler;
 use crate::tor::TorManager;
 
 pub struct AppState {
+    pub resetting_local_data: AtomicBool,
     pub instance_lock: RwLock<Option<File>>,
     pub audio_codec: AudioCodecState,
     pub audio_playback: Arc<AudioPlaybackState>,
@@ -52,6 +53,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            resetting_local_data: AtomicBool::new(false),
             instance_lock: RwLock::new(None),
             audio_codec: AudioCodecState::new(),
             audio_playback: Arc::new(AudioPlaybackState::new()),
@@ -76,7 +78,7 @@ impl AppState {
             database: RwLock::new(None),
             database_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
             power_blocker: Arc::new(crate::system::power::PowerSaveBlocker::new()),
-            close_to_tray: RwLock::new(true),
+            close_to_tray: RwLock::new(cfg!(desktop)),
         }
     }
 

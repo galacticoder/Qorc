@@ -17,6 +17,7 @@ export interface AppSettingsState {
 
 const APP_SETTINGS_KEYS = new Set([
   'navigationLayout',
+  'chatBackground',
   'notifications',
   'preferredCallMicId',
   'preferredSpeakerId',
@@ -48,6 +49,7 @@ export function parseAppSettings(raw: unknown): AppSettingsState {
   ) {
     throw new Error('Invalid navigation layout setting');
   }
+  if (parsed.chatBackground !== undefined && parsed.chatBackground !== 'plain' && parsed.chatBackground !== 'soft') throw new Error('Invalid chat background setting');
   if (parsed.notifications !== undefined) {
     if (
       !isPlainObject(parsed.notifications) ||
@@ -63,7 +65,9 @@ export function parseAppSettings(raw: unknown): AppSettingsState {
       throw new Error('Invalid media device setting');
     }
   }
-  return { ...parsed } as AppSettingsState;
+
+  const { chatBackground: _removedBackground, ...settings } = parsed;
+  return settings as AppSettingsState;
 }
 
 export function readAppSettings(): AppSettingsState {
@@ -75,6 +79,14 @@ export function updateAppSettings(updates: Partial<AppSettingsState>): AppSettin
   const serialized = JSON.stringify(next);
   parseAppSettings(serialized);
   syncEncryptedStorage.setItem(STORAGE_KEYS.APP_SETTINGS, serialized);
+  return next;
+}
+
+export async function updateAppSettingsConfirmed(updates: Partial<AppSettingsState>): Promise<AppSettingsState> {
+  const next = { ...readAppSettings(), ...updates };
+  const serialized = JSON.stringify(next);
+  parseAppSettings(serialized);
+  await syncEncryptedStorage.setItemConfirmed(STORAGE_KEYS.APP_SETTINGS, serialized);
   return next;
 }
 

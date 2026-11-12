@@ -67,6 +67,8 @@ struct ScreenSession {
     slot: Mutex<FrameSlot>,
     ready: Condvar,
     cancel: Notify,
+    #[cfg(target_os = "android")]
+    native_capture: Mutex<Option<Arc<crate::android_media::Capture>>>,
 }
 
 impl ScreenSession {
@@ -79,6 +81,8 @@ impl ScreenSession {
             }),
             ready: Condvar::new(),
             cancel: Notify::new(),
+            #[cfg(target_os = "android")]
+            native_capture: Mutex::new(None),
         }
     }
 
@@ -143,6 +147,12 @@ impl ScreenSession {
 
     fn stop(&self) {
         self.stop.store(true, Ordering::Release);
+        #[cfg(target_os = "android")]
+        if let Ok(mut capture) = self.native_capture.lock() {
+            if let Some(capture) = capture.take() {
+                capture.cancel();
+            }
+        }
         self.finish();
         self.cancel.notify_waiters();
         self.cancel.notify_one();
@@ -168,12 +178,12 @@ impl ScreenCaptureState {
         validate_session_id(session_id)?;
         self.stop(session_id)?;
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             return Err("native screen capture is unavailable on this platform".to_string());
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             let session = Arc::new(ScreenSession::new());
             let replaced = {
@@ -198,7 +208,10 @@ impl ScreenCaptureState {
             let task_state = Arc::downgrade(self);
             let task_session_id = session_id.to_string();
             let _ = tokio::spawn(async move {
+                #[cfg(target_os = "linux")]
                 let result = run_portal_capture(task_session.clone(), task_notifier.clone()).await;
+                #[cfg(target_os = "android")]
+                let result = run_android_capture(task_session.clone(), task_notifier.clone()).await;
                 if let Err(error) = result {
                     notify_start(&task_notifier, Err(error.clone()));
                     tracing::warn!(target: "qorc_call_diag", error = %error, "[CALL-DIAG] native-screen-capture-failed");
@@ -834,4 +847,54 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(target_os = "android")]
+async fn run_android_capture(
+    session: Arc<ScreenSession>,
+    notifier: StartNotifier,
+) -> Result<(), String> {
+    let capture = Arc::new(crate::android_media::Capture::pending("screen"));
+    {
+        let mut native = session
+            .native_capture
+            .lock()
+            .map_err(|_| "Screen state unavailable")?;
+        if session.stop.load(Ordering::Acquire) {
+            return Err("Screen sharing cancelled".into());
+        }
+        *native = Some(capture.clone());
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        capture.begin(None, 1280, 720, 30)?;
+        if session.stop.load(Ordering::Acquire) {
+            return Err("Screen sharing cancelled".into());
+        }
+        notify_start(&notifier, Ok(()));
+        while !session.stop.load(Ordering::Acquire) {
+            if let Some(mut frame) = capture.poll()? {
+                let mut bytes = frame.decode(MAX_FRAME_BYTES)?;
+                if !(2..=1280).contains(&frame.width)
+                    || !(2..=720).contains(&frame.height)
+                    || !(1..=60).contains(&frame.frame_rate)
+                {
+                    bytes.fill(0);
+                    return Err("Invalid Android screen profile".into());
+                }
+                session.publish(ScreenFrame {
+                    sequence: frame.sequence,
+                    captured_at: frame.captured_at,
+                    width: frame.width,
+                    height: frame.height,
+                    frame_rate: frame.frame_rate,
+                    bytes,
+                });
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        capture.finish()
+    })
+    .await
+    .map_err(|_| "Android screen worker failed")?
 }

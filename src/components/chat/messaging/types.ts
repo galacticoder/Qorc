@@ -60,6 +60,8 @@ export interface ChatMessageProps {
   smartReceipt?: MessageReceipt;
   onReply?: (message: Message) => void;
   previousMessage?: Message;
+  nextMessage?: Message;
+  animateArrival?: boolean;
   onDelete?: (message: Message) => void;
   onEdit?: (message: Message) => void;
   onReact?: (message: Message, emoji: string) => void;

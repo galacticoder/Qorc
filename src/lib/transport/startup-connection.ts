@@ -2,6 +2,7 @@ import { getTorAutoSetup } from './tor-auto-setup';
 import { torNetworkManager } from './tor-network';
 import { websocket, storage, anonymousHttp } from '../tauri-bindings';
 import websocketClient from '../websocket/websocket';
+import { beginBackgroundWork } from '../runtime/background-work';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { normalizeToWss } from '../servers/server-address';
 export { normalizeToWss } from '../servers/server-address';
@@ -294,7 +295,10 @@ class StartupConnection {
     const generation = ++this.generation;
     this.diagnosticStartedAt = Date.now();
     this.diagnostic('operation-start');
+    let releaseBackgroundWork = async () => {};
     const run = (async (): Promise<void> => {
+      releaseBackgroundWork = await beginBackgroundWork();
+      if (this.generation !== generation) return;
       const serverUrl = this.state.serverUrl || await this.loadConfiguredServerUrl();
       if (!serverUrl) {
         this.update({ phase: 'idle', step: '', error: '', failureTarget: null });
@@ -381,7 +385,8 @@ class StartupConnection {
       }, 'error');
       this.update({ phase: 'failed', error: message, step: '', failureTarget: 'server' });
       throw lastError instanceof Error ? lastError : new Error(message);
-    })().finally(() => {
+    })().finally(async () => {
+      await releaseBackgroundWork();
       if (this.inFlight === run) this.inFlight = null;
       this.diagnostic('operation-finished', {
         operationWasCurrent: this.generation === generation,

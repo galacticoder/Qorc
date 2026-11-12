@@ -74,6 +74,11 @@ import { keyTransparencyClient } from "../lib/key-transparency/client";
 import { getInstanceLocalStorageItem, setInstanceLocalStorageItem } from "../lib/runtime/instance-storage";
 import { boundMessageState, releaseUnretainedVaultEntries } from "../lib/utils/message-state-limits";
 import { hasResumeToken } from "../lib/signals/resume-tokens";
+import { useMobileLayout } from "../hooks/useMobileLayout";
+import { useAndroidBackgrounded } from "../hooks/useAndroidBackgrounded";
+import { ConversationWorkspace } from "../components/chat/messaging/ConversationWorkspace";
+import { useAppBack } from '../hooks/useAppBack';
+import { SectionPager, type AppSection } from '../components/ui/SectionPager';
 
 const loadCallModal = () => import("../components/chat/calls/CallModal").then((module) => module.default);
 const loadAppSettings = () => import("../components/settings/AppSettings").then((module) => module.AppSettings);
@@ -98,10 +103,12 @@ const ChatApp: React.FC = () => {
     fn.__peek = () => messagesRef.current;
     return fn;
   }, []);
-  
+
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const { theme } = useTheme();
   const [sidebarActiveTab, setSidebarActiveTab] = useState<'chats' | 'calls' | 'settings'>('chats');
+  const mobile = useMobileLayout();
+  const androidBackgrounded = useAndroidBackgrounded();
   const [setupComplete, setSetupComplete] = useState(false);
   const [serverUrlResolved, setServerUrlResolved] = useState(false);
   const [serverEntryPreflightInProgress, setServerEntryPreflightInProgress] = useState(true);
@@ -453,7 +460,8 @@ const ChatApp: React.FC = () => {
     setMessages,
     Database.secureDBRef.current,
     findUser,
-    Database.initialDataLoaded
+    Database.initialDataLoaded,
+    sidebarActiveTab === 'chats' && !androidBackgrounded,
   );
 
   useLayoutEffect(() => {
@@ -464,6 +472,25 @@ const ChatApp: React.FC = () => {
     Database.hydratePreloadedConversationMessages(username);
     selectConversation(username);
   }, [Database.hydratePreloadedConversationMessages, selectConversation]);
+
+  const handleBackToConversations = useCallback(() => {
+    selectConversation(null);
+  }, [selectConversation]);
+
+  const handleSectionChange = useCallback((tab: AppSection) => {
+    setShowNewChatInput(false);
+    if (mobile) handleBackToConversations();
+    setSidebarActiveTab(tab);
+    setShowSettings(false);
+  }, [handleBackToConversations, mobile]);
+
+  useAppBack(mobile && Authentication.isLoggedIn, () => {
+    if (sidebarActiveTab !== 'chats') {
+      setSidebarActiveTab('chats');
+      handleBackToConversations();
+    } else if (selectedConversation) handleBackToConversations();
+    else return false;
+  });
 
   const handleRemoveConversation = useCallback(async (username: string) => {
     Database.discardPreloadedConversationMessages(username);
@@ -596,9 +623,6 @@ const ChatApp: React.FC = () => {
     handleSelectConversation(username);
     setSidebarActiveTab('chats');
   }, [handleSelectConversation]);
-  const handleStartCallFromLog = useCallback((username: string, type: 'audio' | 'video') => {
-    void callingHook.startCall(username, type);
-  }, [callingHook.startCall]);
 
   // Update P2P sender whenever service becomes ready
   useEffect(() => {
@@ -618,7 +642,7 @@ const ChatApp: React.FC = () => {
     }
     return () => unifiedSignalTransport.setP2PSender(null);
   }, [p2pMessaging.p2pStatus.isInitialized, p2pMessaging.connectToPeer, p2pMessaging.isPeerConnected]);
-  
+
   const getOrCreateUser = useCallback((username: string): User => {
     let targetUser = Database.users.find(user => user.username === username);
     if (!targetUser) {
@@ -947,27 +971,26 @@ const ChatApp: React.FC = () => {
   return (
     <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current || ''}>
       <Layout
+        conversationOpen={!!selectedConversation}
+        standaloneScreenOpen={showNewChatInput}
         activeTab={sidebarActiveTab as 'chats' | 'calls' | 'settings'}
-        onTabChange={(tab) => {
-          setSidebarActiveTab(tab);
-          setShowSettings(false);
-        }}
+        onTabChange={handleSectionChange}
         currentUser={{
           username: currentDisplayName || Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || '',
           avatarUrl: undefined
         }}
-        onLogout={async () => await Authentication.logout(Database.secureDBRef)}
       >
-        <div className="qorc-stage">
+        <div className="qorc-stage" inert={showNewChatInput}>
           <PeerIdentityVerificationAlert />
-          <div className={sidebarActiveTab === 'chats' ? 'h-full w-full' : 'hidden'}>
-            <div className="flex h-full">
-              <div
-                className="qorc-conversations-panel hidden md:flex flex-col relative"
-                style={{ width: `${conversationPanelWidth}px` }}
-              >
+          <SectionPager activeTab={sidebarActiveTab} mobile={mobile} swipeEnabled={!selectedConversation && !showNewChatInput} onTabChange={handleSectionChange} panels={{
+            chats: (
+            <ConversationWorkspace
+              mobile={mobile}
+              selectedConversation={selectedConversation}
+              panelWidth={conversationPanelWidth}
+              list={<>
                 {/* Resize Handle */}
-                <div
+                {!mobile && <div
                   className="qorc-resize-line"
                   onMouseDown={(e) => {
                     e.preventDefault();
@@ -993,7 +1016,7 @@ const ChatApp: React.FC = () => {
                     document.addEventListener('mouseup', handleMouseUp);
                   }}
                   style={{ cursor: isResizing ? 'col-resize' : undefined }}
-                />
+                />}
 
                 <div className="qorc-conversations-head">
                   <div className="qorc-conversations-title">
@@ -1029,14 +1052,13 @@ const ChatApp: React.FC = () => {
                     onBlockConversation={handleBlockConversationFromSettings}
                   />
                 </div>
-              </div>
+              </>}
+            >
 
-              <div className="qorc-pane">
                 {selectedConversation ? (
                   <EmojiPickerProvider>
                     <ChatInterface
-                      isPinned={conversations.some(conversation => conversation.username === selectedConversation && conversation.isPinned)}
-                      onTogglePin={toggleConversationPin}
+                      onBack={mobile ? handleBackToConversations : undefined}
                       messages={conversationMessages}
                       setMessages={setMessages}
                       currentCall={currentCall}
@@ -1052,7 +1074,6 @@ const ChatApp: React.FC = () => {
                       getSmartReceiptStatus={getSmartReceiptStatus}
                       secureDB={Database.secureDBRef.current}
                       onSendMessage={onSendMessage}
-                      onToggleBlock={handleToggleBlock}
                       users={Database.users}
                       selectedConversation={selectedConversation}
                       saveMessageToLocalDB={saveMessageWithContext}
@@ -1061,41 +1082,42 @@ const ChatApp: React.FC = () => {
                 ) : (
                   <EmptyChatView onCreateChat={() => openConversationDialog('manage')} />
                 )}
-              </div>
-            </div>
-          </div>
-
-          <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'calls' && (
+            </ConversationWorkspace>
+            ),
+            calls: (
               CallLogsPanel ? (
                 <CallLogsPanel
                   getDisplayUsername={stableGetDisplayUsername}
                   onOpenConversation={handleOpenCallLogConversation}
-                  onStartCall={handleStartCallFromLog}
-                  callsDisabled={Boolean(currentCall)}
                 />
               ) : <CallLogsSkeleton />
-            )}
-          </div>
-
-          <div className={sidebarActiveTab === 'settings' ? 'h-full w-full' : 'hidden'}>
-            {sidebarActiveTab === 'settings' && (
+            ),
+            settings: (
               AppSettingsPanel ? (
                 <AppSettingsPanel
                   currentUsername={Authentication.loginUsernameRef.current || ''}
                   currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
                   onLogout={async () => await Authentication.logout(Database.secureDBRef)}
+                  onClearLocalData={async () => {
+                    if (currentCall) await callingHook.endCall();
+                    await Authentication.logout(Database.secureDBRef, '', { clearLocalData: true });
+                  }}
+                  onResetAllLocalData={async () => {
+                    if (currentCall) await callingHook.endCall();
+                    await Authentication.logout(Database.secureDBRef, '', { resetAllLocalData: true });
+                  }}
                   onOpenBlockConversationChooser={() => openConversationDialog('block')}
                 />
               ) : <SettingsSkeleton />
-            )}
-          </div>
+            )
+          }} />
         </div>
       </Layout>
       <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       {
         currentCall && CallModalPanel && createPortal(
           <CallModalPanel
+            uiActive={!androidBackgrounded}
             call={currentCall}
             localUsername={Authentication.loginUsernameRef.current || ''}
             localMediaActive={callingHook.localMediaActive}
@@ -1124,6 +1146,7 @@ const ChatApp: React.FC = () => {
       {
         foregroundIncomingCall && CallModalPanel && createPortal(
           <CallModalPanel
+            uiActive={!androidBackgrounded}
             key={foregroundIncomingCall.id}
             call={foregroundIncomingCall}
             localUsername={Authentication.loginUsernameRef.current || ''}

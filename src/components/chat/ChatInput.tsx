@@ -17,7 +17,7 @@ import { Cross2Icon } from "./assets/icons";
 import { MaterialFileIcon } from "../ui/MaterialFileIcon";
 
 interface ChatInputProps {
-  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void;
+  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void | Promise<void>;
 
   currentUsername: string;
   users: ReadonlyArray<User>;
@@ -64,6 +64,8 @@ export function ChatInput({
   const [isSending, setIsSending] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [replyDisplaySender, setReplyDisplaySender] = useState('');
+  const messageRef = useRef('');
+  const inputScopeRef = useRef(`${currentUsername}:${selectedConversation}`);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const editingMessageIdRef = useRef<string | null>(null);
@@ -88,12 +90,13 @@ export function ChatInput({
 
   useEffect(() => {
     if (!editingMessage) {
-      if (editingMessageIdRef.current) setMessage("");
+      if (editingMessageIdRef.current) { messageRef.current = ''; setMessage(''); }
       editingMessageIdRef.current = null;
       return;
     }
 
     editingMessageIdRef.current = editingMessage.id;
+    messageRef.current = '';
     setMessage("");
     messageInputRef.current?.focus();
   }, [editingMessage, selectedConversation, currentUsername]);
@@ -121,9 +124,12 @@ export function ChatInput({
 
   useLayoutEffect(() => {
     editingMessageIdRef.current = null;
+    inputScopeRef.current = `${currentUsername}:${selectedConversation}`;
+    messageRef.current = '';
     setMessage("");
     setShowVoiceRecorder(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
+    return () => { messageRef.current = ''; inputScopeRef.current = ''; };
   }, [selectedConversation, currentUsername]);
 
   useLayoutEffect(() => {
@@ -145,35 +151,24 @@ export function ChatInput({
     return () => observer.disconnect();
   }, [message, disabledPlaceholder]);
 
-  // Handle sending text messages or edits
   const handleSend = useCallback(() => {
-    if (!message.trim() || !selectedConversation || disabled) {
-      return;
-    }
-
-    const sanitizedMessage = sanitizeMessage(message);
+    const text = messageRef.current;
+    if (inputScopeRef.current !== `${currentUsername}:${selectedConversation}` || !text.trim() || !selectedConversation || disabled || showVoiceRecorder) return;
+    const sanitizedMessage = sanitizeMessage(text);
     if (!sanitizedMessage) return;
-    setMessage("");
-
-    const isEdit = editingMessage !== null && editingMessage !== undefined;
-    const outboundReply = replyTo
-      ? { ...replyTo, id: replyTo.wireMessageId || replyTo.id }
-      : null;
-    const sendPromise = isEdit
-      ? onSendMessage(
-          editingMessage!.wireMessageId || editingMessage!.id,
-          sanitizedMessage,
-          SignalType.EDIT_MESSAGE,
-          null,
-        )
-      : onSendMessage("", sanitizedMessage, SignalType.MESSAGE, outboundReply);
-
-    if (isEdit) { onCancelEdit(); } else { onCancelReply(); }
-
-    Promise.resolve(sendPromise).catch((error) => {
-      console.error('Failed to send message:', error);
-    });
-  }, [message, selectedConversation, disabled, editingMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
+    const isEdit = !!editingMessage;
+    const targetId = isEdit ? editingMessage!.wireMessageId || editingMessage!.id : '';
+    const outboundReply = replyTo ? { ...replyTo, id: replyTo.wireMessageId || replyTo.id } : null;
+    messageRef.current = '';
+    setMessage('');
+    if (isEdit) { editingMessageIdRef.current = null; onCancelEdit(); } else onCancelReply();
+    try {
+      const result = onSendMessage(targetId, sanitizedMessage, isEdit ? SignalType.EDIT_MESSAGE : SignalType.MESSAGE, isEdit ? null : outboundReply);
+      void Promise.resolve(result).catch(error => console.error('[ChatInput] Message send failed', error));
+    } catch (error) {
+      console.error('[ChatInput] Message send failed', error);
+    }
+  }, [currentUsername, selectedConversation, disabled, showVoiceRecorder, editingMessage, replyTo, onSendMessage, onCancelEdit, onCancelReply]);
 
   // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
@@ -257,9 +252,8 @@ export function ChatInput({
         return;
       }
 
-      await sendFile(file);
-
       setShowVoiceRecorder(false);
+      await sendFile(file);
     } catch (_error) {
       console.error('Failed to send voice note:', _error);
       const msg = _error instanceof Error ? _error.message : 'Unknown error';
@@ -271,9 +265,11 @@ export function ChatInput({
 
   // Handle message input changes and typing indicators
   const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (inputScopeRef.current !== `${currentUsername}:${selectedConversation}`) return;
+    messageRef.current = e.target.value;
     setMessage(e.target.value);
     onTyping();
-  }, [onTyping]);
+  }, [onTyping, currentUsername, selectedConversation]);
 
   // Handle keyboard events
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -282,6 +278,9 @@ export function ChatInput({
       handleSend();
     }
   }, [handleSend]);
+
+  const composerBusy = disabled || isSendingFile || isSending;
+  const hasDraft = !!message.trim();
 
   const fileProgressPercent = Math.max(0, Math.min(1, progress)) * 100;
   const fileProgressLabel = fileSendPhase === 'preparing'
@@ -345,33 +344,11 @@ export function ChatInput({
         <div
           className={`qorc-message-box ${isSendingFile || editingMessage || replyTo || showVoiceRecorder ? 'has-banner' : ''}`}
         >
-            {/* File Upload */}
             <div className="qorc-file-upload-wrapper">
-              <button
-                type="button"
-                className="qorc-composer-icon-btn"
-                title="Add a file"
-                aria-label="Add a file"
-                disabled={disabled || isSendingFile || isSending}
-                onClick={() => fileInputRef.current?.click()}
-              >
+              <button type="button" className="qorc-composer-icon-btn" title="Attach a file" aria-label="Attach a file" disabled={composerBusy || showVoiceRecorder} onClick={() => fileInputRef.current?.click()}>
                 <Paperclip aria-hidden="true" />
               </button>
-              <input
-                ref={fileInputRef}
-                type={SignalType.FILE}
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-                disabled={disabled || isSendingFile || isSending}
-              />
-            </div>
-
-            {/* Voice Recorder Button */}
-            <div className="qorc-voice-button-wrap">
-              <VoiceRecorderButton
-                onClick={() => setShowVoiceRecorder(true)}
-                disabled={isSendingFile || isSending || showVoiceRecorder || disabled}
-              />
+              <input ref={fileInputRef} type={SignalType.FILE} style={{ display: 'none' }} onChange={handleFileChange} disabled={composerBusy} />
             </div>
 
             {/* Message Input */}
@@ -380,8 +357,8 @@ export function ChatInput({
               placeholder={disabledPlaceholder || (editingMessage
                 ? "Editing message..."
                 : replyTo
-                  ? `Replying to ${replyDisplaySender || 'User'}...`
-                  : "Message...")}
+                  ? "Reply…"
+                  : "Message…")}
               rows={1}
               id="messageInput"
               aria-label="Message"
@@ -392,17 +369,18 @@ export function ChatInput({
               className={`qorc-message-input${disabledPlaceholder ? ' is-blocked-placeholder' : ''}`}
             />
 
-            {/* Send Button */}
-            <button
-              id="sendButton"
-              onClick={handleSend}
-              disabled={!message.trim() || !selectedConversation || disabled}
-              className="qorc-send-button"
-              title="Send message"
-              aria-label="Send message"
-            >
-              <SendHorizontal aria-hidden="true" />
-            </button>
+            <div className="qorc-composer-action">
+              {hasDraft ? <button
+                id="sendButton" type="button"
+                onMouseDown={event => {
+                  const input = messageInputRef.current;
+                  if (event.button === 0 && input && document.activeElement === input) event.preventDefault();
+                }}
+                onClick={() => { void handleSend(); }}
+                disabled={!hasDraft || !selectedConversation || disabled || showVoiceRecorder}
+                className="qorc-send-button" title="Send message" aria-label="Send message"
+              ><SendHorizontal aria-hidden="true" /></button> : <VoiceRecorderButton onClick={() => setShowVoiceRecorder(true)} disabled={composerBusy || showVoiceRecorder} />}
+            </div>
         </div>
       </div>
     </>

@@ -59,7 +59,8 @@ export const useConversations = (
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   secureDB: SecureDB | null,
   findUser: (handle: string, options?: DiscoveryLookupOptions) => Promise<any>,
-  initialDataLoaded: boolean
+  initialDataLoaded: boolean,
+  conversationVisible: boolean = true,
 ) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
@@ -242,7 +243,7 @@ export const useConversations = (
   }, [secureDB, currentUsername]);
 
   const markConversationAsRead = useCallback((username: string) => {
-    if (!username || !currentUsername || activeAccountRef.current !== currentUsername) return;
+    if (!conversationVisible || !username || !currentUsername || activeAccountRef.current !== currentUsername) return;
     const latest = getLatestConversationTimestamp(username);
     if (!latest) return;
     setLastReadByConversation(prev => {
@@ -254,21 +255,26 @@ export const useConversations = (
       return next;
     });
     void persistConversationReadState(username, latest);
-  }, [getLatestConversationTimestamp, persistConversationReadState, currentUsername]);
+  }, [getLatestConversationTimestamp, persistConversationReadState, currentUsername, conversationVisible]);
 
-  const selectConversation = useCallback((username: string) => {
-    if (!username || typeof username !== 'string' || activeAccountRef.current !== currentUsername) {
+  const selectConversation = useCallback((username: string | null) => {
+    if (activeAccountRef.current !== currentUsername) return;
+    if (username === null) {
+      setSelectedConversation(null);
+      return;
+    }
+    if (!username || typeof username !== 'string') {
       return;
     }
 
     if (selectedConversation !== username) {
       setSelectedConversation(username);
-      setConversations(prev => prev.map(conv =>
+      if (conversationVisible) setConversations(prev => prev.map(conv =>
         conv.username === username ? { ...conv, unreadCount: 0 } : conv
       ));
       markConversationAsRead(username);
     }
-  }, [selectedConversation, markConversationAsRead, currentUsername]);
+  }, [selectedConversation, markConversationAsRead, currentUsername, conversationVisible]);
 
   useEffect(() => {
     if (!secureDB || !currentUsername) return;
@@ -362,7 +368,7 @@ export const useConversations = (
         });
       } else {
         const updated = { ...conv };
-        
+
         if (msgTime.getTime() > (conv.lastMessageTime?.getTime() || 0)) {
           updated.lastMessage = getConversationPreview(msg, currentUsername);
           updated.lastMessageTime = msgTime;
@@ -392,7 +398,7 @@ export const useConversations = (
             ...exists,
             lastMessage: conv.lastMessage,
             lastMessageTime: conv.lastMessageTime,
-            unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
+            unreadCount: conversationVisible && username === selectedConversation ? 0 : conv.unreadCount,
             secureContentId: conv.secureContentId,
             contentVersion: conv.contentVersion,
             displayName: exists.displayName || conv.displayName,
@@ -446,7 +452,7 @@ export const useConversations = (
       return next;
     });
     setConversationListLoaded(true);
-  }, [messages, currentUsername, selectedConversation, lastReadByConversation, pinStateByConversation, initialDataLoaded, metadataLoaded]);
+  }, [messages, currentUsername, selectedConversation, lastReadByConversation, pinStateByConversation, initialDataLoaded, metadataLoaded, conversationVisible]);
 
   useEffect(() => {
     if (!selectedConversation) return;

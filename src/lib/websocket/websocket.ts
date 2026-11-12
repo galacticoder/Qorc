@@ -10,6 +10,7 @@ import { hasExactKeys, isPlainObject, hasPrototypePollutionKeys } from '../sanit
 import { PinnedServer } from '../utils/auth-utils';
 import { encodeServerProfileTranscript, validateServerProfile } from '../../../shared/server-profile.js';
 import { PostQuantumSignature } from '../cryptography/signature';
+import { isPostQuantumWorkerInfrastructureError } from '../cryptography/worker-bridge';
 import type { ServerProfile } from '../servers/saved-servers';
 import type { MessageHandler, ServerKeyMaterial, SessionKeyMaterial } from '../types/websocket-types';
 import {
@@ -364,6 +365,7 @@ export class WebSocketConnection {
   private serverClockOffsetMs = 0;
   private anonymousServerTrust = new AnonymousServerTrust();
   private serverBootstrapConnectionToken: number | null = null;
+  private serverBootstrapVerification: { connectionToken: number | null } | null = null;
   private timestampRecoveryInFlight: Promise<void> | null = null;
   private timestampRecoveryGeneration = 0;
   private lastTimestampRecoveryAt = 0;
@@ -588,6 +590,7 @@ export class WebSocketConnection {
       this.serverProfile = null;
       this.serverClockOffsetMs = 0;
       this.serverBootstrapConnectionToken = null;
+      this.serverBootstrapVerification = null;
       this.trustTransportUntil = 0;
     }
     this.nativeConnectionToken = connectionToken;
@@ -597,6 +600,7 @@ export class WebSocketConnection {
     this.serverProfile = null;
     this.serverClockOffsetMs = 0;
     this.serverBootstrapConnectionToken = null;
+    this.serverBootstrapVerification = null;
     this.trustTransportUntil = 0;
   }
 
@@ -666,14 +670,16 @@ export class WebSocketConnection {
         throw operationAbortError('WebSocket connection generation changed before server bootstrap');
       }
       const now = Date.now();
-      if (now - startedAt >= timeoutMs) {
+      const verificationPending = this.serverBootstrapVerification?.connectionToken === connectionToken;
+      const deadlineMs = verificationPending ? Math.max(timeoutMs, 30_000) : timeoutMs;
+      if (now - startedAt >= deadlineMs) {
         this.logConnectionDiagnostic('bootstrap.timeout', {
           waitMs: now - startedAt,
           requestCount,
         }, 'error');
         throw new Error('Current WebSocket generation did not provide a valid server bootstrap');
       }
-      if (now - lastRequestAt >= 1_500) {
+      if (!verificationPending && now - lastRequestAt >= 1_500) {
         try {
           requestCount += 1;
           this.logConnectionDiagnostic('bootstrap.key-request-send', { requestCount });
@@ -1106,6 +1112,7 @@ export class WebSocketConnection {
       this.logConnectionDiagnostic('bootstrap.message-received', {
         expectedNativeToken: expectedConnectionToken,
       });
+      if (this.serverBootstrapVerification?.connectionToken === expectedConnectionToken) return true;
       const bootstrap = parseServerKeyBootstrap(message);
       if (!bootstrap) {
         this.logConnectionDiagnostic('bootstrap.message-invalid', {}, 'warn');
@@ -1118,6 +1125,8 @@ export class WebSocketConnection {
 
       const connectionEpoch = expectedConnectionToken;
       const isCurrent = () => this.isConnectionPrivacyEpochCurrent(connectionEpoch);
+      const verification = { connectionToken: expectedConnectionToken };
+      this.serverBootstrapVerification = verification;
       try {
         const signature = decodeServerResponseBase64(bootstrap.serverProfileSignature, ML_DSA_87_SIGNATURE_BYTES);
         const publicKey = decodeServerResponseBase64(bootstrap.hybridKeys.dilithiumPublicBase64, ML_DSA_87_PUBLIC_KEY_BYTES);
@@ -1141,6 +1150,13 @@ export class WebSocketConnection {
         this.serverProfile = { ...bootstrap.serverProfile };
       } catch (error) {
         if (!isCurrent()) return true;
+        if (isPostQuantumWorkerInfrastructureError(error)) {
+          this.logConnectionDiagnostic('bootstrap.crypto-unavailable', {
+            errorName: error.name, errorMessage: error.message,
+          }, 'warn');
+          this.handleConnectionError({ source: 'bootstrap-crypto-recovery', error });
+          return true;
+        }
         this.logConnectionDiagnostic('bootstrap.identity-rejected', {
           errorName: error instanceof Error ? error.name : 'UnknownError',
           errorMessage: error instanceof Error ? error.message : String(error),
@@ -1154,6 +1170,8 @@ export class WebSocketConnection {
           }
         }));
         return true;
+      } finally {
+        if (this.serverBootstrapVerification === verification) this.serverBootstrapVerification = null;
       }
 
       if (!isCurrent()) return true;
@@ -1649,7 +1667,7 @@ export class WebSocketConnection {
       serverPasswordRequired: this.serverPasswordRequired,
       serverAuthGranted: this.serverAuthGranted,
     });
-    
+
     this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
     this.unlinkedSessionReady = false;
     this.unlinkedAccountAuthorizationReady = false;
@@ -1657,7 +1675,7 @@ export class WebSocketConnection {
     this.unlinkedAuthorizationBlocked = false;
     this.unlinkedAuthorizationPromise = null;
     this.unlinkedDeliveryPromise = null;
-    
+
     if (this.isInUnlinkedMode) {
       if (this.serverPasswordRequired && !this.serverAuthGranted) {
         this.unlinkedAuthorizationBlocked = true;
@@ -2213,7 +2231,7 @@ export class WebSocketConnection {
       buf.parts[chunkIndex] = data;
       buf.receivedCount += 1;
       buf.receivedLength += data.length;
-      
+
       window.dispatchEvent(new CustomEvent(EventType.SECURE_CHUNK_PROGRESS, {
         detail: { payloadType: buf.payloadType, received: buf.receivedCount, total: buf.totalChunks }
       }));
@@ -2910,7 +2928,7 @@ export class WebSocketConnection {
     this.isInUnlinkedMode = false;
     const jitter = secureRandomIntInclusive(500, 2000);
     await waitForAbortableDelay(jitter, abortSignal);
-    
+
     await websocket.rotateSocksIdentity();
     await this.connectTransport({ autoReconnectOnFailure: false });
     throwIfOperationAborted(abortSignal);
@@ -3547,7 +3565,7 @@ export class WebSocketConnection {
     }
     this.globalRateLimitUntil = 0;
     this.queue.clear();
-    
+
     if (options.killSession) {
       this.resetSessionKeys(false);
     } else {
@@ -3710,7 +3728,7 @@ export class WebSocketConnection {
       }
     }
     throwIfOperationAborted(options.signal);
-    
+
     if (
       this.lifecycleState !== 'connected' &&
       !options.bypassStateCheck &&
@@ -3739,7 +3757,7 @@ export class WebSocketConnection {
       if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64 || !hybridKeys?.x25519PublicBase64) {
         throw new Error('Incomplete server key material for authenticated PQ transport');
       }
-      
+
       const pinned = this.getPinnedServerPQKeys();
       if (!pinned) {
         return 'rejected';

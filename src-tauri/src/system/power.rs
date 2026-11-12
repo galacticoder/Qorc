@@ -49,9 +49,25 @@ impl Default for PowerSaveBlocker {
 impl Drop for PowerSaveBlocker {
     fn drop(&mut self) {
         if let Some(handle) = self.active.get_mut().take() {
+            #[cfg(target_os = "android")]
+            let _ = std::thread::spawn(move || release_blocker(handle));
+            #[cfg(not(target_os = "android"))]
             let _ = release_blocker(handle);
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn create_blocker() -> QorcResult<BlockerHandle> {
+    crate::android_media::action("callAcquire", serde_json::json!({}))
+        .map_err(QorcError::SystemError)?;
+    Ok(BlockerHandle {})
+}
+
+#[cfg(target_os = "android")]
+fn release_blocker(_handle: BlockerHandle) -> QorcResult<()> {
+    crate::android_media::action("callRelease", serde_json::json!({}))
+        .map_err(QorcError::SystemError)
 }
 
 #[cfg(target_os = "linux")]

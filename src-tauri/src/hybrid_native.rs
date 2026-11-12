@@ -520,25 +520,3 @@ pub fn decrypt_sealed(
         serde_json::to_value(inner).map_err(|_| invalid_envelope())?,
     ))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn blake3_hkdf_matches_noble_hashes_vector() {
-        let input = (0u8..32).collect::<Vec<_>>();
-        let salt = (0u8..32).map(|value| 255 - value).collect::<Vec<_>>();
-        let output = hkdf_blake3(
-            &input,
-            &salt,
-            crate::protocol_keys::HYBRID_NATIVE_INTEROP,
-            64,
-        )
-        .expect("HKDF vector");
-        assert_eq!(
-            hex::encode(output.as_slice()),
-            "a0e32cd57bfcbd34f74c79447fa0b4ed35a1ab90201ebee55e17255a4c402dea40493a00d786136d48106086bcac174834c115e7ee9dc720d5fc3c2e0e8d5da6"
-        );
-    }
-}

@@ -2,7 +2,7 @@ use crate::audio_playback::AudioPlaybackInfo;
 use crate::state::AppState;
 use tauri::{
     State,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Request, Response},
 };
 
 fn session_id(request: &Request<'_>) -> Result<String, String> {
@@ -14,11 +14,8 @@ fn session_id(request: &Request<'_>) -> Result<String, String> {
         .ok_or_else(|| "invalid audio codec session".to_string())
 }
 
-fn raw_body(request: &Request<'_>) -> Result<Vec<u8>, String> {
-    match request.body() {
-        InvokeBody::Raw(body) => Ok(body.clone()),
-        _ => Err("invalid audio codec body".to_string()),
-    }
+fn raw_body(request: &Request<'_>, max_bytes: usize) -> Result<Vec<u8>, String> {
+    super::binary_body(request, max_bytes).map_err(|()| "invalid audio codec body".to_string())
 }
 
 #[tauri::command]
@@ -39,9 +36,13 @@ pub fn audio_opus_encode(
     request: Request<'_>,
 ) -> Result<Response, String> {
     let session_id = session_id(&request)?;
-    let packet = state
-        .audio_codec
-        .encode(&session_id, &raw_body(&request)?)?;
+    let packet = state.audio_codec.encode(
+        &session_id,
+        &raw_body(
+            &request,
+            crate::audio_codec::FRAME_SAMPLES * std::mem::size_of::<f32>(),
+        )?,
+    )?;
     Ok(Response::new(packet))
 }
 
@@ -56,9 +57,11 @@ pub fn audio_opus_decode_playback(
         .get("x-qorc-opus-fec")
         .and_then(|value| value.to_str().ok())
         == Some("1");
-    let mut pcm = state
-        .audio_codec
-        .decode(&session_id, &raw_body(&request)?, fec)?;
+    let mut pcm = state.audio_codec.decode(
+        &session_id,
+        &raw_body(&request, crate::audio_codec::MAX_PACKET_BYTES)?,
+        fec,
+    )?;
     let result = state.audio_playback.push(&session_id, &pcm);
     pcm.fill(0);
     result?;

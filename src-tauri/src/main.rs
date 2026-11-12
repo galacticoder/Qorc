@@ -1,7 +1,7 @@
 //! qorc Tauri Application main entry point
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-compile_error!("qorc desktop supports only Linux and Windows");
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "android")))]
+compile_error!("qorc supports Linux, Windows, and the Android port");
 
 use std::sync::Arc;
 
@@ -12,7 +12,11 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 // Module declarations
 mod account_lifecycle;
+mod app_data_reset;
+mod local_account_data;
 mod account_vault;
+#[cfg(target_os = "android")]
+mod android_media;
 mod audio_codec;
 mod audio_playback;
 mod camera_capture;
@@ -26,6 +30,7 @@ mod link_preview;
 mod message_content;
 mod microphone_capture;
 mod network;
+mod pir_runtime;
 mod protocol_keys;
 mod screen_capture;
 mod signal_protocol;
@@ -55,15 +60,24 @@ fn configure_linux_media_runtime() {
     let spa_path = packaged_runtime.join("spa-0.2");
     let gstreamer_launch = packaged_runtime.join("bin").join("qorc-gst-launch-1.0");
     let plugin_scanner = packaged_runtime.join("bin").join("qorc-gst-plugin-scanner");
-    assert!(capture_plugin_path.is_dir(), "GStreamer capture plugins are unavailable");
+    assert!(
+        capture_plugin_path.is_dir(),
+        "GStreamer capture plugins are unavailable"
+    );
     assert!(plugin_path.is_dir(), "GStreamer plugins are unavailable");
     assert!(library_path.is_dir(), "GStreamer libraries are unavailable");
     assert!(
         screen_capture::spa_runtime_is_complete(&spa_path),
         "PipeWire SPA runtime is unavailable"
     );
-    assert!(gstreamer_launch.is_file(), "GStreamer launcher is unavailable");
-    assert!(plugin_scanner.is_file(), "GStreamer plugin scanner is unavailable");
+    assert!(
+        gstreamer_launch.is_file(),
+        "GStreamer launcher is unavailable"
+    );
+    assert!(
+        plugin_scanner.is_file(),
+        "GStreamer plugin scanner is unavailable"
+    );
     let mut library_paths = vec![library_path.clone()];
     if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
         library_paths.extend(std::env::split_paths(&existing));
@@ -122,8 +136,8 @@ fn install_rustls_provider() {
 
 /// Init logging with filters
 fn init_logging() {
-    let mut filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("error,qorc=error"));
+    let mut filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error,qorc=error"));
 
     for directive in [
         "qorc_lib::network::websocket=info",
@@ -157,16 +171,15 @@ fn init_logging() {
         }
     }
 
-    if let Err(err) = tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .try_init()
-    {
+    let subscriber = tracing_subscriber::registry().with(filter);
+    let result = subscriber.with(tracing_subscriber::fmt::layer()).try_init();
+    if let Err(err) = result {
         eprintln!("logging init skipped: {err}");
     }
 }
 
 /// Main entry point
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure_linux_webview_rendering();
     let mut context = tauri::generate_context!();
@@ -204,6 +217,16 @@ pub fn run() {
     info!("Starting qorc v{}", env!("CARGO_PKG_VERSION"));
     // Build and run Tauri application
     let builder = tauri::Builder::default().manage(AppState::new());
+
+    #[cfg(target_os = "android")]
+    let builder = builder
+        .plugin(tauri_plugin_qorc_media::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        );
 
     builder
         // Register plugins
@@ -283,6 +306,7 @@ pub fn run() {
             }
 
             // Window close check user setting for close to tray
+            #[cfg(desktop)]
             if let Some(window) = app.get_webview_window("main") {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
@@ -305,11 +329,23 @@ pub fn run() {
                 std::io::Error::other("application initialization failed")
             })?;
 
+            #[cfg(target_os = "android")]
+            {
+                let window = app.config().app.windows.iter()
+                    .find(|window| window.label == "main")
+                    .ok_or_else(|| std::io::Error::other("main window is not configured"))?;
+                tauri::WebviewWindowBuilder::from_config(app, window)?.build()?;
+            }
+
             info!("Application setup complete");
             Ok(())
         })
         // Register all commands
         .invoke_handler(tauri::generate_handler![
+            commands::callback_bytes::account_open_channel,
+            commands::callback_bytes::account_public_keys_channel,
+            commands::callback_bytes::pir_generate_query_channel,
+            commands::callback_bytes::pir_generate_batch_query_channel,
             commands::pir::pir_generate_query,
             commands::pir::pir_generate_batch_query,
             commands::pir::pir_decode_response,
@@ -327,6 +363,8 @@ pub fn run() {
             commands::account::account_token_vault_store,
             commands::account::account_token_vault_remove,
             commands::account::account_lock,
+            local_account_data::account_clear_local_data,
+            app_data_reset::app_reset_all_local_data,
             commands::message_content::message_content_store_outgoing,
             commands::message_content::message_content_commit_pending,
             commands::message_content::message_content_has,
@@ -388,6 +426,7 @@ pub fn run() {
             commands::websocket::ws_send,
             commands::websocket::ws_send_binary,
             commands::websocket::ws_receive_binary,
+            commands::websocket::ws_receive_binary_channel,
             commands::websocket::ws_set_server_url,
             commands::websocket::ws_get_server_url,
             commands::websocket::ws_get_state,
@@ -402,6 +441,7 @@ pub fn run() {
             commands::p2p::p2p_authenticate_connection,
             commands::p2p::p2p_local_endpoint,
             commands::discovery::anonymous_api_fetch,
+            commands::discovery::anonymous_api_fetch_channel,
             commands::discovery::cancel_anonymous_api_fetch,
             commands::discovery::prewarm_anonymous_transport,
             commands::notification::notification_show,
@@ -413,7 +453,11 @@ pub fn run() {
             commands::system::power_save_blocker_start,
             commands::system::power_save_blocker_stop,
             commands::system::get_close_to_tray,
+            commands::system::android_runtime_wait,
+            commands::system::android_runtime_work_begin,
+            commands::system::android_runtime_work_end,
             commands::system::set_close_to_tray,
+            commands::system::open_background_notice_settings,
             commands::system::tray_increment_unread,
             commands::system::tray_clear_unread,
             commands::session::session_get_background_state,
@@ -439,28 +483,45 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     let mut config_dir = app_handle.path().app_config_dir()?;
     let mut data_dir = app_handle.path().app_data_dir()?;
 
+    #[cfg(target_os = "android")]
+    {
+        config_dir = tokio::fs::canonicalize(config_dir).await?;
+        data_dir = tokio::fs::canonicalize(data_dir).await?;
+    }
+
     // Instance isolation
     let instance_id = system::get_instance_id()?;
     let instance_lock = system::acquire_instance_lock(&config_dir, &instance_id)?;
     *state.instance_lock.write() = Some(instance_lock);
     info!("Applying instance isolation");
-    let suffix = format!("-instance-{}", instance_id);
+    #[cfg(target_os = "android")]
+    {
+        config_dir = config_dir.join("instances").join(&instance_id).join("config");
+        data_dir = data_dir.join("instances").join(&instance_id).join("data");
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let suffix = format!("-instance-{}", instance_id);
 
-    // Handle config_dir
-    let config_name = config_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("Application config path is invalid")?
-        .to_owned();
-    config_dir.set_file_name(format!("{}{}", config_name, suffix));
+        // Handle config_dir
+        let config_name = config_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Application config path is invalid")?
+            .to_owned();
+        config_dir.set_file_name(format!("{}{}", config_name, suffix));
 
-    // Handle data_dir
-    let data_name = data_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("Application data path is invalid")?
-        .to_owned();
-    data_dir.set_file_name(format!("{}{}", data_name, suffix));
+        // Handle data_dir
+        let data_name = data_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Application data path is invalid")?
+            .to_owned();
+        data_dir.set_file_name(format!("{}{}", data_name, suffix));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    app_data_reset::resume_if_pending(app_handle, &config_dir, &data_dir).await.map_err(std::io::Error::other)?;
 
     // Initialize Tor manager
     let pir_tor_data_dir = data_dir.join("pir-transport");
@@ -472,6 +533,13 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
 
     // Initialize secure storage
     storage::init(&state, config_dir).await?;
+    {
+        let _guard = state.database_lifecycle_lock.clone().lock_owned().await;
+        if let Some(storage) = state.storage() {
+            local_account_data::resume_all_pending(storage.as_ref()).await
+                .map_err(std::io::Error::other)?;
+        }
+    }
     info!("Storage initialized");
 
     // Initialize Signal Protocol handler
@@ -548,15 +616,20 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     info!("P2P transport handler initialized");
 
     // Initialize notification handler
-    system::notification::init(&state).await?;
+    system::notification::init(&state, app_handle).await?;
     info!("Notification handler initialized");
 
     // Initialize tray
-    system::tray::init(app_handle).await?;
-    info!("System tray initialized");
+    #[cfg(desktop)]
+    {
+        system::tray::init(app_handle).await?;
+        info!("System tray initialized");
+    }
 
     // Show main window
+    #[cfg(desktop)]
     if let Some(window) = app_handle.get_webview_window("main") {
+        window.set_zoom(1.75)?;
         window.show()?;
     }
 

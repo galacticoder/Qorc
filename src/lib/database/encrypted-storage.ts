@@ -154,7 +154,7 @@ class EncryptedStorageManager {
     this.rateLimitCount = 0;
     this.notifyBindingChange();
   }
-  
+
   // Wait for storage manager to be initialized
   async waitForInitialization(): Promise<void> {
     while (!this.isInitialized()) {
@@ -218,7 +218,7 @@ class SyncEncryptedStorageAdapter {
     this.selfInitializationPromise = new Promise((resolve) => {
       this.resolveSelfInitialization = resolve;
     });
-    
+
     this.memoryCache.clear();
     this.mutationVersions.clear();
 
@@ -261,6 +261,10 @@ class SyncEncryptedStorageAdapter {
 
   // Set an item in the sync adapter
   setItem(key: string, value: string): void {
+    void this.setItemConfirmed(key, value).catch(() => { });
+  }
+
+  setItemConfirmed(key: string, value: string): Promise<void> {
     validateKey(key);
     if (!this.selfInitialized || !encryptedStorage.isInitialized()) {
       throw new Error('Encrypted storage is not initialized');
@@ -272,12 +276,14 @@ class SyncEncryptedStorageAdapter {
     const previous = this.memoryCache.get(key);
     this.memoryCache.set(key, value);
 
-    encryptedStorage.setItem(key, value).catch(error => {
-      if (generation !== this.generation || this.mutationVersions.get(key) !== version) return;
-      if (hadPrevious) this.memoryCache.set(key, previous);
-      else this.memoryCache.delete(key);
+    return encryptedStorage.setItem(key, value).catch(error => {
+      if (generation === this.generation && this.mutationVersions.get(key) === version) {
+        if (hadPrevious) this.memoryCache.set(key, previous);
+        else this.memoryCache.delete(key);
+        this.notifyChange();
+      }
       console.error('[SyncEncryptedStorage] Failed to store key:', error);
-      this.notifyChange();
+      throw error;
     });
   }
 

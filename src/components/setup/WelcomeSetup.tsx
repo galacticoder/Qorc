@@ -1,8 +1,9 @@
+import { useAppBack } from '../../hooks/useAppBack';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QorcBrandLogo } from '../ui/QorcBrandLogo';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
 import { Server } from 'lucide-react';
-import { SavedServersDialog } from '../servers/SavedServersDialog';
+import { SavedServersScreen } from '../servers/SavedServersScreen';
 import { AppSelect } from '../ui/AppSelect';
 import { useStartupConnection } from '../../hooks/app/useStartupConnection';
 import {
@@ -36,6 +37,8 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState('');
   const mountedRef = useRef(true);
+  useAppBack(advancedOpen, () => setAdvancedOpen(false), 10);
+  useAppBack(!!onCancel && !isConnecting, () => onCancel?.());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -223,7 +226,6 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
               type="button"
               className="welcome-advanced-toggle"
               onClick={() => setSavedServersOpen(true)}
-              aria-haspopup="dialog"
             >
               <span>Saved servers</span>
               <Server size={17} aria-hidden="true" />
@@ -231,7 +233,7 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
           </div>
 
         </main>
-        <SavedServersDialog open={savedServersOpen} onOpenChange={setSavedServersOpen} selectedUrl={serverUrl} disabled={isConnecting} onSelect={(server) => { setServerUrl(server.url); setError(''); }} />
+        <SavedServersScreen open={savedServersOpen} onOpenChange={setSavedServersOpen} selectedUrl={serverUrl} disabled={isConnecting} onSelect={(server) => { setServerUrl(server.url); setError(''); }} />
       </div>
     </section>
   );

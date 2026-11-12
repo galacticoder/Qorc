@@ -1,10 +1,11 @@
 import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { Ban, BellOff, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
+import { ArrowLeft, Ban, BellOff, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -28,6 +29,10 @@ import { ConversationOptionsPopover } from "./ConversationOptionsPopover";
 import { useNotificationPreferences } from '../../../hooks/useNotificationPreferences';
 import { getNotificationMutes } from '../../../lib/ui/notification-preferences';
 import type { DiscoveryProgress, DiscoveryProgressObserver } from "../../../lib/discovery/progress";
+import { useMobileLayout } from '../../../hooks/useMobileLayout';
+import { ConversationSwipeRow } from './ConversationSwipeRow';
+import { useAppBack } from '../../../hooks/useAppBack';
+import { groupConversationsByLetter } from '../../../lib/ui/conversation-order';
 
 export interface Conversation {
   readonly id: string;
@@ -64,6 +69,9 @@ interface ConversationListProps {
 type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean; incoming: boolean } | null;
 
 interface ConversationItemProps {
+  readonly mobile: boolean;
+  readonly actionsOpen: boolean;
+  readonly onActionsOpenChange: (username: string, open: boolean) => void;
   readonly blocked: boolean;
   readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
   readonly conversation: Conversation;
@@ -76,6 +84,9 @@ interface ConversationItemProps {
 }
 
 const ConversationItem = memo<ConversationItemProps>(({
+  mobile,
+  actionsOpen,
+  onActionsOpenChange,
   blocked,
   onToggleBlock,
   conversation,
@@ -100,14 +111,34 @@ const ConversationItem = memo<ConversationItemProps>(({
   // Handle conversation removal
   const handleRemove = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    onActionsOpenChange(conversation.username, false);
     onRemove(conversation.username);
-  }, [onRemove, conversation.username]);
+  }, [onActionsOpenChange, onRemove, conversation.username]);
+  const setActionsOpen = useCallback((open: boolean) => onActionsOpenChange(conversation.username, open), [conversation.username, onActionsOpenChange]);
+  const closeActions = useCallback(() => setActionsOpen(false), [setActionsOpen]);
+
+  const actions = <>
+    <ConversationOptionsPopover
+      username={conversation.username}
+      blocked={blocked}
+      onToggleBlock={onToggleBlock}
+      compact
+      isPinned={conversation.isPinned}
+      onTogglePin={onTogglePin}
+      onAction={mobile ? closeActions : undefined}
+      ariaLabel={`Conversation options for ${displayName}`}
+    />
+    <Button variant="ghost" size="sm" onClick={handleRemove} className="qorc-conversation-tiny-btn danger" aria-label={`Remove conversation with ${displayName}`}>
+      <Trash2 className="h-3 w-3" />
+    </Button>
+  </>;
 
   return (
+    <ConversationSwipeRow enabled={mobile} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions}>
     <div
       className={cn(
         "qorc-conversation-item group",
-        isSelected && "is-selected"
+        !mobile && isSelected && "is-selected"
       )}
       onClick={handleClick}
       role="button"
@@ -121,11 +152,12 @@ const ConversationItem = memo<ConversationItemProps>(({
       }}
       aria-label={`Conversation with ${displayName}`}
       aria-selected={isSelected}
+      aria-description={mobile ? 'Swipe right for conversation options and delete, or press the right arrow key.' : undefined}
     >
       <UserAvatar
         username={conversation.username}
-        size="md"
-        className={cn("qorc-conversation-avatar", isSelected && 'opacity-80')}
+        size={mobile ? 'lg' : 'md'}
+        className={cn("qorc-conversation-avatar", !mobile && isSelected && 'opacity-80')}
       />
 
       <div className="qorc-conversation-main">
@@ -145,26 +177,7 @@ const ConversationItem = memo<ConversationItemProps>(({
               {(muted.messages || muted.calls) && <span title={muteLabel} aria-label={muteLabel}><BellOff className="h-3 w-3" aria-hidden="true" /></span>}
             </div>
           )}
-          <div className="qorc-conversation-action-pill">
-            <ConversationOptionsPopover
-              username={conversation.username}
-              blocked={blocked}
-              onToggleBlock={onToggleBlock}
-              compact
-              isPinned={conversation.isPinned}
-              onTogglePin={onTogglePin}
-              ariaLabel={`Conversation options for ${displayName}`}
-            />
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleRemove}
-                className="qorc-conversation-tiny-btn danger"
-                aria-label={`Remove conversation with ${displayName}`}
-              >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-          </div>
+          {!mobile && <div className="qorc-conversation-action-pill">{actions}</div>}
           {conversation.lastMessageTime && (
             <RelativeMessageTime
               date={conversation.lastMessageTime}
@@ -191,7 +204,7 @@ const ConversationItem = memo<ConversationItemProps>(({
                 messageId={conversation.secureContentId}
                 contentVersion={`${conversation.contentVersion ?? ''}:${isSelected ? 'selected' : 'default'}`}
                 maxWidth={800}
-                fontSize={12}
+                fontSize={mobile ? 14 : 12}
                 color="var(--qorc-conversation-preview-text)"
                 className="qorc-conversation-secure-message-preview"
               />
@@ -232,11 +245,15 @@ const ConversationItem = memo<ConversationItemProps>(({
         </div>
       </div>
     </div>
+    </ConversationSwipeRow>
   );
 });
 
 // manageable row inside add conversation modal
 interface ConversationManageRowProps {
+  readonly mobile: boolean;
+  readonly actionsOpen: boolean;
+  readonly onActionsOpenChange: (username: string, open: boolean) => void;
   readonly isPinned: boolean;
   readonly onTogglePin: (username: string) => void;
   readonly username: string;
@@ -250,6 +267,9 @@ interface ConversationManageRowProps {
 }
 
 const ConversationManageRow = memo<ConversationManageRowProps>(({
+  mobile,
+  actionsOpen,
+  onActionsOpenChange,
   isPinned,
   onTogglePin,
   username,
@@ -262,6 +282,9 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
   blocking = false,
 }) => {
   const displayName = useDisplayUsername({ username });
+  const swipeEnabled = mobile && mode === 'manage';
+  const setActionsOpen = useCallback((open: boolean) => onActionsOpenChange(username, open), [username, onActionsOpenChange]);
+  const closeActions = useCallback(() => setActionsOpen(false), [setActionsOpen]);
   const handlePrimaryAction = useCallback(() => {
     if (mode === 'block') {
       onBlock(username);
@@ -270,77 +293,87 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
     onChat(username);
   }, [mode, onBlock, onChat, username]);
 
-  return (
-    <div
-      className="qorc-cm-row"
-      role="button"
-      tabIndex={0}
-      onClick={handlePrimaryAction}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          handlePrimaryAction();
-        }
-      }}
-      aria-label={mode === 'block' ? `Block ${displayName}` : `Open chat with ${displayName}`}
+  const actions = <>
+    <Button
+      size="sm"
+      variant={swipeEnabled ? 'ghost' : 'outline'}
+      className={swipeEnabled ? 'qorc-conversation-tiny-btn' : 'qorc-call-pill-btn'}
+      title="Audio call"
+      aria-label={`Call ${displayName}`}
+      disabled={blocked}
+      onClick={() => { closeActions(); onCall(username, 'audio'); }}
     >
-      <UserAvatar username={username} size="md" className="qorc-cm-row-avatar" />
+      <CallIcon className="w-4 h-4" aria-hidden="true" />
+    </Button>
+    <Button
+      size="sm"
+      variant={swipeEnabled ? 'ghost' : 'outline'}
+      className={swipeEnabled ? 'qorc-conversation-tiny-btn' : 'qorc-call-pill-btn'}
+      title="Video call"
+      aria-label={`Video call ${displayName}`}
+      disabled={blocked}
+      onClick={() => { closeActions(); onCall(username, 'video'); }}
+    >
+      <Video className="w-4 h-4" aria-hidden="true" />
+    </Button>
+    <ConversationOptionsPopover
+      username={username}
+      isPinned={isPinned}
+      onTogglePin={onTogglePin}
+      blocked={blocked}
+      onToggleBlock={onToggleBlock}
+      compact={swipeEnabled}
+      onAction={swipeEnabled ? closeActions : undefined}
+      ariaLabel={`Conversation options for ${displayName}`}
+    />
+  </>;
 
-      <div className="qorc-cm-row-main">
-        <span className="qorc-cm-row-name" title={displayName}>{displayName}</span>
-        {displayName.toLowerCase() !== username.toLowerCase() && (
-          <span className="qorc-cm-row-username" title={username}>@{username}</span>
+  return (
+    <ConversationSwipeRow enabled={swipeEnabled} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions} actionWidth={168} className="qorc-cm-swipe">
+      <div
+        className="qorc-cm-row"
+        role="button"
+        tabIndex={0}
+        onClick={handlePrimaryAction}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handlePrimaryAction();
+          }
+        }}
+        aria-label={mode === 'block' ? `Block ${displayName}` : `Open chat with ${displayName}`}
+        aria-description={swipeEnabled ? 'Swipe right for calls and conversation options, or press the right arrow key.' : undefined}
+      >
+        <UserAvatar username={username} size="md" className="qorc-cm-row-avatar" />
+
+        <div className="qorc-cm-row-main">
+          <span className="qorc-cm-row-name" title={displayName}>{displayName}</span>
+          {displayName.toLowerCase() !== username.toLowerCase() && (
+            <span className="qorc-cm-row-username" title={username}>@{username}</span>
+          )}
+        </div>
+
+        {mode === 'block' ? (
+          <button
+            type="button"
+            className="qorc-cm-block-btn"
+            disabled={blocking}
+            onClick={(event) => {
+              event.stopPropagation();
+              onBlock(username);
+            }}
+          >
+            {blocking ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
+            <span>{blocking ? 'Blocking…' : 'Block'}</span>
+          </button>
+        ) : !swipeEnabled && (
+          <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+            {actions}
+          </div>
         )}
       </div>
-
-      {mode === 'block' ? (
-        <button
-          type="button"
-          className="qorc-cm-block-btn"
-          disabled={blocking}
-          onClick={(event) => {
-            event.stopPropagation();
-            onBlock(username);
-          }}
-        >
-          {blocking ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
-          <span>{blocking ? 'Blocking…' : 'Block'}</span>
-        </button>
-      ) : (
-        <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
-          <Button
-            size="sm"
-            variant="outline"
-            className="qorc-call-pill-btn"
-            title="Audio call"
-            aria-label={`Call ${displayName}`}
-            disabled={blocked}
-            onClick={() => onCall(username, 'audio')}
-          >
-            <CallIcon className="w-4 h-4" aria-hidden="true" />
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="qorc-call-pill-btn"
-            title="Video call"
-            aria-label={`Video call ${displayName}`}
-            disabled={blocked}
-            onClick={() => onCall(username, 'video')}
-          >
-            <Video className="w-4 h-4" aria-hidden="true" />
-          </Button>
-          <ConversationOptionsPopover
-            username={username}
-            isPinned={isPinned}
-            onTogglePin={onTogglePin}
-            blocked={blocked}
-            onToggleBlock={onToggleBlock}
-            ariaLabel={`Conversation options for ${displayName}`}
-          />
-        </div>
-      )}
-    </div>
+    </ConversationSwipeRow>
   );
 });
 
@@ -360,12 +393,25 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   conversationDialogMode = 'manage',
   onBlockConversation,
 }: ConversationListProps) {
+  const mobile = useMobileLayout();
+  const [actionsPeer, setActionsPeer] = useState<string | null>(null);
+  const setActionsOpen = useCallback((username: string, open: boolean) => {
+    setActionsPeer(current => open ? username : current === username ? null : current);
+  }, []);
+  useEffect(() => setActionsPeer(null), [currentUsername, mobile, selectedConversation]);
   const { typingUsers } = useTypingIndicatorContext();
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
   const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
   const [newChatUsername, setNewChatUsername] = useState("");
+  const [manageActionsPeer, setManageActionsPeer] = useState<string | null>(null);
+  const manageActionsPeerRef = React.useRef<string | null>(null);
+  React.useLayoutEffect(() => { manageActionsPeerRef.current = manageActionsPeer; }, [manageActionsPeer]);
+  const setManageActionsOpen = useCallback((username: string, open: boolean) => {
+    setManageActionsPeer(current => open ? username : current === username ? null : current);
+  }, []);
+  useEffect(() => setManageActionsPeer(null), [currentUsername, mobile, showNewChatInput, conversationDialogMode, newChatUsername]);
   const [isAdding, setIsAdding] = useState(false);
   const [discoveryProgress, setDiscoveryProgress] = useState<DiscoveryProgress | null>(null);
   const [blockingPeer, setBlockingPeer] = useState<string | null>(null);
@@ -400,6 +446,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       (c.displayName ?? "").toLowerCase().includes(trimmedQuery)
     );
   }, [availableConversations, trimmedQuery]);
+  const conversationLetterGroups = useMemo(() => groupConversationsByLetter(filteredConversations), [filteredConversations]);
 
   const hasExactMatch = useMemo(
     () => conversations.some((c) => c.username.toLowerCase() === trimmedQuery),
@@ -576,24 +623,25 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   const itemsToRender = useMemo(() => {
     const result: ({ type: 'header'; label: string; id: string } | { type: 'conversation'; data: Conversation })[] = [];
-    
+
     if (pinnedChats.length > 0) {
       result.push({ type: 'header', label: 'PINNED CHATS', id: 'header-pinned' });
       pinnedChats.forEach(c => result.push({ type: 'conversation', data: c }));
     }
-    
+
     if (unpinnedChats.length > 0) {
       if (pinnedChats.length > 0) {
         result.push({ type: 'header', label: 'CHATS', id: 'header-unpinned' });
       }
       unpinnedChats.forEach(c => result.push({ type: 'conversation', data: c }));
     }
-    
+
     return result;
   }, [pinnedChats, unpinnedChats]);
 
   const handleNewChatOpenChange = useCallback((open: boolean) => {
     if (!open) {
+      setManageActionsPeer(null);
       cancelActiveDiscovery();
       setBlockingPeer(null);
       setNewChatUsername("");
@@ -601,10 +649,67 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     onNewChatOpenChange(open);
   }, [cancelActiveDiscovery, onNewChatOpenChange]);
 
+  const dialogContentRef = React.useRef<HTMLDivElement | null>(null);
+  const mountDialogContent = useCallback((element: HTMLDivElement | null) => {
+    dialogContentRef.current = element;
+    element?.querySelector<HTMLElement>(mobile ? '.qorc-cm-close' : 'input')?.focus({ preventScroll: true });
+  }, [mobile]);
+
+  useAppBack(showNewChatInput, () => {
+    if (document.querySelector('.qorc-conversation-options-popover')) return false;
+    if (manageActionsPeer) { setManageActionsPeer(null); return; }
+    handleNewChatOpenChange(false);
+  }, 80);
+
+  useEffect(() => {
+    if (!showNewChatInput) return;
+    const previousFocus = document.activeElement;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusable = () => Array.from(dialogContentRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]') ?? [])
+      .filter(element => element.getClientRects().length > 0 && !element.closest('[inert]'));
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || (event.target instanceof Element && event.target.closest('.qorc-conversation-options-popover'))) return;
+      if (event.key === 'Escape' && document.querySelector('.qorc-conversation-options-popover[data-state="open"]')) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (manageActionsPeerRef.current) setManageActionsPeer(null);
+        else handleNewChatOpenChange(false);
+        return;
+      }
+      if (event.key !== 'Tab' || !mobile) return;
+      const items = focusable();
+      if (!items.length) return;
+      const index = items.indexOf(document.activeElement as HTMLElement);
+      if (index < 0 || (event.shiftKey ? index === 0 : index === items.length - 1)) {
+        event.preventDefault();
+        items[event.shiftKey ? items.length - 1 : 0].focus();
+      }
+    };
+    const focusin = (event: FocusEvent) => {
+      if (mobile && event.target instanceof Element && !dialogContentRef.current?.contains(event.target) && !event.target.closest('.qorc-conversation-options-popover')) {
+        focusable()[0]?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener('keydown', keydown);
+    document.addEventListener('focusin', focusin);
+    return () => {
+      document.body.style.overflow = overflow;
+      document.removeEventListener('keydown', keydown);
+      document.removeEventListener('focusin', focusin);
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, [showNewChatInput, handleNewChatOpenChange, mobile]);
+
   const handleChatFromModal = useCallback((username: string) => {
     onSelectConversation(username);
     handleNewChatOpenChange(false);
   }, [onSelectConversation, handleNewChatOpenChange]);
+
+  const handleCallFromPicker = useCallback((username: string, type: 'audio' | 'video') => {
+    handleNewChatOpenChange(false);
+    onStartCall(username, type);
+  }, [handleNewChatOpenChange, onStartCall]);
 
   const handleBlockFromModal = useCallback(async (username: string) => {
     if (blockingPeer) return;
@@ -631,152 +736,161 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     : discoveryProgress?.phase === 'downloading' ? `${displayedDiscoveryPercent}%`
     : 'Preparing';
 
-  return (
-    <div className="qorc-conversation-list">
-      <Dialog open={showNewChatInput} onOpenChange={handleNewChatOpenChange}>
-        <DialogContent
-          className="qorc-cm-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="conversation-modal-title"
+  const pickerContent = (
+    <div className="qorc-cm-content" ref={mountDialogContent}>
+      <header className="qorc-cm-head">
+        <button
+          type="button"
+          className="qorc-cm-close qorc-cm-back"
+          onClick={() => handleNewChatOpenChange(false)}
+          aria-label={conversationDialogMode === 'block' ? 'Back to settings' : 'Back to conversations'}
         >
-          <div className="qorc-cm-head">
-            <div className="qorc-cm-head-text">
-              <DialogTitle id="conversation-modal-title">
-                {conversationDialogMode === 'block' ? 'Choose a conversation to block' : 'Add and manage your conversations'}
-              </DialogTitle>
-            </div>
+          <ArrowLeft aria-hidden="true" />
+        </button>
+        <div className="qorc-cm-head-text">
+          <DialogTitle id="conversation-modal-title">
+            {conversationDialogMode === 'block' ? 'Block a conversation' : 'New conversation'}
+          </DialogTitle>
+        </div>
+      </header>
+
+      <div
+        className={cn("qorc-cm-search", (isAdding || blockingPeer) && "is-searching", isAdding && "has-progress")}
+        style={{ '--qorc-discovery-progress': `${discoveryPercent}%` } as React.CSSProperties}
+      >
+        <div className="qorc-cm-search-field qorc-search-field">
+          {isAdding && (
+            <span className="qorc-cm-search-progress" aria-hidden="true">
+              <span className="qorc-cm-search-progress-fill" />
+            </span>
+          )}
+          <span className="qorc-cm-search-icon qorc-search-icon" aria-hidden="true">
+            {isAdding || blockingPeer ? <Loader2 className="animate-spin" /> : <Search />}
+          </span>
+          <Input
+            type="text"
+            placeholder={conversationDialogMode === 'block' ? 'Search conversations' : 'Search or enter username'}
+            value={newChatUsername}
+            onChange={(e) => setNewChatUsername(e.target.value)}
+            className="qorc-cm-search-input qorc-search-input"
+            disabled={isAdding || Boolean(blockingPeer)}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={conversationDialogMode === 'block' ? 'Search conversations to block' : 'Search conversations or enter a username'}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !isAdding && canAddTyped) {
+                handleAddChat();
+              }
+            }}
+          />
+          {conversationDialogMode === 'manage' && isAdding && (
             <button
               type="button"
-              className="qorc-cm-close"
-              onClick={() => handleNewChatOpenChange(false)}
-              aria-label="Close"
+              className="qorc-cm-search-cancel qorc-search-action"
+              onClick={cancelActiveDiscovery}
+              aria-label="Cancel user search"
+              title="Cancel search"
             >
               <X aria-hidden="true" />
             </button>
-          </div>
-
-          <div
-            className={cn("qorc-cm-search", (isAdding || blockingPeer) && "is-searching", isAdding && "has-progress")}
-            style={{ '--qorc-discovery-progress': `${discoveryPercent}%` } as React.CSSProperties}
+          )}
+        </div>
+        {conversationDialogMode === 'manage' && isAdding && (
+          <span
+            className="qorc-cm-search-progress-label"
+            role="progressbar"
+            aria-label={discoveryProgress?.phase === 'downloading' ? 'Downloading discovery data' : `${discoveryLabel} discovery`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={discoveryProgress?.phase === 'downloading' ? displayedDiscoveryPercent : undefined}
+            aria-valuetext={discoveryLabel}
           >
-            {isAdding && (
-              <span className="qorc-cm-search-progress" aria-hidden="true">
-                <span className="qorc-cm-search-progress-fill" />
-              </span>
-            )}
-            <span className="qorc-cm-search-icon" aria-hidden="true">
-              {isAdding || blockingPeer ? <Loader2 className="animate-spin" /> : <Search />}
-            </span>
-            <Input
-              type="text"
-              placeholder={conversationDialogMode === 'block' ? 'Search conversations' : 'Search or enter a username'}
-              value={newChatUsername}
-              onChange={(e) => setNewChatUsername(e.target.value)}
-              className="qorc-cm-search-input"
-              disabled={isAdding || Boolean(blockingPeer)}
-              autoFocus
-              spellCheck={false}
-              autoComplete="off"
-              aria-label={conversationDialogMode === 'block' ? 'Search conversations to block' : 'Search conversations or enter a username'}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !isAdding && canAddTyped) {
-                  handleAddChat();
-                }
-              }}
-            />
-            {conversationDialogMode === 'manage' && isAdding && (
-              <span
-                className="qorc-cm-search-progress-label"
-                role="progressbar"
-                aria-label={discoveryProgress?.phase === 'downloading' ? 'Downloading discovery data' : `${discoveryLabel} discovery`}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={discoveryProgress?.phase === 'downloading' ? displayedDiscoveryPercent : undefined}
-                aria-valuetext={discoveryLabel}
-              >
-                {discoveryLabel}
-              </span>
-            )}
-            {conversationDialogMode === 'manage' && isAdding && (
+            {discoveryLabel}
+          </span>
+        )}
+      </div>
+
+      {(filteredConversations.length > 0 || canAddTyped) ? (
+        <ScrollArea className="qorc-cm-body">
+          <div className="qorc-cm-scroll-inner">
+            {canAddTyped && (
               <button
                 type="button"
-                className="qorc-cm-search-cancel"
-                onClick={cancelActiveDiscovery}
-                aria-label="Cancel user search"
-                title="Cancel search"
+                className="qorc-cm-add-row"
+                onClick={handleAddChat}
+                disabled={isAdding}
               >
-                <X aria-hidden="true" />
+                <span className="qorc-cm-add-icon" aria-hidden="true">
+                  {isAdding ? <Loader2 className="animate-spin" /> : <Plus />}
+                </span>
+                <span className="qorc-cm-add-copy">
+                  <strong className="qorc-cm-add-name">{newChatUsername.trim()}</strong>
+                  <span className="qorc-cm-add-text">Start a new conversation</span>
+                </span>
               </button>
             )}
-          </div>
 
-          {(filteredConversations.length > 0 || canAddTyped) ? (
-            <ScrollArea className="qorc-cm-body">
-              <div className="qorc-cm-scroll-inner">
-                {canAddTyped && (
-                  <button
-                    type="button"
-                    className="qorc-cm-add-row"
-                    onClick={handleAddChat}
-                    disabled={isAdding}
-                  >
-                    <span className="qorc-cm-add-icon" aria-hidden="true">
-                      {isAdding ? <Loader2 className="animate-spin" /> : <Plus />}
-                    </span>
-                    <span className="qorc-cm-add-copy">
-                      <strong className="qorc-cm-add-name">{newChatUsername.trim()}</strong>
-                      <span className="qorc-cm-add-text">Start a new conversation</span>
-                    </span>
-                  </button>
-                )}
-
-                {filteredConversations.length > 0 && (
-                  <div className="qorc-cm-list" data-block-version={blockVersion}>
-                    {filteredConversations.map((c) => (
-                      <ConversationManageRow
-                        isPinned={c.isPinned === true}
-                        onTogglePin={onTogglePin}
-                        key={c.id}
-                        username={c.username}
-                        blocked={blockingSystem.isBlockedSync(c.username)}
-                        mode={conversationDialogMode}
-                        onChat={handleChatFromModal}
-                        onCall={onStartCall}
-                        onToggleBlock={onToggleBlock}
-                        onBlock={(username) => { void handleBlockFromModal(username); }}
-                        blocking={blockingPeer === c.username}
-                      />
-                    ))}
-                  </div>
-                )}
+            {filteredConversations.length > 0 && (
+              <div className="qorc-cm-list" data-block-version={blockVersion}>
+                {conversationLetterGroups.map(group => <section className="qorc-cm-letter-group" key={group.letter} aria-label={`Conversations starting with ${group.letter}`}>
+                  <h4 className="qorc-cm-letter-heading">{group.letter}</h4>
+                  {group.conversations.map((c) => (
+                  <ConversationManageRow
+                    mobile={mobile}
+                    actionsOpen={manageActionsPeer === c.username}
+                    onActionsOpenChange={setManageActionsOpen}
+                    isPinned={c.isPinned === true}
+                    onTogglePin={onTogglePin}
+                    key={c.id}
+                    username={c.username}
+                    blocked={blockingSystem.isBlockedSync(c.username)}
+                    mode={conversationDialogMode}
+                    onChat={handleChatFromModal}
+                    onCall={handleCallFromPicker}
+                    onToggleBlock={onToggleBlock}
+                    onBlock={(username) => { void handleBlockFromModal(username); }}
+                    blocking={blockingPeer === c.username}
+                  />
+                  ))}
+                </section>)}
               </div>
-            </ScrollArea>
-          ) : (
-            <div className="qorc-cm-body qorc-cm-body-static">
-              <div className="qorc-cm-scroll-inner">
-                <div className="qorc-cm-empty">
-                  <span className="qorc-cm-empty-icon" aria-hidden="true">
-                    <Search />
-                  </span>
-                  <div className="qorc-cm-empty-copy">
-                    <h3>{trimmedQuery ? "No matches" : conversationDialogMode === 'block' ? "No conversations to block" : "No conversations yet"}</h3>
-                    <p>
-                      {conversationDialogMode === 'block'
-                        ? trimmedQuery
-                          ? "Try another conversation name."
-                          : "Only existing, unblocked conversations appear here."
-                        : trimmedQuery
-                          ? "Type a full username above to start a new chat."
-                          : "Search a username above to start your first conversation."}
-                    </p>
-                  </div>
-                </div>
+            )}
+          </div>
+        </ScrollArea>
+      ) : (
+        <div className="qorc-cm-body qorc-cm-body-static">
+          <div className="qorc-cm-scroll-inner">
+            <div className="qorc-cm-empty">
+              <span className="qorc-cm-empty-icon" aria-hidden="true">
+                <Search />
+              </span>
+              <div className="qorc-cm-empty-copy">
+                <h3>{trimmedQuery ? "No matches" : conversationDialogMode === 'block' ? "No conversations to block" : "No conversations yet"}</h3>
+                <p>
+                  {conversationDialogMode === 'block'
+                    ? trimmedQuery
+                      ? "Try another conversation name."
+                      : "Only existing, unblocked conversations appear here."
+                    : trimmedQuery
+                      ? "Type a full username above to start a new chat."
+                      : "Search a username above to start your first conversation."}
+                </p>
               </div>
             </div>
-          )}
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className={cn('qorc-conversation-list', mobile && 'is-mobile')}>
+      {showNewChatInput && createPortal(
+        <section className="qorc-cm-dialog qorc-cm-screen" aria-labelledby="conversation-modal-title">
+          {pickerContent}
+        </section>,
+        document.querySelector('.qorc-main-pane') ?? document.body,
+      )}
 
       {conversations.length === 0 ? (
         <div className="qorc-conversation-static">
@@ -814,6 +928,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 const conversation = item.data;
                 return (
                   <ConversationItem
+                    mobile={mobile}
+                    actionsOpen={actionsPeer === conversation.username}
+                    onActionsOpenChange={setActionsOpen}
                     blocked={blockingSystem.isBlockedSync(conversation.username)}
                     onToggleBlock={onToggleBlock}
                     key={conversation.id}

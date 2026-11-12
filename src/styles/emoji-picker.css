@@ -1,10 +1,10 @@
 .emoji-picker {
-  --emoji-picker-bg: var(--qorc-control-bg, hsl(var(--background)));
+  --emoji-picker-bg: var(--qorc-app-bg, hsl(var(--background)));
   position: fixed;
   z-index: 1100;
   display: flex;
-  width: min(236px, calc(100vw - 16px));
-  height: min(368px, calc(100dvh - 16px));
+  width: min(360px, calc(var(--emoji-viewport-width, 100vw) - 16px));
+  height: min(520px, calc(var(--emoji-viewport-height, 100dvh) - 16px));
   flex-direction: column;
   overflow: hidden;
   border: 0;
@@ -13,13 +13,8 @@
   box-shadow: var(--qorc-shadow, 0 20px 55px rgba(0, 0, 0, 0.3));
   color: var(--qorc-text, hsl(var(--popover-foreground)));
   font-family: var(--qorc-ui-font, "Google Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
-  font-size: 13px;
+  font-size: 15px;
   isolation: isolate;
-}
-
-html.light .emoji-picker,
-.light .emoji-picker {
-  --emoji-picker-bg: var(--qorc-input-bg, #f7f7f7);
 }
 
 .emoji-picker,
@@ -29,41 +24,8 @@ html.light .emoji-picker,
 }
 
 .emoji-picker__search {
-  display: grid;
-  min-width: 0;
-  height: 34px;
-  flex: 0 0 34px;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  padding: 0 11px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
-}
-
-.emoji-picker__search:focus-within {
-  color: var(--qorc-text, hsl(var(--foreground)));
-}
-
-.emoji-picker__search input {
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-}
-
-.emoji-picker__search input::placeholder {
-  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
-  opacity: 1;
-}
-
-.emoji-picker__search input::-webkit-search-cancel-button {
-  display: none;
+  flex: 0 0 52px;
+  margin: 8px 12px 12px;
 }
 
 .emoji-picker__clear,
@@ -81,22 +43,14 @@ html.light .emoji-picker,
   cursor: pointer;
 }
 
-.emoji-picker__clear {
-  width: 22px;
-  height: 22px;
-  color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
-}
-
-.emoji-picker__clear:hover,
-.emoji-picker__category:hover,
-.emoji-picker__emoji:hover {
+.emoji-picker__category:hover:where(html:not(.qorc-mobile) *),
+.emoji-picker__emoji:hover:where(html:not(.qorc-mobile) *) {
   background: var(--qorc-control-hover, hsl(var(--accent)));
   color: var(--qorc-text, hsl(var(--accent-foreground)));
 }
 
-.emoji-picker__clear:focus-visible,
-.emoji-picker__category:focus-visible,
-.emoji-picker__emoji:focus-visible {
+.emoji-picker__category:focus-visible:where(html:not(.qorc-mobile) *),
+.emoji-picker__emoji:focus-visible:where(html:not(.qorc-mobile) *) {
   box-shadow: inset 0 0 0 1px var(--qorc-border, hsl(var(--border)));
 }
 
@@ -123,7 +77,7 @@ html.light .emoji-picker,
 
 .emoji-picker__category {
   width: 100%;
-  height: 34px;
+  height: 44px;
   scroll-snap-align: start;
   color: var(--qorc-muted-text, hsl(var(--muted-foreground)));
 }
@@ -137,7 +91,7 @@ html.light .emoji-picker,
 .emoji-picker__scroll {
   min-height: 0;
   flex: 1 1 auto;
-  padding: 0 8px 6px;
+  padding: 0 10px 10px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -178,7 +132,7 @@ html.light .emoji-picker,
   min-width: 0;
   aspect-ratio: 1;
   font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
-  font-size: 22px;
+  font-size: 28px;
   line-height: 1;
 }
 
@@ -214,17 +168,6 @@ html.light .emoji-picker,
 @keyframes emoji-picker-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-@media (max-width: 380px), (max-height: 520px) {
-  .emoji-picker {
-    width: min(228px, calc(100vw - 16px));
-    height: min(336px, calc(100dvh - 16px));
-  }
-
-  .emoji-picker__emoji {
-    font-size: 20px;
   }
 }
 

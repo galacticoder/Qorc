@@ -1,11 +1,7 @@
 //! Client side PIR driven through `qorc-pir-client` sidecar
 
-use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::Mutex;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -13,10 +9,6 @@ use serde::Serialize;
 use tauri::Manager;
 
 use crate::error::{QorcError, QorcResult};
-
-mod embedded {
-    include!(concat!(env!("OUT_DIR"), "/embedded_pir_client.rs"));
-}
 
 const OP_QUERY: u8 = 1;
 const OP_DECODE: u8 = 2;
@@ -32,6 +24,12 @@ const MAX_BATCH_QUERIES: usize = 16;
 
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 
+pub(crate) fn stop_for_local_reset() -> Result<(), String> {
+    let mut guard = SIDECAR.lock().map_err(|_| "PIR worker lock unavailable")?;
+    if let Some(mut child) = guard.take() { let _ = child.kill(); let _ = child.wait(); }
+    Ok(())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PirQuery {
@@ -40,139 +38,23 @@ pub struct PirQuery {
     pub pub_params: String,
 }
 
-fn embedded_file_matches(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !metadata.file_type().is_file()
-        || metadata.len() != embedded::EMBEDDED_PIR_CLIENT.len() as u64
-    {
-        return false;
-    }
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    blake3::hash(&bytes).as_bytes() == &embedded::EMBEDDED_PIR_CLIENT_HASH
-}
-
-fn secure_embedded_directory(path: &Path) -> QorcResult<()> {
-    fs::create_dir_all(path)
-        .map_err(|_| QorcError::Internal("PIR runtime directory is unavailable".to_string()))?;
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| QorcError::Internal("PIR runtime directory is unavailable".to_string()))?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(QorcError::Internal(
-            "PIR runtime directory is invalid".to_string(),
-        ));
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(QorcError::Internal(
-                "PIR runtime directory has the wrong owner".to_string(),
-            ));
-        }
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
-            QorcError::Internal("PIR runtime directory permissions failed".to_string())
-        })?;
-    }
-
-    Ok(())
-}
-
-fn write_embedded_client(path: &Path) -> QorcResult<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| QorcError::Internal("Invalid PIR runtime path".to_string()))?;
-    let temp = parent.join(format!(
-        ".qorc-pir-client-{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| -> QorcResult<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = options
-            .open(&temp)
-            .map_err(|_| QorcError::Internal("PIR client extraction failed".to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o700))
-                .map_err(|_| QorcError::Internal("PIR client permissions failed".to_string()))?;
-        }
-        file.write_all(embedded::EMBEDDED_PIR_CLIENT)
-            .and_then(|_| file.sync_all())
-            .map_err(|_| QorcError::Internal("PIR client extraction failed".to_string()))?;
-        drop(file);
-
-        if path.exists() && !embedded_file_matches(path) {
-            fs::remove_file(path).map_err(|_| {
-                QorcError::Internal("Invalid PIR client cannot be replaced".to_string())
-            })?;
-        }
-        match fs::rename(&temp, path) {
-            Ok(()) => {}
-            Err(_) if embedded_file_matches(path) => {}
-            Err(_) => {
-                return Err(QorcError::Internal(
-                    "PIR client installation failed".to_string(),
-                ));
-            }
-        }
-        if !embedded_file_matches(path) {
-            return Err(QorcError::Internal(
-                "PIR client integrity verification failed".to_string(),
-            ));
-        }
-        Ok(())
-    })();
-    if temp.exists() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-fn materialize_embedded_client(directory: &Path) -> QorcResult<PathBuf> {
-    secure_embedded_directory(&directory)?;
-    let hash_prefix = hex::encode(&embedded::EMBEDDED_PIR_CLIENT_HASH[..8]);
-    let base_name = embedded::EMBEDDED_PIR_CLIENT_FILE_NAME;
-    let file_name = match base_name.rsplit_once('.') {
-        Some((stem, extension)) => format!("{stem}-{hash_prefix}.{extension}"),
-        None => format!("{base_name}-{hash_prefix}"),
-    };
-    let path = directory.join(file_name);
-    if !embedded_file_matches(&path) {
-        write_embedded_client(&path)?;
-    }
-    Ok(path)
-}
-
-fn sidecar_path(app: &tauri::AppHandle) -> QorcResult<PathBuf> {
-    let cache = app
-        .path()
-        .app_cache_dir()
-        .map_err(|_| QorcError::Internal("App cache directory is unavailable".to_string()))?;
-    materialize_embedded_client(&cache.join("native").join("pir"))
-}
-
 fn validation_started(app: &tauri::AppHandle) -> QorcResult<()> {
     let mut guard = SIDECAR
         .lock()
         .map_err(|_| QorcError::Internal("PIR lock".into()))?;
+    if app.state::<crate::state::AppState>().resetting_local_data.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(QorcError::Internal("Local app data is being reset".into()));
+    }
     if let Some(child) = guard.as_mut() {
         if matches!(child.try_wait(), Ok(None)) {
             return Ok(());
         }
     }
-    let mut command = Command::new(sidecar_path(app)?);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(winapi::um::winbase::CREATE_NO_WINDOW);
-    let child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| QorcError::Internal("App cache directory is unavailable".into()))?;
+    let child = crate::pir_runtime::sidecar_command(&cache)?
         .spawn()
         .map_err(|_| QorcError::Internal("PIR sidecar failed to start".to_string()))?;
     *guard = Some(child);
@@ -234,7 +116,9 @@ pub async fn pir_generate_query(
     target_row: u32,
 ) -> QorcResult<PirQuery> {
     if count == 0 || count > MAX_RECORDS || entry_bytes == 0 || entry_bytes > MAX_ENTRY_BYTES {
-        return Err(QorcError::Internal("Invalid PIR database shape".to_string()));
+        return Err(QorcError::Internal(
+            "Invalid PIR database shape".to_string(),
+        ));
     }
     if target_row >= count.next_power_of_two().max(2048) {
         return Err(QorcError::Internal("Invalid PIR row".to_string()));
@@ -284,7 +168,9 @@ pub async fn pir_generate_batch_query(
         || target_rows.is_empty()
         || target_rows.len() > MAX_BATCH_QUERIES
     {
-        return Err(QorcError::Internal("Invalid PIR database shape".to_string()));
+        return Err(QorcError::Internal(
+            "Invalid PIR database shape".to_string(),
+        ));
     }
     let padded_count = count.next_power_of_two().max(2048);
     if target_rows
@@ -338,49 +224,4 @@ pub async fn pir_discard_query(session_id: u32) -> QorcResult<()> {
     }
     call(OP_DISCARD, &session_id.to_le_bytes())?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{embedded, embedded_file_matches, materialize_embedded_client};
-
-    #[test]
-    fn embedded_pir_client_extracts_and_repairs_by_hash() {
-        let directory = std::env::temp_dir().join(format!(
-            "qorc-embedded-pir-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let path = materialize_embedded_client(&directory).expect("extract embedded PIR client");
-        assert!(embedded_file_matches(&path));
-        assert_eq!(std::fs::read(&path).unwrap(), embedded::EMBEDDED_PIR_CLIENT);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-        }
-
-        let mut child = std::process::Command::new(&path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("start extracted PIR client");
-        drop(child.stdin.take());
-        assert!(
-            child
-                .wait()
-                .expect("wait for extracted PIR client")
-                .success()
-        );
-
-        std::fs::write(&path, b"corrupt").unwrap();
-        let repaired = materialize_embedded_client(&directory).expect("repair embedded PIR client");
-        assert_eq!(repaired, path);
-        assert!(embedded_file_matches(&repaired));
-        std::fs::remove_dir_all(directory).unwrap();
-    }
 }

@@ -40,7 +40,7 @@ const MAX_WS_JSON_STRUCTURAL_TOKENS: usize = 16 * 1024;
 const MAX_WS_WRITE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WS_PENDING_WRITES: usize = 1024;
 const MAX_WS_PENDING_WRITE_BYTES: usize = 64 * 1024 * 1024;
-const PQ_WS_FIXED_CELL_BYTES: usize = 64 * 1024;
+pub(crate) const PQ_WS_FIXED_CELL_BYTES: usize = 64 * 1024;
 
 fn connection_failure_diagnostic(error: &QorcError) -> (&'static str, &'static str) {
     let QorcError::Network(message) = error else {

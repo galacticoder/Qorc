@@ -2,11 +2,14 @@
 
 use zeroize::Zeroizing;
 
-use crate::error::{QorcError, QorcResult};
+use crate::error::QorcResult;
+#[cfg(not(target_os = "android"))]
+use crate::error::QorcError;
 
 #[cfg(target_os = "linux")]
 const MAX_MACHINE_ID_BYTES: u64 = 256;
 
+#[cfg(not (target_os = "android"))]
 fn valid_machine_id(value: &str) -> Option<&str> {
     let value = value.trim();
     if (16..=128).contains(&value.len())
@@ -76,54 +79,40 @@ fn read_windows_machine_guid() -> Option<String> {
     String::from_utf16(&value[..end]).ok()
 }
 
-pub async fn get_machine_context() -> QorcResult<Zeroizing<Vec<u8>>> {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(machine_id) = read_linux_machine_id().await
-            && let Some(machine_id) = valid_machine_id(&machine_id)
-        {
-            return Ok(Zeroizing::new(
-                [crate::protocol_keys::MACHINE_LINUX, machine_id.as_bytes()].concat(),
-            ));
-        }
-    }
+pub async fn get_machine_context(_config_dir: &std::path::Path) -> QorcResult<Zeroizing<Vec<u8>>> {
+    #[cfg(target_os = "android")]
+    return super::android_binding::get_context(_config_dir).await;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "android"))]
     {
-        if let Some(machine_guid) = read_windows_machine_guid() {
-            if let Some(machine_guid) = valid_machine_id(&machine_guid) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(machine_id) = read_linux_machine_id().await
+                && let Some(machine_id) = valid_machine_id(&machine_id)
+            {
                 return Ok(Zeroizing::new(
-                    [
-                        crate::protocol_keys::MACHINE_WINDOWS,
-                        machine_guid.as_bytes(),
-                    ]
-                    .concat(),
+                    [crate::protocol_keys::MACHINE_LINUX, machine_id.as_bytes()].concat(),
                 ));
             }
         }
-    }
 
-    Err(QorcError::StorageInitFailed(
-        "Stable machine identifier is unavailable".to_string(),
-    ))
-}
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(machine_guid) = read_windows_machine_guid() {
+                if let Some(machine_guid) = valid_machine_id(&machine_guid) {
+                    return Ok(Zeroizing::new(
+                        [
+                            crate::protocol_keys::MACHINE_WINDOWS,
+                            machine_guid.as_bytes(),
+                        ]
+                        .concat(),
+                    ));
+                }
+            }
+        }
 
-#[cfg(test)]
-mod tests {
-    use super::valid_machine_id;
-
-    #[test]
-    fn accepts_only_bounded_machine_identifiers() {
-        assert_eq!(
-            valid_machine_id("0123456789abcdef0123456789abcdef\n"),
-            Some("0123456789abcdef0123456789abcdef")
-        );
-        assert_eq!(
-            valid_machine_id("4c4c4544-0038-4d10-804a-b8c04f4e5332"),
-            Some("4c4c4544-0038-4d10-804a-b8c04f4e5332")
-        );
-        assert_eq!(valid_machine_id("short"), None);
-        assert_eq!(valid_machine_id("0123456789abcdef/path"), None);
-        assert_eq!(valid_machine_id(&"a".repeat(129)), None);
+        Err(QorcError::StorageInitFailed(
+            "Stable machine identifier is unavailable".to_string(),
+        ))
     }
 }

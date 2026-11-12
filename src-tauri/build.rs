@@ -1,6 +1,10 @@
 use std::{env, fs, path::PathBuf};
 
 use sha2::{Digest, Sha256};
+#[path = "android-pir-build.rs"]
+mod android_pir;
+#[path = "android-tor-build.rs"]
+mod android_tor;
 
 const TOR_BUNDLE_VERSION: &str = "15.0.17";
 
@@ -47,75 +51,95 @@ fn main() {
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("Cargo did not provide CARGO_MANIFEST_DIR"),
     );
-    let executable_suffix = if target.contains("windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let staged_name = format!("qorc-pir-client-{target}{executable_suffix}");
-    let staged_path = manifest_dir.join("binaries").join(&staged_name);
-
-    println!("cargo:rerun-if-env-changed=TARGET");
-    println!("cargo:rerun-if-changed={}", staged_path.display());
-
-    let bytes = fs::read(&staged_path).unwrap_or_else(|error| {
-        panic!(
-            "embedded PIR client is missing at {} ({error}), run pnpm run build:pir first",
-            staged_path.display()
+    println!("cargo:rerun-if-changed=android-tor-build.rs");
+    println!("cargo:rerun-if-changed=android-pir-build.rs");
+    if target.contains("android") {
+        android_tor::generate(
+            &target,
+            &manifest_dir,
+            &PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR")),
         )
-    });
-    let digest = *blake3::hash(&bytes).as_bytes();
-    let digest_literal = byte_array_literal(&digest);
-    let source_path = format!("{:?}", staged_path.to_string_lossy());
-    let generated = format!(
-        "pub static EMBEDDED_PIR_CLIENT: &[u8] = include_bytes!({source_path});\n\
+        .expect("failed to verify the authenticated Android Tor runtime");
+        android_pir::generate(
+            &target,
+            &manifest_dir,
+            &PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR")),
+        )
+        .expect("failed to verify the authenticated Android PIR runtime");
+    }
+    if !target.contains("android") {
+        let executable_suffix = if target.contains("windows") {
+            ".exe"
+        } else {
+            ""
+        };
+        let staged_name = format!("qorc-pir-client-{target}{executable_suffix}");
+        let staged_path = manifest_dir.join("binaries").join(&staged_name);
+
+        println!("cargo:rerun-if-env-changed=TARGET");
+        println!("cargo:rerun-if-changed={}", staged_path.display());
+
+        let bytes = fs::read(&staged_path).unwrap_or_else(|error| {
+            panic!(
+                "embedded PIR client is missing at {} ({error}), run pnpm run build:pir first",
+                staged_path.display()
+            )
+        });
+        let digest = *blake3::hash(&bytes).as_bytes();
+        let digest_literal = byte_array_literal(&digest);
+        let source_path = format!("{:?}", staged_path.to_string_lossy());
+        let generated = format!(
+            "pub static EMBEDDED_PIR_CLIENT: &[u8] = include_bytes!({source_path});\n\
          pub const EMBEDDED_PIR_CLIENT_HASH: [u8; 32] = [{digest_literal}];\n\
          pub const EMBEDDED_PIR_CLIENT_FILE_NAME: &str = {file_name:?};\n",
-        file_name = format!("qorc-pir-client{executable_suffix}")
-    );
-    let output = PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR"))
-        .join("embedded_pir_client.rs");
-    fs::write(output, generated).expect("failed to generate embedded PIR client metadata");
+            file_name = format!("qorc-pir-client{executable_suffix}")
+        );
+        let output = PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR"))
+            .join("embedded_pir_client.rs");
+        fs::write(output, generated).expect("failed to generate embedded PIR client metadata");
 
-    let (tor_platform, tor_arch, tor_target, expected_tor_sha256) = embedded_tor_bundle(&target);
-    let tor_file_name = format!("tor-expert-bundle-{tor_target}-{TOR_BUNDLE_VERSION}.tar.gz");
-    let tor_path = manifest_dir.join("vendor").join("tor").join(&tor_file_name);
-    println!("cargo:rerun-if-changed={}", tor_path.display());
+        let (tor_platform, tor_arch, tor_target, expected_tor_sha256) =
+            embedded_tor_bundle(&target);
+        let tor_file_name = format!("tor-expert-bundle-{tor_target}-{TOR_BUNDLE_VERSION}.tar.gz");
+        let tor_path = manifest_dir.join("vendor").join("tor").join(&tor_file_name);
+        println!("cargo:rerun-if-changed={}", tor_path.display());
 
-    let tor_bytes = fs::read(&tor_path).unwrap_or_else(|error| {
-        panic!(
-            "embedded Tor Expert Bundle is missing at {} ({error})",
+        let tor_bytes = fs::read(&tor_path).unwrap_or_else(|error| {
+            panic!(
+                "embedded Tor Expert Bundle is missing at {} ({error})",
+                tor_path.display()
+            )
+        });
+        let tor_digest: [u8; 32] = Sha256::digest(&tor_bytes).into();
+        let actual_tor_sha256 = lowercase_hex(&tor_digest);
+        assert_eq!(
+            actual_tor_sha256,
+            expected_tor_sha256,
+            "vendored Tor Expert Bundle failed its release-pinned SHA-256 check: {}",
             tor_path.display()
-        )
-    });
-    let tor_digest: [u8; 32] = Sha256::digest(&tor_bytes).into();
-    let actual_tor_sha256 = lowercase_hex(&tor_digest);
-    assert_eq!(
-        actual_tor_sha256,
-        expected_tor_sha256,
-        "vendored Tor Expert Bundle failed its release-pinned SHA-256 check: {}",
-        tor_path.display()
-    );
+        );
 
-    let tor_source_path = format!("{:?}", tor_path.to_string_lossy());
-    let tor_generated = format!(
-        "pub static EMBEDDED_TOR_BUNDLE: &[u8] = include_bytes!({tor_source_path});\n\
+        let tor_source_path = format!("{:?}", tor_path.to_string_lossy());
+        let tor_generated = format!(
+            "pub static EMBEDDED_TOR_BUNDLE: &[u8] = include_bytes!({tor_source_path});\n\
          pub const EMBEDDED_TOR_BUNDLE_SHA256: [u8; 32] = [{digest}];\n\
          pub const EMBEDDED_TOR_BUNDLE_SHA256_HEX: &str = {sha256:?};\n\
          pub const EMBEDDED_TOR_BUNDLE_VERSION: &str = {version:?};\n\
          pub const EMBEDDED_TOR_BUNDLE_TARGET: &str = {bundle_target:?};\n\
          pub const EMBEDDED_TOR_PLATFORM: &str = {platform:?};\n\
          pub const EMBEDDED_TOR_ARCH: &str = {arch:?};\n",
-        digest = byte_array_literal(&tor_digest),
-        sha256 = expected_tor_sha256,
-        version = TOR_BUNDLE_VERSION,
-        bundle_target = tor_target,
-        platform = tor_platform,
-        arch = tor_arch,
-    );
-    let tor_output = PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR"))
-        .join("embedded_tor_bundle.rs");
-    fs::write(tor_output, tor_generated).expect("failed to generate embedded Tor bundle metadata");
+            digest = byte_array_literal(&tor_digest),
+            sha256 = expected_tor_sha256,
+            version = TOR_BUNDLE_VERSION,
+            bundle_target = tor_target,
+            platform = tor_platform,
+            arch = tor_arch,
+        );
+        let tor_output = PathBuf::from(env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR"))
+            .join("embedded_tor_bundle.rs");
+        fs::write(tor_output, tor_generated)
+            .expect("failed to generate embedded Tor bundle metadata");
+    }
 
     println!("cargo:rerun-if-changed=windows-app-manifest.xml");
     tauri_build::try_build(

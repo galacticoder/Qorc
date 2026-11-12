@@ -7,7 +7,18 @@ import { Channel, invoke, SERIALIZE_TO_IPC_FN } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Base64 } from './cryptography/base64';
 import { PROTOCOL_KEYS } from './config/protocol-keys';
+import { isAndroidPlatform } from './runtime/platform';
+import { scopedStorageContext } from './security/scoped-storage-context';
+import { receiveCallbackBytes, receiveCallbackJson, type ByteCallbackChunk } from './runtime/callback-bytes';
+import { WS_FIXED_MESSAGE_SIZE_BYTES } from './constants';
 import type { AudioLaneTelemetry } from './transport/secure-transport';
+
+function invokeJsonResponse<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+    if (!isAndroidPlatform()) return invoke<T>(command, args);
+    return receiveCallbackJson<T>(onChunk => invoke<number>(`${command}_channel`, {
+        ...args, onChunk: new Channel<ByteCallbackChunk>(onChunk),
+    }));
+}
 
 function serializeJsonForNative(value: unknown): string {
     const encoded = JSON.stringify(value);
@@ -70,7 +81,7 @@ const parseNativeMicrophoneFrame = (value: ArrayBuffer): NativeMicrophoneFrame |
 const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null => {
     const bytes = new Uint8Array(value);
     if (bytes.byteLength === 32 && bytes.every(byte => byte === 0)) return null;
-    if (bytes.byteLength <= 32 || bytes.byteLength > 4 * 1024 * 1024 + 32) {
+    if (bytes.byteLength < 32 || bytes.byteLength > 4 * 1024 * 1024 + 32) {
         throw new Error('Invalid native camera frame length');
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -81,6 +92,7 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
     const payloadLength = view.getUint32(24, false);
     const frameRate = view.getUint16(28, false);
     const jpeg = bytes.subarray(32);
+    const enabled = view.getUint8(2) === 1;
     if (
         view.getUint8(0) !== 2 || view.getUint8(1) !== 1 || view.getUint8(2) > 1 ||
         view.getUint8(3) !== 0 || view.getUint16(30, false) !== 0 ||
@@ -89,8 +101,10 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
         width < 2 || height < 2 || width > 1280 || height > 720 ||
         frameRate < 1 || frameRate > 60 ||
         width * height > 1280 * 720 || payloadLength !== jpeg.byteLength ||
-        jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
-        jpeg[jpeg.byteLength - 2] !== 0xff || jpeg[jpeg.byteLength - 1] !== 0xd9
+        (enabled
+            ? jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
+              jpeg[jpeg.byteLength - 2] !== 0xff || jpeg[jpeg.byteLength - 1] !== 0xd9
+            : jpeg.byteLength !== 0)
     ) {
         throw new Error('Invalid native camera frame');
     }
@@ -100,7 +114,7 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
         width,
         height,
         frameRate,
-        enabled: view.getUint8(2) === 1,
+        enabled,
         jpeg,
     };
 };
@@ -241,13 +255,13 @@ export const account = {
         username: string,
         password: string,
         passphrase: string,
-    ) => invoke<NativeAccountOpenResult>('account_open', {
+    ) => invokeJsonResponse<NativeAccountOpenResult>('account_open', {
         accountOwner,
         username,
         password,
         passphrase,
     }),
-    publicKeys: () => invoke<NativeAccountPublicKeys>('account_public_keys'),
+    publicKeys: () => invokeJsonResponse<NativeAccountPublicKeys>('account_public_keys'),
     isUnlocked: (accountOwner: string) =>
         invoke<boolean>('account_is_unlocked', { accountOwner }),
     sign: (purpose: string, message: Uint8Array) =>
@@ -296,13 +310,17 @@ export const account = {
         invoke<boolean>('account_token_vault_remove', { serverScope, vaultKind }),
     lock: (accountOwner: string, options?: { purgeTokens: boolean; serverScope: string | null }) =>
         invoke<boolean>('account_lock', { accountOwner, ...options }),
+    clearLocalData: (accountOwner: string, serverScope: string) =>
+        invoke<boolean>('account_clear_local_data', { accountOwner, serverScope }),
+    resetAllLocalData: (accountOwner: string) =>
+        invoke<boolean>('app_reset_all_local_data', { accountOwner }),
 };
 
 export const storage = {
-    get: (key: string) => invoke<string | null>('secure_get', { key }),
-    set: (key: string, value: string) => invoke<boolean>('secure_set', { key, value }),
-    remove: (key: string) => invoke<boolean>('secure_remove', { key }),
-    has: (key: string) => invoke<boolean>('secure_has', { key }),
+    get: (key: string) => invoke<string | null>('secure_get', { key, ownership: scopedStorageContext(key) }),
+    set: (key: string, value: string) => invoke<boolean>('secure_set', { key, value, ownership: scopedStorageContext(key) }),
+    remove: (key: string) => invoke<boolean>('secure_remove', { key, ownership: scopedStorageContext(key) }),
+    has: (key: string) => invoke<boolean>('secure_has', { key, ownership: scopedStorageContext(key) }),
 };
 
 export const authPow = {
@@ -483,11 +501,11 @@ export interface NativePirQuery {
 
 export const pir = {
     generateQuery: (count: number, entryBytes: number, targetRow: number) =>
-        invoke<NativePirQuery>('pir_generate_query', { count, entryBytes, targetRow }),
+        invokeJsonResponse<NativePirQuery>('pir_generate_query', { count, entryBytes, targetRow }),
     decodeResponse: (response: string, sessionId: number) =>
         invoke<string>('pir_decode_response', { response, sessionId }),
     generateBatchQuery: (count: number, entryBytes: number, targetRows: number[]) =>
-        invoke<NativePirQuery>('pir_generate_batch_query', { count, entryBytes, targetRows }),
+        invokeJsonResponse<NativePirQuery>('pir_generate_batch_query', { count, entryBytes, targetRows }),
     decodeBatchResponse: (response: string, sessionId: number) =>
         invoke<string>('pir_decode_batch_response', { response, sessionId }),
     discardQuery: (sessionId: number) =>
@@ -604,35 +622,58 @@ export const anonymousHttp = {
         options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void; diagnosticId?: number },
     ) => {
         options.signal?.throwIfAborted();
+        const android = isAndroidPlatform();
         const requestId = crypto.randomUUID();
-        const cancel = () => {
+        const controller = new AbortController();
+        let active = true;
+        let receivedBytes = 0;
+        let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+        const cancelNative = () => {
             void invoke('cancel_anonymous_api_fetch', { requestId }).catch((error) => {
                 console.warn('[ANON-HTTP] Request cancellation failed', { error: String(error) });
             });
         };
-        let active = true;
-        let receivedBytes = 0;
-        const progress = options.onProgress ? new Channel<{ receivedBytes: number; totalBytes: number }>((value) => {
-            if (!active || options.signal?.aborted || !value || value.totalBytes !== options.responseBytes ||
+        const abort = () => controller.abort(options.signal?.reason);
+        let rejectAbort: () => void = () => {};
+        const aborted = new Promise<never>((_resolve, reject) => {
+            rejectAbort = () => reject(controller.signal.reason ?? new DOMException('Anonymous request cancelled', 'AbortError'));
+            controller.signal.addEventListener('abort', rejectAbort, { once: true });
+        });
+        controller.signal.addEventListener('abort', cancelNative, { once: true });
+        options.signal?.addEventListener('abort', abort, { once: true });
+        const progress = options.onProgress || android ? new Channel<{ receivedBytes: number; totalBytes: number }>((value) => {
+            if (!active || controller.signal.aborted || !value || value.totalBytes !== options.responseBytes ||
                 !Number.isSafeInteger(value.receivedBytes) || value.receivedBytes < receivedBytes ||
                 value.receivedBytes > options.responseBytes) return;
             receivedBytes = value.receivedBytes;
+            if (android && receivedBytes === options.responseBytes && deliveryTimer === undefined) {
+                deliveryTimer = setTimeout(() => controller.abort(new Error('Native anonymous response delivery timed out')), 30_000);
+            }
             options.onProgress?.(receivedBytes);
         }) : undefined;
-        options.signal?.addEventListener('abort', cancel, { once: true });
         try {
-            return await invoke<ArrayBuffer>('anonymous_api_fetch', body, {
-                headers: {
-                    [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
-                    'x-qorc-anonymous-request-id': requestId,
-                    'x-qorc-anonymous-response-bytes': String(options.responseBytes),
-                    ...(options.diagnosticId === undefined ? {} : { 'x-qorc-transfer-diagnostic': String(options.diagnosticId) }),
-                    ...(progress ? { 'x-qorc-anonymous-progress': progress[SERIALIZE_TO_IPC_FN]() } : {}),
-                },
-            });
+            const headers = {
+                [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
+                'x-qorc-anonymous-request-id': requestId,
+                'x-qorc-anonymous-response-bytes': String(options.responseBytes),
+                ...(options.diagnosticId === undefined ? {} : { 'x-qorc-transfer-diagnostic': String(options.diagnosticId) }),
+                ...(progress ? { 'x-qorc-anonymous-progress': progress[SERIALIZE_TO_IPC_FN]() } : {}),
+            };
+            const response = android
+                ? receiveCallbackBytes(onChunk => {
+                    const channel = new Channel<ByteCallbackChunk>(onChunk);
+                    return invoke<number>('anonymous_api_fetch_channel', body, {
+                        headers: { ...headers, 'x-qorc-anonymous-response-channel': channel[SERIALIZE_TO_IPC_FN]() },
+                    });
+                }, options.responseBytes, false, controller.signal)
+                : invoke<ArrayBuffer>('anonymous_api_fetch', body, { headers });
+            return await Promise.race([response, aborted]);
         } finally {
             active = false;
-            options.signal?.removeEventListener('abort', cancel);
+            clearTimeout(deliveryTimer);
+            controller.signal.removeEventListener('abort', rejectAbort);
+            controller.signal.removeEventListener('abort', cancelNative);
+            options.signal?.removeEventListener('abort', abort);
         }
     },
     prewarm: () => invoke<boolean>('prewarm_anonymous_transport'),
@@ -690,6 +731,7 @@ export const database = {
     delete: (store: string, key: string) => invoke<boolean>('db_delete', { store, key }),
 };
 export const tray = {
+    openBackgroundNoticeSettings: () => invoke<boolean>('open_background_notice_settings'),
     getCloseToTray: () => invoke<boolean>('get_close_to_tray'),
     setCloseToTray: (enabled: boolean) => invoke<boolean>('set_close_to_tray', { enabled }),
     incrementUnread: () => invoke<void>('tray_increment_unread'),
@@ -705,7 +747,11 @@ export const events = {
         void (async () => {
             while (active) {
                 try {
-                    const data = await invoke<ArrayBuffer>('ws_receive_binary');
+                    const data = isAndroidPlatform()
+                        ? await receiveCallbackBytes(onChunk => invoke<number>('ws_receive_binary_channel', {
+                            onChunk: new Channel<ByteCallbackChunk>(onChunk),
+                        }), 8 + WS_FIXED_MESSAGE_SIZE_BYTES)
+                        : await invoke<ArrayBuffer>('ws_receive_binary');
                     consecutiveFailures = 0;
                     if (active && data.byteLength > 0) callback(data);
                 } catch {

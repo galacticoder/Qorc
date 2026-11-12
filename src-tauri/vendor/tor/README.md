@@ -25,3 +25,6 @@ The bundled Lyrebird executable SHA-256 is
 `8c98bafcb321e426e9fc7a336b2b1a0ae1396483d969a343fcba466d13e5c0c3`.
 
 See `THIRD_PARTY_NOTICES.txt` for source and license details.
+
+Android uses separately built Bionic PIE executables installed with the APK.
+See [android/README.md](android/README.md) for pins, sources, packaging and tests.

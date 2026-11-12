@@ -77,8 +77,8 @@
       "icons/icon.ico"
     ],
     "category": "SocialNetworking",
-    "shortDescription": "",
-    "longDescription": "",
+    "shortDescription": "Secure messaging with post-quantum cryptography",
+    "longDescription": "Qorc is a secure messaging application focused on private communication, end-to-end encryption, post-quantum cryptography, and anonymous transport.",
     "copyright": "Copyright \u00a9 2026 galacticoderr",
     "license": "LicenseRef-qorc-Non-Commercial-Copyleft-1.0",
     "licenseFile": "../LICENSE",

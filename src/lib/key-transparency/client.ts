@@ -1,3 +1,4 @@
+import { keyTransparencyStoreKey } from './store-key';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
@@ -160,7 +161,7 @@ function incidentStorageKey(serverScope: string): string {
 }
 
 function contactStorageKey(accountScope: string, label: string): string {
-  return `${STORAGE_PREFIXES.KEY_TRANSPARENCY_CONTACT}${storageDigest(STORAGE_KEY_DOMAINS.KEY_TRANSPARENCY_CONTACT, [accountScope, label])}`;
+  return keyTransparencyStoreKey(STORAGE_PREFIXES.KEY_TRANSPARENCY_CONTACT, STORAGE_KEY_DOMAINS.KEY_TRANSPARENCY_CONTACT, accountScope, label);
 }
 
 function decodeCanonicalPublicKey(value: string): Uint8Array {
@@ -308,7 +309,7 @@ class KeyTransparencyClient {
     this.generation += 1;
     const incidentOwner = this.monitorOwner;
     clearKeyTransparencyVerifiedMaterials();
-    
+
     if (incidentOwner) {
       void this.discardPersistedAuthorizations(incidentOwner).catch((error) => {
         console.error('[KeyTransparency] Persisted authorizations could not be discarded', error);
@@ -885,7 +886,7 @@ class KeyTransparencyClient {
       if (!exactSuccessWrapper(response)) {
         throw new Error('Key-transparency append was not accepted');
       }
-      
+
       const published = { signedUpdate, authorization: updateAuthorization };
       await saveKeyTransparencyTransition(context, ownerUsername, recordHash, published);
       await saveOwnKeyTransparencyTransition(context, ownerUsername, published);
@@ -1355,7 +1356,7 @@ class KeyTransparencyClient {
   ): Promise<void> {
     if (target.rootCommitment === contact.rootCommitment) return;
     revokeKeyTransparencyPeerAuthorization(ownerUsername, target.peer, contact);
-    
+
     await this.persistAuthorizations(ownerUsername);
     const nativeRevocation = beginPeerIdentityRevocation(ownerUsername, target.peer);
     try {

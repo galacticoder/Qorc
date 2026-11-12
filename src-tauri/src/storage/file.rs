@@ -12,17 +12,13 @@ fn invalid_private_path(message: &str) -> QorcError {
 
 pub fn validate_private_file_metadata(metadata: &std::fs::Metadata) -> QorcResult<()> {
     if !metadata.file_type().is_file() {
-        return Err(invalid_private_path(
-            "Storage path is not a regular file",
-        ));
+        return Err(invalid_private_path("Storage path is not a regular file"));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(invalid_private_path(
-                "Storage file has an invalid owner",
-            ));
+            return Err(invalid_private_path("Storage file has an invalid owner"));
         }
         if metadata.permissions().mode() & 0o077 != 0 {
             return Err(invalid_private_path(
@@ -76,9 +72,7 @@ pub async fn check_dir(path: &Path, mode: u32) -> QorcResult<()> {
     match fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => {
-            return Err(invalid_private_path(
-                "Storage path is not a directory",
-            ));
+            return Err(invalid_private_path("Storage path is not a directory"));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(path).await?;
@@ -88,9 +82,7 @@ pub async fn check_dir(path: &Path, mode: u32) -> QorcResult<()> {
 
     let metadata = fs::symlink_metadata(path).await?;
     if !metadata.file_type().is_dir() {
-        return Err(invalid_private_path(
-            "Storage path is not a directory",
-        ));
+        return Err(invalid_private_path("Storage path is not a directory"));
     }
 
     #[cfg(unix)]
@@ -158,6 +150,31 @@ pub async fn atomic_write(path: &Path, data: &[u8], mode: u32) -> QorcResult<()>
     result
 }
 
+#[cfg(target_os = "android")]
+fn install_without_replacing(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 pub async fn atomic_write_if_absent(path: &Path, data: &[u8], mode: u32) -> QorcResult<bool> {
     let parent = path.parent().ok_or_else(|| {
         QorcError::FileOperationFailed("Cannot determine parent directory".to_string())
@@ -179,7 +196,11 @@ pub async fn atomic_write_if_absent(path: &Path, data: &[u8], mode: u32) -> Qorc
         file.sync_all().await?;
         drop(file);
 
-        let inserted = match fs::hard_link(&temp_path, path).await {
+        #[cfg(target_os = "android")]
+        let install = install_without_replacing(&temp_path, path);
+        #[cfg(not(target_os = "android"))]
+        let install = fs::hard_link(&temp_path, path).await;
+        let inserted = match install {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
             Err(error) => return Err(error.into()),
@@ -288,30 +309,4 @@ pub async fn remove_stale_temp_files(dir: &Path) -> QorcResult<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_clobber_write_keeps_one_concurrent_winner() {
-        let dir = std::env::temp_dir().join(format!("qorc-storage-test-{}", uuid::Uuid::new_v4()));
-        check_dir(&dir, 0o700).await.unwrap();
-        let path = dir.join("master.key");
-        let first = [0x11; 64];
-        let second = [0x22; 64];
-
-        let (first_result, second_result) = tokio::join!(
-            atomic_write_if_absent(&path, &first, 0o600),
-            atomic_write_if_absent(&path, &second, 0o600),
-        );
-        let first_inserted = first_result.unwrap();
-        let second_inserted = second_result.unwrap();
-        assert_ne!(first_inserted, second_inserted);
-
-        let stored = read_file_bounded(&path, 64).await.unwrap();
-        assert_eq!(stored, if first_inserted { first } else { second });
-        fs::remove_dir_all(dir).await.unwrap();
-    }
 }

@@ -71,15 +71,16 @@ export function AppSelect({ id, className = '', label, value, options, disabled 
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); }
           }}
         >
-          <span>{selected?.label ?? label}</span>
+          <span className="qorc-select-value" title={selected?.label ?? label}>{selected?.label ?? label}</span>
           <ChevronDown size={17} aria-hidden="true" />
         </button>
       </PopoverTrigger>
       <PopoverContent
-        align="start"
+        align="end"
         sideOffset={6}
+        collisionPadding={12}
         className="qorc-select-menu"
-        style={{ backgroundColor: 'var(--qorc-select-menu-bg)', color: 'var(--qorc-text)', borderColor: 'var(--qorc-border)' }}
+        style={{ backgroundColor: 'var(--qorc-select-menu-bg)', color: 'var(--qorc-text)', borderColor: 'var(--qorc-select-border)' }}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           tabbingRef.current = false;
@@ -101,8 +102,8 @@ export function AppSelect({ id, className = '', label, value, options, disabled 
               tabIndex={-1}
               onClick={() => { onValueChange(option.value); setOpen(false); }}
             >
-              <span>{option.label}</span>
-              {option.value === value && <Check size={16} aria-hidden="true" />}
+              <span className="qorc-select-option-label">{option.label}</span>
+              <span className="qorc-select-check" aria-hidden="true">{option.value === value && <Check size={17} />}</span>
             </button>
           ))}
         </div>

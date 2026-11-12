@@ -261,6 +261,7 @@ export function useMessageSender(
       inFlightOperationsRef.current.set(operationKey, flight);
       const retryUser: UserWithKeys = { username: recipientUsername };
       let writeAheadStarted = false;
+      let durableIntentCommitted = false;
       let localMessage: Message | null = null;
       let storedLocalMessage: StoredMessage | undefined;
       let localMessageCommitted = false;
@@ -335,6 +336,7 @@ export function useMessageSender(
           isCurrent,
           storedLocalMessage,
         );
+        durableIntentCommitted = true;
         localMessageCommitted = !!storedLocalMessage;
         assertCurrent();
         publishLocalMessage();
@@ -500,12 +502,30 @@ export function useMessageSender(
         if (enqueueRetry(pendingRetryMessagesRef.current, recipientUsername, retryEntry)) {
           pinRetryEntry(retryEntry);
         }
-        await persistRetryQueue(
-          secureDBRef,
-          pendingRetryMessagesRef.current,
-          isCurrent,
-          localMessageCommitted ? undefined : storedLocalMessage,
-        );
+        try {
+          await persistRetryQueue(
+            secureDBRef,
+            pendingRetryMessagesRef.current,
+            isCurrent,
+            localMessageCommitted ? undefined : storedLocalMessage,
+          );
+        } catch (persistenceError) {
+          if (!isCurrent()) throw persistenceError;
+          if (!durableIntentCommitted) {
+            const queued = pendingRetryMessagesRef.current.get(recipientUsername) || [];
+            const removed = queued.filter(entry => entry.retryId === operationId);
+            const remaining = queued.filter(entry => entry.retryId !== operationId);
+            if (remaining.length) pendingRetryMessagesRef.current.set(recipientUsername, remaining);
+            else pendingRetryMessagesRef.current.delete(recipientUsername);
+            releaseRetryEntries(removed);
+            if (isPrivateText) await nativeMessageContent.delete(operationId).catch(() => false);
+            throw persistenceError;
+          }
+
+          scheduleRetryPersistence(currentUser, accountGeneration);
+          logError('RETRY-PERSIST', persistenceError);
+          return;
+        }
         if (storedLocalMessage) localMessageCommitted = true;
         assertCurrent();
         publishLocalMessage();
@@ -518,10 +538,9 @@ export function useMessageSender(
             users as any,
             findUser,
             isCurrent,
-          );
+          ).catch(error => logError('RETRY-SESSION', error));
         }
         logError('SEND', _error);
-        if (messageType === SignalType.MESSAGE) throw _error;
       } finally {
         if (inFlightOperationsRef.current.get(operationKey) === flight) {
           inFlightOperationsRef.current.delete(operationKey);

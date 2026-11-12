@@ -14,7 +14,6 @@ import {
 } from "./recovery";
 import { createLogout } from "./logout";
 import { account } from "../../lib/tauri-bindings";
-import { toast } from "sonner";
 import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
 import { loadLastAuthenticatedAccount } from "../../lib/security/local-account-scope";
 import {
@@ -39,6 +38,7 @@ import { profilePictureSystem } from "../../lib/avatar/profile-picture-system";
 import { keyTransparencyClient } from "../../lib/key-transparency/client";
 import { keyTransparencyWarningStore } from "../../lib/key-transparency/warning-store";
 import { deliveryReceiptOutbox } from "../../lib/signals/delivery-receipt-outbox";
+import { beginBackgroundWork } from '../../lib/runtime/background-work';
 
 export const useAuth = () => {
   const [username, setUsername] = useState("");
@@ -51,6 +51,12 @@ export const useAuth = () => {
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
   const [tokenValidationInProgress, setTokenValidationInProgressState] = useState(false);
+  useEffect(() => {
+    if (!tokenValidationInProgress) return;
+    const pending = new AbortController();
+    void beginBackgroundWork(pending.signal);
+    return () => pending.abort();
+  }, [tokenValidationInProgress]);
   const [tokenValidationGeneration, setTokenValidationGeneration] = useState(0);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
   const [recoveryActive, setRecoveryActive] = useState(false);
@@ -572,11 +578,14 @@ export const useAuth = () => {
       setLoginError("");
       setIsSubmittingAuth(true);
       setAuthStatus("Preparing private server-authentication connection...");
+      let releaseBackgroundWork = async () => {};
       try {
+        releaseBackgroundWork = await beginBackgroundWork(operation.signal);
+        authLifecycle.assertCurrent(operation);
         await websocketClient.validateLinkedAuthenticationMode(operation.signal);
         authLifecycle.assertCurrent(operation);
         setAuthStatus("Verifying entry...");
-        
+
         const success = websocketClient.isServerAuthGranted()
           ? true
           : await websocketClient.startServerGatekeeperFlow(
@@ -590,7 +599,7 @@ export const useAuth = () => {
         authLifecycle.assertCurrent(operation);
         if (success) {
           websocketClient.markServerAuthGranted();
-          
+
           showPasswordPromptRef.current = false;
           websocketClient.setServerEntryPromptPending(false);
           setShowPasswordPrompt(false);
@@ -606,6 +615,7 @@ export const useAuth = () => {
         setLoginError(err instanceof Error && err.message ? err.message : "Entry verification failed");
         setAuthStatus("");
       } finally {
+        await releaseBackgroundWork();
         if (authLifecycle.isCurrent(operation)) setIsSubmittingAuth(false);
       }
     },

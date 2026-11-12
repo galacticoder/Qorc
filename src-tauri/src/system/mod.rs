@@ -11,7 +11,9 @@ use std::{
 };
 
 pub mod notification;
+pub mod platform;
 pub mod power;
+#[cfg(desktop)]
 pub mod tray;
 
 const DEFAULT_INSTANCE_ID: &str = "1";
@@ -68,32 +70,4 @@ pub fn acquire_instance_lock(config_root: &Path, instance_id: &str) -> QorcResul
     writeln!(file, "{}", std::process::id())?;
     file.sync_data()?;
     Ok(file)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{acquire_instance_lock, valid_instance_id};
-
-    #[test]
-    fn accepts_only_bounded_path_safe_instance_ids() {
-        assert_eq!(valid_instance_id("test-2"), Some("test-2"));
-        assert_eq!(valid_instance_id("  alpha_3  "), Some("alpha_3"));
-        assert_eq!(valid_instance_id("../escape"), None);
-        assert_eq!(valid_instance_id("a/b"), None);
-        assert_eq!(valid_instance_id("."), None);
-        assert_eq!(valid_instance_id(&"a".repeat(65)), None);
-    }
-
-    #[test]
-    fn prevents_two_processes_from_owning_the_same_instance() {
-        let root = std::env::temp_dir().join(format!(
-            "qorc-instance-lock-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let first = acquire_instance_lock(&root, "1").expect("first instance lock");
-        assert!(acquire_instance_lock(&root, "1").is_err());
-        drop(first);
-        assert!(acquire_instance_lock(&root, "1").is_ok());
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

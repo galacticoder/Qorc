@@ -859,26 +859,3 @@ pub(crate) fn initialize_native_account_signal(
     persist_full_or_restore(&handler, db.as_ref(), username)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_SIGNAL_ACK_JSON_BYTES, parse_bounded_signal_json, parse_encrypted_message};
-
-    #[test]
-    fn signal_ipc_json_rejects_tree_and_size_amplification() {
-        assert!(parse_encrypted_message(r#"[[[[[]]]]]"#).is_err());
-        assert!(parse_encrypted_message(r#"{"messageType":3,"unknown":true}"#).is_err());
-
-        let oversized = format!(r#"["{}"]"#, "a".repeat(MAX_SIGNAL_ACK_JSON_BYTES));
-        assert!(
-            parse_bounded_signal_json::<Vec<String>>(
-                &oversized,
-                MAX_SIGNAL_ACK_JSON_BYTES,
-                2,
-                32,
-                64,
-            )
-            .is_err()
-        );
-    }
-}

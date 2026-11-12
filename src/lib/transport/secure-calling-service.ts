@@ -321,7 +321,6 @@ export class SecureCallingService {
 
     // Timers
     private callTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    private ringStartAt: number | null = null;
     private callTelemetry: CallTelemetry | null = null;
 
     private readonly beforeUnloadHandler = (): void => {
@@ -736,7 +735,6 @@ export class SecureCallingService {
         };
         this.callSignalAbort = new AbortController();
 
-        this.ringStartAt = Date.now();
         console.info('[CALL-DIAG]', { phase: 'service.notify-connecting-before', callType });
         this.notifyCallState(this.currentCall);
         console.info('[CALL-DIAG]', {
@@ -846,7 +844,6 @@ export class SecureCallingService {
         }
         this.currentCall = selected.call;
         this.callSignalAbort = new AbortController();
-        this.ringStartAt = selected.receivedAt;
 
         const peer = this.currentCall.peer;
         if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peer)) {
@@ -1175,7 +1172,7 @@ export class SecureCallingService {
         let acquiredStream: MediaStream | null = null;
         let acquiredNativeSessionId: string | null = null;
         let transportStream: SecureStream | null = null;
-        const useNativeCapture = /\bLinux\b/i.test(navigator.userAgent);
+        const useNativeCapture = /\b(?:Linux|Android)\b/i.test(navigator.userAgent);
         const shareIsCurrent = () =>
             generation === this.screenShareGeneration &&
             this.currentCall?.id === callId &&
@@ -2144,6 +2141,7 @@ export class SecureCallingService {
                             errorMessage: error instanceof Error ? error.message : String(error),
                         });
                         this.callTelemetry?.noteSendError('audio');
+                        void this.endCall('failed');
                     }
                     break;
                 }
@@ -3456,7 +3454,6 @@ export class SecureCallingService {
         this.notifyRemoteVideoCanvas(null);
         this.cleanupRemoteScreenShare();
         this.seenRemoteScreenStreamIds.clear();
-        this.ringStartAt = null;
         this.currentCall = null;
     }
 

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{
     State,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Channel, Request, Response},
 };
 
 struct WsBinaryReceiveGuard<'a>(&'a AppState);
@@ -109,10 +109,8 @@ pub async fn ws_send_binary(
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| "Invalid WebSocket connection token".to_string())?;
-    let payload = match request.body() {
-        InvokeBody::Raw(body) => body.clone(),
-        _ => return Err("Invalid WebSocket binary cell".to_string()),
-    };
+    let payload = super::binary_body(&request, crate::network::websocket::PQ_WS_FIXED_CELL_BYTES)
+        .map_err(|()| "Invalid WebSocket binary cell".to_string())?;
     let ws = state
         .inner()
         .websocket()
@@ -123,11 +121,12 @@ pub async fn ws_send_binary(
         .map_err(|e| e.safe_message())
 }
 
-/// Receive one encrypted fixed-size cell as raw IPC bytes. The first eight
-/// bytes are the big-endian native connection token and the remainder is the
-/// exact WebSocket cell.
 #[tauri::command]
 pub async fn ws_receive_binary(state: State<'_, AppState>) -> Result<Response, String> {
+    receive_binary_frame(&state).await.map(Response::new)
+}
+
+async fn receive_binary_frame(state: &State<'_, AppState>) -> Result<Vec<u8>, String> {
     if state
         .websocket_binary_receive_active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -150,12 +149,21 @@ pub async fn ws_receive_binary(state: State<'_, AppState>) -> Result<Response, S
         }
     };
     let Some(event) = event else {
-        return Ok(Response::new(Vec::new()));
+        return Ok(Vec::new());
     };
     let reserved_byte_len = event.reserved_byte_len();
     let bytes = event.into_bridge_bytes();
     crate::network::websocket::release_ws_inbound_bytes(reserved_byte_len);
-    Ok(Response::new(bytes))
+    Ok(bytes)
+}
+
+#[tauri::command]
+pub async fn ws_receive_binary_channel(
+    state: State<'_, AppState>,
+    on_chunk: Channel<super::callback_bytes::ByteChunk>,
+) -> Result<usize, String> {
+    let bytes = zeroize::Zeroizing::new(receive_binary_frame(&state).await?);
+    super::callback_bytes::send_bytes(&bytes, &on_chunk)
 }
 
 /// Set server URL

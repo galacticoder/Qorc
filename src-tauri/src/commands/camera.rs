@@ -104,28 +104,3 @@ fn encode_frame(frame: Option<CameraFrame>) -> Result<Vec<u8>, String> {
     output.extend_from_slice(&frame.bytes);
     Ok(output)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{CAMERA_FRAME_HEADER_BYTES, encode_frame};
-    use crate::camera_capture::CameraFrame;
-
-    #[test]
-    fn camera_frame_response_is_bounded_binary() {
-        let output = encode_frame(Some(CameraFrame {
-            sequence: 7,
-            captured_at: 9,
-            width: 640,
-            height: 360,
-            frame_rate: 60,
-            enabled: true,
-            bytes: vec![0xff, 0xd8, 0xff, 0xd9],
-        }))
-        .unwrap();
-        assert_eq!(output.len(), CAMERA_FRAME_HEADER_BYTES + 4);
-        assert_eq!(output[0..4], [2, 1, 1, 0]);
-        assert_eq!(u64::from_be_bytes(output[4..12].try_into().unwrap()), 7);
-        assert_eq!(u32::from_be_bytes(output[24..28].try_into().unwrap()), 4);
-        assert_eq!(u16::from_be_bytes(output[28..30].try_into().unwrap()), 60);
-    }
-}

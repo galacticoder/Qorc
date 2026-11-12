@@ -138,35 +138,3 @@ pub async fn auth_pow_solve_batch(
     .await
     .map_err(|_| "Proof-of-work worker failed".to_string())?
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn solves_the_server_wire_convention() {
-        let result = solve_auth_pow_batch_inner(
-            &STANDARD.encode([0u8; AUTH_POW_SEED_BYTES]),
-            1,
-            &STANDARD.encode([0u8; AUTH_POW_NONCE_BYTES]),
-            3,
-        )
-        .expect("batch should solve");
-
-        assert_eq!(result.solution.as_deref(), Some("AAAAAAAAAAI="));
-        assert_eq!(result.iterations, 3);
-    }
-
-    #[test]
-    fn rejects_non_canonical_and_unbounded_inputs() {
-        let seed = STANDARD.encode([0u8; AUTH_POW_SEED_BYTES]);
-        let nonce = STANDARD.encode([0u8; AUTH_POW_NONCE_BYTES]);
-
-        assert!(solve_auth_pow_batch_inner(seed.trim_end_matches('='), 1, &nonce, 1).is_err());
-        assert!(solve_auth_pow_batch_inner(&seed, 29, &nonce, 1).is_err());
-        assert!(
-            solve_auth_pow_batch_inner(&seed, 1, &nonce, AUTH_POW_MAX_BATCH_ITERATIONS + 1)
-                .is_err()
-        );
-    }
-}

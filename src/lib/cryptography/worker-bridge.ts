@@ -55,6 +55,29 @@ function spawnPostQuantumWorker(): Worker {
 const MAIN_WORKER_MAX_PENDING = 32;
 const SIGNING_WORKER_MAX_PENDING = 16;
 const ARGON2_MAX_QUEUED_OPERATIONS = 3;
+const WORKER_READY_TIMEOUT_MS = 10_000;
+const WORKER_RECOVERY_COOLDOWN_MS = 30_000;
+
+function authTokenHex(token: Uint8Array): string {
+  return Array.from(token, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function waitForWorkerAuthentication(
+  validate: () => void,
+  state: () => { worker: Worker | null; token: Uint8Array | null; disabled: boolean },
+  label: string,
+): Promise<string> {
+  const deadline = performance.now() + WORKER_READY_TIMEOUT_MS;
+  while (true) {
+    validate();
+    const current = state();
+    if (current.worker && current.token) return authTokenHex(current.token);
+    if (current.disabled) throw new PostQuantumWorkerInfrastructureError(`Worker recovery cooling down (${label})`);
+    if (performance.now() >= deadline) throw new PostQuantumWorkerInfrastructureError(`Worker recovery timed out (${label})`);
+    await new Promise<void>(resolve => setTimeout(resolve, 50));
+  }
+}
+
 
 export class PostQuantumWorkerInfrastructureError extends Error {
   readonly code = 'PQ_WORKER_INFRASTRUCTURE';
@@ -369,6 +392,9 @@ class WorkerChannel {
   private restarting = false;
   private disabled = false;
   private stabilityTimer: ReturnType<typeof setTimeout> | null = null;
+  private ready: Promise<string> | null = null;
+  private readyWaiters = 0;
+  private recoveryAfter = 0;
 
   constructor(
     private readonly label: string,
@@ -376,6 +402,10 @@ class WorkerChannel {
   ) {}
 
   private validateWorker(): void {
+    if (this.disabled && performance.now() >= this.recoveryAfter) {
+      this.disabled = false;
+      this.restartAttempts = 0;
+    }
     if (this.worker || this.restarting || this.disabled) {
       return;
     }
@@ -383,6 +413,10 @@ class WorkerChannel {
       const worker = spawnPostQuantumWorker();
 
       worker.addEventListener('message', (event: MessageEvent<unknown>) => {
+        if (this.worker !== worker) {
+          if (isPlainObject(event.data)) wipeBinaryValues(event.data.result);
+          return;
+        }
         try {
           const data = event.data;
           if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
@@ -435,10 +469,12 @@ class WorkerChannel {
       });
 
       worker.addEventListener('error', (error) => {
+        if (this.worker !== worker) return;
         console.error(`[WorkerChannel:${this.label}] Worker script error event:`, error);
         this.handleWorkerFailure(error);
       });
       worker.addEventListener('messageerror', (error) => {
+        if (this.worker !== worker) return;
         console.error(`[WorkerChannel:${this.label}] Worker message error event:`, error);
         this.handleWorkerFailure(error);
       });
@@ -497,9 +533,10 @@ class WorkerChannel {
 
   private scheduleRestart(): void {
     if (this.restartAttempts >= PQ_WORKER_MAX_RESTART_ATTEMPTS) {
-      console.error(`[WorkerChannel:${this.label}] Max restart attempts reached; channel disabled`);
+      console.error(`[WorkerChannel:${this.label}] Max restart attempts reached; channel cooling down`);
       this.restarting = false;
       this.disabled = true;
+      this.recoveryAfter = performance.now() + WORKER_RECOVERY_COOLDOWN_MS;
       return;
     }
     const delay = Math.min(1000 * Math.pow(2, this.restartAttempts), 30_000);
@@ -511,32 +548,30 @@ class WorkerChannel {
       } catch (error) {
         console.error(`[WorkerChannel:${this.label}] Restart attempt failed:`, error);
       }
-      if (!this.worker && this.restartAttempts < PQ_WORKER_MAX_RESTART_ATTEMPTS) {
-        this.restarting = true;
-        this.scheduleRestart();
-      }
     }, delay);
   }
 
   private async getAuthToken(): Promise<string> {
-    if (!this.authToken) {
-      if (this.restarting) {
-        throw new PostQuantumWorkerInfrastructureError('Worker not available or restarting');
-      }
-      const start = Date.now();
-      while (!this.authToken && Date.now() - start < 2000) {
-        if (!this.worker) {
-          throw new PostQuantumWorkerInfrastructureError('Worker instance lost during authentication');
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
+    if (this.pending.size + this.readyWaiters >= this.maxPending) {
+      throw new PostQuantumWorkerInfrastructureError(`Worker channel is at capacity (${this.label})`);
     }
-    if (!this.authToken) {
-      const error = new PostQuantumWorkerInfrastructureError('Worker auth token not initialized');
-      this.handleWorkerFailure(error);
-      throw error;
-    }
-    return Array.from(this.authToken, (b) => b.toString(16).padStart(2, '0')).join('');
+    this.readyWaiters++;
+    try {
+      if (!this.ready) {
+        const ready = waitForWorkerAuthentication(
+          () => this.validateWorker(),
+          () => ({ worker: this.worker, token: this.authToken, disabled: this.disabled }),
+          this.label,
+        ).catch(error => {
+          if (this.worker && !this.authToken) this.handleWorkerFailure(error);
+          throw error;
+        });
+        this.ready = ready;
+        const clear = () => { if (this.ready === ready) this.ready = null; };
+        void ready.then(clear, clear);
+      }
+      return await this.ready;
+    } finally { this.readyWaiters--; }
   }
 
   // Dispatch one operation to channel's worker and await the validated result
@@ -546,10 +581,6 @@ class WorkerChannel {
     expectedType: WorkerRequestMessage['type'],
     timeoutOverrideMs?: number
   ): Promise<T> {
-    this.validateWorker();
-    if (!this.worker) {
-      throw new PostQuantumWorkerInfrastructureError('Worker not available');
-    }
     const id = PostQuantumRandom.randomUUID();
     const auth = await this.getAuthToken();
     const request = { id, type, ...payload, auth } as unknown as WorkerRequestMessage;
@@ -557,7 +588,10 @@ class WorkerChannel {
     return await new Promise<T>((resolve, reject) => {
       this.setPendingWithTimeout(id, resolve as (value: unknown) => void, reject, expectedType, timeoutOverrideMs);
       try {
-        this.worker!.postMessage(request);
+        if (!this.worker || !this.authToken || auth !== authTokenHex(this.authToken)) {
+          throw new PostQuantumWorkerInfrastructureError('Worker restarted before request dispatch');
+        }
+        this.worker.postMessage(request);
       } catch (error) {
         const entry = this.pending.get(id);
         if (entry) clearTimeout(entry.timeoutId);
@@ -568,7 +602,7 @@ class WorkerChannel {
   }
 
   terminateWhenIdle(): void {
-    if (this.pending.size !== 0 || this.restarting) return;
+    if (this.pending.size !== 0 || this.restarting || this.readyWaiters !== 0) return;
     try { this.worker?.terminate(); } catch { }
     this.worker = null;
     this.authToken?.fill(0);
@@ -597,8 +631,15 @@ export class PostQuantumWorker {
   private static disabled = false;
   private static authToken: Uint8Array | null = null;
   private static stabilityTimer: ReturnType<typeof setTimeout> | null = null;
+  private static ready: Promise<string> | null = null;
+  private static readyWaiters = 0;
+  private static recoveryAfter = 0;
 
   private static validateWorker(): void {
+    if (PostQuantumWorker.disabled && performance.now() >= PostQuantumWorker.recoveryAfter) {
+      PostQuantumWorker.disabled = false;
+      PostQuantumWorker.restartAttempts = 0;
+    }
     if (PostQuantumWorker.worker || PostQuantumWorker.restarting || PostQuantumWorker.disabled) {
       return;
     }
@@ -607,6 +648,10 @@ export class PostQuantumWorker {
       const worker = spawnPostQuantumWorker();
 
       worker.addEventListener('message', (event: MessageEvent<unknown>) => {
+        if (PostQuantumWorker.worker !== worker) {
+          if (isPlainObject(event.data)) wipeBinaryValues(event.data.result);
+          return;
+        }
         try {
           const data = event.data;
           if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
@@ -670,11 +715,13 @@ export class PostQuantumWorker {
       });
 
       worker.addEventListener('error', (error) => {
+        if (PostQuantumWorker.worker !== worker) return;
         console.error('[PostQuantumWorker] Worker script error event:', error);
         PostQuantumWorker.handleWorkerFailure(error);
       });
 
       worker.addEventListener('messageerror', (error) => {
+        if (PostQuantumWorker.worker !== worker) return;
         console.error('[PostQuantumWorker] Worker message error event:', error);
         PostQuantumWorker.handleWorkerFailure(error);
       });
@@ -739,8 +786,8 @@ export class PostQuantumWorker {
 
   private static postRequest(request: WorkerRequestMessage): void {
     validateWorkerRequest(request);
-    if (!PostQuantumWorker.worker) {
-      throw new PostQuantumWorkerInfrastructureError('Worker not available');
+    if (!PostQuantumWorker.worker || !PostQuantumWorker.authToken || request.auth !== authTokenHex(PostQuantumWorker.authToken)) {
+      throw new PostQuantumWorkerInfrastructureError('Worker restarted before request dispatch');
     }
     try {
       PostQuantumWorker.worker.postMessage(request);
@@ -776,9 +823,10 @@ export class PostQuantumWorker {
 
   private static scheduleRestart(): void {
     if (PostQuantumWorker.restartAttempts >= PQ_WORKER_MAX_RESTART_ATTEMPTS) {
-      console.error('[PostQuantum][Worker] Max restart attempts reached; worker disabled');
+      console.error('[PostQuantum][Worker] Max restart attempts reached; worker cooling down');
       PostQuantumWorker.restarting = false;
       PostQuantumWorker.disabled = true;
+      PostQuantumWorker.recoveryAfter = performance.now() + WORKER_RECOVERY_COOLDOWN_MS;
       return;
     }
     const delay = Math.min(1000 * Math.pow(2, PostQuantumWorker.restartAttempts), 30_000);
@@ -790,42 +838,33 @@ export class PostQuantumWorker {
       } catch (error) {
         console.error('[PostQuantum][Worker] Restart attempt failed:', error);
       }
-      if (!PostQuantumWorker.worker && PostQuantumWorker.restartAttempts < PQ_WORKER_MAX_RESTART_ATTEMPTS) {
-        PostQuantumWorker.restarting = true;
-        PostQuantumWorker.scheduleRestart();
-      }
     }, delay);
   }
 
   private static async getAuthToken(): Promise<string> {
-    if (!PostQuantumWorker.authToken) {
-      if (PostQuantumWorker.restarting) {
-        throw new PostQuantumWorkerInfrastructureError('Worker not available or restarting');
-      }
-
-      const start = Date.now();
-      while (!PostQuantumWorker.authToken && Date.now() - start < 2000) {
-        if (!PostQuantumWorker.worker) {
-          throw new PostQuantumWorkerInfrastructureError('Worker instance lost during authentication');
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
+    if (PostQuantumWorker.pending.size + PostQuantumWorker.readyWaiters >= MAIN_WORKER_MAX_PENDING) {
+      throw new PostQuantumWorkerInfrastructureError('Post-quantum worker is at capacity');
     }
-    if (!PostQuantumWorker.authToken) {
-      const error = new PostQuantumWorkerInfrastructureError('Worker auth token not initialized');
-      PostQuantumWorker.handleWorkerFailure(error);
-      throw error;
-    }
-    return Array.from(PostQuantumWorker.authToken, (b) => b.toString(16).padStart(2, '0')).join('');
+    PostQuantumWorker.readyWaiters++;
+    try {
+      if (!PostQuantumWorker.ready) {
+        const ready = waitForWorkerAuthentication(
+          () => PostQuantumWorker.validateWorker(),
+          () => ({ worker: PostQuantumWorker.worker, token: PostQuantumWorker.authToken, disabled: PostQuantumWorker.disabled }),
+          'main',
+        ).catch(error => {
+          if (PostQuantumWorker.worker && !PostQuantumWorker.authToken) PostQuantumWorker.handleWorkerFailure(error);
+          throw error;
+        });
+        PostQuantumWorker.ready = ready;
+        const clear = () => { if (PostQuantumWorker.ready === ready) PostQuantumWorker.ready = null; };
+        void ready.then(clear, clear);
+      }
+      return await PostQuantumWorker.ready;
+    } finally { PostQuantumWorker.readyWaiters--; }
   }
 
   static async generateKemKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    PostQuantumWorker.validateWorker();
-
-    if (!PostQuantumWorker.worker) {
-      throw new PostQuantumWorkerInfrastructureError('Worker not available');
-    }
-
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
     const request: WorkerRequestMessage = {
@@ -848,8 +887,6 @@ export class PostQuantumWorker {
   }
 
   static async kemEncapsulate(publicKey: Uint8Array): Promise<{ ciphertext: Uint8Array; sharedSecret: Uint8Array }> {
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -874,8 +911,6 @@ export class PostQuantumWorker {
   }
 
   static async kemDecapsulate(ciphertext: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -902,9 +937,6 @@ export class PostQuantumWorker {
   }
 
   static async generateSigKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new PostQuantumWorkerInfrastructureError('Worker not available');
-
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
     const request: WorkerRequestMessage = {
@@ -945,10 +977,6 @@ export class PostQuantumWorker {
   }
 
   static async ppGenerateTokenBatch(count: number, purpose: string): Promise<{ blindedTokens: Uint8Array[]; tokenSecrets: any[] }> {
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) {
-      throw new Error('Worker not available');
-    }
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -974,10 +1002,6 @@ export class PostQuantumWorker {
   }
 
   static async ppUnblindTokens(tokenSecrets: any[], signedBlindedTokens: Uint8Array[], proof: Uint8Array, serverPublicKey: Uint8Array): Promise<{ completedTokens: any[] }> {
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) {
-      throw new Error('Worker not available');
-    }
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1006,8 +1030,6 @@ export class PostQuantumWorker {
 
   static async opaqueStartRegistration(password: Uint8Array): Promise<{ blindedElement: Uint8Array; blindingFactor: Uint8Array }> {
     validateOpaquePassword(password);
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1038,8 +1060,6 @@ export class PostQuantumWorker {
       evaluatedElement: serverResponse.evaluatedElement,
       serverNonce: serverResponse.serverNonce,
     };
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1067,8 +1087,6 @@ export class PostQuantumWorker {
 
   static async opaqueStartLogin(password: Uint8Array): Promise<{ blindedElement: Uint8Array; blindingFactor: Uint8Array }> {
     validateOpaquePassword(password);
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1109,8 +1127,6 @@ export class PostQuantumWorker {
       serverNonce: serverResponse.serverNonce,
       salt: serverResponse.salt,
     };
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) throw new Error('Worker not available');
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1184,10 +1200,6 @@ export class PostQuantumWorker {
     if (explicitNonce !== undefined && (
       !(explicitNonce instanceof Uint8Array) || explicitNonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES
     )) throw new Error('Invalid AEAD nonce');
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) {
-      throw new Error('Worker not available for AEAD');
-    }
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();
@@ -1240,10 +1252,6 @@ export class PostQuantumWorker {
     if (additionalData !== undefined && (
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
     )) throw new Error('Invalid AEAD additional data');
-    PostQuantumWorker.validateWorker();
-    if (!PostQuantumWorker.worker) {
-      throw new Error('Worker not available for AEAD');
-    }
 
     const id = PostQuantumRandom.randomUUID();
     const auth = await PostQuantumWorker.getAuthToken();

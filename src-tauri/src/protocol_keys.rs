@@ -18,8 +18,7 @@ pub const EXPECTED_SERVER_HEADER: &str = "x-qorc-expected-server-url";
 pub const HYBRID_ENVELOPE_PROTOCOL: &str = "hybrid-envelope";
 pub const HYBRID_INNER_KDF: &str = "qorc-hybrid:inner";
 pub const INNER_ENVELOPE_PROTOCOL: &str = "inner-envelope";
-#[cfg(test)]
-pub const HYBRID_NATIVE_INTEROP: &[u8] = b"qorc-hybrid-native-interop";
+
 pub const HYBRID_OUTER_KDF: &str = "qorc-hybrid:outer";
 pub const KEY_TRANSPARENCY_RECOVERY_SIGNING: &str = "key-transparency-recovery";
 pub const KEY_TRANSPARENCY_SIGNING: &str = "key-transparency";
@@ -27,6 +26,8 @@ pub const KEY_TRANSPARENCY_SIGNING: &str = "key-transparency";
 pub const MACHINE_LINUX: &[u8] = b"qorc-machine/linux\0";
 #[cfg(target_os = "windows")]
 pub const MACHINE_WINDOWS: &[u8] = b"qorc-machine/windows\0";
+#[cfg(target_os = "android")]
+pub const MACHINE_ANDROID: &[u8] = b"qorc-machine/android\0";
 pub const NATIVE_DATABASE_FILENAME: &[u8] = b"qorc-native-db-filename\0";
 pub const NATIVE_MESSAGE_CONTENT_MAGIC: &[u8; 4] = b"QMCT";
 pub const NOISE_PROTOCOL: &str = "hybrid-mlkem1024-mldsa87-session";

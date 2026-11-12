@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
-if (process.platform !== 'linux') process.exit(0);
+if ((process.env.TAURI_ENV_PLATFORM || process.platform) !== 'linux') process.exit(0);
 const runtimeTargets = {
   x64: { target: 'linux-x86_64', libraryTriplet: 'x86_64-linux-gnu' },
   arm64: { target: 'linux-aarch64', libraryTriplet: 'aarch64-linux-gnu' }

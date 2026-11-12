@@ -1,3 +1,5 @@
+import { useAppBack } from '../../hooks/useAppBack';
+import { useMobileLayout } from '../../hooks/useMobileLayout';
 import {
   useCallback,
   useEffect,
@@ -93,6 +95,8 @@ export function EmojiPicker({
   secureDB,
   origin,
 }: EmojiPickerProps) {
+  const mobile = useMobileLayout();
+  useAppBack(true, onClose, 100);
   const [catalog, setCatalog] = useState<EmojiCatalogView | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [activeCategory, setActiveCategory] = useState('frequent');
@@ -107,6 +111,7 @@ export function EmojiPicker({
   const scrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchAutoFocused = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -157,16 +162,20 @@ export function EmojiPicker({
 
     const margin = 8;
     const gap = 10;
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
+    const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+    const viewportLeft = window.visualViewport?.offsetLeft ?? 0;
+    const viewportTop = window.visualViewport?.offsetTop ?? 0;
+    picker.style.setProperty('--emoji-viewport-width', `${viewportWidth}px`);
+    picker.style.setProperty('--emoji-viewport-height', `${viewportHeight}px`);
     const pickerRect = picker.getBoundingClientRect();
     const pickerWidth = pickerRect.width;
     const pickerHeight = pickerRect.height;
 
     if (origin) {
       setPosition({
-        left: Math.round(clamp(origin.left, margin, viewportWidth - pickerWidth - margin)),
-        top: Math.round(clamp(origin.top, margin, viewportHeight - pickerHeight - margin)),
+        left: Math.round(clamp(origin.left, viewportLeft + margin, viewportLeft + viewportWidth - pickerWidth - margin)),
+        top: Math.round(clamp(origin.top, viewportTop + margin, viewportTop + viewportHeight - pickerHeight - margin)),
       });
       return;
     }
@@ -175,8 +184,8 @@ export function EmojiPicker({
 
     if (!trigger) {
       setPosition({
-        left: Math.round(clamp((viewportWidth - pickerWidth) / 2, margin, viewportWidth - pickerWidth - margin)),
-        top: Math.round(clamp((viewportHeight - pickerHeight) / 2, margin, viewportHeight - pickerHeight - margin)),
+        left: Math.round(viewportLeft + clamp((viewportWidth - pickerWidth) / 2, margin, viewportWidth - pickerWidth - margin)),
+        top: Math.round(viewportTop + clamp((viewportHeight - pickerHeight) / 2, margin, viewportHeight - pickerHeight - margin)),
       });
       return;
     }
@@ -188,8 +197,8 @@ export function EmojiPicker({
     const alternateLeft = isCurrentUser
       ? triggerRect.right + gap
       : triggerRect.left - pickerWidth - gap;
-    const preferredFits = preferredLeft >= margin && preferredLeft + pickerWidth <= viewportWidth - margin;
-    const alternateFits = alternateLeft >= margin && alternateLeft + pickerWidth <= viewportWidth - margin;
+    const preferredFits = preferredLeft >= viewportLeft + margin && preferredLeft + pickerWidth <= viewportLeft + viewportWidth - margin;
+    const alternateFits = alternateLeft >= viewportLeft + margin && alternateLeft + pickerWidth <= viewportLeft + viewportWidth - margin;
 
     let left = preferredFits
       ? preferredLeft
@@ -198,8 +207,8 @@ export function EmojiPicker({
         : triggerRect.left + (triggerRect.width - pickerWidth) / 2;
     let top = triggerRect.top - 48;
 
-    left = clamp(left, margin, viewportWidth - pickerWidth - margin);
-    top = clamp(top, margin, viewportHeight - pickerHeight - margin);
+    left = clamp(left, viewportLeft + margin, viewportLeft + viewportWidth - pickerWidth - margin);
+    top = clamp(top, viewportTop + margin, viewportTop + viewportHeight - pickerHeight - margin);
     setPosition({ left: Math.round(left), top: Math.round(top) });
   }, [isCurrentUser, origin, triggerId]);
 
@@ -231,10 +240,14 @@ export function EmojiPicker({
   }, [calculatePosition]);
 
   useEffect(() => {
-    if (!position) return;
-    const frame = window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    if (mobile || !position || searchAutoFocused.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (!searchInputRef.current) return;
+      searchAutoFocused.current = true;
+      searchInputRef.current.focus();
+    });
     return () => window.cancelAnimationFrame(frame);
-  }, [position]);
+  }, [position, mobile]);
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
@@ -373,7 +386,7 @@ export function EmojiPicker({
               title={section.label}
               onClick={() => chooseCategory(section.id)}
             >
-              <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
+              <Icon size={20} strokeWidth={1.8} aria-hidden="true" />
             </button>
           );
         })}
@@ -428,11 +441,12 @@ export function EmojiPicker({
         <div ref={sentinelRef} className="emoji-picker__sentinel" aria-hidden="true" />
       </div>
 
-      <div className="emoji-picker__search">
-        <Search size={16} aria-hidden="true" />
+      <div className="emoji-picker__search qorc-search-field">
+        <span className="qorc-search-icon" aria-hidden="true"><Search /></span>
         <input
           ref={searchInputRef}
           type="search"
+          className="qorc-search-input"
           value={searchQuery}
           onChange={(event) => setSearchQuery(event.target.value)}
           onKeyDown={(event) => {
@@ -450,7 +464,7 @@ export function EmojiPicker({
         {searchQuery && (
           <button
             type="button"
-            className="emoji-picker__clear"
+            className="emoji-picker__clear qorc-search-action"
             onClick={() => {
               setSearchQuery('');
               searchInputRef.current?.focus();

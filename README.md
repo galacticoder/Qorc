@@ -131,6 +131,9 @@ Desktop source builds are supported on x86_64 and ARM64 Linux, and x86_64
 Windows. A normal Linux build selects native PIR, Tor, WebKitGTK, GStreamer,
 PipeWire, and AppImage assets for its host architecture.
 
+Android APK builds, device-bound storage, media, Tor, and PIR are implemented. See [Android build guide](docs/android.md)
+for build commands, native runtimes, signing, and toolchain setup.
+
 ### Install client build dependencies
 
 ```bash

@@ -1,0 +1,2 @@
+-keep class com.qorc.media.MediaPlugin { *; }
+-keep class com.qorc.media.CallService { *; }

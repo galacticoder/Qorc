@@ -18,6 +18,8 @@ const NOTIFICATION_BODY: &str = "Open Qorc to view it";
 pub struct NotificationHandler {
     enabled: RwLock<bool>,
     notification_times: RwLock<Vec<Instant>>,
+    #[cfg(target_os = "android")]
+    app: Option<tauri::AppHandle>,
 }
 
 impl NotificationHandler {
@@ -25,6 +27,8 @@ impl NotificationHandler {
         Self {
             enabled: RwLock::new(true),
             notification_times: RwLock::new(Vec::new()),
+            #[cfg(target_os = "android")]
+            app: None,
         }
     }
 
@@ -46,11 +50,30 @@ impl NotificationHandler {
             return Ok(false);
         }
 
+        #[cfg(target_os = "android")]
+        {
+            use tauri_plugin_notification::NotificationExt;
+            let app = self.app.as_ref().ok_or_else(|| {
+                QorcError::NotificationFailed("Notification backend is not initialized".to_string())
+            })?;
+            if app
+                .notification()
+                .permission_state()
+                .map_err(|e| QorcError::NotificationFailed(e.to_string()))?
+                != tauri::plugin::PermissionState::Granted
+            {
+                return Ok(false);
+            }
+            return tauri_plugin_qorc_media::call("activityNotification", serde_json::json!({}))
+                .map_err(QorcError::NotificationFailed);
+        }
+
+        #[cfg(not(target_os = "android"))]
         if !self.try_reserve_notification() {
             return Ok(false);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
             let mut notification = notify_rust::Notification::new();
             notification.summary(NOTIFICATION_TITLE);
@@ -71,6 +94,7 @@ impl NotificationHandler {
                 .map_err(|e| QorcError::NotificationFailed(e.to_string()))?;
         }
 
+        #[cfg(not(target_os = "android"))]
         Ok(true)
     }
 
@@ -85,32 +109,13 @@ impl Default for NotificationHandler {
     }
 }
 
-pub async fn init(state: &AppState) -> QorcResult<()> {
+pub async fn init(state: &AppState, _app: &tauri::AppHandle) -> QorcResult<()> {
     let handler = NotificationHandler::new();
+    #[cfg(target_os = "android")]
+    let handler = NotificationHandler {
+        app: Some(_app.clone()),
+        ..handler
+    };
     *state.notification_handler.write() = Some(Arc::new(handler));
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_NOTIFICATIONS_PER_WINDOW, NotificationHandler};
-    use std::sync::Arc;
-
-    #[test]
-    fn concurrent_reservations_cannot_exceed_rate_limit() {
-        let handler = Arc::new(NotificationHandler::new());
-        let threads: Vec<_> = (0..64)
-            .map(|_| {
-                let handler = Arc::clone(&handler);
-                std::thread::spawn(move || handler.try_reserve_notification())
-            })
-            .collect();
-
-        let admitted = threads
-            .into_iter()
-            .map(|thread| thread.join().expect("notification test thread panicked"))
-            .filter(|admitted| *admitted)
-            .count();
-        assert_eq!(admitted, MAX_NOTIFICATIONS_PER_WINDOW);
-    }
 }

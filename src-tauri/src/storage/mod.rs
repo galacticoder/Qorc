@@ -17,6 +17,8 @@ use zeroize::Zeroizing;
 use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
+#[cfg(target_os = "android")]
+mod android_binding;
 pub(crate) mod file;
 mod machine_entropy;
 
@@ -37,6 +39,7 @@ struct StoreUsage {
 
 /// Storage handler
 pub struct SecureStorage {
+    revoked: std::sync::atomic::AtomicBool,
     aes_key: Zeroizing<[u8; 32]>,
     xchacha_key: Zeroizing<[u8; 32]>,
     mac_key: Zeroizing<[u8; 32]>,
@@ -46,6 +49,10 @@ pub struct SecureStorage {
 }
 
 impl SecureStorage {
+    pub(crate) fn config_dir(&self) -> &Path {
+        self.store_dir.parent().expect("secure-store has an application parent")
+    }
+
     pub async fn new(config_dir: PathBuf) -> QorcResult<Self> {
         let store_dir = config_dir.join("secure-store");
         let master_key_path = config_dir.join("master.key");
@@ -55,9 +62,11 @@ impl SecureStorage {
         file::remove_stale_temp_files(&config_dir).await?;
         file::remove_stale_temp_files(&store_dir).await?;
 
+        #[cfg(target_os = "android")]
+        let machine_context = machine_entropy::get_machine_context(&config_dir).await?;
         let master_key = Self::load_or_generate_master_key(&master_key_path).await?;
-
-        let machine_context = machine_entropy::get_machine_context().await?;
+        #[cfg(not(target_os = "android"))]
+        let machine_context = machine_entropy::get_machine_context(&config_dir).await?;
 
         let root_key = Self::derive_root_key(&master_key, &machine_context);
 
@@ -84,6 +93,7 @@ impl SecureStorage {
         drop(machine_context);
 
         Ok(Self {
+            revoked: std::sync::atomic::AtomicBool::new(false),
             aes_key: Zeroizing::new(aes_key),
             xchacha_key: Zeroizing::new(xchacha_key),
             mac_key: Zeroizing::new(mac_key),
@@ -192,6 +202,7 @@ impl SecureStorage {
     }
 
     pub async fn set_item(&self, key: &str, value: &[u8]) -> QorcResult<()> {
+        self.ensure_live()?;
         if value.len() > SECURE_VALUE_MAX_BYTES {
             return Err(QorcError::InvalidArgument(
                 "Storage value exceeds its size limit".to_string(),
@@ -257,6 +268,7 @@ impl SecureStorage {
 
         let file_path = self.file_path_for_key(key);
         let mut usage = self.usage.lock().await;
+        self.ensure_live()?;
         let existing_bytes = match tokio::fs::symlink_metadata(&file_path).await {
             Ok(metadata) => {
                 file::validate_private_file_metadata(&metadata)?;
@@ -286,6 +298,7 @@ impl SecureStorage {
 
     /// Retrieve and decrypt a value
     pub async fn get_item(&self, key: &str) -> QorcResult<Option<Vec<u8>>> {
+        self.ensure_live()?;
         let file_path = self.file_path_for_key(key);
 
         let file_data = match file::read_file_bounded(&file_path, ENCRYPTED_ITEM_MAX_BYTES).await {
@@ -367,6 +380,7 @@ impl SecureStorage {
     pub async fn remove_item(&self, key: &str) -> QorcResult<()> {
         let file_path = self.file_path_for_key(key);
         let mut usage = self.usage.lock().await;
+        self.ensure_live()?;
         let existing_bytes = match tokio::fs::symlink_metadata(&file_path).await {
             Ok(metadata) => {
                 file::validate_private_file_metadata(&metadata)?;
@@ -403,8 +417,21 @@ impl SecureStorage {
 
     /// Check if item exists
     pub async fn has(&self, key: &str) -> QorcResult<bool> {
+        self.ensure_live()?;
         let file_path = self.file_path_for_key(key);
         file::private_file_exists(&file_path).await
+    }
+
+    fn ensure_live(&self) -> QorcResult<()> {
+        if self.revoked.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(QorcError::StorageInitFailed("Local app data is being reset".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn revoke(&self) {
+        let _guard = self.usage.lock().await;
+        self.revoked.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

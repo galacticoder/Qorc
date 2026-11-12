@@ -1,9 +1,9 @@
-import React, { useRef, useMemo, useCallback, useEffect, useState } from "react";
+import React, { useRef, useMemo, useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
 import { format } from "date-fns";
 import { EmojiPicker } from "../../ui/EmojiPicker";
 import { useEmojiPicker } from "../../../contexts/EmojiPickerContext";
-import { ChatMessageProps } from "./types";
+import { type Message, ChatMessageProps } from "./types";
 import { SystemMessage } from "./ChatMessage/SystemMessage";
 import { recordEmojiUsage } from "../../../lib/system-emoji";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage";
@@ -12,9 +12,9 @@ import { VoiceMessage } from "../calls/VoiceMessage";
 import { MessageReceipt } from "./MessageReceipt";
 import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { MessageContextMenu } from "./MessageContextMenu";
-import { UserAvatar } from "../../ui/UserAvatar";
 import { SecureCanvasText } from "./SecureCanvasText";
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
+import { UserAvatar } from '../../ui/UserAvatar';
 import { createDownloadLink, parseCurrentVoiceNoteFilename } from "../../../lib/utils/file-utils";
 import { nativeMessageContent } from "../../../lib/tauri-bindings";
 import { MessageLinkPreviews } from "./MessageLinkPreview";
@@ -81,27 +81,33 @@ const parseSystemMessage = (content: string, message: any, currentUsername?: str
   }
 };
 
-export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, currentUsername, secureDB }) => {
+export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, nextMessage, animateArrival = false, onDelete, onEdit, onReact, onReplyClick, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
   const effectiveReceipt = smartReceipt;
 
-  const displaySender = useDisplayUsername({ username: sender });
   const displayReplyToSender = useDisplayUsername({ username: message.replyTo?.sender || '' });
 
   const safeIsCurrentUser = isCurrentUser === true || sender === currentUsername;
 
-  const isGrouped = useMemo(() => {
-    if (!previousMessage || previousMessage.id === message.id) return false;
-    if (isSystemMessage || isDeleted || previousMessage.isSystemMessage || previousMessage.isDeleted) return false;
-    if (previousMessage.sender !== sender) return false;
-    if (previousMessage.recipient !== message.recipient) return false;
-    if ((previousMessage.isCurrentUser === true || previousMessage.sender === currentUsername) !== safeIsCurrentUser) return false;
-    if (!(previousMessage.timestamp instanceof Date) || !(timestamp instanceof Date)) return false;
-    const diff = timestamp.getTime() - previousMessage.timestamp.getTime();
-    return Number.isFinite(diff) && diff >= 0 && diff <= 3 * 60 * 1000;
-  }, [previousMessage, message.id, message.recipient, sender, timestamp, isSystemMessage, isDeleted, currentUsername, safeIsCurrentUser]);
+  const sameRun = (before?: Message, after?: Message) => {
+    if (!before || !after || before.id === after.id || before.isSystemMessage || after.isSystemMessage || before.isDeleted || after.isDeleted) return false;
+    if (before.sender !== after.sender || before.recipient !== after.recipient) return false;
+    if (!(before.timestamp instanceof Date) || !(after.timestamp instanceof Date)) return false;
+    const gap = after.timestamp.getTime() - before.timestamp.getTime();
+    return Number.isFinite(gap) && gap >= 0 && gap <= 3 * 60 * 1000;
+  };
+  const groupedBefore = sameRun(previousMessage, message);
+  const groupedAfter = sameRun(message, nextMessage);
+  const bubbleRadius = safeIsCurrentUser
+    ? `18px ${groupedBefore ? 6 : 18}px ${groupedAfter ? 6 : 18}px 18px`
+    : `${groupedBefore ? 6 : 18}px 18px 18px ${groupedAfter ? 6 : 18}px`;
 
   const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const textBubbleRef = useRef<HTMLDivElement | null>(null);
+  const [textMaxWidth, setTextMaxWidth] = useState(420);
+  const [showSentTime, setShowSentTime] = useState(false);
+  useEffect(() => setShowSentTime(false), [message.id]);
   const { openPicker, openPickerOrigin, closePicker, isPickerOpen } = useEmojiPicker();
 
   const messageTriggerIdRef = useRef<string | null>(null);
@@ -141,6 +147,21 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
   const isFileMessageType =
     type === SignalType.FILE_MESSAGE ||
     type === SignalType.FILE;
+
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    const bubble = textBubbleRef.current;
+    if (!body || !bubble) return;
+    const measure = () => {
+      const style = getComputedStyle(bubble);
+      const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      setTextMaxWidth(Math.max(20, Math.min(420, Math.floor(body.clientWidth - padding))));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [isFileMessageType, isSystemMessage, isDeleted]);
 
   const isVoiceNote = useMemo(() => {
     if (!isFileMessageType) return false;
@@ -314,7 +335,6 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
     return (
       <DeletedMessage
         senderUsername={sender}
-        displayName={displaySender}
         timestamp={timestamp}
         isCurrentUser={safeIsCurrentUser}
       />
@@ -325,59 +345,38 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
     <div
       data-emoji-trigger={messageTriggerId}
       className={cn(
-        "flex gap-3 mb-4",
+        "qorc-chat-message flex gap-3",
+        animateArrival && "is-new-arrival",
         safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
       )}
-      style={{
-        marginBottom: reactionEntries.length > 0
-          ? `calc(${isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'} + 10px)`
-          : isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'
-      }}
+      data-message-direction={safeIsCurrentUser ? 'outgoing' : 'incoming'}
+      style={{ marginBottom: `calc(${groupedAfter ? '4px' : '14px'} + ${reactionEntries.length > 0 ? '10px' : '0px'})` }}
     >
-      <div className="flex-shrink-0 w-10">
-        {!isGrouped && (
-          <UserAvatar
-            username={sender}
-            isCurrentUser={safeIsCurrentUser}
-            size="md"
-          />
-        )}
-      </div>
-
       {/* Message Content */}
       <div
+        ref={bodyRef}
         className={cn(
           "flex flex-col min-w-0 group",
           safeIsCurrentUser ? "items-end" : "items-start"
         )}
         style={{
-          maxWidth: 'var(--message-bubble-max-width)'
+          flex: '1 1 0',
+          maxWidth: 'min(var(--message-bubble-max-width), 100%)'
+        }}
+        role="group"
+        aria-label={`${safeIsCurrentUser ? 'Your' : 'Received'} message; ${showSentTime ? 'hide' : 'show'} sent time`}
+        tabIndex={0}
+        onClick={event => {
+          if ((event.target as Element).closest('button, a, input, textarea, audio, video, [role="button"], .qorc-message-reply-preview')) return;
+          setShowSentTime(value => !value);
+        }}
+        onKeyDown={event => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          if (event.target !== event.currentTarget && !(event.target as Element).classList.contains('secure-canvas-text')) return;
+          event.preventDefault();
+          setShowSentTime(value => !value);
         }}
       >
-        {!isGrouped && (
-          <div
-            className={cn(
-              "flex items-center gap-2 mb-1",
-              safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
-            )}
-          >
-            <span
-              className="text-sm font-medium"
-              style={{ color: 'var(--color-text-primary)' }}
-            >
-              {displaySender}
-            </span>
-            <span
-              className="text-xs select-none"
-              style={{ color: 'var(--color-text-secondary)' }}
-              role="time"
-              aria-label={`Message sent at ${timestampDisplay}`}
-            >
-              {timestampDisplay}
-            </span>
-          </div>
-        )}
-
         {/* Message body container (bubbles, previews, etc) */}
         <div
           style={{
@@ -389,17 +388,20 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
           {message.replyTo && (
             <div
               className="qorc-message-reply-preview mb-1 select-none"
-              role="note"
-              aria-label={`Replying to ${displayReplyToSender}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`Replying to ${displayReplyToSender || 'Unknown user'}`}
               onClick={() => onReplyClick?.(message.replyTo!.id)}
+              onKeyDown={event => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                event.stopPropagation();
+                onReplyClick?.(message.replyTo!.id);
+              }}
             >
-              <UserAvatar
-                username={message.replyTo.sender || ''}
-                size="xs"
-                className="qorc-message-reply-preview-avatar"
-              />
+              <UserAvatar username={message.replyTo.sender || ''} size="sm" className="qorc-message-reply-preview-avatar" />
               <div className="qorc-message-reply-preview-copy">
-                <span className="qorc-message-reply-preview-name">{displayReplyToSender}</span>
+                <span className="qorc-message-reply-preview-name">{displayReplyToSender || 'Unknown user'}</span>
                 <div className="qorc-message-reply-preview-text">
                   {message.replyTo.isDeleted ? (
                     <span className="qorc-message-reply-preview-deleted">Message deleted</span>
@@ -409,6 +411,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
                       contentVersion={message.replyTo.contentVersion}
                       maxWidth={800}
                       maxLines={2}
+                      fontSize={14}
                     />
                   )}
                 </div>
@@ -417,10 +420,10 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
           )}
 
           {/* Message bubble */}
-          <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
+          <div className={cn("flex items-end gap-2 min-w-0 max-w-full", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
             {/* Render file content or text content */}
             {isFileMessageType ? (
-              <div className="relative" ref={bubbleRef} onContextMenu={handleContextMenu}>
+              <div className="relative min-w-0 max-w-full" ref={bubbleRef} onContextMenu={handleContextMenu}>
                 {isVoiceNote ? (
                   <VoiceMessage
                     timestamp={timestamp}
@@ -448,7 +451,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
             ) : (
                 <div
                   className={cn(
-                    "relative flex max-w-full flex-col",
+                    "relative flex min-w-0 max-w-full flex-col",
                     safeIsCurrentUser ? "items-end" : "items-start"
                   )}
                   ref={bubbleRef}
@@ -460,10 +463,11 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
                     onContextMenu={handleContextMenu}
                   />
                   <div
-                    className="px-4 py-3 text-sm transition-opacity duration-200"
+                    ref={textBubbleRef}
+                    className="qorc-text-bubble overflow-hidden transition-opacity duration-200"
                     style={{
-                      backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-text-bg, var(--chat-bubble-received-bg))',
-                      borderRadius: 'var(--message-bubble-radius)',
+                      backgroundColor: safeIsCurrentUser ? 'var(--qorc-chat-accent, var(--color-accent-primary))' : 'var(--chat-bubble-received-text-bg, var(--chat-bubble-received-bg))',
+                      borderRadius: bubbleRadius,
                       minWidth: '3rem',
                       maxWidth: '100%'
                     }}
@@ -472,9 +476,9 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
                     <SecureCanvasText
                       messageId={message.secureContentId || message.id}
                       contentVersion={message.controlState?.editOperationId}
-                      maxWidth={350}
-                      fontSize={14}
-                      color={safeIsCurrentUser ? 'var(--color-on-accent)' : 'var(--chat-bubble-received-text)'}
+                      maxWidth={textMaxWidth}
+                      fontSize={17}
+                      color={safeIsCurrentUser ? 'var(--qorc-chat-on-accent, var(--color-on-accent))' : 'var(--chat-bubble-received-text)'}
                       isCurrentUser={safeIsCurrentUser}
                       onRendered={() => setIsContentRendered(true)}
                       onContextMenu={handleContextMenu}
@@ -502,6 +506,12 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
             </span>
           )}
         </div>
+
+        {showSentTime && (
+          <time className="qorc-message-sent-time text-xs mt-1 select-none" dateTime={timestamp.toISOString()} aria-label={`Message sent at ${timestampDisplay}`}>
+            {timestampDisplay}
+          </time>
+        )}
 
         <MessageReceipt
           receipt={effectiveReceipt}

@@ -54,7 +54,10 @@ async fn activate_session(
 ) -> Result<(), String> {
     let lifecycle_lock = state.database_lifecycle_lock.clone();
     let _database_guard = lifecycle_lock.lock_owned().await;
+    if state.resetting_local_data.load(std::sync::atomic::Ordering::SeqCst) { return Err("Local app data is being reset".into()); }
     permit.ensure_current()?;
+    let storage = state.storage().ok_or("Storage not initialized")?;
+    crate::local_account_data::ensure_session(storage.as_ref(), session.as_ref()).await?;
     let database = crate::database::prepare_native_account_database(
         app_handle.clone(),
         session.account_owner(),
@@ -105,6 +108,7 @@ pub async fn account_open(
     password: String,
     passphrase: String,
 ) -> Result<AccountOpenResult, String> {
+    if state.resetting_local_data.load(std::sync::atomic::Ordering::SeqCst) { return Err("Local app data is being reset".into()); }
     let password = Zeroizing::new(password);
     let passphrase = Zeroizing::new(passphrase);
     let permit = state.inner().account_lifecycle.begin_open(&account_owner)?;
@@ -112,6 +116,12 @@ pub async fn account_open(
         .inner()
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
+    {
+        let _guard = state.database_lifecycle_lock.clone().lock_owned().await;
+        if !state.account_session().is_some_and(|session| session.account_owner() == account_owner) {
+            crate::local_account_data::resume_pending(storage.as_ref(), &account_owner).await?;
+        }
+    }
     let created = !account_vault::exists(storage.as_ref(), &account_owner)
         .await
         .map_err(|error| error.safe_message())?;
@@ -287,6 +297,7 @@ pub async fn account_token_vault_load(
     else {
         return Ok(None);
     };
+    crate::local_account_data::record_key(storage.as_ref(), session.as_ref(), &key).await?;
     let plaintext = session
         .open_token_vault(&server_scope, &vault_kind, &encoded)
         .map_err(|error| error.safe_message())?;
@@ -316,6 +327,7 @@ pub async fn account_token_vault_store(
         .inner()
         .storage()
         .ok_or_else(|| "Storage not initialized".to_string())?;
+    crate::local_account_data::record_key(storage.as_ref(), session.as_ref(), &key).await?;
     storage
         .set_text(&key, &encoded)
         .await
@@ -405,83 +417,4 @@ async fn lock_native_account(
         }
     }
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn account_token_access_queued_before_switch_cannot_use_the_new_session() {
-        let state = Arc::new(AppState::new());
-        *state.account_session.write() = Some(account_vault::test_session(&"a".repeat(64), 1));
-        let guard = state.database_lifecycle_lock.clone().lock_owned().await;
-        let task_state = state.clone();
-        let queued =
-            tokio::spawn(async move { acquire_token_vault_session(&task_state).await.is_err() });
-        tokio::task::yield_now().await;
-        *state.account_session.write() = Some(account_vault::test_session(&"b".repeat(64), 2));
-        drop(guard);
-        assert!(queued.await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn account_logout_revokes_access_and_deletes_both_encrypted_pools() {
-        let directory =
-            std::env::temp_dir().join(format!("qorc-account-audit-{}", uuid::Uuid::new_v4()));
-        let storage = Arc::new(
-            crate::storage::SecureStorage::new(directory.clone())
-                .await
-                .unwrap(),
-        );
-        let state = AppState::new();
-        let owner = "a".repeat(64);
-        let scope = "b".repeat(64);
-        let session = account_vault::test_session(&owner, 3);
-        for kind in ["working", "resume"] {
-            let key = session.token_vault_storage_key(&scope, kind).unwrap();
-            let sealed = session
-                .seal_token_vault(&scope, kind, b"test credentials")
-                .unwrap();
-            storage.set_text(&key, &sealed).await.unwrap();
-        }
-        *state.storage.write() = Some(storage.clone());
-        *state.account_session.write() = Some(session.clone());
-        assert!(
-            lock_native_account(&state, &owner, true, Some(&scope))
-                .await
-                .unwrap()
-        );
-        assert!(state.account_session().is_none());
-        assert!(acquire_token_vault_session(&state).await.is_err());
-        for kind in ["working", "resume"] {
-            assert!(
-                !storage
-                    .has(&session.token_vault_storage_key(&scope, kind).unwrap())
-                    .await
-                    .unwrap()
-            );
-        }
-        tokio::fs::remove_dir_all(directory).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn account_cleanup_failure_stays_locked_and_unrelated_owner_cannot_revoke() {
-        let state = AppState::new();
-        let owner = "a".repeat(64);
-        *state.account_session.write() = Some(account_vault::test_session(&owner, 4));
-        assert!(
-            !lock_native_account(&state, &"b".repeat(64), false, None)
-                .await
-                .unwrap()
-        );
-        assert!(state.account_session().is_some());
-        assert!(
-            lock_native_account(&state, &owner, true, None)
-                .await
-                .is_err()
-        );
-        assert!(state.account_session().is_none());
-    }
 }

@@ -7,7 +7,8 @@ const { execFileSync, execSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 
-execFileSync(process.execPath, [path.join(__dirname, 'stage-webkitgtk-runtime.cjs')], {
+const targetPlatform = process.env.TAURI_ENV_PLATFORM || process.platform;
+if (targetPlatform === 'linux') execFileSync(process.execPath, [path.join(__dirname, 'stage-webkitgtk-runtime.cjs')], {
     cwd: repoRoot,
     stdio: 'inherit',
     env: process.env,

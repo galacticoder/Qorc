@@ -11,8 +11,8 @@
     "start": "node scripts/start-client.cjs",
     "build": "node scripts/generate-material-file-icons.cjs && vite build --config vite.config.simple.ts",
     "lint": "eslint src --report-unused-disable-directives --max-warnings 0",
-    "test:security": "node --test server/test/*.test.js",
     "bundle": "node scripts/start-client.cjs --bundle-only",
+    "bundle:android": "node scripts/start-client.cjs --bundle-only --android",
     "build:pir": "node scripts/build-pir-sidecars.cjs"
   },
   "dependencies": {

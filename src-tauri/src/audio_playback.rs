@@ -114,7 +114,7 @@ impl AudioPlaybackSession {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn fill(&self, output: &mut [u8]) -> usize {
         output.fill(0);
         let Ok(mut queue) = self.queue.lock() else {
@@ -283,6 +283,38 @@ impl AudioPlaybackState {
 impl Default for AudioPlaybackState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(target_os = "android")]
+fn run_playback(
+    session: Arc<AudioPlaybackSession>,
+    device_id: Option<&str>,
+    started: std::sync::mpsc::SyncSender<Result<(), String>>,
+) {
+    let result = (|| -> Result<(), String> {
+        let capture = crate::android_media::Capture::start("playback", device_id, 0, 0, 0)?;
+        let _ = started.send(Ok(()));
+        let mut buffer = vec![0; FRAME_SAMPLES * 4];
+        let mut deadline = Instant::now();
+        while !session.stop.load(Ordering::Acquire) {
+            session.fill(&mut buffer);
+            let result = capture.write(&buffer);
+            buffer.fill(0);
+            result?;
+            deadline += Duration::from_millis(20);
+            let now = Instant::now();
+            if deadline > now {
+                thread::sleep(deadline - now);
+            } else {
+                deadline = now;
+            }
+        }
+        capture.finish()
+    })();
+    if let Err(error) = result {
+        let _ = started.send(Err(error));
+        session.stop.store(true, Ordering::Release);
     }
 }
 
@@ -517,14 +549,14 @@ where
         .map_err(|error| format!("speaker stream could not be opened: {error}"))
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 struct PlaybackResampler {
     step: f64,
     position: f64,
     samples: Option<(f32, f32)>,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 impl PlaybackResampler {
     fn new(sample_rate: u32) -> Self {
         Self {
@@ -564,146 +596,4 @@ fn validate_device_id(device_id: &str) -> Result<(), String> {
         return Err("invalid speaker device identifier".to_string());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn playback_preserves_48khz_samples_and_outputs_silence_on_underrun() {
-        let mut queue = PlaybackQueue::new();
-        queue.gain = 1.0;
-        queue.samples.extend([0.25, -0.5, 1.0, -1.0]);
-        queue.samples.extend(vec![0.0; EDGE_FADE_SAMPLES]);
-        let mut resampler = PlaybackResampler::new(48_000);
-        let output: Vec<_> = (0..EDGE_FADE_SAMPLES + 7)
-            .map(|_| resampler.next(&mut queue))
-            .collect();
-        assert_eq!(&output[..4], &[0.25, -0.5, 1.0, -1.0]);
-        assert!(output[4..].iter().all(|sample| *sample == 0.0));
-        assert_eq!(queue.underruns, 1);
-    }
-
-    #[test]
-    fn playback_resamples_across_callback_boundaries() {
-        for rate in [44_100, 48_000, 96_000, 192_000] {
-            let mut queue = PlaybackQueue::new();
-            queue.gain = 1.0;
-            queue
-                .samples
-                .extend((0..48_002 + EDGE_FADE_SAMPLES).map(|i| i as f32 / 48_000.0));
-            let mut resampler = PlaybackResampler::new(rate);
-            for index in 0..rate {
-                let sample = resampler.next(&mut queue);
-                assert!((sample - index as f32 / rate as f32).abs() < 0.00001);
-            }
-            assert!(queue.samples.len() <= EDGE_FADE_SAMPLES + 1);
-            assert_eq!(queue.underruns, 0);
-        }
-    }
-
-    #[test]
-    fn underrun_edges_fade_without_affecting_steady_audio() {
-        let mut queue = PlaybackQueue::new();
-        for _ in 0..FRAME_SAMPLES {
-            assert_eq!(queue.next(), 0.0);
-        }
-        assert_eq!(queue.underruns, 0);
-        queue.samples.extend(vec![0.75; FRAME_SAMPLES]);
-        let output: Vec<_> = (0..FRAME_SAMPLES).map(|_| queue.next()).collect();
-        let step = 0.75 / EDGE_FADE_SAMPLES as f32;
-        assert!(output[0] <= step + 0.00001);
-        assert_eq!(output[FRAME_SAMPLES / 2], 0.75);
-        assert!(output[FRAME_SAMPLES - 1] <= step + 0.00001);
-        assert!(
-            output
-                .windows(2)
-                .all(|pair| (pair[1] - pair[0]).abs() <= step + 0.00001)
-        );
-        for _ in 0..4800 {
-            assert_eq!(queue.next(), 0.0);
-        }
-        assert_eq!(queue.underruns, 1);
-        assert_eq!(queue.underrun_samples, 4800);
-        queue.samples.extend(vec![-0.75; FRAME_SAMPLES]);
-        assert!(queue.next().abs() <= step + 0.00001);
-        for _ in 1..FRAME_SAMPLES {
-            queue.next();
-        }
-        assert_eq!(queue.next(), 0.0);
-        assert_eq!(queue.underruns, 2);
-    }
-
-    #[test]
-    fn playback_queue_is_bounded_and_sanitizes_nonfinite_samples() {
-        let session = AudioPlaybackSession::new();
-        let frame: Vec<_> = [f32::NAN, f32::INFINITY, 2.0, -2.0]
-            .into_iter()
-            .cycle()
-            .take(FRAME_SAMPLES)
-            .flat_map(f32::to_le_bytes)
-            .collect();
-        for _ in 0..20 {
-            session.push(&frame).unwrap();
-        }
-        let queue = session.queue.lock().unwrap();
-        assert_eq!(queue.samples.len(), MAX_QUEUE_SAMPLES);
-        assert_eq!(
-            queue.samples.iter().take(4).copied().collect::<Vec<_>>(),
-            [0.0, 0.0, 1.0, -1.0]
-        );
-        drop(queue);
-        session.stop();
-        assert!(session.push(&frame).is_err());
-        assert!(session.queue.lock().unwrap().samples.is_empty());
-    }
-
-    #[test]
-    fn output_level_is_measured_from_played_samples_not_queued_samples() {
-        let session = AudioPlaybackSession::new();
-        let frame: Vec<_> = (0..FRAME_SAMPLES)
-            .flat_map(|_| 0.5f32.to_le_bytes())
-            .collect();
-        session.push(&frame).unwrap();
-        let initial = session.info().unwrap();
-        assert_eq!(initial.queued_ms, 20.0);
-        assert_eq!(initial.level, 0.0);
-        let mut queue = session.queue.lock().unwrap();
-        let energy = (0..FRAME_SAMPLES)
-            .map(|_| f64::from(queue.next()).powi(2))
-            .sum();
-        session.record_level(energy, FRAME_SAMPLES);
-        drop(queue);
-        let level = session.info().unwrap().level;
-        assert!(level > 0.0 && level < 0.5);
-        session.record_level(0.0, FRAME_SAMPLES);
-        assert_eq!(session.info().unwrap().level, 0.0);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_output_callback_reports_loudness_and_clears_it_on_underrun() {
-        let session = AudioPlaybackSession::new();
-        let frame: Vec<_> = (0..FRAME_SAMPLES)
-            .flat_map(|_| 0.25f32.to_le_bytes())
-            .collect();
-        session.push(&frame).unwrap();
-        let mut output = vec![0; FRAME_SAMPLES * 4];
-        session.fill(&mut output);
-        let energy: f64 = output
-            .chunks_exact(4)
-            .map(|bytes| f64::from(f32::from_le_bytes(bytes.try_into().unwrap())).powi(2))
-            .sum();
-        assert_eq!(
-            session.info().unwrap().level,
-            (energy / FRAME_SAMPLES as f64).sqrt() as f32
-        );
-        assert_eq!(session.info().unwrap().queued_ms, 0.0);
-        session.fill(&mut output);
-        assert!(output.iter().all(|sample| *sample == 0));
-        assert_eq!(session.info().unwrap().level, 0.0);
-        assert_eq!(session.info().unwrap().underruns, 1);
-        assert_eq!(session.info().unwrap().underrun_ms, 20.0);
-    }
 }

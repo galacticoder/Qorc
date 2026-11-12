@@ -16,6 +16,7 @@ const protocVersion = process.env.QORC_PROTOC_VERSION || '33.0';
 const strawberryPerlUrl = process.env.QORC_STRAWBERRY_PERL_URL ||
     'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip';
 const cliArgs = process.argv.slice(2);
+const androidBuild = cliArgs.includes('--android');
 
 function readTargetArgument() {
     const equalsArgument = cliArgs.find(argument => argument.startsWith('--target='));
@@ -42,6 +43,8 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only] [--target <architecture>] [--all-architectures]');
     console.log('  --run-only     Skip the rebuild and just launch the already built binary.');
     console.log('  --bundle-only  Build native installer bundles and exit without launching.');
+    console.log('  --android      Build a signed Android APK (ARM64 by default), combine with --target x64 or --all-architectures.');
+    console.log('  --debug        With --android, build a debug APK for device testing.');
     console.log('  --target       Build x64 or arm64 bundles, a non-native Linux target uses Docker Buildx.');
     console.log('  --all-architectures  On x86-64 Linux, build both x86-64 and ARM64 bundles.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` for native builds.');
@@ -49,6 +52,7 @@ if (cliArgs.some(arg => arg === '-h' || arg === '--help')) {
     console.log('Set QORC_ARM64_BUILDER only to select a different existing Buildx builder.');
     console.log('Native bundles are written to src-tauri/target/release/bundle.');
     console.log('Cross-built ARM64 bundles are written beneath src-tauri/target/aarch64-unknown-linux-gnu/release/bundle.');
+    console.log('Android APKs are copied to src-tauri/target/release/bundle/android (debug builds use target/debug/bundle/android).');
     console.log('Logs are saved to logs/instance-<QORC_INSTANCE_ID>-logs.txt');
     process.exit(0);
 }
@@ -62,19 +66,23 @@ let requestedTarget;
 let targetArchitecture;
 try {
     requestedTarget = readTargetArgument();
-    targetArchitecture = normalizeTargetArchitecture(requestedTarget);
+    targetArchitecture = androidBuild && !requestedTarget ? 'arm64' : normalizeTargetArchitecture(requestedTarget);
 } catch (error) {
     logErr(error.message);
     process.exit(1);
 }
 
-if (process.platform !== 'linux' && process.platform !== 'win32') {
+if (process.platform !== 'linux' && process.platform !== 'win32' && !(androidBuild && process.platform === 'darwin')) {
     logErr('qorc desktop supports only Linux and Windows.');
     process.exit(1);
 }
 
 if (runOnly && bundleOnly) {
     logErr('--run-only and --bundle-only cannot be used together.');
+    process.exit(1);
+}
+if (androidBuild && runOnly) {
+    logErr('Android builds produce an APK, use adb or Android Studio to launch an installed app.');
     process.exit(1);
 }
 if (runOnly && (requestedTarget || allArchitectures)) {
@@ -85,19 +93,19 @@ if (allArchitectures && (!bundleOnly || requestedTarget)) {
     logErr('--all-architectures requires --bundle-only and cannot be combined with --target.');
     process.exit(1);
 }
-if ((requestedTarget || allArchitectures) && process.platform !== 'linux') {
+if (!androidBuild && (requestedTarget || allArchitectures) && process.platform !== 'linux') {
     logErr('Architecture selection is currently supported only for Linux bundles.');
     process.exit(1);
 }
-if (allArchitectures && process.arch !== 'x64') {
+if (!androidBuild && allArchitectures && process.arch !== 'x64') {
     logErr('--all-architectures currently requires an x86-64 Linux build host.');
     process.exit(1);
 }
-if (requestedTarget && targetArchitecture !== process.arch && !bundleOnly) {
+if (!androidBuild && requestedTarget && targetArchitecture !== process.arch && !bundleOnly) {
     logErr('A non-native --target requires --bundle-only because it cannot be launched on this host.');
     process.exit(1);
 }
-if (requestedTarget && targetArchitecture !== process.arch && !(process.arch === 'x64' && targetArchitecture === 'arm64')) {
+if (!androidBuild && requestedTarget && targetArchitecture !== process.arch && !(process.arch === 'x64' && targetArchitecture === 'arm64')) {
     logErr(`Cross-building from ${process.arch} to ${targetArchitecture} is not supported.`);
     process.exit(1);
 }
@@ -791,7 +799,22 @@ function pruneClientTargetCache() {
     }
 }
 
-if (runOnly) {
+if (androidBuild) {
+    acquireBuildLock();
+    checkProtocEnv();
+    checkWindowsPerlEnv();
+    try {
+        require('./build-client-android.cjs').build({
+            architectures: allArchitectures ? ['arm64', 'x64'] : [targetArchitecture],
+            debug: cliArgs.includes('--debug'),
+            env: { ...process.env },
+        });
+    } catch (error) {
+        logErr(error.message);
+        process.exit(1);
+    }
+    process.exit(0);
+} else if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
 } else if (requestedTarget && targetArchitecture !== process.arch) {

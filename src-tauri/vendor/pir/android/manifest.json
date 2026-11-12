@@ -1,0 +1,16 @@
+{
+  "abis": {
+    "arm64-v8a": {
+      "sha256": "90642c08e2b10dbcce880eb70fcd81846d1787f02642d53bc7599c44b1479eb9",
+      "size": 509224
+    },
+    "x86_64": {
+      "sha256": "9880096d0df042c4f39cd913cfdfd247ad055f8a8594be3b0954bccf991fa972",
+      "size": 542864
+    }
+  },
+  "sourceSha256": "ff97c9ec05cd7545acc7dc882ddf7c553ff23537c73b61473ba6b95393343d54",
+  "ndk": "27.3.13750724",
+  "minSdk": 24,
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+}

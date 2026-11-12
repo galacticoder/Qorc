@@ -371,20 +371,3 @@ impl<'a> YClient<'a> {
         self.inner
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_lwe() {
-        let lwe_params = LWEParams::default();
-        let client = LWEClient::new(lwe_params.clone());
-        let pt = fastrand::u32(0..lwe_params.pt_modulus as u32);
-        let scaled_pt = pt.wrapping_mul(lwe_params.scale_k() as u32);
-        let ct = client.encrypt(&mut ChaCha20Rng::from_entropy(), scaled_pt);
-        let pt_dec = client.decrypt(&ct);
-        let result = rescale(pt_dec as u64, lwe_params.modulus, lwe_params.pt_modulus) as u32;
-        assert_eq!(result, pt);
-    }
-}

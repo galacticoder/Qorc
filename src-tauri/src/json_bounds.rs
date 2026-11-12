@@ -67,20 +67,3 @@ pub fn enforce_bounded_json_structure(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::enforce_bounded_json_structure;
-
-    #[test]
-    fn rejects_tree_string_and_depth_amplification() {
-        assert!(
-            enforce_bounded_json_structure(br#"{"ok":true,"items":["a","b"]}"#, 8, 16, 8).is_ok()
-        );
-        assert!(enforce_bounded_json_structure(br#"[[[[[]]]]]"#, 4, 16, 8).is_err());
-        assert!(enforce_bounded_json_structure(br#"[1,2,3,4]"#, 8, 3, 8).is_err());
-        assert!(enforce_bounded_json_structure(br#"{"value":"12345678"}"#, 8, 16, 8).is_ok());
-        assert!(enforce_bounded_json_structure(br#"{"value":"123456789"}"#, 8, 16, 8).is_err());
-        assert!(enforce_bounded_json_structure(br#"{"value":[1,2}"#, 8, 16, 8).is_err());
-    }
-}

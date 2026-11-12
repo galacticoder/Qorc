@@ -248,7 +248,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
       }
-      
+
       const analyser = audioContext.createAnalyser();
       const source = audioContext.createMediaStreamSource(stream);
       const meterSink = audioContext.createGain();
@@ -548,7 +548,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
               type="button"
               onClick={sendVoiceNote}
               disabled={disabled}
-              className="qorc-send-button qorc-voice-recorder-send"
+              className="qorc-voice-recorder-send"
               title="Send voice note"
               aria-label="Send voice note"
             >

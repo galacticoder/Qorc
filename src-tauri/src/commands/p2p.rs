@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{
     State,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Request, Response},
 };
 
 struct P2PReceiveGuard<'a>(&'a AppState);
@@ -104,10 +104,8 @@ pub async fn p2p_send(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=60_000).contains(value));
-    let data = match request.body() {
-        InvokeBody::Raw(body) => body.clone(),
-        _ => return Err("Invalid P2P frame".to_string()),
-    };
+    let data = super::binary_body(&request, crate::network::p2p::MAX_FRAME_BYTES)
+        .map_err(|()| "Invalid P2P frame".to_string())?;
     let p2p = state
         .inner()
         .p2p_handler()

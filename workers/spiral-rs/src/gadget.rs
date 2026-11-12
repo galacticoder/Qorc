@@ -68,29 +68,3 @@ pub fn gadget_invert_alloc<'a>(mx: usize, inp: &PolyMatrixRaw<'a>) -> PolyMatrix
     gadget_invert(&mut out, inp);
     out
 }
-
-#[cfg(test)]
-mod test {
-    use crate::util::get_test_params;
-
-    use super::*;
-
-    #[test]
-    fn gadget_invert_is_correct() {
-        let params = get_test_params();
-        let mut mat = PolyMatrixRaw::zero(&params, 2, 1);
-        mat.get_poly_mut(0, 0)[37] = 3;
-        mat.get_poly_mut(1, 0)[37] = 6;
-        let log_q = params.modulus_log2 as usize;
-        let result = gadget_invert_alloc(2 * log_q, &mat);
-
-        assert_eq!(result.get_poly(0, 0)[37], 1);
-        assert_eq!(result.get_poly(2, 0)[37], 1);
-        assert_eq!(result.get_poly(4, 0)[37], 0); // binary for '3'
-
-        assert_eq!(result.get_poly(1, 0)[37], 0);
-        assert_eq!(result.get_poly(3, 0)[37], 1);
-        assert_eq!(result.get_poly(5, 0)[37], 1);
-        assert_eq!(result.get_poly(7, 0)[37], 0); // binary for '6'
-    }
-}

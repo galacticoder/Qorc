@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name" translatable="false" formatted="false">Qorc</string>
+    <string name="main_activity_title" translatable="false" formatted="false">Qorc</string>
+    <string name="app_description" translatable="false" formatted="false">Qorc is a secure messaging application focused on private communication, end-to-end encryption, post-quantum cryptography, and anonymous transport.</string>
+</resources>

@@ -6,7 +6,11 @@ fn main() {
     let msvc = build.get_compiler().is_like_msvc();
     build.std(if msvc { "c++14" } else { "c++11" });
 
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+    let android = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android");
+    if android {
+        build.cpp_link_stdlib("c++_static");
+    }
+    if !android && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
         build.flag(if msvc {
             "/arch:AVX2"
         } else {

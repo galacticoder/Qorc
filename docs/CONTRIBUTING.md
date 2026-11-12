@@ -143,21 +143,12 @@ later source changes.
     ```
     Always pass `-p tsconfig.app.json`. The root `tsconfig.json` has an empty
     `files` array, so a bare `tsc` type checks nothing and exits 0.
-6.  **Run the security tests** if you touched anything under `server/`:
-    ```bash
-    pnpm test:security
-    ```
-7.  **Run the standalone visual-call codec harness** if you changed the VP8
-    encoder, decoder, batching, adaptation, or renderer pipeline:
-    ```bash
-    node scripts/test-call-video-codec.cjs
-    ```
-8.  **Commit your changes** with descriptive commit messages.
-9.  **Push to your fork:**
+6.  **Commit your changes** with descriptive commit messages.
+7.  **Push to your fork:**
     ```bash
     git push origin feature/your-feature-name
     ```
-10. **Open a Pull Request** against the `main` branch of the original repository.
+8.  **Open a Pull Request** against the `main` branch of the original repository.
 
 ## Style Guide
 

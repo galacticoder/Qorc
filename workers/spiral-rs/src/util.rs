@@ -4,34 +4,8 @@ use rand_chacha::ChaCha20Rng;
 use serde_json::Value;
 use std::fs;
 
-pub const CFG_20_256: &'static str = r#"
-        {'n': 2,
-        'nu_1': 9,
-        'nu_2': 6,
-        'p': 256,
-        'q2_bits': 20,
-        's_e': 87.62938774292914,
-        't_gsw': 8,
-        't_conv': 4,
-        't_exp_left': 8,
-        't_exp_right': 56,
-        'instances': 1,
-        'db_item_size': 8192 }
-    "#;
-pub const CFG_16_100000: &'static str = r#"
-        {'n': 2,
-        'nu_1': 10,
-        'nu_2': 6,
-        'p': 512,
-        'q2_bits': 21,
-        's_e': 85.83255142749422,
-        't_gsw': 10,
-        't_conv': 4,
-        't_exp_left': 16,
-        't_exp_right': 56,
-        'instances': 11,
-        'db_item_size': 100000 }
-    "#;
+
+
 
 pub fn calc_index(indices: &[usize], lengths: &[usize]) -> usize {
     let mut idx = 0usize;
@@ -60,97 +34,15 @@ pub fn decompose_index(indices: &mut [usize], index: usize, lengths: &[usize]) {
     }
 }
 
-pub fn get_test_params() -> Params {
-    Params::init(
-        2048,
-        &vec![268369921u64, 249561089u64],
-        6.4,
-        2,
-        256,
-        20,
-        4,
-        8,
-        56,
-        8,
-        true,
-        9,
-        6,
-        1,
-        2048,
-        0,
-    )
-}
 
-pub fn get_short_keygen_params() -> Params {
-    Params::init(
-        2048,
-        &vec![268369921u64, 249561089u64],
-        6.4,
-        2,
-        256,
-        20,
-        4,
-        4,
-        4,
-        4,
-        true,
-        9,
-        6,
-        1,
-        2048,
-        0,
-    )
-}
 
-pub fn get_expansion_testing_params() -> Params {
-    let cfg = r#"
-        {'n': 2,
-        'nu_1': 9,
-        'nu_2': 6,
-        'p': 256,
-        'q2_bits': 20,
-        't_gsw': 8,
-        't_conv': 4,
-        't_exp_left': 8,
-        't_exp_right': 56,
-        'instances': 1,
-        'db_item_size': 8192 }
-    "#;
-    params_from_json(&cfg.replace("'", "\""))
-}
 
-pub fn get_fast_expansion_testing_params() -> Params {
-    let cfg = r#"
-        {'n': 2,
-        'nu_1': 6,
-        'nu_2': 2,
-        'p': 256,
-        'q2_bits': 20,
-        't_gsw': 8,
-        't_conv': 4,
-        't_exp_left': 8,
-        't_exp_right': 8,
-        'instances': 1,
-        'db_item_size': 8192 }
-    "#;
-    params_from_json(&cfg.replace("'", "\""))
-}
 
-pub fn get_no_expansion_testing_params() -> Params {
-    let cfg = r#"
-        {'direct_upload': 1,
-        'n': 5,
-        'nu_1': 6,
-        'nu_2': 3,
-        'p': 65536,
-        'q2_bits': 27,
-        't_gsw': 3,
-        't_conv': 56,
-        't_exp_left': 56,
-        't_exp_right': 56}
-    "#;
-    params_from_json(&cfg.replace("'", "\""))
-}
+
+
+
+
+
 
 pub fn get_seed() -> u64 {
     thread_rng().gen::<u64>()
@@ -350,80 +242,6 @@ pub fn reorient_reg_ciphertexts(params: &Params, out: &mut [u64], v_reg: &Vec<Po
                     out[idx_a_out] = val1 | (val2 << 32);
                 }
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn params_from_json_correct() {
-        let cfg = r#"
-            {'n': 2,
-            'nu_1': 9,
-            'nu_2': 6,
-            'p': 256,
-            'q2_bits': 20,
-            's_e': 87.62938774292914,
-            't_gsw': 8,
-            't_conv': 4,
-            't_exp_left': 8,
-            't_exp_right': 56,
-            'instances': 1,
-            'db_item_size': 2048 }
-        "#;
-        let cfg = cfg.replace("'", "\"");
-        let b = params_from_json(&cfg);
-        let c = Params::init(
-            2048,
-            &vec![268369921u64, 249561089u64],
-            6.4,
-            2,
-            256,
-            20,
-            4,
-            8,
-            56,
-            8,
-            true,
-            9,
-            6,
-            1,
-            2048,
-            0,
-        );
-        assert_eq!(b, c);
-    }
-
-    #[test]
-    fn test_decompose_calc_correct() {
-        let lengths = [5, 4, 3];
-        let indices = [2, 1, 2];
-        let idx = calc_index(&indices, &lengths);
-        let mut gues_indices = [0, 0, 0];
-        decompose_index(&mut gues_indices, idx, &lengths);
-        assert_eq!(indices, gues_indices);
-    }
-
-    #[test]
-    fn test_read_write_arbitrary_bits() {
-        let len = 4096;
-        let num_bits = 9;
-        let mut data = vec![0u8; len];
-        let scaled_len = len * 8 / num_bits - 64;
-        let mut bit_offs = 0;
-        let get_from = |i: usize| -> u64 { ((i * 7 + 13) % (1 << num_bits)) as u64 };
-        for i in 0..scaled_len {
-            write_arbitrary_bits(data.as_mut_slice(), get_from(i), bit_offs, num_bits);
-            bit_offs += num_bits;
-        }
-        bit_offs = 0;
-        for i in 0..scaled_len {
-            let val = read_arbitrary_bits(data.as_slice(), bit_offs, num_bits);
-            assert_eq!(val, get_from(i));
-            bit_offs += num_bits;
         }
     }
 }

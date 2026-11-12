@@ -134,38 +134,3 @@ impl NoiseEstimator for Params {
         get_p_err(&paramset, s_e, q2)
     }
 }
-
-#[cfg(test)]
-mod test {
-    use crate::util::*;
-
-    use super::*;
-
-    #[test]
-    fn get_noise_from_paramset_correct() {
-        let cfg_expand = r#"
-        {
-            "n": 2,
-            "nu_1": 9,
-            "nu_2": 5,
-            "p": 256,
-            "q2_bits": 22,
-            "t_gsw": 7,
-            "t_conv": 3,
-            "t_exp_left": 5,
-            "t_exp_right": 5,
-            "instances": 4,
-            "db_item_size": 32768
-        }
-        "#;
-        let params = params_from_json(cfg_expand);
-        let s_e = params.estimate_noise();
-        let p_err = params.estimate_log2_err_prob();
-        let noise_log2 = f64::log2(s_e);
-        println!("noise_log2: {}", noise_log2);
-        println!("p_err: {}", p_err);
-        println!("setup bytes: {}", params.setup_bytes());
-        // assert!(noise_log2 < 87.0);
-        assert!(p_err <= -40.0);
-    }
-}

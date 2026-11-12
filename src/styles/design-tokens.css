@@ -4,46 +4,26 @@
   --color-background: #ffffff;
   --color-surface: #f8fafc;
   --color-panel: #f1f5f9;
-  --color-muted-panel: #d1d9e3;
-  --color-text-primary: #0f172a;
   --color-text-secondary: #475569;
   --color-accent-primary: #3b82f6;
-  --color-accent-secondary: #6366f1;
   --color-on-accent: #ffffff;
   --color-border: #cbd5e1;
 
   /* Typing Indicator */
-  --color-typing-bubble: #1e1e23;
-  --color-typing-dot: #8b95a3;
+  --color-typing-bubble: #ececf1;
+  --color-typing-dot: #656574;
 
   /* Typography */
-  --font-family: var(--qorc-ui-font, "Google Sans", -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
   --font-weight-medium: 500;
 
-  --font-size-heading: 1.25rem;
-  --font-size-body: 0.875rem;
-  --font-size-caption: 0.75rem;
-
-  --line-height-body: 1.5;
-
-  /* Spacing */
-  --spacing-base: 4px;
-  --spacing-xxs: calc(var(--spacing-base) * 1);
-  --spacing-sm: calc(var(--spacing-base) * 3);
-  --spacing-md: calc(var(--spacing-base) * 4);
-  --spacing-lg: calc(var(--spacing-base) * 6);
 
   /* Radius */
   --radius-small: 6px;
   --radius-medium: 12px;
-  --radius-pill: 9999px;
 
-  /* Shadows */
-  --shadow-elevation-low: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-  --shadow-elevation-high: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
 
   /* Message Bubbles */
-  --message-bubble-max-width: 65%;
+  --message-bubble-max-width: 72%;
   --message-bubble-radius: var(--radius-medium);
 }
 
@@ -53,17 +33,14 @@
   --color-background: #151519;
   --color-surface: #151519;
   --color-panel: #1e1e23;
-  --color-muted-panel: #0d0d0d;
-  --color-text-primary: #e2e8f0;
   --color-text-secondary: #94a3b8;
   --color-accent-primary: #3b82f6;
-  --color-accent-secondary: #3f87fa;
   --color-on-accent: #e2e8f0;
   --color-border: #0d0d0d;
 
   /* Typing Indicator - Dark Mode */
   --color-typing-bubble: #1e1e23;
-  --color-typing-dot: #4c4c55;
+  --color-typing-dot: #a9a7b5;
 
 }
 
@@ -101,6 +78,6 @@
 /* Responsive Design */
 @media (max-width: 768px) {
   :root {
-    --message-bubble-max-width: 85%;
+    --message-bubble-max-width: 90%;
   }
 }

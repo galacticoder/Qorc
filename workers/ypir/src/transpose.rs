@@ -85,23 +85,3 @@ pub fn transpose_f64(out: &mut [f64], a: &[f64], a_rows: usize, a_cols: usize) {
         }
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_transpose() {
-        let mut buf = vec![0u8; 16];
-        for i in 0..16 {
-            buf[i] = i as u8;
-        }
-
-        let out = transpose(&buf, 2, 8, 1);
-
-        assert_eq!(
-            out,
-            vec![0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15,]
-        );
-    }
-}

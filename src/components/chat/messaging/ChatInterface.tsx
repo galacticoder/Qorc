@@ -16,7 +16,6 @@ import { keyTransparencyEpochStartMs } from "@/lib/key-transparency/crypto";
 import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, TriangleAlert } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
-import { ConversationOptionsPopover } from './ConversationOptionsPopover';
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { useBlockStatus } from '@/hooks/useBlockStatus';
 import {
@@ -24,8 +23,7 @@ import {
   SCROLL_THRESHOLD,
   NEAR_BOTTOM_THRESHOLD,
   CONVERSATION_SEGMENT_SIZE,
-  SEGMENT_UNLOAD_IDLE_MS,
-  INITIAL_LOAD_DELAY_MS
+  SEGMENT_UNLOAD_IDLE_MS
 } from "../../../lib/constants";
 import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-limits";
 import type { HybridKeys } from "../../../lib/types/auth-types";
@@ -34,10 +32,12 @@ import { toast } from 'sonner';
 import { ConversationSkeleton } from '../../ui/ViewSkeletons';
 import { ChatInput } from '../ChatInput';
 import type { CallState } from '../../../lib/types/calling-types';
+import { ConversationHeader } from './ConversationHeader';
+import { useAppBack } from '../../../hooks/useAppBack';
+import { attachChatViewport } from '../../../lib/ui/chat-viewport';
 
 interface ChatInterfaceProps {
-  readonly isPinned: boolean;
-  readonly onTogglePin: (username: string) => void;
+  readonly onBack?: () => void;
   readonly onSendMessage: (
     messageId: string,
     content: string,
@@ -61,7 +61,6 @@ interface ChatInterfaceProps {
   readonly secureDB: SecureDB;
   readonly currentCall: CallState | null;
   readonly startCall: (targetUser: string, callType?: 'audio' | 'video') => Promise<string>;
-  readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
 }
 
 const distanceFromChatBottom = (container: Element): number => (
@@ -87,6 +86,7 @@ const shouldCreateReadReceipt = (message: Message, currentUsername: string): boo
 );
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({ 
+  onBack,
   onSendMessage,
   messages,
   setMessages,
@@ -105,9 +105,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   secureDB,
   currentCall,
   startCall,
-  onToggleBlock,
-  isPinned,
-  onTogglePin,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const interfaceRef = useRef<HTMLDivElement>(null);
@@ -125,12 +122,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, []);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  useAppBack(!!replyTo || !!editingMessage, () => { setReplyTo(null); setEditingMessage(null); }, 30);
   const isUserBlocked = useBlockStatus(selectedConversation, { eventRateMax: DEFAULT_UI_EVENT_RATE_MAX });
   const hasAttachedCall = Boolean(currentCall && selectedConversation === currentCall.peer);
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
   const messageActionsDisabled = isUserBlocked || isBlockedByUser;
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [openingConversation, setOpeningConversation] = useState<string | null>(null);
+  const [initialHistoryComplete, setInitialHistoryComplete] = useState<string | null>(null);
   const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
   const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
   const backgroundLoadConversationRef = useRef<string | null>(null);
@@ -165,6 +164,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     loadedMessagesCountRef.current.clear();
     processedInScrollRef.current.clear();
     backgroundLoadConversationRef.current = null;
+    setInitialHistoryComplete(null);
     setReplyTo(null);
     setEditingMessage(null);
   }, [currentUsername]);
@@ -178,39 +178,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   useLayoutEffect(() => {
     const root = interfaceRef.current;
     const composer = composerRef.current;
-    if (!root || !composer) return;
-    const measure = () => {
-      root.style.setProperty('--qorc-composer-height', `${composer.getBoundingClientRect().height}px`);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(composer);
-    return () => {
-      observer.disconnect();
-      root.style.removeProperty('--qorc-composer-height');
-    };
-  }, [openingConversation, selectedConversation]);
-
-  useLayoutEffect(() => {
     prevMessagesLengthRef.current = messages.length;
     lastMessageIdRef.current = messages[messages.length - 1]?.id || null;
-    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!scrollContainer) return;
-
-    scrollToBottom(scrollContainer);
-    const frame = requestAnimationFrame(() => scrollToBottom(scrollContainer));
-    return () => cancelAnimationFrame(frame);
-  }, [openingConversation, selectedConversation, scrollToBottom]);
-
-  useLayoutEffect(() => {
-    if (
-      loadedMessagesCountRef.current.has(selectedConversation)
-    ) {
-      setOpeningConversation(null);
-      return;
-    }
-    setOpeningConversation(selectedConversation);
-  }, [loadMoreMessages, selectedConversation]);
+    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>('[data-radix-scroll-area-viewport]');
+    if (!root || !composer || !viewport) return;
+    return attachChatViewport(root, viewport, composer);
+  }, [currentUsername, openingConversation, selectedConversation]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -229,12 +202,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const isCurrentLoad = () => (
       !cancelled && backgroundLoadConversationRef.current === conversationToLoad
     );
+    // Read immediately. Only show a placeholder for a genuinely slow, cold
+    // conversation; warm messages remain visible throughout the refresh.
+    const loadingTimer = setTimeout(() => {
+      if (isCurrentLoad() && messagesRef.current.length === 0) setOpeningConversation(conversationToLoad);
+    }, 120);
 
     const loadBackgroundMessages = async () => {
       try {
-        await new Promise(resolve => setTimeout(resolve, INITIAL_LOAD_DELAY_MS));
-        if (!isCurrentLoad()) return;
-
         const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) ?? 0;
 
         const batch = await loadMoreMessages(
@@ -250,8 +225,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       } catch (error) {
         console.error('[ChatInterface] Background message load failed', error);
       } finally {
+        clearTimeout(loadingTimer);
         if (isCurrentLoad()) {
           backgroundLoadConversationRef.current = null;
+          setInitialHistoryComplete(conversationToLoad);
           setOpeningConversation((current) => current === conversationToLoad ? null : current);
         }
       }
@@ -259,12 +236,34 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
     void loadBackgroundMessages();
     return () => {
+      clearTimeout(loadingTimer);
       cancelled = true;
+      setOpeningConversation(current => current === conversationToLoad ? null : current);
       if (backgroundLoadConversationRef.current === conversationToLoad) {
         backgroundLoadConversationRef.current = null;
       }
     };
   }, [selectedConversation, loadMoreMessages]);
+
+  const knownArrivalIds = useRef(new Set(messages.map(message => message.id)));
+  const arrivalScope = useRef(`${currentUsername}:${selectedConversation}`);
+  const arrivalHistoryReady = useRef(false);
+  const [arrivalIds, setArrivalIds] = useState<Set<string>>(() => new Set());
+  useLayoutEffect(() => {
+    const scope = `${currentUsername}:${selectedConversation}`;
+    const sameConversation = arrivalScope.current === scope;
+    const canAnimate = sameConversation && arrivalHistoryReady.current && !isLoadingMore;
+    const ids = new Set(messages.map(message => message.id));
+    const arrivals = canAnimate ? messages.filter(message => !knownArrivalIds.current.has(message.id) && Date.now() - message.timestamp.getTime() < 5000).map(message => message.id) : [];
+    knownArrivalIds.current = ids;
+    arrivalScope.current = scope;
+    arrivalHistoryReady.current = initialHistoryComplete === selectedConversation;
+    setArrivalIds(previous => {
+      const next = new Set(sameConversation ? [...previous].filter(id => ids.has(id)) : []);
+      for (const id of arrivals) next.add(id);
+      return next.size === previous.size && [...next].every(id => previous.has(id)) ? previous : next;
+    });
+  }, [messages, selectedConversation, currentUsername, initialHistoryComplete, isLoadingMore]);
 
   // Handle lazy loading of older messages on scroll
   const handleLazyLoadScroll = useCallback(async (scrollContainer: Element) => {
@@ -576,14 +575,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     messageSignalType: string,
     replyToMsg?: MessageReply | null
   ) => {
-    if (messageActionsDisabled) return;
+    if (messageActionsDisabled) throw new Error('Messaging is unavailable');
+    if (messageSignalType !== SignalType.TYPING_START && messageSignalType !== SignalType.TYPING_STOP) resetTypingAfterSend();
     await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-
-    if (messageSignalType !== SignalType.TYPING_START && messageSignalType !== SignalType.TYPING_STOP) {
-      resetTypingAfterSend();
-      setReplyTo(null);
-    }
-  }, [messageActionsDisabled, onSendMessage, resetTypingAfterSend]);
+  }, [messageActionsDisabled, onSendMessage, resetTypingAfterSend, selectedConversation]);
 
   // Handle message deletion
   const handleDeleteMessage = useCallback((message: Message) => {
@@ -627,55 +622,38 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, []);
 
-  if (openingConversation === selectedConversation) {
-    return <ConversationSkeleton hasAttachedCall={hasAttachedCall} />;
+  if (openingConversation === selectedConversation && messages.length === 0) {
+    return <ConversationSkeleton username={selectedConversation} hasAttachedCall={hasAttachedCall} onBack={onBack} />;
   }
 
   return (
     <div ref={interfaceRef} className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
-      <div
-        className="qorc-toolbar"
-      >
-        <div className="min-w-0 flex-1 pr-3" />
-        <div className="flex items-center gap-2">
-          {selectedConversation && (
-            <div className="qorc-call-pill" role="group" aria-label="Conversation actions">
-              {!keyChangePending && !hasAttachedCall && (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleAudioCall}
-                    disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                    className="qorc-call-pill-btn"
-                    title="Audio call"
-                  >
-                    <CallIcon className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleVideoCall}
-                    disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                    className="qorc-call-pill-btn"
-                    title="Video call"
-                  >
-                    <Video className="w-4 h-4" />
-                  </Button>
-                </>
-              )}
-              <ConversationOptionsPopover
-                username={selectedConversation}
-                isPinned={isPinned}
-                onTogglePin={onTogglePin}
-                blocked={isUserBlocked}
-                onToggleBlock={onToggleBlock}
-              />
-            </div>
-          )}
-
-        </div>
-      </div>
+      <ConversationHeader username={selectedConversation} onBack={onBack}>
+        {selectedConversation && !keyChangePending && !hasAttachedCall && (
+          <div className="qorc-call-pill" role="group" aria-label="Conversation actions">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleAudioCall}
+              disabled={!!currentCall || isUserBlocked || isBlockedByUser}
+              className="qorc-call-pill-btn"
+              title="Audio call"
+            >
+              <CallIcon className="w-4 h-4" />
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleVideoCall}
+              disabled={!!currentCall || isUserBlocked || isBlockedByUser}
+              className="qorc-call-pill-btn"
+              title="Video call"
+            >
+              <Video className="w-4 h-4" />
+            </Button>
+          </div>
+        )}
+      </ConversationHeader>
       {selectedConversation && recoveryWarning && (
         <div
           className="flex items-start gap-2 border-y border-amber-500/30 bg-amber-950/55 px-4 py-2.5 text-sm text-amber-100"
@@ -705,7 +683,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               <span className="qorc-thread-loading-spinner" aria-hidden="true" />
             </div>
           ) : null}
-          {messages.length === 0 && !isLoadingMore ? (
+          {messages.length === 0 && !isLoadingMore && initialHistoryComplete === selectedConversation ? (
             <div className="qorc-thread-empty">
               <strong>No messages yet. Start the conversation!</strong>
             </div>
@@ -722,6 +700,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     message={message}
                     smartReceipt={receiptToShow}
                     previousMessage={index > 0 ? messages[index - 1] : undefined}
+                    nextMessage={messages[index + 1]}
+                    animateArrival={arrivalIds.has(message.id)}
                     onReply={messageActionsDisabled ? undefined : handleReply}
                     onDelete={handleDeleteMessage}
                     onEdit={messageActionsDisabled ? undefined : handleEdit}
