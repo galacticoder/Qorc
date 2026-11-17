@@ -18,7 +18,6 @@ export async function offerToSaveServer(address: string, profile: ServerProfile 
     const options = {
       id,
       unstyled: true,
-      className: 'server-save-toast',
       style: { width: 'min(440px, calc(100vw - 32px))', maxWidth: 'calc(100vw - 32px)', fontFamily: 'var(--qorc-ui-font)' },
       duration: 10_000,
     };

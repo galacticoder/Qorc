@@ -89,11 +89,15 @@ let cachedServerPin: PinnedServerKeys | null = null;
 let cachedServerPinUrl: string | null = null;
 let serverPinMutationTail: Promise<void> = Promise.resolve();
 
+function serverPinStorageKey(url: string): string {
+  const digest = blake3(new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.SERVER_PQ_PIN}\0${url}`));
+  return `${STORAGE_PREFIXES.SERVER_PQ_PIN}${bytesToHex(digest)}`;
+}
+
 async function serverPinContext(): Promise<{ url: string; key: string }> {
   const url = normalizeToWss((await websocket.getServerUrl()) ?? '');
   if (!url) throw new Error('Server identity address unavailable');
-  const digest = blake3(new TextEncoder().encode(`${STORAGE_KEY_DOMAINS.SERVER_PQ_PIN}\0${url}`));
-  return { url, key: `${STORAGE_PREFIXES.SERVER_PQ_PIN}${bytesToHex(digest)}` };
+  return { url, key: serverPinStorageKey(url) };
 }
 
 async function assertServerPinContext(url: string): Promise<void> {
@@ -131,6 +135,18 @@ function serverKeysEqual(left: PinnedServerKeys, right: PinnedServerKeys): boole
 }
 
 export const PinnedServer = {
+  async inspect(address: string): Promise<PinnedServerKeys | null> {
+    const url = normalizeToWss(address);
+    if (!url) throw new Error('Server identity address unavailable');
+    return withServerPinMutation(async () => {
+      const raw = await storage.get(serverPinStorageKey(url));
+      if (raw === null) return null;
+      if (typeof raw !== 'string' || !raw.length || raw.length > 10_000) {
+        throw new Error('Pinned server identity record is invalid');
+      }
+      return normalizeServerKeys(JSON.parse(raw));
+    });
+  },
   async load(): Promise<PinnedServerKeys | null> {
     const { url, key } = await serverPinContext();
     return withServerPinMutation(async () => {

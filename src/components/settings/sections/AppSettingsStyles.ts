@@ -104,44 +104,31 @@ const APP_SETTINGS_CSS = `
       overflow-x: hidden;
       overflow-y: auto;
       overscroll-behavior-y: contain;
-      max-width: 880px;
-      margin-inline: auto;
-      padding: 0 28px 36px;
-      scrollbar-gutter: stable;
+      max-width: none;
+      margin-inline: 0;
+      padding: 16px var(--qorc-page-gutter) 36px;
       background: var(--settings-bg);
-      scrollbar-width: thin;
+      scrollbar-width: none;
     }
 
-    .settings-content::-webkit-scrollbar {
-      width: 6px;
-    }
-
-    .settings-content::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .settings-content::-webkit-scrollbar-thumb {
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--settings-muted) 24%, transparent);
-    }
+    .settings-content::-webkit-scrollbar { display: none; }
 
     .settings-header {
+      box-sizing: border-box;
+      height: var(--qorc-header-height);
+      min-height: var(--qorc-header-height);
+      max-height: var(--qorc-header-height);
       flex-shrink: 0;
       min-width: 0;
       display: flex;
       align-items: center;
       gap: 8px;
       width: 100%;
-      max-width: 880px;
-      margin-inline: auto;
-      padding: 24px 28px 12px;
-      background: var(--settings-bg);
-    }
-
-    .qorc-settings-host:not(.is-mobile) .settings-header,
-    .qorc-settings-host:not(.is-mobile) .settings-content {
       max-width: none;
       margin-inline: 0;
+      padding: 0 var(--qorc-header-gutter);
+      box-shadow: var(--qorc-header-divider);
+      background: var(--qorc-header-bg);
     }
 
     .settings-brand {
@@ -174,23 +161,7 @@ const APP_SETTINGS_CSS = `
 
     .settings-brand:focus { outline: none; }
 
-    .settings-back {
-      display: grid;
-      place-items: center;
-      width: 44px;
-      height: 44px;
-      flex: 0 0 44px;
-      margin-left: -10px;
-      padding: 0;
-      border: 0;
-      border-radius: 50%;
-      background: transparent;
-      color: var(--settings-text);
-    }
-
-    .settings-back:hover:where(html:not(.qorc-mobile) *) { background: var(--settings-hover); }
-    .settings-back:focus-visible:where(html:not(.qorc-mobile) *),
-    .settings-section-link:focus-visible:where(html:not(.qorc-mobile) *) { outline: 2px solid var(--qorc-accent); outline-offset: -2px; }
+    .settings-section-link:focus-visible { outline: 2px solid var(--qorc-accent); outline-offset: -2px; }
 
     .settings-section-menu {
       display: grid;
@@ -216,7 +187,7 @@ const APP_SETTINGS_CSS = `
       text-align: left;
     }
 
-    .settings-section-link:hover:where(html:not(.qorc-mobile) *) { background: var(--settings-link-hover); }
+    .settings-section-link:is(:hover, :active, [data-qorc-pressed]) { background: var(--settings-link-hover); }
     .settings-section-link > svg { flex: 0 0 auto; color: var(--settings-muted); }
     .settings-section-copy { display: grid; gap: 4px; min-width: 0; flex: 1; }
     .settings-section-copy strong { font-size: var(--settings-label-size); line-height: 1.35; font-weight: 600; }
@@ -280,8 +251,8 @@ const APP_SETTINGS_CSS = `
       background: var(--settings-link-bg);
     }
 
-    .setting-row:hover:where(html:not(.qorc-mobile) *),
-    .setting-row:focus-within:where(html:not(.qorc-mobile) *) {
+    .setting-row:is(:hover, :active, [data-qorc-pressed]),
+    .setting-row:focus-within {
       background: var(--settings-link-hover);
     }
 
@@ -336,51 +307,38 @@ const APP_SETTINGS_CSS = `
     }
 
     .navigation-layout-picker {
-      width: 164px;
-      height: 38px;
+      position: relative;
+      isolation: isolate;
+      width: 176px;
+      height: 44px;
       justify-self: end;
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-items: center;
-      gap: 0;
       padding: 0;
-      overflow: hidden;
-      border-radius: 9px;
+      border: 0;
+      border-radius: 8px;
       background: var(--settings-control);
     }
-
-    .navigation-layout-picker button {
-      width: 100%;
-      min-width: 0;
-      height: 38px;
-      border: 0;
-      border-radius: 0;
-      padding: 0 8px;
-      background: transparent;
-      color: var(--settings-muted);
-      font-size: 12px;
-      font-weight: 600;
+    .navigation-layout-picker::before {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      inset: 0 auto 0 0;
+      width: 50%;
+      border-radius: 8px;
+      background: var(--qorc-accent);
+      transition: transform 180ms cubic-bezier(.2,.8,.2,1);
     }
-
-    .navigation-layout-picker button:hover:where(html:not(.qorc-mobile) *) {
-      background: var(--settings-layout-hover);
-      color: var(--settings-text);
+    .navigation-layout-picker[data-layout="top"]::before { transform: translateX(100%); }
+    .navigation-layout-picker span { padding: 0 8px; color: var(--settings-muted); font-size: 14px; font-weight: 600; }
+    .navigation-layout-picker[data-layout="sidebar"] [data-choice="sidebar"],
+    .navigation-layout-picker[data-layout="top"] [data-choice="top"] { color: #fff; }
+    .navigation-layout-picker:focus-visible { outline: 2px solid var(--settings-muted); outline-offset: 3px; }
+    .qorc-settings-host .navigation-layout-picker:disabled { opacity: 1; cursor: progress; }
+    @media (prefers-reduced-motion: reduce) {
+      .navigation-layout-picker::before { transition: none; }
     }
-
-    .navigation-layout-picker button.is-active,
-    .navigation-layout-picker button.is-active:hover:where(html:not(.qorc-mobile) *) {
-      background: var(--qorc-accent, #7057c8);
-      color: #fff;
-    }
-
-    .navigation-layout-picker button:first-child {
-      border-radius: 9px 7px 7px 9px;
-    }
-
-    .navigation-layout-picker button:last-child {
-      border-radius: 7px 9px 9px 7px;
-    }
-
 
     .action,
     .danger-action,
@@ -419,7 +377,7 @@ const APP_SETTINGS_CSS = `
       background: transparent;
     }
 
-    .avatar-preview-button:focus-visible:where(html:not(.qorc-mobile) *) {
+    .avatar-preview-button:focus-visible {
       outline: 1px solid var(--settings-muted);
       outline-offset: 3px;
     }
@@ -465,8 +423,8 @@ const APP_SETTINGS_CSS = `
       transition: opacity .15s ease;
     }
 
-    .avatar-preview-button:hover:where(html:not(.qorc-mobile) *) .avatar-hover-overlay,
-    .avatar-preview-button:focus-visible:where(html:not(.qorc-mobile) *) .avatar-hover-overlay {
+    .avatar-preview-button:is(:hover, :active, [data-qorc-pressed]) .avatar-hover-overlay,
+    .avatar-preview-button:focus-visible .avatar-hover-overlay {
       opacity: 1;
     }
 
@@ -509,34 +467,7 @@ const APP_SETTINGS_CSS = `
       white-space: nowrap;
     }
 
-    .copy-username {
-      grid-column: 3;
-      width: 38px;
-      height: 38px;
-      flex: 0 0 38px;
-      display: grid;
-      place-items: center;
-      border-radius: 8px;
-      padding: 0;
-      background: var(--settings-control);
-      color: var(--settings-muted);
-    }
-
-    .copy-username:hover:where(html:not(.qorc-mobile) *),
-    .copy-username:focus-visible:where(html:not(.qorc-mobile) *) {
-      outline: none;
-      background: var(--settings-hover);
-      color: var(--settings-text);
-    }
-
-    .copy-username.copied {
-      color: var(--settings-success);
-    }
-
-    .copy-username svg {
-      width: 17px;
-      height: 17px;
-    }
+    .copy-username { grid-column: 3; }
 
     .account-actions {
       width: 100%;
@@ -556,18 +487,13 @@ const APP_SETTINGS_CSS = `
       gap: 12px;
     }
 
-    .qorc-settings-host.is-mobile .settings-account-footer {
-      margin-top: calc(var(--settings-section-link-gap) * 2.5);
-      padding-top: 0;
-    }
-
-    .qorc-settings-host:not(.is-mobile) .settings-account-footer {
+    .qorc-settings-host .settings-account-footer {
       margin-top: calc(var(--settings-section-link-gap) * 2.5);
       padding: 0;
     }
-    .qorc-settings-host:not(.is-mobile) .settings-account-footer .settings-account-action-copy,
-    .qorc-settings-host:not(.is-mobile) .settings-account-footer .account-action-controls,
-    .qorc-settings-host:not(.is-mobile) .settings-account-footer .danger-action { width: 100%; }
+    .settings-account-footer .settings-account-action-copy,
+    .settings-account-footer .account-action-controls,
+    .settings-account-footer .danger-action { width: 100%; }
 
     .action,
     .danger-action {
@@ -587,24 +513,36 @@ const APP_SETTINGS_CSS = `
     .settings-account-footer .action,
     .settings-account-footer .danger-action { min-height: 44px; }
 
-    .action {
-      background: var(--settings-control);
-      color: var(--settings-text);
+    .qorc-settings-host :is(.action, .danger-action) {
+      font-size: var(--settings-caption-size);
+      font-weight: 600;
+      line-height: 1;
     }
 
-    .action:hover:where(html:not(.qorc-mobile) *),
-    .action:focus-visible:where(html:not(.qorc-mobile) *) {
-      outline: none;
-      background: var(--settings-hover);
+    .action {
+      background: var(--qorc-accent);
+      color: #fff;
     }
+    .action.is-secondary {
+      background: var(--qorc-button-secondary-bg);
+      color: var(--qorc-button-secondary-text);
+    }
+    .action.is-secondary:is(:hover, :active, [data-qorc-pressed]),
+    .action.is-secondary:focus-visible { background: var(--qorc-button-secondary-hover); }
+
+    .action:not(.is-secondary):is(:hover, :active, [data-qorc-pressed]),
+    .action:not(.is-secondary):focus-visible {
+      background: color-mix(in srgb, var(--qorc-accent) 86%, black);
+    }
+    .action:focus-visible { outline: 2px solid var(--settings-muted); outline-offset: 3px; }
 
     .danger-action {
       background: var(--settings-danger);
       color: #fff;
     }
 
-    .danger-action:hover:where(html:not(.qorc-mobile) *),
-    .danger-action:focus-visible:where(html:not(.qorc-mobile) *) {
+    .danger-action:is(:hover, :active, [data-qorc-pressed]),
+    .danger-action:focus-visible {
       outline: none;
       background: var(--settings-danger-hover);
     }
@@ -627,6 +565,8 @@ const APP_SETTINGS_CSS = `
       padding: 0 7px;
       background: transparent;
     }
+
+    .qorc-settings-host .switch.is-saving:disabled { opacity: 1; cursor: progress; }
 
     .switch::after {
       content: "";
@@ -657,7 +597,7 @@ const APP_SETTINGS_CSS = `
     }
 
     .switch.on::before { transform: translateX(16px); }
-    .switch:focus-visible:where(html:not(.qorc-mobile) *) { outline: 1px solid var(--settings-muted); outline-offset: 2px; }
+    .switch:focus-visible { outline: 1px solid var(--settings-muted); outline-offset: 2px; }
     .qorc-settings-host .qorc-select { min-height: 44px; }
 
     .device-select {
@@ -709,17 +649,13 @@ const APP_SETTINGS_CSS = `
       margin: 0;
     }
 
-    .blocked-users-screen .settings-header,
-    .blocked-users-screen .settings-content { max-width: 780px; }
+    .blocked-users-screen .settings-content > .settings-section-link { margin-bottom: 16px; }
+
+
     .blocked-users-header .settings-brand { flex: 1; }
 
     .blocked-user-row {
       grid-template-columns: minmax(0, 1fr) auto;
-    }
-
-    .blocked-user-row .action:hover:where(html:not(.qorc-mobile) *),
-    .blocked-user-row .action:focus-visible:where(html:not(.qorc-mobile) *) {
-      background: var(--settings-layout-hover);
     }
 
     .blocked-user-identity {
@@ -854,8 +790,8 @@ const APP_SETTINGS_CSS = `
       transition: background .15s ease, color .15s ease;
     }
 
-    .qorc-unblock-close:hover:where(html:not(.qorc-mobile) *),
-    .qorc-unblock-close:focus-visible:where(html:not(.qorc-mobile) *) {
+    .qorc-unblock-close:is(:hover, :active, [data-qorc-pressed]),
+    .qorc-unblock-close:focus-visible {
       outline: none;
       background: var(--settings-hover);
       color: var(--settings-text);
@@ -918,19 +854,19 @@ const APP_SETTINGS_CSS = `
       border: 0;
       border-radius: 8px;
       padding: 0 14px;
-      background: var(--settings-control);
-      color: var(--settings-text);
+      background: var(--qorc-accent);
+      color: #fff;
       font-size: 12.5px;
       font-weight: 650;
       cursor: pointer;
       transition: background .15s ease, color .15s ease, opacity .15s ease;
     }
 
-    .qorc-unblock-confirm:hover:where(html:not(.qorc-mobile) *),
-    .qorc-unblock-confirm:focus-visible:where(html:not(.qorc-mobile) *) {
-      outline: none;
-      background: var(--settings-layout-hover);
+    .qorc-unblock-confirm:is(:hover, :active, [data-qorc-pressed]),
+    .qorc-unblock-confirm:focus-visible {
+      background: color-mix(in srgb, var(--qorc-accent) 86%, black);
     }
+    .qorc-unblock-confirm:focus-visible { outline: 2px solid var(--settings-muted); outline-offset: 3px; }
 
     .qorc-unblock-close:disabled,
     .qorc-unblock-confirm:disabled {
@@ -944,6 +880,11 @@ const APP_SETTINGS_CSS = `
       animation: qorc-blocked-spin .7s linear infinite;
     }
 
+    @container settings-panel (min-width: 581px) {
+      .setting-row.setting-row-destructive { grid-template-columns: minmax(240px, 1fr) auto; gap: 24px; }
+      .settings-clear-controls { justify-self: end; }
+    }
+
     @container settings-panel (max-width: 580px) {
       .account-preview {
         --settings-avatar-size: 256px;
@@ -952,7 +893,6 @@ const APP_SETTINGS_CSS = `
 
       .account-username { font-size: 28px; }
       .account-name-row { grid-template-columns: 44px minmax(0, auto) 44px; }
-      .copy-username { width: 44px; height: 44px; }
       .setting-row { gap: 16px; padding: 14px 12px; }
       .setting-row:has(.settings-refresh-button),
       .setting-row:has(.navigation-layout-picker) { grid-template-columns: minmax(0, 1fr); gap: 10px; }
@@ -971,8 +911,7 @@ const APP_SETTINGS_CSS = `
     }
 
     @media (max-width: 760px) {
-      .settings-header { padding: 18px 20px 8px; }
-      .settings-content { padding: 0 20px 24px; }
+      .settings-content { padding-bottom: 24px; }
     }
 
 `;

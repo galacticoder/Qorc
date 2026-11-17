@@ -34,7 +34,7 @@ and `REDIS_PASSWORD` values.
 | `PORT` | Required by the runtime, Docker supplies `3000` | `server/config/config.js`, launchers | HTTPS listen port. |
 | `BIND_ADDRESS` | `127.0.0.1` | `server/bootstrap/server-bootstrap.js` | HTTPS bind interface. Docker sets `0.0.0.0`. |
 | `ALLOWED_CORS_ORIGINS` | Empty in the runtime, launcher supplies localhost development origins | `server/config/constants.js` | Comma separated browser origins. The fixed first-party Tauri origins are always included. Unknown browser origins receive no CORS grant and websocket upgrades with an unknown `Origin` are rejected. |
-| `HTTPS_REQUEST_TIMEOUT_MS` | `180000`, 5000-300000 | `server/bootstrap/server-bootstrap.js` | Complete HTTPS request timeout. The default admits a fixed 2 MiB anonymous PIR upload over a fresh Tor circuit. |
+| `HTTPS_REQUEST_TIMEOUT_MS` | `180000`, 5000-300000 | `server/bootstrap/server-bootstrap.js` | Complete HTTPS request timeout. The default admits a fixed 1600 KiB anonymous PIR upload over a fresh Tor circuit. |
 | `HTTPS_HEADERS_TIMEOUT_MS` | `15000`, 5000 to request timeout | same | Header receive timeout. |
 | `HTTPS_KEEP_ALIVE_TIMEOUT_MS` | `5000`, 1000-30000 | same | Idle keep-alive timeout. |
 | `HTTPS_SOCKET_IDLE_TIMEOUT_MS` | `120000`, 30000-600000 | same | General socket idle timeout. |
@@ -113,15 +113,16 @@ the password does not appear in command arguments. It is not an operator setting
 | ---- | --------------- | ----- | ------- |
 | `PQ_ANONYMOUS_HTTP_MAX_INFLIGHT` | `8`, 5-16 | `server/routes/pq-anonymous-http.js` | Concurrent admitted replay/KEM/decrypt/dispatch/response operations per process. |
 | `PQ_ANONYMOUS_HTTP_MAX_RPS` | `100`, 1-2000 | same | Process wide token bucket for work-valid requests before KEM processing. |
-| `PQ_ANONYMOUS_HTTP_BODY_MAX_INFLIGHT` | `32`, 1-256 | same | Pre-parser cap on simultaneous fixed-cell uploads, preventing unauthenticated 2 MiB PIR bodies from accumulating without bound. Excess sockets are closed before body buffering. |
-| `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 64 KiB opaque failure writes, excess failures close without allocating a response. |
+| `PQ_ANONYMOUS_HTTP_BODY_MAX_INFLIGHT` | `32`, 1-256 | same | Pre-parser cap on simultaneous fixed-cell uploads, preventing unauthenticated 1600 KiB PIR bodies from accumulating without bound. Excess sockets are closed before body buffering. |
+| `PQ_ANONYMOUS_HTTP_MAX_FAILURE_INFLIGHT` | `16`, 1-64 | same | Concurrent fixed 24 KiB opaque failure writes, excess failures close without allocating a response. |
 | `PQ_ANONYMOUS_HTTP_MAX_FAILURE_RPS` | `200`, 1-4000 | same | Process wide token bucket for opaque failure writes. |
 | `PQ_ANONYMOUS_HTTP_REJECT_LOG_MAX_RPS` | `5`, 1-20 | same | Process-wide ceiling for fixed, non-attacker-controlled anonymous transport rejection diagnostics. |
 
-Anonymous response transfers use a fixed 180-second idle limit and a size-based
-deadline of 180 seconds plus one second per 16 KiB, rounded up, with a minimum
-body budget of five minutes for slow but progressing transfers. An 8.5 MiB
-discovery response therefore has a 724-second body budget. The response writer
+Anonymous response transfers use a fixed 180-second idle limit. Avatar fetches
+retain a 356-second body budget and discovery buckets retain a 580-second body
+budget, independent of their padding sizes. Other replies use 180 seconds plus
+one second per 16 KiB, rounded up, with a minimum body budget of five minutes
+for slow but progressing transfers. The response writer
 uses 16 KiB chunks and applies the same idle budget to its underlying HTTPS
 socket. The native client disables the HTTP library's shorter Linux TCP user
 timeout, request cancellation and the explicit transfer deadlines own its
@@ -129,7 +130,7 @@ lifetime, including when Tor applies SOCKS upload backpressure. The native clien
 allows up to 150 seconds to establish the isolated Tor connection, within its
 180-second response-header budget, separately from the body budget. These
 limits are protocol policy, not environment settings. A discovery lookup fetches
-four padded responses (34 MiB total) and cancels outstanding downloads when it
+four padded responses (24,640 KiB total) and cancels outstanding downloads when it
 fails, changes account or authenticated server identity, crosses a linked/unlinked
 privacy boundary, or reaches its 20-minute overall deadline. A WebSocket reconnect
 does not cancel independent anonymous HTTP transfers. Their authenticated public

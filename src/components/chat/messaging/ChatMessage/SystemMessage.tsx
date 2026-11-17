@@ -38,7 +38,7 @@ export function SystemMessage({ content, actions, isError, callType, showCallIco
                   'qorc-system-message-action ml-1 cursor-pointer px-2 py-0.5 rounded-md font-semibold',
                   isError
                     ? 'qorc-system-message-action--error qorc-danger-button text-white'
-                    : 'border border-border bg-background text-foreground hover:bg-accent'
+                    : 'qorc-button-primary'
                 )}
                 style={{ fontSize: '0.7rem' }}
               >

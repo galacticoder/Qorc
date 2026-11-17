@@ -26,7 +26,7 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
   useLayoutEffect(() => { latestBack.current = onBack; });
   const goBack = useCallback(() => {
     if (closing.current) return;
-    const animation = register && !mobile ? null : animateView(content.current, 'back', true);
+    const animation = register && !mobile ? null : animateView(content.current, 'back', true, mobile ? 'slide' : 'fade');
     if (!animation) { latestBack.current(); return; }
     closing.current = true;
     exit.current = animation;
@@ -47,8 +47,9 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
     const previousFocus = document.activeElement;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    content.current?.querySelector<HTMLButtonElement>('button')?.focus();
-    const entrance = register && !mobile ? null : animateView(content.current);
+    const entrance = register && !mobile ? null : animateView(content.current, 'forward', false, mobile ? 'slide' : 'fade');
+    content.current?.setAttribute('data-screen-ready', '');
+    content.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
     return () => {
       entrance?.cancel();
       const animation = exit.current;
@@ -59,7 +60,7 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
       if (root) root.inert = !!wasInert;
       document.body.style.overflow = overflow;
       queueMicrotask(() => {
-        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected && !previousFocus.closest('[inert]')) previousFocus.focus({ preventScroll: true });
       });
     };
   }, [open, register, mobile]);

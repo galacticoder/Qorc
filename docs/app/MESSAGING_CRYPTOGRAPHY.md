@@ -209,14 +209,23 @@ Code:
 
 Discovery lookup, VOPRF evaluation, avatar storage/fetch, and tagged-spool
 index/PIR retrieval use one outer `POST /api/anonymous` route. The operation and
-JSON body are inside a padded authenticated-encryption envelope. Requests derive
+body are inside a padded authenticated-encryption envelope. Bulk opaque fields
+use binary encoding; the operation metadata retains its original JSON values. Requests derive
 their key from an encapsulation to the authenticated server ML-KEM-1024 key plus
 X25519. Responses add a fresh server encapsulation to the request's ephemeral
 client ML-KEM key and are signed by the pinned server ML-DSA-87 key before the
 client decapsulates them.
 
-The wire has three request classes—64 KiB, 512 KiB, and 2 MiB—and four response
-classes: 64 KiB, 512 KiB, 4 MiB, and 8.5 MiB. Ten operations share this route,
+Wire version 5 has three request classes: 8 KiB, 272 KiB, and 1600 KiB. Its six
+response classes are 24 KiB, 256 KiB, 768 KiB, 1408 KiB, 2576 KiB, and 6160 KiB.
+Avatar and discovery body budgets remain 356 and 580 seconds respectively,
+independent of the smaller outer padding.
+All successful and authenticated error responses use the operation’s fixed class.
+Tag indices retain all 6061 possible full tag/probe pairs in binary. Key
+transparency retains all 4096 records and their original JSON representation.
+Discovery retains all 64 slots, avatar GET retains all ten blobs, and PIR retains
+the full query, public parameters and answer. No ciphertext compression or
+content-dependent size selection is used. Client and server must update together. Ten operations share this route,
 including key-transparency sync and append. Tag-index and PIR retrieval use a
 dedicated Tor daemon, SOCKS listener, circuit pool, and single-request queue,
 the remaining anonymous operations use the primary Tor daemon. A fresh Tor SOCKS isolation credential and
@@ -301,3 +310,12 @@ messages. Loading another page replaces the renderer's bounded metadata window,
 stored private text remains in native content records rather than accumulating
 in JavaScript. See `docs/app/LOCAL_DATA_SECURITY.md` for the account master,
 database key hierarchy, Signal storage, token pools, and threat boundaries.
+
+Contact transition verification also retains at most 16 public verified prefixes
+in memory, each limited to 4096 transitions. Every lookup still authenticates
+the fresh global head and delta. Cache reuse requires an identical full prefix
+(including recomputed signed-update and authorization hashes) and matching
+account, server pins, lifecycle generation, signer and verification policy.
+Logout, security incidents, context changes and verification failures clear or
+invalidate the corresponding results. No private queries, keys, nonces or
+persisted verification shortcuts are cached.

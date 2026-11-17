@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useTheme } from '../contexts/ThemeContext';
+import { useDesktopZoom } from '../hooks/useDesktopZoom';
 import { Login } from "../components/chat/Login";
 import { PeerIdentityVerificationAlert } from "../components/chat/PeerIdentityVerificationAlert";
 import { User } from "../components/chat/messaging/UserList";
@@ -519,10 +520,8 @@ const ChatApp: React.FC = () => {
     try {
       if (nextBlocked) {
         await blockingSystem.blockUser(username);
-        toast.success('User blocked');
       } else {
         await blockingSystem.unblockUser(username);
-        toast.success('User unblocked');
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to update block list');
@@ -546,7 +545,6 @@ const ChatApp: React.FC = () => {
       throw new Error('That user is already blocked.');
     }
     await blockingSystem.blockUser(username);
-    toast.success('User blocked');
   }, []);
 
   const {
@@ -869,6 +867,31 @@ const ChatApp: React.FC = () => {
     return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
   }, []);
 
+  const isFullyAuthenticated = Authentication.isLoggedIn
+    && Authentication.accountAuthenticated
+    && Authentication.vaultReady
+    && !Authentication.showPassphrasePrompt
+    && !Authentication.showPasswordPrompt;
+  const authPromptVisible = Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt;
+  const showValidationScreen = (
+    Authentication.tokenValidationInProgress
+    || serverEntryPreflightInProgress
+    || Boolean(recoveryConnectionIssue)
+  ) && !isFullyAuthenticated && !authPromptVisible;
+  const showLoginScreen = !showValidationScreen && (
+    !Authentication.isLoggedIn ||
+    !Authentication.accountAuthenticated ||
+    Authentication.showPassphrasePrompt ||
+    Authentication.showPasswordPrompt
+  );
+  const mainScreenVisible = !isResumingFromBackground
+    && (serverUrlResolved || !!selectedServerUrl)
+    && !showServerSetup && !!selectedServerUrl
+    && !showValidationScreen && !showLoginScreen
+    && Database.dbInitialized && Authentication.vaultReady
+    && Database.initialDataLoaded && conversationsLoaded && startupAvatarsLoaded;
+  useDesktopZoom(mainScreenVisible);
+
   if (isResumingFromBackground) {
     return <FullscreenSpinner />;
   }
@@ -907,24 +930,6 @@ const ChatApp: React.FC = () => {
       </div>
     );
   }
-
-  const isFullyAuthenticated = Authentication.isLoggedIn
-    && Authentication.accountAuthenticated
-    && Authentication.vaultReady
-    && !Authentication.showPassphrasePrompt
-    && !Authentication.showPasswordPrompt;
-  const authPromptVisible = Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt;
-  const showValidationScreen = (
-    Authentication.tokenValidationInProgress
-    || serverEntryPreflightInProgress
-    || Boolean(recoveryConnectionIssue)
-  ) && !isFullyAuthenticated && !authPromptVisible;
-  const showLoginScreen = !showValidationScreen && (
-    !Authentication.isLoggedIn ||
-    !Authentication.accountAuthenticated ||
-    Authentication.showPassphrasePrompt ||
-    Authentication.showPasswordPrompt
-  );
 
   if (showValidationScreen) {
     return (
@@ -1107,6 +1112,7 @@ const ChatApp: React.FC = () => {
                     await Authentication.logout(Database.secureDBRef, '', { resetAllLocalData: true });
                   }}
                   onOpenBlockConversationChooser={() => openConversationDialog('block')}
+                  blockConversationChooserOpen={showNewChatInput && conversationDialogMode === 'block'}
                 />
               ) : <SettingsSkeleton />
             )

@@ -242,6 +242,11 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
 
+            #[cfg(desktop)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_zoom(1.3)?;
+            }
+
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.with_webview(|webview| {
@@ -629,7 +634,6 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     // Show main window
     #[cfg(desktop)]
     if let Some(window) = app_handle.get_webview_window("main") {
-        window.set_zoom(1.75)?;
         window.show()?;
     }
 

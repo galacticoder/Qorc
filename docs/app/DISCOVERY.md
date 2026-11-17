@@ -20,7 +20,7 @@ default deployment. The exact limits are documented below and in
 The client normalizes a valid handle and hashes it with BLAKE3 to a 32-byte
 pseudonym. It blinds that pseudonym with RFC 9497 VOPRF over Ristretto255 and
 sends only the blinded point as the encrypted `oprf/evaluate` operation inside
-`POST /api/anonymous`. The outer request is a 64 KiB hybrid-PQ envelope sent on
+`POST /api/anonymous`. The outer request is an 8 KiB hybrid-PQ envelope sent on
 a fresh Tor SOCKS-isolated connection.
 
 The response includes a DLEQ proof and public key. The client verifies both and
@@ -196,8 +196,8 @@ Code:
 
 ## Avoiding The Lookup
 
-A lookup is expensive , four requests of one 8.5 MiB bucket each, 64 blobs per
-bucket, 60-100s over Tor in practice , so the result is saved per peer and
+A lookup is expensive , four requests of one 6160 KiB bucket each, 64 blobs per
+bucket, with latency depending on the Tor path, so the result is saved per peer and
 reused when it is provably still current.
 
 `src/lib/discovery/persisted-discovery-material.ts` stores the validated material
@@ -274,12 +274,12 @@ A lookup issues four such requests, so an operator that can group them by timing
 recovers the four-bucket set. Circuit isolation and shuffled order raise the
 cost of that grouping, they do not make it impossible.
 
-Before decryption, the outer route exposes only request timing and a 64 KiB
+Before decryption, the outer route exposes only request timing and an 8 KiB
 request class for discovery operations. The destination server decrypts the
 operation and therefore still learns whether it is evaluating OPRF, serving a
 manifest, or serving a bucket, plus the operation body described above. A bucket
-response is always 8,912,896 bytes, 8.5 MiB, and a manifest/OPRF response is
-always 64 KiB, so the response class remains observable to the network path.
+response is always 6,307,840 bytes, 6160 KiB, and a manifest/OPRF response is
+always 24 KiB, so the response class remains observable to the network path.
 
 The three cover lookup buckets hide which single requested bucket is real from
 an observer that cannot derive the token. They do not protect against an

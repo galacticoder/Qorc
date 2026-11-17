@@ -1,3 +1,4 @@
+import { encodeAnonymousRequest, decodeAnonymousResponse } from '../../../shared/anonymous-http-codec.js';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { PostQuantumRandom } from '../cryptography/random';
@@ -183,7 +184,7 @@ function decodeRawResponse(value: ArrayBuffer | Uint8Array): Uint8Array {
   throw new Error('Invalid native anonymous transport response');
 }
 
-function decodePaddedResponse(plaintext: Uint8Array): unknown {
+function decodePaddedResponse(operation: AnonymousHttpOperation, plaintext: Uint8Array): unknown {
   if (plaintext.length < 5) throw new Error('Invalid anonymous transport response');
   const jsonLength = new DataView(
     plaintext.buffer,
@@ -193,10 +194,7 @@ function decodePaddedResponse(plaintext: Uint8Array): unknown {
   if (jsonLength < 2 || jsonLength > plaintext.length - 4) {
     throw new Error('Invalid anonymous transport response');
   }
-  const decoded = new TextDecoder('utf-8', { fatal: true }).decode(
-    plaintext.subarray(4, 4 + jsonLength)
-  );
-  const wrapper = JSON.parse(decoded) as unknown;
+  const wrapper = decodeAnonymousResponse(operation, plaintext.subarray(4, 4 + jsonLength)) as unknown;
   if (
     !isPlainRecord(wrapper) ||
     !hasExactKeys(wrapper, ['payload', 'version']) ||
@@ -307,11 +305,11 @@ async function executeAnonymousHttpRequest(
       32
     );
 
-    const encodedRequest = new TextEncoder().encode(JSON.stringify({
+    const encodedRequest = encodeAnonymousRequest({
       version: PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL,
       operation,
       body,
-    }));
+    });
     try {
       if (encodedRequest.length > requestPlaintextBytes - 4) {
         throw new Error('Anonymous transport request exceeds its fixed size class');
@@ -427,7 +425,7 @@ async function executeAnonymousHttpRequest(
     await assertCurrentServerContext(serverContext);
     signal.throwIfAborted();
     diagnostics?.phase('response-parse');
-    return decodePaddedResponse(plaintextResponse);
+    return decodePaddedResponse(operation, plaintextResponse);
   } finally {
     requestId.fill(0);
     fingerprint.fill(0);

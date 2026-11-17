@@ -7,9 +7,7 @@ import {
   ArrowLeft,
   Bell,
   Camera,
-  Check,
   ChevronRight,
-  Copy,
   ExternalLink,
   FileText,
   Headphones,
@@ -25,6 +23,7 @@ import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 import { nativeCamera, nativeMicrophone, notifications as tauriNotifications, system, tray } from '../../lib/tauri-bindings';
 import { copyTextToClipboard } from '../../lib/clipboard';
+import { CopyIconButton } from '../ui/CopyIconButton';
 import { isAndroidPlatform } from '../../lib/runtime/platform';
 import { useMobileLayout } from '../../hooks/useMobileLayout';
 import { useAppBack } from '../../hooks/useAppBack';
@@ -76,6 +75,7 @@ interface AppSettingsProps {
   onClearLocalData: () => Promise<void>;
   onResetAllLocalData: () => Promise<void>;
   onOpenBlockConversationChooser: () => void;
+  blockConversationChooserOpen?: boolean;
 }
 
 interface NotificationSettings {
@@ -146,7 +146,7 @@ function SettingsActionDialog({ title, description, confirmLabel, busyLabel, bus
         {busy && <p className="settings-action-dialog-status" role="status">{busyLabel}</p>}
       </div>
       <div className="settings-action-dialog-buttons">
-        <button className="action" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button className="action is-secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
         <button className="danger-action" type="button" disabled={busy} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button>
       </div>
     </div>
@@ -175,20 +175,22 @@ function SwitchButton({
   checked,
   label,
   disabled,
+  pending = false,
   onChange,
 }: {
   checked: boolean;
   label: string;
   disabled?: boolean;
+  pending?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
     <button
-      className={`switch ${checked ? 'on' : ''}`}
+      className={`switch ${checked ? 'on' : ''}${pending && !disabled ? ' is-saving' : ''}`}
       type="button"
       role="switch"
       aria-checked={checked}
-      disabled={disabled}
+      disabled={disabled || pending}
       aria-label={`${label} ${checked ? 'enabled' : 'disabled'}`}
       onClick={() => onChange(!checked)}
     />
@@ -325,6 +327,7 @@ export const AppSettings = React.memo(function AppSettings({
   onClearLocalData,
   onResetAllLocalData,
   onOpenBlockConversationChooser,
+  blockConversationChooserOpen = false,
 }: AppSettingsProps) {
   const { theme, resolvedTheme, setTheme } = useTheme();
   const mobile = useMobileLayout();
@@ -379,7 +382,7 @@ export const AppSettings = React.memo(function AppSettings({
     if (previousSectionRef.current === sectionId) return;
     previousSectionRef.current = sectionId;
     if (!mobile) return;
-    const animation = animateView(settingsContentRef.current, sectionId ? 'forward' : 'back');
+    const animation = animateView(settingsContentRef.current, sectionId ? 'forward' : 'back', false, 'slide');
     return () => animation?.cancel();
   }, [mobile, sectionId]);
 
@@ -415,6 +418,10 @@ export const AppSettings = React.memo(function AppSettings({
       setBlockedUsersLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (blockedUsersOpen && !blockConversationChooserOpen) void loadBlockedUsers();
+  }, [blockedUsersOpen, blockConversationChooserOpen, loadBlockedUsers]);
 
   const refreshMediaDevices = useCallback(async () => {
     if (devicesLoadingRef.current) return;
@@ -756,15 +763,13 @@ export const AppSettings = React.memo(function AppSettings({
                     />
                     <div className="account-name-row">
                       <div className="account-username">{displayUsername}</div>
-                      <button
-                        className={`copy-username ${copiedUsername ? 'copied' : ''}`}
-                        type="button"
+                      <CopyIconButton
+                        className="copy-username"
+                        copied={copiedUsername}
                         aria-label={copiedUsername ? 'Username copied' : 'Copy username'}
                         data-copy-username={copyUsername}
                         onClick={handleCopyUsername}
-                      >
-                        {copiedUsername ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                      </button>
+                      />
                       <SettingFeedback state={feedback.states.avatar} />
                     </div>
 
@@ -792,24 +797,12 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-label">Navigation layout<SettingFeedback state={feedback.states['navigation']} /></div>
                       <div className="setting-description">Choose the collapsible sidebar or compact navigation at the top.</div>
                     </div>
-                    <div className="navigation-layout-picker" role="group" aria-label="Navigation layout">
-                      <button
-                        type="button"
-                        className={navigationLayout === 'sidebar' ? 'is-active' : ''}
-                        aria-pressed={navigationLayout === 'sidebar'} disabled={feedback.busy}
-                        onClick={() => handleNavigationLayoutChange('sidebar')}
-                      >
-                        Sidebar
-                      </button>
-                      <button
-                        type="button"
-                        className={navigationLayout === 'top' ? 'is-active' : ''}
-                        aria-pressed={navigationLayout === 'top'} disabled={feedback.busy}
-                        onClick={() => handleNavigationLayoutChange('top')}
-                      >
-                        Top
-                      </button>
-                    </div>
+                    <button className="navigation-layout-picker" type="button" role="switch" aria-label="Top navigation"
+                      aria-checked={navigationLayout === 'top'} data-layout={navigationLayout} disabled={feedback.busy}
+                      onClick={() => handleNavigationLayoutChange(navigationLayout === 'top' ? 'sidebar' : 'top')}>
+                      <span data-choice="sidebar">Sidebar</span>
+                      <span data-choice="top">Top</span>
+                    </button>
                   </div>}
                   <div className="setting-row">
                     <SettingCopy>
@@ -826,7 +819,7 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-label">{android ? 'Keep running in background' : 'Minimize to system tray on close'}<SettingFeedback state={feedback.states.background} /></div>
                       <div className="setting-description">{android ? 'Keep messages and calls connected after closing the app.' : 'Closing the window keeps Qorc running in the background.'}</div>
                     </div>
-                    <SwitchButton checked={closeToTray} disabled={isTrayLoading || feedback.busy} label={android ? 'Keep running in background' : 'Minimize to system tray'} onChange={handleCloseToTrayChange} />
+                    <SwitchButton checked={closeToTray} pending={feedback.busy} disabled={isTrayLoading} label={android ? 'Keep running in background' : 'Minimize to system tray'} onChange={handleCloseToTrayChange} />
                   </div>}
                   {android && <div className="setting-row">
                     <div>
@@ -857,7 +850,7 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-label">{mobile ? 'Notifications' : 'Desktop Notifications'}<SettingFeedback state={feedback.states.notifications} /></div>
                       <div className="setting-description">Show alerts for unmuted messages and calls.</div>
                     </SettingCopy>
-                    <SwitchButton checked={notifications.desktop && !(doNotDisturb.messages && doNotDisturb.calls)} disabled={feedback.busy || (doNotDisturb.messages && doNotDisturb.calls)} label={mobile ? 'Notifications' : 'Desktop Notifications'} onChange={handleDesktopNotificationsToggle} />
+                    <SwitchButton checked={notifications.desktop && !(doNotDisturb.messages && doNotDisturb.calls)} pending={feedback.busy} disabled={doNotDisturb.messages && doNotDisturb.calls} label={mobile ? 'Notifications' : 'Desktop Notifications'} onChange={handleDesktopNotificationsToggle} />
                   </div>
                   <h3 className="settings-subsection-title">Do Not Disturb</h3>
                   <div className="setting-row">
@@ -865,14 +858,14 @@ export const AppSettings = React.memo(function AppSettings({
                       <div className="setting-label">Mute message alerts<SettingFeedback state={feedback.states['mute-messages']} /></div>
                       <div className="setting-description">Silence message alerts while keeping messages available in your chats.</div>
                     </SettingCopy>
-                    <SwitchButton checked={doNotDisturb.messages} disabled={feedback.busy} label="Mute message alerts" onChange={checked => handleDoNotDisturb('messages', checked)} />
+                    <SwitchButton checked={doNotDisturb.messages} pending={feedback.busy} label="Mute message alerts" onChange={checked => handleDoNotDisturb('messages', checked)} />
                   </div>
                   <div className="setting-row">
                     <SettingCopy>
                       <div className="setting-label">Mute call alerts<SettingFeedback state={feedback.states['mute-calls']} /></div>
                       <div className="setting-description">Silence incoming call alerts without changing your message alerts.</div>
                     </SettingCopy>
-                    <SwitchButton checked={doNotDisturb.calls} disabled={feedback.busy} label="Mute call alerts" onChange={checked => handleDoNotDisturb('calls', checked)} />
+                    <SwitchButton checked={doNotDisturb.calls} pending={feedback.busy} label="Mute call alerts" onChange={checked => handleDoNotDisturb('calls', checked)} />
                   </div>
                 </div>
               </div>
@@ -961,7 +954,7 @@ export const AppSettings = React.memo(function AppSettings({
                 <div className="setting-row setting-row-destructive">
                   <div><div className="setting-label">Reset this Qorc installation</div><div className="setting-description">Delete every local account, message, attachment, encryption key, saved server and app setting. Accounts on the server and exported copies remain.</div></div>
                   <div className="settings-clear-controls">
-                    <button className="danger-action" type="button" disabled={actionBusy || feedback.busy} onClick={() => openActionConfirmation('reset')}><Trash2 aria-hidden="true" /><span>Reset All Local Qorc Data</span></button>
+                    <button className="danger-action" type="button" disabled={actionBusy || feedback.busy} onClick={() => openActionConfirmation('reset')}><Trash2 aria-hidden="true" /><span>Clear All Data</span></button>
                   </div>
                 </div>
               </div>
@@ -978,16 +971,16 @@ export const AppSettings = React.memo(function AppSettings({
 
         {confirmationAction && <SettingsActionDialog
           themeClass={themeClass} busy={actionBusy} error={actionError}
-          title={confirmationAction === 'logout' ? 'Log out?' : confirmationAction === 'clear' ? 'Clear this account’s local data?' : 'Reset all local Qorc data?'}
+          title={confirmationAction === 'logout' ? 'Log out?' : confirmationAction === 'clear' ? 'Clear this account’s local data?' : 'Clear all local data?'}
           description={confirmationAction === 'logout' ? 'Sign out of Qorc on this device. Your local messages and files will be kept.'
             : confirmationAction === 'clear' ? `Permanently delete local messages, attachments, encryption keys, saved sign-in and settings for ${displayUsername}, then sign out. Other local accounts and your account on the server remain. This cannot be undone.`
             : `Permanently delete every local account, message, attachment, encryption key, saved server and app setting. Server accounts and exported copies remain. ${android ? 'Qorc will close; reopen it to start from setup.' : 'Qorc will restart and return to setup.'} This cannot be undone.`}
-          confirmLabel={confirmationAction === 'logout' ? 'Log Out' : confirmationAction === 'clear' ? 'Delete local data' : 'Reset all local data'}
+          confirmLabel={confirmationAction === 'logout' ? 'Log Out' : confirmationAction === 'clear' ? 'Delete local data' : 'Clear All Data'}
           busyLabel={confirmationAction === 'logout' ? 'Logging out…' : confirmationAction === 'clear' ? 'Deleting…' : 'Resetting…'}
           onCancel={closeActionConfirmation} onConfirm={confirmAction}
         />}
         <SavedServersScreen open={savedServersOpen} onOpenChange={setSavedServersOpen} />
-        {blockedUsersOpen && <StandaloneScreen open onBack={closeBlockedUsers} className="qorc-blocked-users-screen" labelledBy={blockedUsersTitleId}>
+        {blockedUsersOpen && <StandaloneScreen open={!blockConversationChooserOpen} onBack={closeBlockedUsers} className="qorc-blocked-users-screen" labelledBy={blockedUsersTitleId}>
           <div className={`qorc-settings-host ${themeClass}${mobile ? ' is-mobile' : ''}`}>
             <main className="settings-screen blocked-users-screen" inert={!!unblockTarget}>
               <header className="settings-header blocked-users-header">
@@ -997,7 +990,7 @@ export const AppSettings = React.memo(function AppSettings({
                 <h1 className="settings-brand" id={blockedUsersTitleId}><strong>Blocked users</strong></h1>
               </header>
               <section className="settings-content" aria-label="Blocked users list">
-                <button className="settings-section-link" type="button" aria-label="Block a user" onClick={() => { setBlockedUsersOpen(false); onOpenBlockConversationChooser(); }}>
+                <button className="settings-section-link" type="button" aria-label="Block a user" onClick={onOpenBlockConversationChooser}>
                   <Ban size={22} aria-hidden="true" />
                   <span className="settings-section-copy"><strong>Block a user</strong></span>
                   <ChevronRight size={20} aria-hidden="true" />

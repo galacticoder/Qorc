@@ -108,6 +108,11 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
   const [textMaxWidth, setTextMaxWidth] = useState(420);
   const [showSentTime, setShowSentTime] = useState(false);
   useEffect(() => setShowSentTime(false), [message.id]);
+  useEffect(() => {
+    if (!showSentTime) return;
+    const timeout = window.setTimeout(() => setShowSentTime(false), 3000);
+    return () => window.clearTimeout(timeout);
+  }, [showSentTime, message.id]);
   const { openPicker, openPickerOrigin, closePicker, isPickerOpen } = useEmojiPicker();
 
   const messageTriggerIdRef = useRef<string | null>(null);

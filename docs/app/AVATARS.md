@@ -94,7 +94,7 @@ What rides inside the encrypted discovery keys-blob is only an `AvatarRef`:
 
 The avatar bytes themselves go to the content store as a PURB:
 - **PURB (Padded Uniform Random Blob):** the avatar (`{data, mimeType, hash}`) is padded to a fixed plaintext capacity (`AVATAR_PURB_CAPACITY`, 256 KiB) with the true length encrypted inside, then AEAD-encrypted under a fresh owner-generated key. Every stored blob is therefore byte-identical in size, so the server learns nothing from size and a "miss" can be answered with an identically-sized synthetic blob. (256 KiB fits a 512px WebP avatar with margin. The rare avatar that does not fit is not shared through the store: `publishAvatarToStore` returns null and peers continue to show a default. There is no targeted P2P avatar fallback. The cap is kept small because cover traffic fetches about ten PURBs per lookup.)
-- **Ownerless upload record:** the PURB is sent as the encrypted `avatar/blob/put` operation inside `POST /api/anonymous` (never the account WebSocket), keyed only by the client-chosen random `blobId`. The outer request is always 512 KiB and uses a fresh Tor SOCKS isolation credential. The `avatar_blobs` table has no account/owner column, so there is no direct stored owner mapping. The server decrypts the operation and therefore observes the blob ID, request timing, volume, and connection carrying the upload, endpoint timing or a global observer can still attempt correlation.
+- **Ownerless upload record:** the PURB is sent as the encrypted `avatar/blob/put` operation inside `POST /api/anonymous` (never the account WebSocket), keyed only by the client-chosen random `blobId`. The outer request is always 272 KiB and uses a fresh Tor SOCKS isolation credential. The `avatar_blobs` table has no account/owner column, so there is no direct stored owner mapping. The server decrypts the operation and therefore observes the blob ID, request timing, volume, and connection carrying the upload, endpoint timing or a global observer can still attempt correlation.
 
 Publishing (`useDiscovery` self-publish):
 1. `getAvatarForDiscovery` selects the avatar to share (real or default, per `shareWithOthers`).
@@ -113,7 +113,7 @@ Receiving (`useDiscovery.finalizeDiscoveryResult`):
 
 Privacy summary: the avatar fetch is k-anonymous, not oblivious. The opaque reference exists only inside encrypted discovery material, the bytes are E2E-encrypted and uniform-size, and the database has no owner field. Ten-ID fetches, stable decoys, cover uploads, jitter, and fresh per-call Tor isolation reduce direct linkage and repeated-set intersection. They do not eliminate timing, volume, low-population, or global-observer correlation.
 
-Honest residuals: (a) the server sees the complete candidate ID set after decrypting the operation, (b) anonymity is bounded by the available real and cover blobs, (c) repeated requests outside the six-hour stable-decoy window can support intersection analysis, (d) every avatar fetch downloads one fixed 4 MiB outer response, and (e) anonymous global write caps permit storage churn but cannot provide fair per-user quotas without identity metadata.
+Honest residuals: (a) the server sees the complete candidate ID set after decrypting the operation, (b) anonymity is bounded by the available real and cover blobs, (c) repeated requests outside the six-hour stable-decoy window can support intersection analysis, (d) every avatar fetch downloads one fixed 2576 KiB outer response, and (e) anonymous global write caps permit storage churn but cannot provide fair per-user quotas without identity metadata.
 
 ### Circuit isolation
 
@@ -123,8 +123,8 @@ avatar fetch, and spool retrieval all use the same external
 `POST /api/anonymous` path, while their operation name and body stay inside the
 hybrid-PQ envelope. This prevents deliberate circuit reuse between any two calls,
 it is not proof of mutual unlinkability against endpoint timing, the visible
-64 KiB/512 KiB request classes, the 64 KiB/512 KiB/4 MiB/18 MiB response
-classes, or a global observer. Wiring is in
+8 KiB/272 KiB/1600 KiB request classes, the
+24 KiB/256 KiB/768 KiB/1408 KiB/2576 KiB/6160 KiB response classes, or a global observer. Wiring is in
 `src-tauri/src/commands/discovery.rs`.
 
 Code references:

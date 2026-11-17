@@ -386,7 +386,7 @@ export function EmojiPicker({
               title={section.label}
               onClick={() => chooseCategory(section.id)}
             >
-              <Icon size={20} strokeWidth={1.8} aria-hidden="true" />
+              <Icon size={20} aria-hidden="true" />
             </button>
           );
         })}

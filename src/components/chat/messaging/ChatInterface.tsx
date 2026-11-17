@@ -1,6 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message, MessageReply } from './types';
 import { User } from "./UserList";
@@ -630,27 +629,27 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     <div ref={interfaceRef} className={`qorc-interface${hasAttachedCall ? ' has-attached-call' : ''}`}>
       <ConversationHeader username={selectedConversation} onBack={onBack}>
         {selectedConversation && !keyChangePending && !hasAttachedCall && (
-          <div className="qorc-call-pill" role="group" aria-label="Conversation actions">
-            <Button
-              size="sm"
-              variant="outline"
+          <div className="qorc-chat-call-actions" role="group" aria-label="Conversation actions">
+            <button
+              type="button"
               onClick={handleAudioCall}
               disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-              className="qorc-call-pill-btn"
+              className="qorc-chat-call-button"
               title="Audio call"
+              aria-label="Audio call"
             >
               <CallIcon className="w-4 h-4" />
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
+            </button>
+            <button
+              type="button"
               onClick={handleVideoCall}
               disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-              className="qorc-call-pill-btn"
+              className="qorc-chat-call-button"
               title="Video call"
+              aria-label="Video call"
             >
               <Video className="w-4 h-4" />
-            </Button>
+            </button>
           </div>
         )}
       </ConversationHeader>

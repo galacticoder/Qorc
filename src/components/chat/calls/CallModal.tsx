@@ -863,7 +863,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               <button
                 type="button"
                 onClick={answerCall}
-                className="flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl bg-emerald-600/90 text-white backdrop-blur-xl hover:bg-emerald-500"
+                className="qorc-button-primary flex h-10 w-11 cursor-pointer items-center justify-center rounded-xl backdrop-blur-xl"
                 title="Answer"
               >
                 <Phone className="h-4 w-4" />

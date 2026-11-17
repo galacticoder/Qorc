@@ -311,9 +311,22 @@ export class WebSocketConnection {
     return this.serverProfile ? { ...this.serverProfile } : null;
   }
   private _lifecycleState: string = 'idle';
+  private readonly connectionStateListeners = new Set<() => void>();
   get lifecycleState(): string { return this._lifecycleState; }
   set lifecycleState(next: string) {
     this._lifecycleState = next;
+    this.notifyConnectionState();
+  }
+
+  subscribeConnectionState(listener: () => void): () => void {
+    this.connectionStateListeners.add(listener);
+    return () => { this.connectionStateListeners.delete(listener); };
+  }
+
+  private notifyConnectionState(): void {
+    for (const listener of this.connectionStateListeners) {
+      try { listener(); } catch { }
+    }
   }
   private isManualClose = false;
   private isGatekeeperFlowActive = false;
@@ -2318,6 +2331,7 @@ export class WebSocketConnection {
       PostQuantumUtils.clearMemory(this.sessionKeyMaterial.recvKey);
     }
     this.sessionKeyMaterial = undefined;
+    this.notifyConnectionState();
     this.clearSecureChunkBuffers();
     this.encryption.resetCounters();
     if (!preserveServerKeys) this.handshake.clearServerKeyMaterial();
@@ -3589,6 +3603,13 @@ export class WebSocketConnection {
 
   // Check if PQ session established
   isPQSessionEstablished(): boolean { return !!this.sessionKeyMaterial; }
+
+  getConnectedServerIdentity(): { fingerprint: string; serverId: string | null } | null {
+    const material = this.handshake.getServerKeyMaterial();
+    if (!this.isConnectedToServer() || !this.sessionKeyMaterial || !material ||
+      material.fingerprint !== this.sessionKeyMaterial.fingerprint) return null;
+    return { fingerprint: material.fingerprint, serverId: material.serverId ?? null };
+  }
 
   private refreshAnonymousHttpTrust(): void {
     if (this.isManualClose) {

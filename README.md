@@ -344,7 +344,7 @@ Discovery resolves a user's current encrypted key material without sending any i
   server intersect the two sets.
 - The four buckets are requested as four separate single-bucket operations, each
   on its own freshly isolated Tor circuit with its own proof of work, and every
-  bucket is padded to the same 64-entry count of 131,072 character records inside a fixed 8.5 MiB response. The
+  bucket is padded to the same 64-entry count of 98,304-byte binary records inside a fixed 6160 KiB response. The
   server therefore answers a stream of indistinguishable single-bucket requests,
   but it still sees their timing and volume, so discovery is k-anonymous
   retrieval rather than oblivious retrieval.

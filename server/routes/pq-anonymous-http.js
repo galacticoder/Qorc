@@ -1,3 +1,4 @@
+import { decodeAnonymousRequest, encodeAnonymousResponse } from '../../shared/anonymous-http-codec.js';
 import crypto from 'crypto';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { privateLookupId } from '../database/core.js';
@@ -14,7 +15,6 @@ import {
 } from '../config/audiences.js';
 import { ANONYMOUS_OPERATION_FAILED } from '../config/error-codes.js';
 import { envInt } from '../utils/env.js';
-import { UTF8_ENCODER } from '../utils/encoding.js';
 import { setNoStoreHeaders } from '../utils/http.js';
 import { createTokenBucketRateLimiter } from '../utils/rate-limit.js';
 import { createInflightBodyAdmission } from '../utils/http-admission.js';
@@ -207,10 +207,7 @@ function parsePaddedRequest(plaintext) {
   if (jsonLength < 2 || jsonLength > plaintext.length - 4) return null;
   let parsed;
   try {
-    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(
-      plaintext.subarray(4, 4 + jsonLength)
-    );
-    parsed = JSON.parse(decoded);
+    parsed = decodeAnonymousRequest(plaintext.subarray(4, 4 + jsonLength));
   } catch {
     return null;
   }
@@ -273,6 +270,7 @@ function rememberLocalReplay(localReplayIds, replayId) {
 }
 
 async function encodeResponse({
+  operation,
   policy,
   payload,
   requestId,
@@ -323,16 +321,19 @@ async function encodeResponse({
       HASH_OUTPUT_BYTES
     );
 
-    let encodedPayload = UTF8_ENCODER.encode(JSON.stringify({
+    const encodePayload = (value) => encodeAnonymousResponse(operation, {
       version: PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL,
-      payload
-    }));
+      payload: value
+    });
+    let encodedPayload;
+    try {
+      encodedPayload = encodePayload(payload);
+    } catch {
+      encodedPayload = encodePayload({ ok: false, error: 'anonymous_response_too_large' });
+    }
     if (encodedPayload.length > responsePlaintextBytes - 4) {
       encodedPayload.fill(0);
-      encodedPayload = UTF8_ENCODER.encode(JSON.stringify({
-        version: PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_PROTOCOL,
-        payload: { ok: false, error: 'anonymous_response_too_large' }
-      }));
+      encodedPayload = encodePayload({ ok: false, error: 'anonymous_response_too_large' });
     }
     try {
       responsePlaintext = Buffer.allocUnsafe(responsePlaintextBytes);
@@ -544,6 +545,7 @@ export function createPqAnonymousHttpHandler({
       }
 
       responseBody = await encodeResponse({
+        operation: parsedRequest.operation,
         policy,
         payload,
         requestId,

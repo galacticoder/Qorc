@@ -35,5 +35,7 @@ export function installPressFeedback(): void {
     control.setAttribute('data-qorc-pressed', '');
   }, true);
   document.addEventListener('keyup', clear, true);
-  document.addEventListener('focusout', clear, true);
+  document.addEventListener('focusout', event => {
+    if (pointer === null || event.target === pressed) clear();
+  }, true);
 }

@@ -137,21 +137,24 @@ fn spawn_warm_refill(socks_port: u16, host: String, port: u16) {
     });
 }
 
-const REQUEST_SMALL_BYTES: usize = 64 * 1024;
-const REQUEST_LARGE_BYTES: usize = 512 * 1024;
+const REQUEST_SMALL_BYTES: usize = 8 * 1024;
+const REQUEST_LARGE_BYTES: usize = 272 * 1024;
 
-const REQUEST_PIR_BYTES: usize = 2 * 1024 * 1024;
-const RESPONSE_SMALL_BYTES: usize = 64 * 1024;
-const RESPONSE_TAG_INDEX_BYTES: usize = 512 * 1024;
-const RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES: usize = 2 * 1024 * 1024;
-const RESPONSE_PIR_BYTES: usize = 1024 * 1024;
-const RESPONSE_AVATAR_BYTES: usize = 4 * 1024 * 1024;
-const RESPONSE_DISCOVERY_BYTES: usize = 8912896;
+const REQUEST_PIR_BYTES: usize = 1600 * 1024;
+const RESPONSE_SMALL_BYTES: usize = 24 * 1024;
+const RESPONSE_TAG_INDEX_BYTES: usize = 256 * 1024;
+const RESPONSE_KEY_TRANSPARENCY_SYNC_BYTES: usize = 1408 * 1024;
+const RESPONSE_PIR_BYTES: usize = 768 * 1024;
+const RESPONSE_AVATAR_BYTES: usize = 2576 * 1024;
+const RESPONSE_DISCOVERY_BYTES: usize = 6160 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(180);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(150);
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const MIN_BODY_TIMEOUT: Duration = Duration::from_secs(300);
 const MIN_TRANSFER_BYTES_PER_SECOND: usize = 16 * 1024;
+
+const AVATAR_BODY_TIMEOUT: Duration = Duration::from_secs(356);
+const DISCOVERY_BODY_TIMEOUT: Duration = Duration::from_secs(580);
 const REQUEST_ID_HEADER: &str = "x-qorc-anonymous-request-id";
 const RESPONSE_BYTES_HEADER: &str = "x-qorc-anonymous-response-bytes";
 const PROGRESS_HEADER: &str = "x-qorc-anonymous-progress";
@@ -232,10 +235,14 @@ fn uses_bulk_transport(request_bytes: usize, response_bytes: usize) -> bool {
 }
 
 fn body_timeout(bytes: usize) -> Duration {
-    MIN_BODY_TIMEOUT.max(
-        BODY_IDLE_TIMEOUT
-            + Duration::from_secs(bytes.div_ceil(MIN_TRANSFER_BYTES_PER_SECOND) as u64),
-    )
+    match bytes {
+        RESPONSE_AVATAR_BYTES => AVATAR_BODY_TIMEOUT,
+        RESPONSE_DISCOVERY_BYTES => DISCOVERY_BODY_TIMEOUT,
+        _ => MIN_BODY_TIMEOUT.max(
+            BODY_IDLE_TIMEOUT
+                + Duration::from_secs(bytes.div_ceil(MIN_TRANSFER_BYTES_PER_SECOND) as u64),
+        ),
+    }
 }
 
 fn anonymous_http_client_builder() -> reqwest::ClientBuilder {

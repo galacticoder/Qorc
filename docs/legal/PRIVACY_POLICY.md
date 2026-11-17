@@ -42,8 +42,8 @@ externally visible `/api/anonymous` path, use a fresh Tor-isolated connection pe
 call, and encrypt the operation name and body with hybrid post-quantum key
 establishment. The destination server decrypts the operation to perform it and
 therefore knows its operation type and body. The network path can observe timing
-plus the fixed 64 KiB/512 KiB request and 64 KiB/512 KiB/4 MiB/18 MiB response
-classes.
+plus the fixed 8 KiB/272 KiB/1600 KiB request and
+24 KiB/256 KiB/768 KiB/1408 KiB/2576 KiB/6160 KiB response classes.
 
 ## What The Server Handles
 

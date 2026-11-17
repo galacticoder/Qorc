@@ -1,3 +1,4 @@
+import { VerifiedPrefixCache } from './verified-prefix-cache';
 import { keyTransparencyStoreKey } from './store-key';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
@@ -100,7 +101,6 @@ import {
   keyTransparencyRootMatches,
   verifyKeyTransparencyDelta,
   verifyKeyTransparencyGossipHead,
-  verifyKeyTransparencyTransitions,
 } from './verifier';
 import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
 import { bytesToHex } from '../../../shared/bytes.js';
@@ -241,6 +241,7 @@ function randomUnit(): number {
 class KeyTransparencyClient {
   private latestHead: KeyTransparencyLogHead | null = null;
   private generation = 0;
+  private readonly verifiedPrefixes = new VerifiedPrefixCache();
   private readonly enqueue = createStoreLock();
   private pendingGossip = new Map<string, KeyTransparencyLogHead>();
   private deferredGossip = new Map<string, KeyTransparencyLogHead>();
@@ -268,6 +269,7 @@ class KeyTransparencyClient {
     this.deferredGossipTimer = null;
     this.securityIncidentActive = false;
     this.authorizationRestore = null;
+    this.verifiedPrefixes.clear();
     clearKeyTransparencyVerifiedMaterials();
     this.stopContactMonitoring();
   }
@@ -308,6 +310,7 @@ class KeyTransparencyClient {
     this.securityIncidentActive = true;
     this.generation += 1;
     const incidentOwner = this.monitorOwner;
+    this.verifiedPrefixes.clear();
     clearKeyTransparencyVerifiedMaterials();
 
     if (incidentOwner) {
@@ -592,9 +595,19 @@ class KeyTransparencyClient {
         epoch: record.epoch,
       });
     }
+    await assertCurrentServerContext(context);
+    this.assertGeneration(generation);
+    const head = this.latestHead;
+    if (!head) throw new Error('Key-transparency head is unavailable');
     let contact: VerifiedKeyTransparencyContactState | null = null;
     try {
-      contact = verifyKeyTransparencyTransitions(null, published, discoveryEncryptionKey);
+      contact = this.verifiedPrefixes.verify({
+        account: deriveLocalAccountScope(context, ownerUsername),
+        server: context.serverScope,
+        generation,
+        signer: head.signerKeyId,
+        policy: `${KEY_TRANSPARENCY_PROTOCOL}/verified-prefix-v1`,
+      }, published, discoveryEncryptionKey);
     } catch {
       await this.recordIncident(context);
       throw new Error('Key-transparency contact chain verification failed');
@@ -603,8 +616,6 @@ class KeyTransparencyClient {
       contact = { ...contact, lastVerifiedEpoch: Math.max(0, checkpoint.epoch - 1) };
       await this.persistContact(context, ownerUsername, contact);
     }
-    const head = this.latestHead;
-    if (!head) throw new Error('Key-transparency head is unavailable');
     return { context, head, contact };
   }
 

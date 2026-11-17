@@ -1,11 +1,10 @@
-import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
+import React, { memo, useMemo, useEffect, useLayoutEffect, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
-import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { ArrowLeft, Ban, BellOff, Trash2, Search, Phone, Video, Loader2, Pin, X, Plus } from "lucide-react";
+import { ArrowLeft, BellOff, Trash2, Search, Video, Loader2, Pin, X, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -33,6 +32,7 @@ import { useMobileLayout } from '../../../hooks/useMobileLayout';
 import { ConversationSwipeRow } from './ConversationSwipeRow';
 import { useAppBack } from '../../../hooks/useAppBack';
 import { groupConversationsByLetter } from '../../../lib/ui/conversation-order';
+import { animateView } from '../../../lib/ui/motion';
 
 export interface Conversation {
   readonly id: string;
@@ -102,39 +102,32 @@ const ConversationItem = memo<ConversationItemProps>(({
   const muted = getNotificationMutes(conversation.username, preferences);
   const muteLabel = muted.messages && muted.calls ? 'Message and call alerts muted' : muted.messages ? 'Message alerts muted' : 'Call alerts muted';
   const callStatus = muted.calls && receivedCallStatus?.incoming && receivedCallStatus.status === 'ringing' ? null : receivedCallStatus;
+  const callStatusLabel = callStatus?.status === 'connected' ? 'Active call'
+    : callStatus?.status === 'connecting' ? 'Connecting call'
+      : callStatus?.incoming ? 'Incoming call' : 'Calling';
 
   // Handle conversation selection
   const handleClick = useCallback(() => {
     onSelect(conversation.username);
   }, [onSelect, conversation.username]);
 
-  // Handle conversation removal
-  const handleRemove = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onActionsOpenChange(conversation.username, false);
-    onRemove(conversation.username);
-  }, [onActionsOpenChange, onRemove, conversation.username]);
   const setActionsOpen = useCallback((open: boolean) => onActionsOpenChange(conversation.username, open), [conversation.username, onActionsOpenChange]);
   const closeActions = useCallback(() => setActionsOpen(false), [setActionsOpen]);
 
-  const actions = <>
-    <ConversationOptionsPopover
+  const actions = <ConversationOptionsPopover
       username={conversation.username}
       blocked={blocked}
       onToggleBlock={onToggleBlock}
       compact
       isPinned={conversation.isPinned}
       onTogglePin={onTogglePin}
+      onDeleteConversation={onRemove}
       onAction={mobile ? closeActions : undefined}
       ariaLabel={`Conversation options for ${displayName}`}
-    />
-    <Button variant="ghost" size="sm" onClick={handleRemove} className="qorc-conversation-tiny-btn danger" aria-label={`Remove conversation with ${displayName}`}>
-      <Trash2 className="h-3 w-3" />
-    </Button>
-  </>;
+    />;
 
   return (
-    <ConversationSwipeRow enabled={mobile} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions}>
+    <ConversationSwipeRow enabled={mobile} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions} actionWidth={64}>
     <div
       className={cn(
         "qorc-conversation-item group",
@@ -152,7 +145,7 @@ const ConversationItem = memo<ConversationItemProps>(({
       }}
       aria-label={`Conversation with ${displayName}`}
       aria-selected={isSelected}
-      aria-description={mobile ? 'Swipe right for conversation options and delete, or press the right arrow key.' : undefined}
+      aria-description={mobile ? 'Swipe right for conversation options, or press the right arrow key.' : undefined}
     >
       <UserAvatar
         username={conversation.username}
@@ -162,6 +155,15 @@ const ConversationItem = memo<ConversationItemProps>(({
 
       <div className="qorc-conversation-main">
         <div className="qorc-conversation-title-row">
+          {callStatus && (
+            <span className="qorc-conversation-call-status" role="status" title={callStatusLabel} aria-label={callStatusLabel}>
+              {callStatus.isVideo ? (
+                <Video size={16} fill="currentColor" aria-hidden="true" />
+              ) : (
+                <CallIcon className="fill-current" width={16} height={16} aria-hidden="true" />
+              )}
+            </span>
+          )}
           <span
             className={cn(
               "qorc-conversation-name",
@@ -217,29 +219,9 @@ const ConversationItem = memo<ConversationItemProps>(({
               {conversation.lastMessage}
             </div>
           ) : null}
-          {(callStatus || (!isSelected && (conversation.unreadCount ?? 0) > 0)) && (
+          {!isSelected && (conversation.unreadCount ?? 0) > 0 && (
             <div className="qorc-conversation-controls">
-              {callStatus && (
-                <div
-                  className={cn(
-                    "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
-                    callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
-                    callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
-                    callStatus.status === 'connected' && "bg-green-100 text-green-800"
-                  )}
-                  role="status"
-                  aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
-                >
-                  {callStatus.status === 'connecting' ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : callStatus.isVideo ? (
-                    <Video className="w-3.5 h-3.5" />
-                  ) : (
-                    <Phone className="w-3.5 h-3.5" />
-                  )}
-                </div>
-              )}
-              {!isSelected && <UnreadIndicator count={conversation.unreadCount ?? 0} />}
+              <UnreadIndicator count={conversation.unreadCount ?? 0} />
             </div>
           )}
         </div>
@@ -263,6 +245,7 @@ interface ConversationManageRowProps {
   readonly onCall: (username: string, type: 'audio' | 'video') => void;
   readonly onToggleBlock: (username: string, nextBlocked: boolean) => void | Promise<void>;
   readonly onBlock: (username: string) => void;
+  readonly onRemove: (username: string) => void;
   readonly blocking?: boolean;
 }
 
@@ -279,6 +262,7 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
   onCall,
   onToggleBlock,
   onBlock,
+  onRemove,
   blocking = false,
 }) => {
   const displayName = useDisplayUsername({ username });
@@ -294,32 +278,31 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
   }, [mode, onBlock, onChat, username]);
 
   const actions = <>
-    <Button
-      size="sm"
-      variant={swipeEnabled ? 'ghost' : 'outline'}
-      className={swipeEnabled ? 'qorc-conversation-tiny-btn' : 'qorc-call-pill-btn'}
+    <button
+      type="button"
+      className="qorc-chat-call-button"
       title="Audio call"
       aria-label={`Call ${displayName}`}
       disabled={blocked}
       onClick={() => { closeActions(); onCall(username, 'audio'); }}
     >
       <CallIcon className="w-4 h-4" aria-hidden="true" />
-    </Button>
-    <Button
-      size="sm"
-      variant={swipeEnabled ? 'ghost' : 'outline'}
-      className={swipeEnabled ? 'qorc-conversation-tiny-btn' : 'qorc-call-pill-btn'}
+    </button>
+    <button
+      type="button"
+      className="qorc-chat-call-button"
       title="Video call"
       aria-label={`Video call ${displayName}`}
       disabled={blocked}
       onClick={() => { closeActions(); onCall(username, 'video'); }}
     >
       <Video className="w-4 h-4" aria-hidden="true" />
-    </Button>
+    </button>
     <ConversationOptionsPopover
       username={username}
       isPinned={isPinned}
       onTogglePin={onTogglePin}
+      onDeleteConversation={onRemove}
       blocked={blocked}
       onToggleBlock={onToggleBlock}
       compact={swipeEnabled}
@@ -332,17 +315,17 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
     <ConversationSwipeRow enabled={swipeEnabled} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions} actionWidth={168} className="qorc-cm-swipe">
       <div
         className="qorc-cm-row"
-        role="button"
-        tabIndex={0}
-        onClick={handlePrimaryAction}
+        role={mode === 'block' ? 'group' : 'button'}
+        tabIndex={mode === 'block' ? undefined : 0}
+        onClick={mode === 'block' ? undefined : handlePrimaryAction}
         onKeyDown={(e) => {
-          if (e.target !== e.currentTarget) return;
+          if (mode === 'block' || e.target !== e.currentTarget) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             handlePrimaryAction();
           }
         }}
-        aria-label={mode === 'block' ? `Block ${displayName}` : `Open chat with ${displayName}`}
+        aria-label={mode === 'block' ? `Conversation with ${displayName}` : `Open chat with ${displayName}`}
         aria-description={swipeEnabled ? 'Swipe right for calls and conversation options, or press the right arrow key.' : undefined}
       >
         <UserAvatar username={username} size="md" className="qorc-cm-row-avatar" />
@@ -357,18 +340,18 @@ const ConversationManageRow = memo<ConversationManageRowProps>(({
         {mode === 'block' ? (
           <button
             type="button"
-            className="qorc-cm-block-btn"
+            className="qorc-cm-block-btn qorc-danger-button"
             disabled={blocking}
+            aria-label={`Block ${displayName}`}
             onClick={(event) => {
               event.stopPropagation();
               onBlock(username);
             }}
           >
-            {blocking ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
             <span>{blocking ? 'Blocking…' : 'Block'}</span>
           </button>
         ) : !swipeEnabled && (
-          <div className="qorc-call-pill qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+          <div className="qorc-chat-call-actions qorc-cm-row-actions" onClick={(e) => e.stopPropagation()}>
             {actions}
           </div>
         )}
@@ -472,6 +455,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const handleCancelRemove = useCallback(() => {
     setShowConfirmDialog(false);
   }, []);
+  useAppBack(showConfirmDialog, handleCancelRemove, 100);
 
   const handleRemoveDialogOpenChange = useCallback((open: boolean) => {
     setShowConfirmDialog(open);
@@ -650,6 +634,28 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, [cancelActiveDiscovery, onNewChatOpenChange]);
 
   const dialogContentRef = React.useRef<HTMLDivElement | null>(null);
+  const pickerScreenRef = React.useRef<HTMLElement | null>(null);
+  const pickerExitRef = React.useRef<Animation | null>(null);
+  useLayoutEffect(() => {
+    if (!showNewChatInput || !mobile) return;
+    const entrance = animateView(pickerScreenRef.current, 'forward', false, 'slide');
+    return () => {
+      entrance?.cancel();
+      pickerExitRef.current?.cancel();
+      pickerExitRef.current = null;
+    };
+  }, [showNewChatInput, mobile]);
+  const closePicker = useCallback(() => {
+    if (pickerExitRef.current) return;
+    const exit = mobile ? animateView(pickerScreenRef.current, 'back', true, 'slide') : null;
+    if (!exit) { handleNewChatOpenChange(false); return; }
+    pickerExitRef.current = exit;
+    void exit.finished.then(() => {
+      if (pickerExitRef.current !== exit) return;
+      pickerExitRef.current = null;
+      handleNewChatOpenChange(false);
+    }, () => {});
+  }, [mobile, handleNewChatOpenChange]);
   const mountDialogContent = useCallback((element: HTMLDivElement | null) => {
     dialogContentRef.current = element;
     element?.querySelector<HTMLElement>(mobile ? '.qorc-cm-close' : 'input')?.focus({ preventScroll: true });
@@ -658,7 +664,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   useAppBack(showNewChatInput, () => {
     if (document.querySelector('.qorc-conversation-options-popover')) return false;
     if (manageActionsPeer) { setManageActionsPeer(null); return; }
-    handleNewChatOpenChange(false);
+    closePicker();
   }, 80);
 
   useEffect(() => {
@@ -669,12 +675,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     const focusable = () => Array.from(dialogContentRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]') ?? [])
       .filter(element => element.getClientRects().length > 0 && !element.closest('[inert]'));
     const keydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || (event.target instanceof Element && event.target.closest('.qorc-conversation-options-popover'))) return;
+      if (event.defaultPrevented || document.querySelector('.qorc-delete-conversation-dialog') || (event.target instanceof Element && event.target.closest('.qorc-conversation-options-popover'))) return;
       if (event.key === 'Escape' && document.querySelector('.qorc-conversation-options-popover[data-state="open"]')) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (manageActionsPeerRef.current) setManageActionsPeer(null);
-        else handleNewChatOpenChange(false);
+        else closePicker();
         return;
       }
       if (event.key !== 'Tab' || !mobile) return;
@@ -687,7 +693,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       }
     };
     const focusin = (event: FocusEvent) => {
-      if (mobile && event.target instanceof Element && !dialogContentRef.current?.contains(event.target) && !event.target.closest('.qorc-conversation-options-popover')) {
+      if (mobile && event.target instanceof Element && !dialogContentRef.current?.contains(event.target) && !event.target.closest('.qorc-conversation-options-popover, .qorc-delete-conversation-dialog')) {
         focusable()[0]?.focus({ preventScroll: true });
       }
     };
@@ -699,7 +705,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       document.removeEventListener('focusin', focusin);
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
     };
-  }, [showNewChatInput, handleNewChatOpenChange, mobile]);
+  }, [showNewChatInput, closePicker, mobile]);
 
   const handleChatFromModal = useCallback((username: string) => {
     onSelectConversation(username);
@@ -716,13 +722,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     setBlockingPeer(username);
     try {
       await onBlockConversation(username);
-      handleNewChatOpenChange(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to block user');
     } finally {
       setBlockingPeer(null);
     }
-  }, [blockingPeer, handleNewChatOpenChange, onBlockConversation]);
+  }, [blockingPeer, onBlockConversation]);
 
   const discoveryPercent = discoveryProgress && discoveryProgress.totalBytes > 0
     ? Math.min(100, Math.max(0, discoveryProgress.receivedBytes / discoveryProgress.totalBytes * 100))
@@ -742,7 +747,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         <button
           type="button"
           className="qorc-cm-close qorc-cm-back"
-          onClick={() => handleNewChatOpenChange(false)}
+          onClick={closePicker}
           aria-label={conversationDialogMode === 'block' ? 'Back to settings' : 'Back to conversations'}
         >
           <ArrowLeft aria-hidden="true" />
@@ -849,6 +854,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                     onCall={handleCallFromPicker}
                     onToggleBlock={onToggleBlock}
                     onBlock={(username) => { void handleBlockFromModal(username); }}
+                    onRemove={handleRemoveClick}
                     blocking={blockingPeer === c.username}
                   />
                   ))}
@@ -886,7 +892,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   return (
     <div className={cn('qorc-conversation-list', mobile && 'is-mobile')}>
       {showNewChatInput && createPortal(
-        <section className="qorc-cm-dialog qorc-cm-screen" aria-labelledby="conversation-modal-title">
+        <section ref={pickerScreenRef} className="qorc-cm-dialog qorc-cm-screen" aria-labelledby="conversation-modal-title">
           {pickerContent}
         </section>,
         document.querySelector('.qorc-main-pane') ?? document.body,

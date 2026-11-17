@@ -30,7 +30,7 @@ function useNavigationHighlight(variant: string, expanded: boolean, activeTab: s
         window.addEventListener('resize', measure);
         return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
     }, [variant, expanded]);
-    const index = Math.max(0, Math.min(2, motion?.index ?? sectionIds.indexOf(activeTab as typeof sectionIds[number])));
+    const index = Math.max(0, Math.min(2, (variant === 'bottom' ? undefined : motion?.index) ?? sectionIds.indexOf(activeTab as typeof sectionIds[number])));
     const from = rects[Math.floor(index)], to = rects[Math.ceil(index)];
     const amount = index % 1;
     const mix = (key: keyof HighlightRect) => from[key] + (to[key] - from[key]) * amount;
@@ -45,16 +45,19 @@ interface SidebarProps {
     activeTab: 'chats' | 'calls' | 'settings';
     onTabChange: (tab: 'chats' | 'calls' | 'settings') => void;
     navigationMotion?: SectionNavigationMotion | null;
+    collapsed: boolean;
+    onCollapsedChange: (collapsed: boolean) => void;
+    hidden?: boolean;
+    layoutPhase?: 'entering' | 'leaving';
     currentUser: {
         username: string;
         avatarUrl?: string;
     };
 }
 
-export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUser, navigationMotion }: SidebarProps) {
+export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUser, navigationMotion, collapsed: isCollapsed, onCollapsedChange, hidden = false, layoutPhase }: SidebarProps) {
     const { theme, resolvedTheme, setTheme } = useTheme();
     const themeMaskId = useId();
-    const [isCollapsed, setIsCollapsed] = useState(true);
     const { ref: navigationRef, highlight } = useNavigationHighlight(variant, !isCollapsed, activeTab, navigationMotion);
     const activeTheme = theme === 'system' ? resolvedTheme : theme;
 
@@ -119,7 +122,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
 
     if (variant === 'top') {
         return (
-            <header className="qorc-top-nav">
+            <header className="qorc-top-nav" hidden={hidden} inert={hidden || layoutPhase === 'leaving'} aria-hidden={hidden || layoutPhase === 'leaving' || undefined} data-layout-phase={layoutPhase}>
                 <div className="qorc-top-nav-cluster">
                     <div className="qorc-top-nav-brand" aria-hidden="true">
                         <QorcBrandLogo className="brand-square qorc-brand-square" imageClassName="qorc-brand-logo" />
@@ -146,6 +149,7 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
                                 />
                             </button>
                         ))}
+                        <span className="qorc-top-nav-divider" aria-hidden="true" />
                         <button
                             type="button"
                             onClick={() => onTabChange('settings')}
@@ -189,12 +193,13 @@ export function Sidebar({ variant = 'sidebar', activeTab, onTabChange, currentUs
     }
 
     return (
-        <aside ref={navigationRef} className={cn("qorc-rail", !isCollapsed && "is-expanded")} data-nav-motion={navigationMotion?.phase ?? 'idle'}>
+        <aside ref={navigationRef} className={cn("qorc-rail", !isCollapsed && "is-expanded")} data-nav-motion={navigationMotion?.phase ?? 'idle'}
+            hidden={hidden} inert={hidden || layoutPhase === 'leaving'} aria-hidden={hidden || layoutPhase === 'leaving' || undefined} data-layout-phase={layoutPhase}>
             {highlight}
             <button
                 type="button"
                 className="qorc-rail-row qorc-rail-head"
-                onClick={() => setIsCollapsed(!isCollapsed)}
+                onClick={() => onCollapsedChange(!isCollapsed)}
                 title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
                 aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >

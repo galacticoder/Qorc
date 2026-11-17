@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Ban, Loader2, MoreVertical, Pin, PinOff } from 'lucide-react';
+import { Ban, MoreVertical, Pin, PinOff, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
@@ -16,6 +16,7 @@ interface ConversationOptionsPopoverProps {
   readonly isPinned?: boolean;
   readonly onTogglePin?: (username: string) => void;
   readonly onAction?: () => void;
+  readonly onDeleteConversation?: (username: string) => void;
 }
 
 export function ConversationOptionsPopover({
@@ -27,6 +28,7 @@ export function ConversationOptionsPopover({
   isPinned = false,
   onTogglePin,
   onAction,
+  onDeleteConversation,
 }: ConversationOptionsPopoverProps) {
   const [open, setOpen] = useState(false);
   const [updating, setUpdating] = useState(false);
@@ -97,12 +99,12 @@ export function ConversationOptionsPopover({
           {onTogglePin && (
             <button type="button" className="qorc-conversation-options-action" onClick={() => { dismiss(); onTogglePin(username); }}>
               {isPinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
-              <span>{isPinned ? 'Unpin' : 'Pin'}</span>
+              <span>{isPinned ? 'Unpin chat' : 'Pin chat'}</span>
             </button>
           )}
           {(['messages', 'calls'] as const).map(type => (
             <button key={type} type="button" className="qorc-conversation-options-action" onClick={() => toggleMute(type)}>
-              <span className={`qorc-notification-state-icon${mutes?.[type] ? ' is-muted' : ''}`} aria-hidden="true">
+              <span className={`qorc-menu-alert-icon${mutes?.[type] ? '' : ' is-muted'}`} aria-hidden="true">
                 {type === 'messages' ? <ChatBubbleIcon /> : <CallIcon />}
               </span>
               <span>{mutes?.[type] ? 'Unmute' : 'Mute'} {type}</span>
@@ -110,13 +112,15 @@ export function ConversationOptionsPopover({
           ))}
           <button
             type="button"
-            className="qorc-conversation-options-action danger"
+            className="qorc-conversation-options-destructive qorc-danger-button"
             disabled={updating}
             onClick={() => void handleToggleBlock()}
           >
-            {updating ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Ban aria-hidden="true" />}
-            <span>{updating ? 'Updating...' : blocked ? 'Unblock' : 'Block'}</span>
+            <Ban aria-hidden="true" />
+            <span>{updating ? 'Updating...' : blocked ? 'Unblock user' : 'Block user'}</span>
           </button>
+          {onDeleteConversation && <button type="button" className="qorc-conversation-options-destructive qorc-danger-button"
+            onClick={() => { dismiss(); onDeleteConversation(username); }}><Trash2 aria-hidden="true" />Delete chat</button>}
         </div>
       </PopoverContent>
     </Popover>
