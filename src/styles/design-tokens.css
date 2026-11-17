@@ -61,7 +61,7 @@
   transition: background-color 0.2s ease;
 }
 
-::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover:where(html:not([data-qorc-touch]) *) {
   background: var(--color-text-secondary);
 }
 

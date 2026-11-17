@@ -2,12 +2,17 @@ export function installPressFeedback(): void {
   let pressed: Element | null = null;
   let pointer: number | null = null;
   let origin = { x: 0, y: 0 };
+  const updateInput = (event: PointerEvent) => {
+    if (event.pointerType === 'mouse') document.documentElement.removeAttribute('data-qorc-touch');
+    else if (event.pointerType === 'touch' || event.pointerType === 'pen') document.documentElement.setAttribute('data-qorc-touch', '');
+  };
   const clear = () => {
     pressed?.removeAttribute('data-qorc-pressed');
     pressed = null;
     pointer = null;
   };
   document.addEventListener('pointerdown', event => {
+    updateInput(event);
     clear();
     if (!event.isPrimary || event.button !== 0 || !(event.target instanceof Element)) return;
     const control = event.target.closest('button, [role="button"], [role="option"], a[href]');
@@ -18,11 +23,15 @@ export function installPressFeedback(): void {
     control.setAttribute('data-qorc-pressed', '');
   }, { capture: true, passive: true });
   document.addEventListener('pointermove', event => {
+    updateInput(event);
     if (event.pointerId === pointer && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) clear();
   }, { capture: true, passive: true });
   document.addEventListener('pointerup', clear, true);
   document.addEventListener('pointercancel', clear, true);
   document.addEventListener('lostpointercapture', clear, true);
+  document.addEventListener('touchend', clear, { capture: true, passive: true });
+  document.addEventListener('touchcancel', clear, { capture: true, passive: true });
+  document.addEventListener('contextmenu', clear, true);
   document.addEventListener('scroll', clear, { capture: true, passive: true });
   document.addEventListener('visibilitychange', clear);
   window.addEventListener('blur', clear);

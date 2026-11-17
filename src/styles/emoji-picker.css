@@ -43,8 +43,8 @@
   cursor: pointer;
 }
 
-.emoji-picker__category:is(:hover, :active, [data-qorc-pressed]),
-.emoji-picker__emoji:is(:hover, :active, [data-qorc-pressed]) {
+.emoji-picker__category:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
+.emoji-picker__emoji:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
   background: var(--qorc-control-hover, hsl(var(--accent)));
   color: var(--qorc-text, hsl(var(--accent-foreground)));
 }

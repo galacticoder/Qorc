@@ -187,7 +187,7 @@ const APP_SETTINGS_CSS = `
       text-align: left;
     }
 
-    .settings-section-link:is(:hover, :active, [data-qorc-pressed]) { background: var(--settings-link-hover); }
+    .settings-section-link:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) { background: var(--settings-link-hover); }
     .settings-section-link > svg { flex: 0 0 auto; color: var(--settings-muted); }
     .settings-section-copy { display: grid; gap: 4px; min-width: 0; flex: 1; }
     .settings-section-copy strong { font-size: var(--settings-label-size); line-height: 1.35; font-weight: 600; }
@@ -251,8 +251,8 @@ const APP_SETTINGS_CSS = `
       background: var(--settings-link-bg);
     }
 
-    .setting-row:is(:hover, :active, [data-qorc-pressed]),
-    .setting-row:focus-within {
+    .setting-row:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
+    .setting-row:has(:focus-visible) {
       background: var(--settings-link-hover);
     }
 
@@ -423,7 +423,7 @@ const APP_SETTINGS_CSS = `
       transition: opacity .15s ease;
     }
 
-    .avatar-preview-button:is(:hover, :active, [data-qorc-pressed]) .avatar-hover-overlay,
+    .avatar-preview-button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) .avatar-hover-overlay,
     .avatar-preview-button:focus-visible .avatar-hover-overlay {
       opacity: 1;
     }
@@ -527,10 +527,10 @@ const APP_SETTINGS_CSS = `
       background: var(--qorc-button-secondary-bg);
       color: var(--qorc-button-secondary-text);
     }
-    .action.is-secondary:is(:hover, :active, [data-qorc-pressed]),
+    .action.is-secondary:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
     .action.is-secondary:focus-visible { background: var(--qorc-button-secondary-hover); }
 
-    .action:not(.is-secondary):is(:hover, :active, [data-qorc-pressed]),
+    .action:not(.is-secondary):is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
     .action:not(.is-secondary):focus-visible {
       background: color-mix(in srgb, var(--qorc-accent) 86%, black);
     }
@@ -541,7 +541,7 @@ const APP_SETTINGS_CSS = `
       color: #fff;
     }
 
-    .danger-action:is(:hover, :active, [data-qorc-pressed]),
+    .danger-action:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
     .danger-action:focus-visible {
       outline: none;
       background: var(--settings-danger-hover);
@@ -790,7 +790,7 @@ const APP_SETTINGS_CSS = `
       transition: background .15s ease, color .15s ease;
     }
 
-    .qorc-unblock-close:is(:hover, :active, [data-qorc-pressed]),
+    .qorc-unblock-close:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
     .qorc-unblock-close:focus-visible {
       outline: none;
       background: var(--settings-hover);
@@ -862,7 +862,7 @@ const APP_SETTINGS_CSS = `
       transition: background .15s ease, color .15s ease, opacity .15s ease;
     }
 
-    .qorc-unblock-confirm:is(:hover, :active, [data-qorc-pressed]),
+    .qorc-unblock-confirm:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
     .qorc-unblock-confirm:focus-visible {
       background: color-mix(in srgb, var(--qorc-accent) 86%, black);
     }
