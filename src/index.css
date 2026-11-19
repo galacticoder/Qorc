@@ -5072,9 +5072,9 @@ html.light .saved-server-status.is-connected { color: #287346; }
 .saved-server-inline-fields .saved-server-fields { grid-template-columns: minmax(0, 1fr); }
 .saved-server-inline-editor > :is(.saved-server-address-note, .saved-servers-error, .saved-server-editor-actions) { grid-column: 1 / -1; }
 .saved-server-expanded-details { padding: 20px; border-top: .5px solid var(--saved-border); }
-.server-identity-heading { display: grid; gap: 6px; margin-bottom: 20px; }
+.server-identity-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; margin-bottom: 20px; }
 .server-identity-heading h3 { color: var(--saved-text); font-size: 16px; font-weight: 600; }
-.server-identity-state { color: var(--saved-muted); font-size: 13px; }
+.server-identity-state { grid-column: 1; color: var(--saved-muted); font-size: 13px; }
 .server-identity-state.is-matched { color: #77c99a; }
 .light .server-identity-state.is-matched { color: #287346; }
 .server-identity-state.is-error { color: var(--qorc-danger); }
@@ -5101,7 +5101,7 @@ html.light .saved-server-status.is-connected { color: #287346; }
 :is(.server-identity-keys, .server-identity-connection) summary:focus-visible { outline: 2px solid var(--qorc-muted-text); outline-offset: 2px; }
 .server-identity-keys > div { margin: 14px 0 0 26px; }
 .server-identity-copy { margin-top: 20px; }
-.saved-server-use { margin-top: 12px; }
+.saved-server-use { grid-column: 2; grid-row: 1 / span 2; align-self: start; justify-self: end; }
 @media (max-width: 760px) {
   .saved-server-inline-editor { grid-template-columns: 56px minmax(0, 1fr); gap: 14px; padding: 16px 14px; }
   .saved-server-expanded-details { padding: 18px 14px; }
@@ -5148,6 +5148,7 @@ html.light .saved-server-status.is-connected { color: #287346; }
 .screen-login,
 .screen-signup,
 .screen-welcome {
+  --auth-link-hover: #a991ff;
   --auth-primary-bg: var(--qorc-accent);
   --auth-primary-hover: color-mix(in srgb, var(--qorc-accent) 86%, black);
   --auth-primary-active: color-mix(in srgb, var(--qorc-accent) 78%, black);
@@ -5165,7 +5166,6 @@ html.light .saved-server-status.is-connected { color: #287346; }
   --auth-input-placeholder: var(--qorc-muted-text);
   --auth-text: #f4f4f5;
   --auth-muted: #92929b;
-  --auth-link-hover: #a991ff;
   --auth-disabled-bg: var(--qorc-control-hover);
   --auth-disabled-text: #686870;
   min-height: 100vh;
@@ -5476,14 +5476,15 @@ html.light .saved-server-status.is-connected { color: #287346; }
 .screen-login .login-simple-legal button,
 .screen-login .login-simple-switch button,
 .screen-signup .signup-simple-legal button,
-.screen-signup .signup-simple-switch button {
+.screen-signup .signup-simple-switch button,
+.welcome-server-help a {
   appearance: none;
   margin: 0;
   padding: 2px 3px;
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--auth-text);
+  color: var(--auth-text, var(--welcome-text));
   font: inherit;
   font-weight: 700;
   text-decoration: none;
@@ -5494,7 +5495,8 @@ html.light .saved-server-status.is-connected { color: #287346; }
 .screen-login .login-simple-legal button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
 .screen-login .login-simple-switch button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
 .screen-signup .signup-simple-legal button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
-.screen-signup .signup-simple-switch button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
+.screen-signup .signup-simple-switch button:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
+.welcome-server-help a:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
   background: transparent;
   color: var(--auth-link-hover);
 }
@@ -5506,7 +5508,8 @@ html.light .saved-server-status.is-connected { color: #287346; }
 .screen-login .login-simple-legal button:active,
 .screen-login .login-simple-switch button:active,
 .screen-signup .signup-simple-legal button:active,
-.screen-signup .signup-simple-switch button:active {
+.screen-signup .signup-simple-switch button:active,
+.welcome-server-help a:focus-visible {
   background: transparent;
   color: var(--auth-link-hover);
   outline: none;
@@ -5533,7 +5536,7 @@ html.light .saved-server-status.is-connected { color: #287346; }
 
 .login-back-setup:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]):not(:disabled),
 .signup-back-setup:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]):not(:disabled) {
-  background: var(--auth-control-hover);
+  background: var(--qorc-icon-button-hover);
   color: var(--auth-text);
 }
 
@@ -5656,7 +5659,6 @@ html.light .screen-signup .auth-simple-message,
   --welcome-control-hover: rgb(17, 17, 17);
   --welcome-field: var(--qorc-input-bg);
   --welcome-border: var(--qorc-border);
-  --welcome-border-focus: rgba(255, 255, 255, .16);
   --welcome-text: var(--qorc-text);
   --welcome-muted: var(--qorc-muted-text);
   --welcome-disabled: #18181b;
@@ -5691,6 +5693,8 @@ html.light .screen-signup .auth-simple-message,
   min-height: 72px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 20px;
   padding: 16px 24px;
   background: var(--welcome-bg);
 }
@@ -5731,15 +5735,6 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 }
 
 .screen-welcome .auth-theme-toggle {
-  position: fixed;
-  left: 24px;
-  bottom: 24px;
-  z-index: 90;
-  width: 34px;
-  height: 34px;
-  min-width: 34px;
-  min-height: 34px;
-  background: transparent;
   color: var(--welcome-muted);
 }
 
@@ -5790,6 +5785,14 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 }
 
 .welcome-simple-head {
+  text-align: center;
+}
+
+.welcome-server-help {
+  margin: 0;
+  color: var(--welcome-muted);
+  font-size: 12px;
+  line-height: 1.55;
   text-align: center;
 }
 
@@ -5845,7 +5848,8 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 }
 
 .screen-welcome .login-simple-input:focus {
-  border-color: var(--welcome-border-focus);
+  border-color: var(--welcome-border);
+  box-shadow: none;
   background: var(--welcome-field);
 }
 
@@ -5927,7 +5931,7 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 
 .welcome-advanced-toggle:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
   color: var(--welcome-text);
-  background: var(--welcome-control-hover);
+  background: var(--qorc-icon-button-hover);
 }
 
 .welcome-advanced-toggle svg {
@@ -6122,7 +6126,8 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 }
 
 .welcome-textarea:focus {
-  border-color: var(--welcome-border-focus);
+  border-color: var(--welcome-border);
+  box-shadow: none;
 }
 
 .welcome-textarea:disabled {
@@ -6132,9 +6137,9 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 
 html.light .screen-welcome,
 .light .screen-welcome {
+  --auth-link-hover: #7057c8;
   --welcome-control: #e9e9e9;
   --welcome-control-hover: #dedee1;
-  --welcome-border-focus: rgba(16, 16, 20, .2);
   --welcome-disabled: var(--qorc-control-hover);
   --welcome-disabled-text: #98989f;
 }
@@ -6159,11 +6164,6 @@ html.light .welcome-advanced-panel,
   .welcome-simple {
     min-height: calc(100vh - 64px);
     padding: 38px 18px 54px;
-  }
-
-  .screen-welcome .auth-theme-toggle {
-    left: 16px;
-    bottom: 16px;
   }
 
   .welcome-auth-back {

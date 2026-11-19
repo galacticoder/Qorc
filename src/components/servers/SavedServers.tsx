@@ -246,8 +246,8 @@ export function SavedServers({ onSelect, selectedUrl = '', currentServer = null,
               </Popover>
               </div>
               {detailsUrl === server.url && <div id={detailsId} className="saved-server-expanded-details">
-                <ServerIdentityDetails key={server.url} server={server} connected={currentServer?.url === server.url ? currentServer : null} />
-                {onSelect && <button type="button" className="saved-servers-action is-primary saved-server-use" disabled={busy} onClick={() => onSelect(server)}>Use this server</button>}
+                <ServerIdentityDetails key={server.url} server={server} connected={currentServer?.url === server.url ? currentServer : null}
+                  headerAction={onSelect && <button type="button" className="saved-servers-action is-primary saved-server-use" disabled={busy} onClick={() => onSelect(server)}>Use this server</button>} />
               </div>}
             </div>;
           })}

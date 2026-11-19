@@ -2,9 +2,9 @@ import { useAppBack } from '../../hooks/useAppBack';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QorcBrandLogo } from '../ui/QorcBrandLogo';
 import { ThemeToggleButton } from '../ui/ThemeToggleButton';
-import { Server } from 'lucide-react';
 import { SavedServersScreen } from '../servers/SavedServersScreen';
 import { AppSelect } from '../ui/AppSelect';
+import { system } from '../../lib/tauri-bindings';
 import { useStartupConnection } from '../../hooks/app/useStartupConnection';
 import {
   humanizeConnectionError,
@@ -13,6 +13,8 @@ import {
   saveTorPreferences,
   startupConnection,
 } from '../../lib/transport/startup-connection';
+
+const SERVER_SETUP_URL = 'https://www.qorc.app/docs.html#SERVER_SETUP.md';
 
 interface WelcomeSetupProps {
   readonly onConnected: (serverUrl: string) => void;
@@ -100,9 +102,9 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
             <QorcBrandLogo className="login-brand-mark" imageClassName="login-brand-logo" />
             <span className="login-brand-name">Qorc</span>
           </div>
+          <ThemeToggleButton className="auth-theme-toggle" />
         </header>
 
-        <ThemeToggleButton className="auth-theme-toggle" />
         {onCancel && (
           <button
             type="button"
@@ -154,6 +156,16 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
               {submitLabel}
             </button>
           </form>
+
+          <div className="welcome-advanced">
+            <button
+              type="button"
+              className="welcome-advanced-toggle"
+              onClick={() => setSavedServersOpen(true)}
+            >
+              <span>Saved servers</span>
+            </button>
+          </div>
 
           <div className={`welcome-advanced${advancedOpen ? ' is-open' : ''}`}>
             <button
@@ -221,16 +233,13 @@ export function WelcomeSetup({ onConnected, onCancel, initialServerUrl = '' }: W
             </div>
           </div>
 
-          <div className="welcome-advanced">
-            <button
-              type="button"
-              className="welcome-advanced-toggle"
-              onClick={() => setSavedServersOpen(true)}
-            >
-              <span>Saved servers</span>
-              <Server size={17} aria-hidden="true" />
-            </button>
-          </div>
+          <p className="welcome-server-help">
+            Want to run your own server?{' '}
+            <a href={SERVER_SETUP_URL} target="_blank" rel="noopener noreferrer" onClick={(event) => {
+              event.preventDefault();
+              void system.openExternal(SERVER_SETUP_URL).catch(() => setError('Could not open the setup guide. Try again.'));
+            }}>Read the setup guide</a>
+          </p>
 
         </main>
         <SavedServersScreen open={savedServersOpen} onOpenChange={setSavedServersOpen} selectedUrl={serverUrl} disabled={isConnecting} onSelect={(server) => { setServerUrl(server.url); setError(''); }} />

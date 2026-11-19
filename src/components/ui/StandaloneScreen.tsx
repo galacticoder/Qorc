@@ -26,7 +26,7 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
   useLayoutEffect(() => { latestBack.current = onBack; });
   const goBack = useCallback(() => {
     if (closing.current) return;
-    const animation = register && !mobile ? null : animateView(content.current, 'back', true, mobile ? 'slide' : 'fade');
+    const animation = mobile ? animateView(content.current, 'back', true, 'slide') : null;
     if (!animation) { latestBack.current(); return; }
     closing.current = true;
     exit.current = animation;
@@ -35,7 +35,7 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
       latestBack.current();
     };
     void animation.finished.then(finish, finish);
-  }, [register, mobile]);
+  }, [mobile]);
   useAppBack(open, goBack, 80);
 
   useLayoutEffect(() => {
@@ -47,7 +47,7 @@ export function StandaloneScreen({ open, onBack, className = '', labelledBy, des
     const previousFocus = document.activeElement;
     const overflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    const entrance = register && !mobile ? null : animateView(content.current, 'forward', false, mobile ? 'slide' : 'fade');
+    const entrance = mobile ? animateView(content.current, 'forward', false, 'slide') : null;
     content.current?.setAttribute('data-screen-ready', '');
     content.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
     return () => {

@@ -20,6 +20,7 @@ export const STORAGE_KEYS = {
     PENDING_RETRY_ALL: 'all',
     SAVED_SERVERS: 'saved_servers',
     THEME: 'theme',
+    INTRO_COMPLETED: 'intro_completed',
     TOR_BRIDGES_ENABLED: 'qorc_tor_bridges_enabled',
     TOR_BRIDGE_LINES: 'qorc_tor_bridge_lines',
     TOR_BRIDGE_TRANSPORT: 'qorc_tor_bridge_transport',

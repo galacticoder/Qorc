@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Check, ChevronRight, Copy } from 'lucide-react';
 import { readSavedServerIdentity, type SavedServerIdentity } from '../../lib/servers/server-identity';
 import type { SavedServer } from '../../lib/servers/saved-servers';
@@ -27,7 +27,7 @@ function IdentityCodeBlock({ label, value, caption, fingerprint = false }: { lab
   </div>;
 }
 
-export function ServerIdentityDetails({ server, connected }: { server: SavedServer; connected: ConnectedServer | null }) {
+export function ServerIdentityDetails({ server, connected, headerAction }: { server: SavedServer; connected: ConnectedServer | null; headerAction?: ReactNode }) {
   const [result, setResult] = useState<{ identity: SavedServerIdentity | null; error: boolean } | null>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
@@ -68,6 +68,7 @@ export function ServerIdentityDetails({ server, connected }: { server: SavedServ
   return <div className="server-identity-details">
     <div className="server-identity-heading"><h3>Server identity</h3>
       <span className={`server-identity-state${matches ? ' is-matched' : mismatch || result?.error ? ' is-error' : ''}`} role="status">{status}</span>
+      {headerAction}
     </div>
     <IdentityCodeBlock label="Full address" value={server.url} />
     {identity && <>

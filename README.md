@@ -46,6 +46,8 @@ cover-traffic protocol artifacts.
 
 ## Run a Qorc server with Docker
 
+For a short walkthrough from installation to your first connection, see [Set up and connect to a Qorc server](docs/SERVER_SETUP.md).
+
 This works with Docker Linux containers on
 64-bit Intel/AMD and ARM hosts running Linux, Windows, or macOS.
 
