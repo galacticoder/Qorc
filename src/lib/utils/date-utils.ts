@@ -1,3 +1,4 @@
+import { DATE_UTILS_MINUTES_MINIMUM, DATE_UTILS_DAYS_MINIMUM } from '../constants';
 import { format, isToday, isYesterday, isThisYear } from 'date-fns';
 
 export const formatClockDurationSeconds = (seconds: number): string => {
@@ -25,9 +26,9 @@ export const formatRelativeAge = (date: Date | number | undefined, now = Date.no
   const days = Math.floor(diff / 86400000);
 
   if (minutes < 1) return 'now';
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < DATE_UTILS_MINUTES_MINIMUM) return `${minutes}m`;
   if (hours < 24) return `${hours}h`;
-  if (days < 7) return `${days}d`;
+  if (days < DATE_UTILS_DAYS_MINIMUM) return `${days}d`;
 
   const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
   const day = dateObj.getDate().toString().padStart(2, '0');

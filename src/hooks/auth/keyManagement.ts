@@ -1,3 +1,7 @@
+import {
+  KEY_MANAGEMENT_TIMEOUT_MS,
+  KEY_MANAGEMENT_CREATE_WAIT_FOR_SERVER_KEYS_TIMEOUT_MS,
+} from '../../lib/constants';
 import { RefObject } from "react";
 import { validateServerKeys } from "../../lib/utils/auth-utils";
 import type { ServerHybridPublicKeys, HybridKeys } from "../../lib/types/auth-types";
@@ -119,7 +123,7 @@ export const createWaitForServerKeys = (
 ) => {
   return async (
     signal?: AbortSignal,
-    timeoutMs: number = 15000
+    timeoutMs: number = KEY_MANAGEMENT_TIMEOUT_MS
   ): Promise<ServerHybridPublicKeys> => {
     const start = Date.now();
 
@@ -144,7 +148,7 @@ export const createWaitForServerKeys = (
           else resolve();
         };
         const onAbort = () => finish(new StaleAuthOperationError());
-        timer = setTimeout(() => finish(), 100);
+        timer = setTimeout(() => finish(), KEY_MANAGEMENT_CREATE_WAIT_FOR_SERVER_KEYS_TIMEOUT_MS);
         signal?.addEventListener('abort', onAbort, { once: true });
         if (signal?.aborted) onAbort();
       });

@@ -1,5 +1,6 @@
 //! Renderer entry points for opaque native message content operations
 
+use crate::constants::link_preview::MAX_PARALLEL_LINK_PREVIEW_FETCHES;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -11,12 +12,12 @@ use zeroize::Zeroizing;
 use crate::link_preview::{NativeLinkPreview, fetch_link_preview};
 use crate::message_content::{
     ContentCommitResult, NativeMessageLinkTarget, RenderedMessageContent,
-    clone_content_for_display, commit_pending_content, load_native_content_record, message_links,
+    clone_content_for_display, commit_pending_content, load_native_content_record,
+    load_native_display_content_record, message_links,
     parse_message_link, render_private_message, revoke_outbound_binding, store_outgoing_content,
 };
 use crate::state::AppState;
 
-const MAX_PARALLEL_LINK_PREVIEW_FETCHES: usize = 8;
 static LINK_PREVIEW_FETCH_LIMIT: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_PARALLEL_LINK_PREVIEW_FETCHES));
 
@@ -133,7 +134,7 @@ pub async fn message_content_render(
         .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     tokio::task::spawn_blocking(move || {
-        let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
+        let record = load_native_display_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
             crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )
@@ -170,7 +171,7 @@ pub async fn message_content_link_targets(
         .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     let targets = tokio::task::spawn_blocking(move || {
-        let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
+        let record = load_native_display_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
             crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )
@@ -291,7 +292,7 @@ pub async fn message_content_copy(
         .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     tokio::task::spawn_blocking(move || {
-        let record = load_native_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
+        let record = load_native_display_content_record(db.as_ref(), &storage_id)?.ok_or_else(|| {
             crate::error::QorcError::NotInitialized(
                 "Native message content is unavailable".to_string(),
             )

@@ -1,7 +1,8 @@
+import { LOCAL_ACCOUNT_SCOPE_SERVER_URL_LENGTH_LIMIT } from '../constants';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { storage, websocket } from '../tauri-bindings';
 import { PinnedServer } from '../utils/auth-utils';
-import { canonicalAuthUsername, isCanonicalAuthUsername } from '../sanitizers';
+import { canonicalAuthUsername, hasExactObjectKeys, isCanonicalAuthUsername, isValidDisplayName } from '../sanitizers';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { Base64 } from '../cryptography/base64';
 import type { ServerKeyMaterial } from '../types/websocket-types';
@@ -29,7 +30,7 @@ function canonicalAccountUsername(username: string): string {
 
 function validateServerUrl(value: unknown): string {
   const serverUrl = typeof value === 'string' ? value.trim() : '';
-  if (!serverUrl || serverUrl.length > 2048) {
+  if (!serverUrl || serverUrl.length > LOCAL_ACCOUNT_SCOPE_SERVER_URL_LENGTH_LIMIT) {
     throw new Error('Authenticated server identity is unavailable');
   }
   return serverUrl;
@@ -83,89 +84,76 @@ export async function getCurrentLocalAccountScope(username: string): Promise<str
   return deriveLocalAccountScope(await captureCurrentServerContext(), username);
 }
 
-function lastAccountStorageKeys(serverScope: string): { username: string; displayName: string } {
-  return {
-    username: `${STORAGE_PREFIXES.LAST_AUTH_USER}${serverScope}`,
-    displayName: `${STORAGE_PREFIXES.LAST_AUTH_DISPLAY}${serverScope}`,
-  };
+type LastAuthenticatedAccount = { username: string; displayName: string };
+
+let accountMarkerWrites = Promise.resolve();
+
+function updateAccountMarker(operation: () => Promise<void>): Promise<void> {
+  const write = accountMarkerWrites.then(operation);
+  accountMarkerWrites = write.catch(() => { });
+  return write;
+}
+
+function accountMarkerKey(serverScope: string): string {
+  return `${STORAGE_PREFIXES.LAST_AUTH_ACCOUNT}${serverScope}`;
+}
+
+function parseAccountMarker(raw: string): LastAuthenticatedAccount {
+  let record: unknown;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    throw new Error('Local account marker is invalid');
+  }
+  if (!hasExactObjectKeys(record, ['username', 'displayName']) ||
+      !isCanonicalAuthUsername(record.username) || !isValidDisplayName(record.displayName)) {
+    throw new Error('Local account marker is invalid');
+  }
+  return { username: record.username, displayName: record.displayName };
 }
 
 export async function loadLastAuthenticatedAccount(): Promise<{
   username: string | null;
   displayName: string | null;
 }> {
+  await accountMarkerWrites;
   const context = await captureCurrentServerContext();
-  const keys = lastAccountStorageKeys(context.serverScope);
-  const [username, displayName] = await Promise.all([
-    storage.get(keys.username),
-    storage.get(keys.displayName),
-  ]);
+  const raw = await storage.get(accountMarkerKey(context.serverScope));
   await assertCurrentServerContext(context);
-  if (username === null && displayName === null) {
-    return { username: null, displayName: null };
-  }
-  if (
-    typeof username !== 'string' ||
-    !isCanonicalAuthUsername(username) ||
-    typeof displayName !== 'string' ||
-    displayName.length === 0 ||
-    displayName.length > 256 ||
-    /[\x00-\x1f\x7f]/.test(displayName)
-  ) {
-    throw new Error('Local account marker is incomplete or invalid');
-  }
-  return { username, displayName };
+  return raw === null ? { username: null, displayName: null } : parseAccountMarker(raw);
 }
 
-export async function storeLastAuthenticatedAccount(
+export function storeLastAuthenticatedAccount(
   username: string,
-  displayName: string
+  displayName: string,
+  assertCurrent: () => void,
 ): Promise<void> {
-  if (
-    (displayName.length === 0 || displayName.length > 256 || /[\x00-\x1f\x7f]/.test(displayName))
-  ) {
-    throw new Error('Invalid local account display name');
-  }
-  canonicalAuthUsername(username, 'local account owner');
-  const context = await captureCurrentServerContext();
-  const keys = lastAccountStorageKeys(context.serverScope);
-  try {
-    if (!await storage.set(keys.username, username)) {
-      throw new Error('Failed to store local account marker');
-    }
-    if (!await storage.set(keys.displayName, displayName)) {
-      throw new Error('Failed to store local account display marker');
-    }
-    const [storedUsername, storedDisplayName] = await Promise.all([
-      storage.get(keys.username),
-      storage.get(keys.displayName),
-    ]);
-    if (
-      storedUsername !== username ||
-      storedDisplayName !== displayName
-    ) {
+  return updateAccountMarker(async () => {
+    canonicalAuthUsername(username, 'local account owner');
+    if (!isValidDisplayName(displayName)) throw new Error('Invalid local account display name');
+    assertCurrent();
+    const context = await captureCurrentServerContext();
+    assertCurrent();
+    const key = accountMarkerKey(context.serverScope);
+    const record = JSON.stringify({ username, displayName } satisfies LastAuthenticatedAccount);
+    if (!await storage.set(key, record) || await storage.get(key) !== record) {
       throw new Error('Local account marker could not be verified');
     }
     await assertCurrentServerContext(context);
-  } catch (error) {
-    await Promise.allSettled([storage.remove(keys.username), storage.remove(keys.displayName)]);
-    throw error;
-  }
+    assertCurrent();
+  });
 }
 
-export async function clearLastAuthenticatedAccount(): Promise<void> {
-  const context = await captureCurrentServerContext();
-  const keys = lastAccountStorageKeys(context.serverScope);
-  const removed = await Promise.all([
-    storage.remove(keys.username),
-    storage.remove(keys.displayName),
-  ]);
-  const remains = await Promise.all([
-    storage.has(keys.username),
-    storage.has(keys.displayName),
-  ]);
-  if (removed.some(result => result !== true) || remains.some(Boolean)) {
-    throw new Error('Local account marker deletion could not be verified');
-  }
-  await assertCurrentServerContext(context);
+export function clearLastAuthenticatedAccount(assertCurrent: () => void): Promise<void> {
+  return updateAccountMarker(async () => {
+    assertCurrent();
+    const context = await captureCurrentServerContext();
+    assertCurrent();
+    const key = accountMarkerKey(context.serverScope);
+    if (!await storage.remove(key) || await storage.has(key)) {
+      throw new Error('Local account marker deletion could not be verified');
+    }
+    await assertCurrentServerContext(context);
+    assertCurrent();
+  });
 }

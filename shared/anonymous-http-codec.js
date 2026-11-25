@@ -6,10 +6,14 @@ import {
   ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET,
   ANONYMOUS_HTTP_RESPONSE_PIR_BYTES,
   ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_TAG_UPDATE_BYTES,
 } from './anonymous-http-layout.js';
 import { ANONYMOUS_DISCOVERY_RESPONSE_BYTES } from './anonymous-transfer-policy.js';
+import { DISCOVERY_BLOB_WIRE_BYTES, DISCOVERY_BUCKET_TARGET_SIZE } from './discovery-constants.js';
 import { SPOOL_TAG_PROTOCOL, SPOOL_PIR_LAYOUT } from './protocol-keys.js';
 import { POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES } from './crypto-sizes.js';
+import { SPOOL_INDEX_MAX_ENTRIES, SPOOL_INDEX_UPDATE_MAX_BYTES, validateSpoolIndexUpdate } from './spool-index-updates.js';
+import { SPOOL_DETECTION_PROBE_BYTES, SPOOL_TAG_HEX_CHARS, SPOOL_DETECTION_PROBE_HEX_CHARS } from './spool-tag-protocol.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -17,11 +21,13 @@ const MAGIC = [81, 65, 66, 50];
 const HEADER_BYTES = 16;
 const MAX_PIR_COMPONENT_BYTES = 2 * 1024 * 1024;
 const profiles = Object.freeze({
+  'response:spool/tag-index-base': { id: 7, count: 2, maxBlobBytes: SPOOL_INDEX_MAX_ENTRIES * SPOOL_DETECTION_PROBE_BYTES, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES, encoding: 'hex', allowEmpty: true },
+  'response:spool/tag-index-update': { id: 8, count: 3, maxBlobBytes: SPOOL_INDEX_UPDATE_MAX_BYTES, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_TAG_UPDATE_BYTES, encoding: 'hex', allowEmpty: true },
   'request:avatar/blob/put': { id: 1, count: 1, blobBytes: 262244, metaMax: 4096, bytes: ANONYMOUS_HTTP_REQUEST_LARGE_BYTES },
   'request:spool/pir': { id: 2, count: 2, metaMax: 4096, bytes: ANONYMOUS_HTTP_REQUEST_PIR_BYTES },
-  'response:discovery/bucket': { id: 3, count: 64, blobBytes: 98304, metaMax: 4096, bytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES },
+  'response:discovery/bucket': { id: 3, count: DISCOVERY_BUCKET_TARGET_SIZE, blobBytes: DISCOVERY_BLOB_WIRE_BYTES, metaMax: 4096, bytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES },
   'response:avatar/blob/get': { id: 4, count: 10, blobBytes: 262244, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES },
-  'response:spool/tag-index': { id: 6, count: 2, maxBlobBytes: 6061 * 32, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES, encoding: 'hex', allowEmpty: true },
+  'response:spool/tag-index': { id: 6, count: 2, maxBlobBytes: SPOOL_INDEX_MAX_ENTRIES * SPOOL_DETECTION_PROBE_BYTES, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES, encoding: 'hex', allowEmpty: true },
   'response:spool/pir': { id: 5, count: 1, maxBlobBytes: 760 * 1024, metaMax: 4096, bytes: ANONYMOUS_HTTP_RESPONSE_PIR_BYTES },
 });
 
@@ -90,8 +96,8 @@ function validIndex(payload, placeholders = false) {
   if (!exact(payload, ['ok', 'protocol', 'pirLayout', 'epoch', 'count', 'tags', 'probes']) ||
       payload.ok !== true || payload.protocol !== SPOOL_TAG_PROTOCOL || payload.pirLayout !== SPOOL_PIR_LAYOUT ||
       !Number.isSafeInteger(payload.epoch) || payload.epoch < 0 ||
-      !Number.isSafeInteger(payload.count) || payload.count < 0 || payload.count > 6061) fail();
-  for (const [key, width] of [['tags', 16], ['probes', 64]]) {
+      !Number.isSafeInteger(payload.count) || payload.count < 0 || payload.count > SPOOL_INDEX_MAX_ENTRIES) fail();
+  for (const [key, width] of [['tags', SPOOL_TAG_HEX_CHARS], ['probes', SPOOL_DETECTION_PROBE_HEX_CHARS]]) {
     if (placeholders && payload[key] === null) continue;
     if (typeof payload[key] !== 'string' || payload[key].length !== payload.count * width || /[^a-f0-9]/.test(payload[key])) fail();
   }
@@ -128,8 +134,13 @@ function transform(direction, operation, wrapper, replace) {
       if (!exact(item, ['id', 'data']) || typeof item.id !== 'string' || !/^[a-f0-9]{64}$/.test(item.id)) fail();
       return { ...item, data: replace(item.data) };
     });
-  } else if (operation === 'spool/tag-index') {
+  } else if ((operation === 'spool/tag-index' || operation === 'spool/tag-index-base')) {
     validIndex(payload, true);
+    payload.tags = replace(payload.tags);
+    payload.probes = replace(payload.probes);
+  } else if (operation === 'spool/tag-index-update') {
+    validateSpoolIndexUpdate(payload, true);
+    payload.order = replace(payload.order);
     payload.tags = replace(payload.tags);
     payload.probes = replace(payload.probes);
   } else {
@@ -190,7 +201,8 @@ function decode(direction, operation, bytes) {
     const value = profile.encoding === 'hex' ? hex(raw) : base64(raw); at += size; return value;
   });
   if (i !== count || at !== bytes.length) fail();
-  if (operation === 'spool/tag-index' && result.payload.ok === true) validIndex(result.payload);
+  if ((operation === 'spool/tag-index' || operation === 'spool/tag-index-base') && result.payload.ok === true) validIndex(result.payload);
+  if (operation === 'spool/tag-index-update' && result.payload.ok === true) validateSpoolIndexUpdate(result.payload);
   return result;
 }
 export function encodeAnonymousRequest(wrapper) { return encode('request', wrapper.operation, wrapper); }

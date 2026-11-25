@@ -1,6 +1,6 @@
 [package]
 name = "qorc"
-version = "1.2.0"
+version = "1.2.2"
 description = "Secure messaging application"
 authors = ["galacticoderr"]
 edition = "2024"

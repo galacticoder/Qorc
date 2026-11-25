@@ -1,7 +1,11 @@
+import {
+  AUTH_USERNAME_REGEX,
+  ACCOUNT_CREDENTIALS_IS_VALID_ACCOUNT_CREDENTIAL_VALUE_LENGTH_LIMIT,
+} from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 export function isValidAccountCredential(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 1024) return false;
+  if (typeof value !== 'string' || value.length === 0 || value.length > ACCOUNT_CREDENTIALS_IS_VALID_ACCOUNT_CREDENTIAL_VALUE_LENGTH_LIMIT) return false;
   for (let index = 0; index < value.length; index += 1) {
     const unit = value.charCodeAt(index);
     if (unit === 0) return false;
@@ -17,7 +21,7 @@ export function isValidAccountCredential(value: unknown): value is string {
 
 export function encodeAccountAuthSecret(username: string, password: string, passphrase: string): Uint8Array {
   if (
-    !/^[a-z0-9._-]{3,100}$/.test(username) ||
+    !AUTH_USERNAME_REGEX.test(username) ||
     !isValidAccountCredential(password) ||
     !isValidAccountCredential(passphrase)
   ) throw new Error('Invalid authentication secret');

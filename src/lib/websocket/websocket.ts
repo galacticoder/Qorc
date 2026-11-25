@@ -2,6 +2,7 @@
  * WebSocket Connection Manager
  */
 
+import { sleep } from '../runtime/sleep';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumRandom } from '../cryptography/random';
 import { SignalType } from '../types/signal-types';
@@ -23,6 +24,46 @@ import {
   WS_CONTROL_RESPONSE_TIMEOUT_MS,
   WS_CONTROL_SEND_TIMEOUT_MS,
   WS_FIXED_MESSAGE_SIZE_BYTES,
+  ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE,
+  SECURE_CHUNK_MAX_CONCURRENT,
+  SECURE_CHUNK_MAX_DATA_LENGTH,
+  SECURE_CHUNK_MAX_RESERVED_LENGTH,
+  SECURE_CHUNK_MAX_TOTAL_CHUNKS,
+  SECURE_CHUNK_MAX_TOTAL_LENGTH,
+  SECURE_CHUNK_TIMEOUT_MS,
+  SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS,
+  WS_INBOUND_PENDING_MAX_BYTES,
+  WS_INBOUND_PENDING_MAX_COUNT,
+  UINT32_RANGE,
+  PLAINTEXT_WIRE_TYPES,
+  SECURE_CHUNK_MESSAGE_ID_RE,
+  LINKED_FORBIDDEN_ANONYMOUS_TYPES,
+  UNLINKED_FORBIDDEN_ACCOUNT_TYPES,
+  AUTH_CHANNEL_BOUND_REQUEST_FIELDS,
+  SERVER_ENTRY_TOKEN_INVALID,
+  NON_QUEUEABLE_CONTROL_TYPES,
+  WEBSOCKET_IS_TOKEN_VALIDATION_RESPONSE_VALUE_ERROR_LENGTH_MINIMUM,
+  WEBSOCKET_WAIT_FOR_CURRENT_SERVER_BOOTSTRAP_TIMEOUT_MS,
+  WEBSOCKET_MESSAGE_ERROR_LENGTH_LIMIT,
+  WEBSOCKET_ON_ACKNOWLEDGEMENT_MESSAGE_ERROR_LENGTH_LIMIT,
+  WEBSOCKET_CONNECT_TRANSPORT_TIMEOUT_MS,
+  WEBSOCKET_ATTEMPT_MINIMUM,
+  WEBSOCKET_ESTABLISH_CONNECTION_DELAY_MS,
+  WEBSOCKET_PERFORM_AUTHORIZE_UNLINKED_CONNECTION_TIMEOUT_MS,
+  WEBSOCKET_PERFORM_VALIDATE_UNLINKED_DELIVERY_READY_TIMEOUT_MS,
+  WEBSOCKET_CONNECT_NATIVE_TRANSPORT_DELAY_MS,
+  WEBSOCKET_RECOVER_FROM_TIMESTAMP_REJECT_DELAY_MS,
+  WEBSOCKET_START_CONNECTIVITY_WATCHDOG_INTERVAL_MS,
+  WEBSOCKET_START_SERVER_GATEKEEPER_FLOW_TIMEOUT_MS,
+  WEBSOCKET_TOKEN_BATCH_SIGNED_BLINDED_TOKENS_LENGTH_EXPECTED,
+  WEBSOCKET_TIMEOUT_MS,
+  WEBSOCKET_WAIT_UNTIL_READY_TIMEOUT_MS,
+  WEBSOCKET_MAX_WAIT_TIME,
+  WEBSOCKET_SEND_SECURE_CONTROL_MESSAGE_TIMEOUT_MS,
+  WS_TIMESTAMP_RECOVERY_COOLDOWN_MS,
+  WS_BOOTSTRAP_RETRY_INTERVAL_MS,
+  WS_BOOTSTRAP_TIMEOUT_CAP_MS,
+  WS_COVER_BACKPRESSURE_LOG_INTERVAL_MS,
 } from '../constants';
 
 import { WebSocketRateLimiter } from './rate-limiter';
@@ -61,57 +102,6 @@ interface DispatchOptions {
 interface SecureControlSendOptions extends DispatchOptions {
   failIfQueued?: boolean;
 }
-
-const SERVER_ENTRY_GRANT_BASE_TIMEOUT_MS = 30_000;
-const SERVER_ENTRY_TOKEN_INVALID = 'SERVER_ENTRY_TOKEN_INVALID';
-
-const SECURE_CHUNK_MAX_TOTAL_CHUNKS = 512;
-const SECURE_CHUNK_MAX_TOTAL_LENGTH = 24 * 1024 * 1024;
-const SECURE_CHUNK_MAX_DATA_LENGTH = 8 * 1024 * 1024;
-const SECURE_CHUNK_MAX_CONCURRENT = 4;
-const SECURE_CHUNK_MAX_RESERVED_LENGTH = 32 * 1024 * 1024;
-const SECURE_CHUNK_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
-const WS_INBOUND_PENDING_MAX_COUNT = 128;
-const WS_INBOUND_PENDING_MAX_BYTES = 24 * 1024 * 1024;
-const AUTH_CHANNEL_BOUND_REQUEST_FIELDS = new Map<string, 'authRequestId' | 'requestId'>([
-  [SignalType.AUTH_PIR_REQUEST, 'authRequestId'],
-  [SignalType.SERVER_ENTRY_REQUEST, 'requestId'],
-]);
-const NON_QUEUEABLE_CONTROL_TYPES = new Set<string>([
-  SignalType.AUTH_REGISTER_REQUEST,
-  SignalType.AUTH_REGISTER_FINALIZE,
-  SignalType.AUTH_REGISTER_CONFIRM,
-  SignalType.AUTH_PIR_REQUEST,
-  SignalType.AUTH_PIR_FINALIZE,
-  SignalType.SERVER_ENTRY_REQUEST,
-  SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
-  SignalType.ACCOUNT_AUTH_TOKEN_REFRESH,
-  SignalType.PRIVACY_PASS_REDEMPTION,
-  SignalType.TOKEN_VALIDATION,
-  SignalType.ACTIVATE_DELIVERY,
-]);
-const ACCOUNT_AUTH_REPLACEMENT_BATCH_SIZE = 1;
-const SECURE_CHUNK_TIMEOUT_MS = 200_000;
-const PLAINTEXT_WIRE_TYPES = new Set<string>([
-  SignalType.SERVER_PUBLIC_KEY,
-  SignalType.PQ_HANDSHAKE_ACK
-]);
-const UNLINKED_FORBIDDEN_ACCOUNT_TYPES = new Set<string>([
-  SignalType.AUTH_REGISTER_REQUEST,
-  SignalType.AUTH_REGISTER_FINALIZE,
-  SignalType.AUTH_REGISTER_CONFIRM,
-  SignalType.AUTH_PIR_REQUEST,
-  SignalType.AUTH_PIR_FINALIZE,
-  SignalType.SERVER_ENTRY_REQUEST,
-  SignalType.SERVER_ENTRY_TOKEN_ISSUANCE
-]);
-const LINKED_FORBIDDEN_ANONYMOUS_TYPES = new Set<string>([
-  SignalType.TOKEN_VALIDATION,
-  SignalType.ACTIVATE_DELIVERY,
-  SignalType.BLIND_ROUTE,
-  SignalType.OPRF_DISCOVERY_PUBLIC_KEY,
-  SignalType.PUBLISH_DISCOVERY
-]);
 
 function operationAbortError(message = 'WebSocket operation was cancelled'): Error {
   const error = new Error(message);
@@ -189,7 +179,7 @@ const isTokenValidationResponse = (value: unknown): value is ResumeAuthorization
   return hasExactKeys(value, ['error', 'requestId', 'type', 'valid']) &&
     typeof value.error === 'string' &&
     value.error.length > 0 &&
-    value.error.length <= 128;
+    value.error.length <= WEBSOCKET_IS_TOKEN_VALIDATION_RESPONSE_VALUE_ERROR_LENGTH_MINIMUM;
 };
 
 interface SecureChunkBuffer {
@@ -225,7 +215,7 @@ interface PrivacyBoundaryTransition {
 
 const secureRandomUnit = (): number => {
   const word = globalThis.crypto.getRandomValues(new Uint32Array(1))[0];
-  return word / 0x1_0000_0000;
+  return word / UINT32_RANGE;
 };
 
 const secureRandomIntInclusive = (min: number, max: number): number => {
@@ -671,7 +661,7 @@ export class WebSocketConnection {
   }
 
   private async waitForCurrentServerBootstrap(connectionToken: number): Promise<void> {
-    const timeoutMs = Math.min(30_000, this.torIntegration.getAdaptedTimeout(5_000));
+    const timeoutMs = Math.min(WS_BOOTSTRAP_TIMEOUT_CAP_MS, this.torIntegration.getAdaptedTimeout(WEBSOCKET_WAIT_FOR_CURRENT_SERVER_BOOTSTRAP_TIMEOUT_MS));
     const startedAt = Date.now();
     let lastRequestAt = startedAt;
     let requestCount = 0;
@@ -684,7 +674,7 @@ export class WebSocketConnection {
       }
       const now = Date.now();
       const verificationPending = this.serverBootstrapVerification?.connectionToken === connectionToken;
-      const deadlineMs = verificationPending ? Math.max(timeoutMs, 30_000) : timeoutMs;
+      const deadlineMs = verificationPending ? Math.max(timeoutMs, WS_BOOTSTRAP_TIMEOUT_CAP_MS) : timeoutMs;
       if (now - startedAt >= deadlineMs) {
         this.logConnectionDiagnostic('bootstrap.timeout', {
           waitMs: now - startedAt,
@@ -692,7 +682,7 @@ export class WebSocketConnection {
         }, 'error');
         throw new Error('Current WebSocket generation did not provide a valid server bootstrap');
       }
-      if (!verificationPending && now - lastRequestAt >= 1_500) {
+      if (!verificationPending && now - lastRequestAt >= WS_BOOTSTRAP_RETRY_INTERVAL_MS) {
         try {
           requestCount += 1;
           this.logConnectionDiagnostic('bootstrap.key-request-send', { requestCount });
@@ -1046,7 +1036,7 @@ export class WebSocketConnection {
         Object.keys(message).sort().join(',') !== 'connectionToken,error,type' ||
         !isNativeWsConnectionToken(message.connectionToken) ||
         typeof message.error !== 'string' ||
-        message.error.length > 512
+        message.error.length > WEBSOCKET_MESSAGE_ERROR_LENGTH_LIMIT
       ) return;
       if (message.connectionToken !== this.nativeConnectionToken) {
         this.logConnectionDiagnostic('native-event.stale-error-ignored', {
@@ -1304,7 +1294,7 @@ export class WebSocketConnection {
       if (this.cancelCoverAcknowledgement || this.connectionWaiterCancels.size > 0) return;
       if (Number(state.queue_size || 0) > 0) {
         const now = Date.now();
-        if (now - this.lastCoverBackpressureLogAt > 60000) {
+        if (now - this.lastCoverBackpressureLogAt > WS_COVER_BACKPRESSURE_LOG_INTERVAL_MS) {
           this.lastCoverBackpressureLogAt = now;
           console.info('[WebSocket] Skipping cover traffic while websocket writer is backlogged', {
             queueSize: state.queue_size
@@ -1335,7 +1325,7 @@ export class WebSocketConnection {
           typeof message.success !== 'boolean' ||
           (!hasExactKeys(message, ['type', 'requestId', 'success']) &&
             !hasExactKeys(message, ['type', 'requestId', 'success', 'error'])) ||
-          ('error' in message && (typeof message.error !== 'string' || message.error.length < 1 || message.error.length > 200))
+          ('error' in message && (typeof message.error !== 'string' || message.error.length < 1 || message.error.length > WEBSOCKET_ON_ACKNOWLEDGEMENT_MESSAGE_ERROR_LENGTH_LIMIT))
         ) return;
         release();
       };
@@ -1405,7 +1395,7 @@ export class WebSocketConnection {
       !!this.sessionKeyMaterial
     ) {
       this.logConnectionDiagnostic('connect.paused-settle-begin');
-      const resumed = await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(3000));
+      const resumed = await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(WEBSOCKET_CONNECT_TRANSPORT_TIMEOUT_MS));
       if (resumed) {
         this.logConnectionDiagnostic('connect.paused-settle-ready');
         return;
@@ -1601,7 +1591,7 @@ export class WebSocketConnection {
         this.logConnectionDiagnostic('establish.entry-store-ready', { hasEntryTokens: gk.hasTokens });
         if (gk.hasTokens) {
           let entryGranted = false;
-          for (let attempt = 0; attempt < 3 && !entryGranted; attempt++) {
+          for (let attempt = 0; attempt < WEBSOCKET_ATTEMPT_MINIMUM && !entryGranted; attempt++) {
             const redemption = await gk.getRedemptionPayload();
             assertConnectionCurrent();
             if (!redemption) {
@@ -1643,14 +1633,14 @@ export class WebSocketConnection {
               assertConnectionCurrent();
               if (attempt === 0) {
                 console.warn('[WebSocket] Entry token rejected, retrying with fresh token');
-                await new Promise(r => setTimeout(r, 300));
+                await sleep(WEBSOCKET_ESTABLISH_CONNECTION_DELAY_MS);
                 assertConnectionCurrent();
               }
             } else {
               try { await gk.commitPendingTokenUsage(); } catch { }
               assertConnectionCurrent();
               if (attempt === 0) {
-                await new Promise(r => setTimeout(r, 300));
+                await sleep(WEBSOCKET_ESTABLISH_CONNECTION_DELAY_MS);
                 assertConnectionCurrent();
               }
             }
@@ -1748,7 +1738,7 @@ export class WebSocketConnection {
     const requestId = crypto.randomUUID();
     if (!UUID_V4_RE.test(requestId)) return false;
 
-    const timeoutMs = this.torIntegration.getAdaptedTimeout(30000);
+    const timeoutMs = this.torIntegration.getAdaptedTimeout(WEBSOCKET_PERFORM_AUTHORIZE_UNLINKED_CONNECTION_TIMEOUT_MS);
     let cancelWait = () => {};
     const response = new Promise<boolean>((resolve) => {
       let settled = false;
@@ -1860,7 +1850,7 @@ export class WebSocketConnection {
         await self.sendSecureControlMessage(message);
       });
 
-      const activationTimeoutMs = this.torIntegration.getAdaptedTimeout(30000);
+      const activationTimeoutMs = this.torIntegration.getAdaptedTimeout(WEBSOCKET_PERFORM_VALIDATE_UNLINKED_DELIVERY_READY_TIMEOUT_MS);
       const activationRequestId = crypto.randomUUID();
       let cancelActivationWait = () => {};
       const waitForActivationResponse = new Promise<boolean>((resolve) => {
@@ -1976,7 +1966,7 @@ export class WebSocketConnection {
     await this.rejectStaleConnectionOperation(operationGeneration, result?.connectionToken);
     if (result?.success === false && this.isNativeConnectionInProgress(result.error)) {
       this.logConnectionDiagnostic('native-dial.connection-in-progress', {}, 'warn');
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await sleep(WEBSOCKET_CONNECT_NATIVE_TRANSPORT_DELAY_MS);
       this.assertConnectionOperationCurrent(operationGeneration);
       const nativeState = await websocket.getState();
       this.logConnectionDiagnostic('native-dial.in-progress-state', {
@@ -2000,7 +1990,7 @@ export class WebSocketConnection {
         this.logConnectionDiagnostic('native-dial.stuck-attempt-disconnect', {}, 'warn');
         await websocket.disconnect().catch(() => { });
         this.assertConnectionOperationCurrent(operationGeneration);
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await sleep(250);
         this.assertConnectionOperationCurrent(operationGeneration);
       }
       this.logConnectionDiagnostic('native-dial.retry-invoke');
@@ -2053,7 +2043,7 @@ export class WebSocketConnection {
     }
 
     const now = Date.now();
-    if (now - this.lastTimestampRecoveryAt < 3000) {
+    if (now - this.lastTimestampRecoveryAt < WS_TIMESTAMP_RECOVERY_COOLDOWN_MS) {
       return;
     }
     this.lastTimestampRecoveryAt = now;
@@ -2091,7 +2081,7 @@ export class WebSocketConnection {
       } catch { }
       if (!isCurrentRecovery()) return;
 
-      await new Promise(resolve => setTimeout(resolve, 250));
+      await sleep(WEBSOCKET_RECOVER_FROM_TIMESTAMP_REJECT_DELAY_MS);
       if (!isCurrentRecovery()) return;
       await this.connect();
       if (!isCurrentRecovery()) return;
@@ -2113,7 +2103,7 @@ export class WebSocketConnection {
     if (this.connectivityWatchdog) return;
     this.connectivityWatchdog = setInterval(() => {
       if (this.lifecycleState === 'connected') void this.queue.flush();
-    }, 5000);
+    }, WEBSOCKET_START_CONNECTIVITY_WATCHDOG_INTERVAL_MS);
   }
 
   // Stop connectivity watchdog
@@ -2438,7 +2428,6 @@ export class WebSocketConnection {
         throw new Error('Account-linked message rejected on unlinked socket');
       }
     }
-
 
     if (!this.rateLimiter.checkRateLimit()) {
       if (allowQueue) {
@@ -3005,7 +2994,7 @@ export class WebSocketConnection {
       const request = await gk.startEntryRequest(password);
       throwIfAborted();
 
-      const challengeTimeoutMs = this.torIntegration.getAdaptedTimeout(10000);
+      const challengeTimeoutMs = this.torIntegration.getAdaptedTimeout(WEBSOCKET_START_SERVER_GATEKEEPER_FLOW_TIMEOUT_MS);
       const waitForChallenge = (): { promise: Promise<any>; cancel: () => void } => {
         let cancel = () => {};
         const promise = new Promise<any>((resolve, reject) => {
@@ -3216,7 +3205,7 @@ export class WebSocketConnection {
       let issuanceProof: Uint8Array | null = null;
       let issuerPublicKey: Uint8Array | null = null;
       try {
-        if (!Array.isArray(tokenBatch.signedBlindedTokens) || tokenBatch.signedBlindedTokens.length !== 1000) {
+        if (!Array.isArray(tokenBatch.signedBlindedTokens) || tokenBatch.signedBlindedTokens.length !== WEBSOCKET_TOKEN_BATCH_SIGNED_BLINDED_TOKENS_LENGTH_EXPECTED) {
           throw new Error('Invalid server-entry issuance batch size');
         }
         signedBlindedTokens = decodeCanonicalBase64List(tokenBatch.signedBlindedTokens, 32, 1000);
@@ -3325,7 +3314,7 @@ export class WebSocketConnection {
     };
     const requestId = crypto.randomUUID();
     try {
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < WEBSOCKET_ATTEMPT_MINIMUM; attempt += 1) {
         if (await this.issueAccountAuthorizationReplacement(assertConnectionCurrent, requestId)) {
           this.accountAuthReplacementConnectionToken = connectionToken;
           return;
@@ -3490,7 +3479,7 @@ export class WebSocketConnection {
   }
 
   private createServerEntryGrantWaiter(
-    timeoutMs: number = 5000,
+    timeoutMs: number = WEBSOCKET_TIMEOUT_MS,
     abortSignal?: AbortSignal,
     requestId?: string
   ): {
@@ -3683,7 +3672,7 @@ export class WebSocketConnection {
   }
 
   // Wait until the socket is fully connected with an established PQ session
-  async waitUntilReady(timeoutMs: number = 30000, signal?: AbortSignal): Promise<boolean> {
+  async waitUntilReady(timeoutMs: number = WEBSOCKET_WAIT_UNTIL_READY_TIMEOUT_MS, signal?: AbortSignal): Promise<boolean> {
     const ready = () => this.isConnectedToServer() && this.isPQSessionEstablished();
     if (signal?.aborted) return false;
     if (ready()) return true;
@@ -3732,7 +3721,7 @@ export class WebSocketConnection {
         }
         return null;
       }
-      const maxWaitTime = 10000;
+      const maxWaitTime = WEBSOCKET_MAX_WAIT_TIME;
       const startTime = Date.now();
       while (!this.isPQSessionEstablished() && (Date.now() - startTime) < maxWaitTime) {
         await waitForAbortableDelay(100, options.signal);
@@ -3755,7 +3744,7 @@ export class WebSocketConnection {
       !options.bypassStateCheck &&
       this.isTransientlyUnavailable()
     ) {
-      await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(15000), options.signal);
+      await this.waitForConnectedSettle(this.torIntegration.getAdaptedTimeout(WEBSOCKET_SEND_SECURE_CONTROL_MESSAGE_TIMEOUT_MS), options.signal);
       throwIfOperationAborted(options.signal);
     }
     const authChannelBinding = await this.dispatchPayload(

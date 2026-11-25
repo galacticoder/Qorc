@@ -6,16 +6,20 @@ import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { MAX_AVATAR_DATA_URL_CHARS } from '../constants';
+import {
+  MAX_AVATAR_DATA_URL_CHARS,
+  AVATAR_PURB_CAPACITY,
+  AVATAR_PURB_LENGTH_PREFIX_BYTES,
+  AVATAR_PURB_WIRE_BYTES,
+  AVATAR_BLOB_CRYPTO_DECODED_LENGTH_EXPECTED,
+  AVATAR_BLOB_CRYPTO_KEY_LENGTH_EXPECTED,
+} from '../constants';
 import type { AvatarData } from '../types/avatar-types';
 import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 import { Base64 } from '../cryptography/base64';
 import { bytesToHex } from '../../../shared/bytes.js';
 
-export const AVATAR_PURB_CAPACITY = 256 * 1024;
-export const AVATAR_PURB_WIRE_BYTES = POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES + (AVATAR_PURB_CAPACITY + 32);
-
-const LEN_PREFIX = 4;
+export { AVATAR_PURB_WIRE_BYTES } from "../constants/avatars";
 
 export interface AvatarRef {
     blobId: string;
@@ -45,7 +49,7 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
         hash: avatar.hash,
         isDefault: avatar.isDefault === true
     }));
-    if (content.length + LEN_PREFIX > AVATAR_PURB_CAPACITY) {
+    if (content.length + AVATAR_PURB_LENGTH_PREFIX_BYTES > AVATAR_PURB_CAPACITY) {
         throw new Error('avatar too large for PURB capacity');
     }
 
@@ -60,11 +64,11 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
     let blobIdBytes: Uint8Array | null = null;
     try {
         new DataView(plaintext.buffer).setUint32(0, content.length, true);
-        plaintext.set(content, LEN_PREFIX);
-        const padLen = AVATAR_PURB_CAPACITY - LEN_PREFIX - content.length;
+        plaintext.set(content, AVATAR_PURB_LENGTH_PREFIX_BYTES);
+        const padLen = AVATAR_PURB_CAPACITY - AVATAR_PURB_LENGTH_PREFIX_BYTES - content.length;
         if (padLen > 0) {
             padding = PostQuantumRandom.randomBytes(padLen);
-            plaintext.set(padding, LEN_PREFIX + content.length);
+            plaintext.set(padding, AVATAR_PURB_LENGTH_PREFIX_BYTES + content.length);
         }
 
         if (
@@ -75,7 +79,7 @@ export function encryptAvatarToPurb(avatar: AvatarData, existingRef?: AvatarRef)
         ) {
             const decoded = PostQuantumUtils.base64ToUint8Array(existingRef.keyB64);
             if (
-                decoded.length === 32 &&
+                decoded.length === AVATAR_BLOB_CRYPTO_DECODED_LENGTH_EXPECTED &&
                 Base64.arrayBufferToBase64(decoded) === existingRef.keyB64
             ) {
                 key = decoded;
@@ -137,15 +141,15 @@ export function decryptAvatarPurb(purbBase64: string, ref: AvatarRef): AvatarDat
         tag = data.slice(POST_QUANTUM_AEAD_NONCE_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES);
         ciphertext = data.slice(POST_QUANTUM_AEAD_NONCE_BYTES + HASH_OUTPUT_BYTES);
         key = PostQuantumUtils.base64ToUint8Array(ref.keyB64);
-        if (key.length !== 32 || Base64.arrayBufferToBase64(key) !== ref.keyB64) return null;
+        if (key.length !== AVATAR_BLOB_CRYPTO_KEY_LENGTH_EXPECTED || Base64.arrayBufferToBase64(key) !== ref.keyB64) return null;
         aad = new TextEncoder().encode(PROTOCOL_KEYS.AVATAR_BLOB_AAD);
 
         plaintext = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, aad);
-        if (plaintext.length < LEN_PREFIX) return null;
-        const contentLen = new DataView(plaintext.buffer, plaintext.byteOffset, LEN_PREFIX).getUint32(0, true);
-        if (contentLen <= 0 || contentLen + LEN_PREFIX > plaintext.length) return null;
+        if (plaintext.length < AVATAR_PURB_LENGTH_PREFIX_BYTES) return null;
+        const contentLen = new DataView(plaintext.buffer, plaintext.byteOffset, AVATAR_PURB_LENGTH_PREFIX_BYTES).getUint32(0, true);
+        if (contentLen <= 0 || contentLen + AVATAR_PURB_LENGTH_PREFIX_BYTES > plaintext.length) return null;
 
-        content = plaintext.slice(LEN_PREFIX, LEN_PREFIX + contentLen);
+        content = plaintext.slice(AVATAR_PURB_LENGTH_PREFIX_BYTES, AVATAR_PURB_LENGTH_PREFIX_BYTES + contentLen);
         const obj = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(content));
         if (
             !obj ||

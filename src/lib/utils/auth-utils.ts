@@ -1,3 +1,11 @@
+import {
+  AUTH_UTILS_B64_LENGTH_LIMIT,
+  AUTH_UTILS_X_LENGTH_EXPECTED,
+  AUTH_UTILS_K_LENGTH_EXPECTED,
+  AUTH_UTILS_D_LENGTH_EXPECTED,
+  AUTH_UTILS_RAW_LENGTH_LIMIT,
+  AUTH_UTILS_PREVIOUS_RAW_LENGTH_LIMIT,
+} from '../constants';
 import { RefObject } from "react";
 import { blake3 } from '@noble/hashes/blake3.js';
 import { storage, websocket } from '../tauri-bindings';
@@ -39,7 +47,7 @@ export const computePrivateAuthStorageId = (username: string, serverScope: strin
 // Safely decode a base64 string into Uint8Array, with length and format validation
 export const safeDecodeB64 = (b64?: string): Uint8Array | null => {
   try {
-    if (!b64 || typeof b64 !== 'string' || b64.length > 10000) return null;
+    if (!b64 || typeof b64 !== 'string' || b64.length > AUTH_UTILS_B64_LENGTH_LIMIT) return null;
     const bytes = CryptoUtils.Base64.base64ToUint8Array(b64);
     if (CryptoUtils.Base64.arrayBufferToBase64(bytes) !== b64) {
       bytes.fill(0);
@@ -71,7 +79,7 @@ export const validateServerKeys = (val: any): boolean => {
 
   try {
     if (!x || !k || !d) return false;
-    return x.length === 32 && k.length === 1568 && d.length === 2592;
+    return x.length === AUTH_UTILS_X_LENGTH_EXPECTED && k.length === AUTH_UTILS_K_LENGTH_EXPECTED && d.length === AUTH_UTILS_D_LENGTH_EXPECTED;
   } finally {
     x?.fill(0);
     k?.fill(0);
@@ -141,7 +149,7 @@ export const PinnedServer = {
     return withServerPinMutation(async () => {
       const raw = await storage.get(serverPinStorageKey(url));
       if (raw === null) return null;
-      if (typeof raw !== 'string' || !raw.length || raw.length > 10_000) {
+      if (typeof raw !== 'string' || !raw.length || raw.length > AUTH_UTILS_RAW_LENGTH_LIMIT) {
         throw new Error('Pinned server identity record is invalid');
       }
       return normalizeServerKeys(JSON.parse(raw));
@@ -161,7 +169,7 @@ export const PinnedServer = {
         return null;
       }
       if (raw.length === 0) throw new Error('Pinned server identity record is invalid');
-      if (raw.length > 10_000) throw new Error('Pinned server identity record is oversized');
+      if (raw.length > AUTH_UTILS_RAW_LENGTH_LIMIT) throw new Error('Pinned server identity record is oversized');
       cachedServerPin = normalizeServerKeys(JSON.parse(raw));
       cachedServerPinUrl = url;
       return { ...cachedServerPin };
@@ -181,7 +189,7 @@ export const PinnedServer = {
         throw new Error('Pinned server identity record is invalid');
       }
       if (previousRaw === '') throw new Error('Pinned server identity record is invalid');
-      if (typeof previousRaw === 'string' && previousRaw.length > 10_000) {
+      if (typeof previousRaw === 'string' && previousRaw.length > AUTH_UTILS_PREVIOUS_RAW_LENGTH_LIMIT) {
         throw new Error('Pinned server identity record is oversized');
       }
       const previousPin = previousRaw

@@ -1,3 +1,7 @@
+import {
+  REGISTRATION_ATTEMPT_VALIDATE_ATTEMPT_ID_VALUE_LENGTH_EXPECTED,
+  REGISTRATION_ATTEMPT_DECODED_LENGTH_EXPECTED,
+} from '../constants';
 import { storage } from '../tauri-bindings';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { computePrivateAuthStorageId } from '../utils/auth-utils';
@@ -35,13 +39,13 @@ function validateUsername(username: string): string {
 }
 
 function validateAttemptId(value: unknown): string {
-  if (typeof value !== 'string' || value.length !== 44) {
+  if (typeof value !== 'string' || value.length !== REGISTRATION_ATTEMPT_VALIDATE_ATTEMPT_ID_VALUE_LENGTH_EXPECTED) {
     throw new Error('Stored registration attempt is invalid');
   }
   const decoded = PostQuantumUtils.base64ToUint8Array(value);
   try {
     if (
-      decoded.length !== 32 ||
+      decoded.length !== REGISTRATION_ATTEMPT_DECODED_LENGTH_EXPECTED ||
       Base64.arrayBufferToBase64(decoded) !== value
     ) {
       throw new Error('Stored registration attempt is invalid');

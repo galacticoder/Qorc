@@ -2,6 +2,10 @@
  * Auth Signal Handlers
  */
 
+import {
+  TOKEN_VAULT_MAX_TOKENS,
+  AUTH_HANDLERS_HANDLE_TOKEN_VALIDATION_RESPONSE_DATA_ERROR_LENGTH_LIMIT,
+} from '../constants';
 import websocketClient from '../websocket/websocket';
 import { EventType } from '../types/event-types';
 import { account, storage } from '../tauri-bindings';
@@ -75,7 +79,7 @@ function hasValidIssuanceShape(value: unknown): value is Record<string, unknown>
       'signedBlindedTokens'
     ]) &&
     Array.isArray((value as any).signedBlindedTokens) &&
-    (value as any).signedBlindedTokens.length === 250 &&
+    (value as any).signedBlindedTokens.length === TOKEN_VAULT_MAX_TOKENS &&
     (value as any).signedBlindedTokens.every((token: unknown) => typeof token === 'string') &&
     typeof (value as any).proof === 'string' &&
     typeof (value as any).publicKey === 'string' &&
@@ -474,7 +478,7 @@ export async function handleTokenValidationResponse(data: any, auth: TokenValida
       : !hasExactKeys(data, ['error', 'requestId', 'type', 'valid']) ||
         typeof data.error !== 'string' ||
         data.error.length < 1 ||
-        data.error.length > 128)
+        data.error.length > AUTH_HANDLERS_HANDLE_TOKEN_VALIDATION_RESPONSE_DATA_ERROR_LENGTH_LIMIT)
   ) {
     throw new Error('Server returned invalid session validation response');
   }

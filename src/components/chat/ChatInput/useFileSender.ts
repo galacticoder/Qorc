@@ -1,3 +1,4 @@
+import { sleep } from '../../../lib/runtime/sleep';
 import { useRef, useState, useCallback, useEffect, useLayoutEffect } from "react";
 import { CryptoUtils } from "../../../lib/utils/crypto-utils";
 import { SignalType } from "../../../lib/types/signal-types";
@@ -20,6 +21,13 @@ import {
   MAX_RETRANSMIT_CHUNKS_PER_REQUEST,
   RETRANSMIT_MIN_INTERVAL_MS,
   MAX_FILE_SIZE,
+  FILE_RECOVERY_PROBE_INITIAL_MS,
+  FILE_RECOVERY_PROBE_MAX_MS,
+  MAX_FILE_SEND_RESTARTS,
+  MAX_FILE_SESSION_PEERS,
+  MAX_RETAINED_FILE_BYTES,
+  USE_FILE_SENDER_SEND_CHUNKS_DELAY_MS,
+  FILE_SEND_PROGRESS_REPORT_INTERVAL_MS,
 } from '../../../lib/constants';
 import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
 import { account, signal } from "../../../lib/tauri-bindings";
@@ -89,11 +97,6 @@ export interface FileSenderController {
   readonly fileName: string;
   readonly cancelCurrent: () => void;
 }
-
-const MAX_RETAINED_FILE_BYTES = 128 * 1024 * 1024;
-const MAX_FILE_SESSION_PEERS = 512;
-const FILE_RECOVERY_PROBE_INITIAL_MS = 15_000;
-const FILE_RECOVERY_PROBE_MAX_MS = 120_000;
 
 const fileRecoveryRetentionMs = (totalChunks: number): number => Math.max(
   FILE_RETRANSMIT_RETENTION_MS,
@@ -389,7 +392,7 @@ export function useFileSender(
         }
 
         while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, delay));
+          await sleep(delay);
           if (!isCurrent()) return false;
 
           if (sessionReadyFlag) {
@@ -439,10 +442,9 @@ export function useFileSender(
     let serverChunks = 0;
     let chunkPreparationMs = 0;
     let transportMs = 0;
-    const MAX_RESTARTS = 2;
     let retryCause: 'session-reset' | 'transport' | null = null;
 
-    for (let restartAttempt = 0; restartAttempt <= MAX_RESTARTS; restartAttempt++) {
+    for (let restartAttempt = 0; restartAttempt <= MAX_FILE_SEND_RESTARTS; restartAttempt++) {
       if (!isTransferAuthorized(state.ownerUsername, state.ownerGeneration, state.recipientUsername)) return false;
       let resetDetected = false;
       let transportFailed = false;
@@ -467,8 +469,8 @@ export function useFileSender(
           setProgress(0);
           if (!await validateSignalSession(true)) {
             retryCause = 'session-reset';
-            if (restartAttempt < MAX_RESTARTS) {
-              await new Promise(r => setTimeout(r, 1000));
+            if (restartAttempt < MAX_FILE_SEND_RESTARTS) {
+              await sleep(USE_FILE_SENDER_SEND_CHUNKS_DELAY_MS);
               continue;
             }
             break;
@@ -487,7 +489,7 @@ export function useFileSender(
             return false;
           }
           if (!takeToken()) {
-            await new Promise(res => setTimeout(res, RATE_LIMITER_SLEEP_MS));
+            await sleep(RATE_LIMITER_SLEEP_MS);
             continue;
           }
 
@@ -591,7 +593,7 @@ export function useFileSender(
           const pct = confirmedBytes / state.fileSize;
           setProgress(pct);
           const reportedAt = performance.now();
-          if (nextIndex === 0 || nextIndex === totalChunks - 1 || reportedAt - lastReportedAt >= 10_000) {
+          if (nextIndex === 0 || nextIndex === totalChunks - 1 || reportedAt - lastReportedAt >= FILE_SEND_PROGRESS_REPORT_INTERVAL_MS) {
             const elapsedMs = reportedAt - startedAt;
             console.info('[FILE-SEND-PERF]', {
               submittedBytes: confirmedBytes,
@@ -607,7 +609,7 @@ export function useFileSender(
           }
 
           if ((nextIndex & (YIELD_INTERVAL - 1)) === 0) {
-            await new Promise(res => setTimeout(res, 0));
+            await sleep(0);
           }
         }
 
@@ -617,8 +619,8 @@ export function useFileSender(
 
         retryCause = resetDetected ? 'session-reset' : (transportFailed ? 'transport' : null);
         if (retryCause) {
-          if (restartAttempt < MAX_RESTARTS) {
-            await new Promise(r => setTimeout(r, 1000));
+          if (restartAttempt < MAX_FILE_SEND_RESTARTS) {
+            await sleep(USE_FILE_SENDER_SEND_CHUNKS_DELAY_MS);
             continue;
           } else {
             break;
@@ -735,7 +737,7 @@ export function useFileSender(
           const recipient = ctx.userKeys[0];
           if (!recipient || !isLive()) return;
           while (isLive() && !takeToken()) {
-            await new Promise(resolve => setTimeout(resolve, RATE_LIMITER_SLEEP_MS));
+            await sleep(RATE_LIMITER_SLEEP_MS);
           }
           if (!isLive()) return;
           try {
@@ -786,7 +788,7 @@ export function useFileSender(
         .slice(0, MAX_RETRANSMIT_CHUNKS_PER_REQUEST);
 
       for (const idx of indices) {
-        while (!takeToken()) { await new Promise(r => setTimeout(r, RATE_LIMITER_SLEEP_MS)); }
+        while (!takeToken()) { await sleep(RATE_LIMITER_SLEEP_MS); }
         if (
           retainedTransfersRef.current.get(fileId) !== ctx &&
           activeRetransmitContextRef.current !== ctx

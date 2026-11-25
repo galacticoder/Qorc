@@ -1,4 +1,3 @@
-import { SignalType } from "./signal-types";
 
 export interface WebSocketMessageSchema {
   validate: (message: BaseMessage) => boolean;
@@ -14,23 +13,9 @@ export interface BaseMessage {
   [key: string]: unknown;
 }
 
-export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
-  SignalType.PQ_HANDSHAKE_ACK,
-  SignalType.PQ_HANDSHAKE_CONFIRMED,
-  SignalType.PQ_HEARTBEAT_PONG,
-  SignalType.AUTH_ERROR,
-  SignalType.TOKEN_VALIDATION_RESPONSE,
-  SignalType.ERROR,
-  SignalType.SERVER_PUBLIC_KEY,
-  SignalType.AUTH_FULL_SUCCESS,
-  SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED,
-  SignalType.SEALED_ENVELOPE,
-]);
+export { DEFAULT_ALLOWED_TYPES } from "../constants/interface";
 
-export const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
-  SignalType.SERVER_ENTRY_CREDENTIAL_ROTATED,
-  SignalType.SEALED_ENVELOPE,
-]);
+export { DEFAULT_ENCRYPTED_TYPES } from "../constants/interface";
 
 export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {};
 

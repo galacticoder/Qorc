@@ -2,6 +2,13 @@
 //!
 //! WebSocket connections through Tor SOCKS5 proxy
 
+use crate::constants::websocket::{
+    MAX_WS_INBOUND_BUFFERED_BYTES, MAX_WS_INBOUND_BUFFERED_FRAMES, MAX_WS_JSON_DEPTH,
+    MAX_WS_JSON_STRUCTURAL_TOKENS, MAX_WS_MESSAGE_BYTES, MAX_WS_PENDING_WRITE_BYTES,
+    MAX_WS_PENDING_WRITES, MAX_WS_WRITE_BUFFER_BYTES, PQ_WS_FIXED_CELL_BYTES,
+    SERVER_CONNECTION_TIMEOUT_SECS, SOCKS_CONNECT_TIMEOUT_SECS, STALE_CONNECTING_SECS,
+    WEBSOCKET_UPGRADE_TIMEOUT_SECS, WEBSOCKET_WRITE_TIMEOUT_SECS,
+};
 use log::{error, info, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
@@ -24,23 +31,10 @@ use crate::error::{QorcError, QorcResult};
 use crate::json_bounds::enforce_bounded_json_structure;
 
 // Constants
-const WEBSOCKET_UPGRADE_TIMEOUT_SECS: u64 = 30;
-const SOCKS_CONNECT_TIMEOUT_SECS: u64 = 150;
-const SERVER_CONNECTION_TIMEOUT_SECS: u64 =
-    SOCKS_CONNECT_TIMEOUT_SECS + WEBSOCKET_UPGRADE_TIMEOUT_SECS + 10;
 const _: () = assert!(
     SOCKS_CONNECT_TIMEOUT_SECS > 120,
     "must outlast Tor's own SocksTimeout so Tor owns the give-up decision"
 );
-const WEBSOCKET_WRITE_TIMEOUT_SECS: u64 = 30;
-const STALE_CONNECTING_SECS: u64 = SERVER_CONNECTION_TIMEOUT_SECS + 10;
-const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_WS_JSON_DEPTH: usize = 32;
-const MAX_WS_JSON_STRUCTURAL_TOKENS: usize = 16 * 1024;
-const MAX_WS_WRITE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_WS_PENDING_WRITES: usize = 1024;
-const MAX_WS_PENDING_WRITE_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const PQ_WS_FIXED_CELL_BYTES: usize = 64 * 1024;
 
 fn connection_failure_diagnostic(error: &QorcError) -> (&'static str, &'static str) {
     let QorcError::Network(message) = error else {
@@ -179,9 +173,6 @@ fn try_reserve_ws_inbound(byte_len: usize) -> bool {
 
 static WS_INBOUND_BUFFERED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static WS_INBOUND_BUFFERED_FRAMES: AtomicUsize = AtomicUsize::new(0);
-const MAX_WS_INBOUND_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
-const MAX_WS_INBOUND_BUFFERED_FRAMES: usize = 4096;
-pub const WS_EVENT_CHANNEL_CAPACITY: usize = MAX_WS_INBOUND_BUFFERED_FRAMES + 16;
 
 pub fn release_ws_inbound_bytes(n: usize) {
     if n > 0 {

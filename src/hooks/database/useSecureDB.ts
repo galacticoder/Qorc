@@ -7,6 +7,10 @@ import {
   CONVERSATION_WARM_MESSAGE_COUNT,
   DB_MAX_PENDING_MESSAGES,
   DB_SAVE_DEBOUNCE_MS,
+  USE_SECURE_DB_LIMIT,
+  DB_OPERATION_RETRY_BASE_MS,
+  DB_OPERATION_RETRY_MAX_EXPONENT,
+  DB_OPERATION_RETRY_CAP_MS,
 } from '../../lib/constants';
 import type { UseSecureDBProps, UseSecureDBReturn } from '../../lib/types/database-types';
 import {
@@ -368,7 +372,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
       } catch {
         if (!isCurrent()) return;
         failedAttempts += 1;
-        const delay = Math.min(1_000 * (2 ** Math.min(failedAttempts - 1, 5)), 30_000);
+        const delay = Math.min(DB_OPERATION_RETRY_BASE_MS * (2 ** Math.min(failedAttempts - 1, DB_OPERATION_RETRY_MAX_EXPONENT)), DB_OPERATION_RETRY_CAP_MS);
         retryTimer = setTimeout(() => {
           retryTimer = null;
           void flush();
@@ -567,7 +571,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   );
 
   const loadMoreConversationMessages = useCallback(
-    async (peerUsername: string, currentOffset: number, limit: number = 50) => {
+    async (peerUsername: string, currentOffset: number, limit: number = USE_SECURE_DB_LIMIT) => {
       if (!secureDBRef.current || !Authentication.loginUsernameRef.current) {
         console.error('[useSecureDB] Cannot load more messages: DB or username not available');
         return [];

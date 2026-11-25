@@ -1,4 +1,10 @@
 import {
+  MAX_MONITORED_CONTACTS,
+  KEY_TRANSPARENCY_MONITOR_ENTRY_KEYS,
+  MONITOR_STORE_KEY_LENGTH_EXPECTED,
+  MONITOR_STORE_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED,
+} from '../constants';
+import {
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
   exactPlainObject,
   isKeyTransparencyHash,
@@ -22,8 +28,6 @@ import {
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 
-const MAX_MONITORED_CONTACTS = 2048;
-const MONITOR_ENTRY_KEYS = ['discoveryKey', 'label', 'lastCheckedAt', 'peer', 'rootCommitment', 'version'];
 const enqueue = createStoreLock();
 
 export class KeyTransparencyMonitorStoreCorruptionError extends Error {
@@ -76,7 +80,7 @@ function parseEntry(value: unknown): StoredMonitorTarget {
     corruptMonitorStore('Stored key-transparency monitor target is corrupt');
   }
   if (
-    !exactPlainObject(entry, MONITOR_ENTRY_KEYS) ||
+    !exactPlainObject(entry, KEY_TRANSPARENCY_MONITOR_ENTRY_KEYS) ||
     peer !== entry.peer ||
     !isKeyTransparencyLabel(entry.label) ||
     typeof entry.discoveryKey !== 'string' ||
@@ -91,7 +95,7 @@ function parseEntry(value: unknown): StoredMonitorTarget {
   try {
     key = Base64.base64ToUint8Array(entry.discoveryKey);
     if (
-      key.length !== 32 ||
+      key.length !== MONITOR_STORE_KEY_LENGTH_EXPECTED ||
       Base64.arrayBufferToBase64(key) !== entry.discoveryKey ||
       deriveKeyTransparencyLabel(key) !== entry.label
     ) corruptMonitorStore('Stored key-transparency monitor target is corrupt');
@@ -150,7 +154,7 @@ export async function upsertKeyTransparencyMonitorTarget(
   contact: { label: string; rootCommitment: string; version: number },
   expectedPrevious: { rootCommitment: string; version: number } | null,
 ): Promise<void> {
-  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== 32) {
+  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== MONITOR_STORE_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED) {
     throw new Error('Invalid key-transparency monitor key');
   }
   const normalized = normalizePeer(peer);

@@ -1,3 +1,4 @@
+use crate::constants::link_preview::{MAX_HTML_BYTES, MAX_IMAGE_BYTES, MAX_REDIRECTS};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -10,10 +11,6 @@ use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::message_content::NativeMessageLinkTarget;
-
-const MAX_HTML_BYTES: usize = 512 * 1024;
-const MAX_IMAGE_BYTES: usize = 1536 * 1024;
-const MAX_REDIRECTS: usize = 4;
 
 static META_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<meta\b[^>]*>").expect("valid metadata tag regex"));

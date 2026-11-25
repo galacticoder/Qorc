@@ -1,9 +1,19 @@
+import { sleep } from '../../lib/runtime/sleep';
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { SecureP2PService } from '../../lib/transport/secure-p2p-service';
 import { EventType } from '../../lib/types/event-types';
 import {
   AUTH_USERNAME_REGEX,
   MAX_CONCURRENT_P2P_CONNECTS,
+  ENDPOINT_UNAVAILABLE_COOLDOWN_MS,
+  MAX_CONCURRENT_P2P_CERT_REQUESTS,
+  MAX_P2P_FAILURE_CACHE_ENTRIES,
+  MAX_P2P_PRELOAD_CONCURRENCY,
+  USE_P2_PMESSAGING_CONNECT_TO_PEER_DELAY_MS,
+  P2P_UNAVAILABLE_RETRY_STEP_MS,
+  P2P_UNAVAILABLE_RETRY_CAP_MS,
+  P2P_CONNECT_FAILURE_RETRY_BASE_MS,
+  P2P_CONNECT_FAILURE_RETRY_CAP_MS,
 } from '../../lib/constants';
 import { p2pTransport } from '../../lib/transport/p2p-transport';
 import { hasPrototypePollutionKeys, isPlainObject } from '../../lib/sanitizers';
@@ -40,11 +50,6 @@ import {
 import { awaitPeerIdentityRevocation } from '../../lib/key-transparency/revocation';
 import { keyTransparencyClient } from '../../lib/key-transparency/client';
 import { loadPersistedPeerEndpoint } from '../../lib/p2p/persisted-peer-cert';
-
-const MAX_P2P_FAILURE_CACHE_ENTRIES = 512;
-const ENDPOINT_UNAVAILABLE_COOLDOWN_MS = 60_000;
-const MAX_CONCURRENT_P2P_CERT_REQUESTS = 32;
-const MAX_P2P_PRELOAD_CONCURRENCY = 4;
 
 function setBoundedFailure<K, V>(map: Map<K, V>, key: K, value: V): void {
   if (!map.has(key) && map.size >= MAX_P2P_FAILURE_CACHE_ENTRIES) {
@@ -331,7 +336,7 @@ export function useP2PMessaging(
         let isBridgeDisconnected = errorLower.includes('bridge disconnected');
 
         if (isBridgeDisconnected) {
-          await new Promise<void>(resolve => setTimeout(resolve, 250));
+          await sleep(USE_P2_PMESSAGING_CONNECT_TO_PEER_DELAY_MS);
           if (generation !== accountGenerationRef.current) throw createP2PError('AUTH_REQUIRED');
           try {
             await connectToPeerBase(peer);
@@ -417,11 +422,11 @@ export function useP2PMessaging(
           isEndpointUnavailable
             ? ENDPOINT_UNAVAILABLE_COOLDOWN_MS
             : isCertOrDescriptorIssue
-              ? Math.min(5000 * failures, 30_000)
+              ? Math.min(P2P_UNAVAILABLE_RETRY_STEP_MS * failures, P2P_UNAVAILABLE_RETRY_CAP_MS)
             : isHostUnreachable
               ? Math.min(15000 * Math.pow(2, failures - 1), 180000)
               : isTimeoutLike || isBridgeDisconnected
-                ? Math.min(5000 * Math.pow(2, failures - 1), 90000)
+                ? Math.min(P2P_CONNECT_FAILURE_RETRY_BASE_MS * Math.pow(2, failures - 1), P2P_CONNECT_FAILURE_RETRY_CAP_MS)
                 : Math.min(2000 * Math.pow(2, failures - 1), 30000);
         if (generation === accountGenerationRef.current) {
           setBoundedFailure(connectBackoffRef.current, peer, {

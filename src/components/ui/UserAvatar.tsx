@@ -9,10 +9,11 @@ import {
     markAvatarImageReady,
 } from '../../lib/avatar/image-readiness';
 import {
-    DEFAULT_EVENT_RATE_WINDOW_MS,
-    DEFAULT_EVENT_RATE_MAX,
-    MAX_EVENT_TYPE_LENGTH,
-    MAX_EVENT_USERNAME_LENGTH
+  DEFAULT_EVENT_RATE_WINDOW_MS,
+  DEFAULT_EVENT_RATE_MAX,
+  MAX_EVENT_TYPE_LENGTH,
+  MAX_EVENT_USERNAME_LENGTH,
+  USER_AVATAR_SIZES,
 } from '../../lib/constants';
 
 interface UserAvatarProps {
@@ -21,14 +22,6 @@ interface UserAvatarProps {
     size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
     className?: string;
 }
-
-const SIZE_MAP = {
-    xs: 24,
-    sm: 32,
-    md: 40,
-    lg: 48,
-    xl: 80
-} as const;
 
 export const UserAvatar = memo(function UserAvatar({
     username,
@@ -122,7 +115,7 @@ export const UserAvatar = memo(function UserAvatar({
         };
     }, [loadAvatar, username, isCurrentUser, defaultAvatarUrl, applyAvatarUrl]);
 
-    const pixelSize = SIZE_MAP[size];
+    const pixelSize = USER_AVATAR_SIZES[size];
     const skeletonColor = 'var(--color-secondary)';
 
     return (

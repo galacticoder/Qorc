@@ -21,28 +21,12 @@ pub async fn camera_capture_start(
     frame_rate: u32,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    tracing::info!(
-        width,
-        height,
-        frame_rate,
-        selected_device = device_id.is_some(),
-        "[CALL-DIAG] native-camera-start-enter"
-    );
     let camera_capture = state.camera_capture.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         camera_capture.start(&session_id, device_id.as_deref(), width, height, frame_rate)
     })
     .await
-    .map_err(|_| {
-        tracing::warn!("[CALL-DIAG] native-camera-start-task-failed");
-        "camera capture failed to start".to_string()
-    })?;
-    match &result {
-        Ok(()) => tracing::info!("[CALL-DIAG] native-camera-start-complete"),
-        Err(error) => {
-            tracing::warn!(error = %error, "[CALL-DIAG] native-camera-start-failed")
-        }
-    }
+    .map_err(|_| "camera capture failed to start".to_string())?;
     result?;
     Ok(true)
 }

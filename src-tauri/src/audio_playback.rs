@@ -1,3 +1,10 @@
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::constants::audio::FRAME_BYTES;
+use crate::media_utils::{MediaSession, validate_device_id};
+use crate::constants::media::AUDIO_DEVICE_ID_MAX_BYTES;
+use crate::constants::audio::{
+    EDGE_FADE_SAMPLES, FRAME_SAMPLES, MAX_PLAYBACK_SESSIONS, MAX_QUEUE_SAMPLES, SAMPLE_RATE_HZ,
+};
 #[cfg(target_os = "linux")]
 use pulseaudio::{AsPlaybackSource, Client as PulseClient, protocol};
 use std::collections::{HashMap, VecDeque};
@@ -9,11 +16,6 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-const FRAME_SAMPLES: usize = 960;
-const MAX_QUEUE_SAMPLES: usize = FRAME_SAMPLES * 10;
-const EDGE_FADE_SAMPLES: usize = 240;
-const MAX_SESSIONS: usize = 2;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,11 +89,11 @@ impl AudioPlaybackSession {
         }
     }
 
-    fn push(&self, input: &[u8]) -> Result<(), String> {
+    fn push(&self, input: &[f32]) -> Result<(), String> {
         if self.stop.load(Ordering::Acquire) {
             return Err("audio playback stream stopped".to_string());
         }
-        if input.len() != FRAME_SAMPLES * std::mem::size_of::<f32>() {
+        if input.len() != FRAME_SAMPLES {
             return Err("invalid audio playback frame".to_string());
         }
         let mut queue = self
@@ -103,8 +105,7 @@ impl AudioPlaybackSession {
                 queue.samples.pop_front();
             }
         }
-        for bytes in input.chunks_exact(4) {
-            let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        for &sample in input {
             queue.samples.push_back(if sample.is_finite() {
                 sample.clamp(-1.0, 1.0)
             } else {
@@ -116,16 +117,18 @@ impl AudioPlaybackSession {
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn fill(&self, output: &mut [u8]) -> usize {
-        output.fill(0);
         let Ok(mut queue) = self.queue.lock() else {
+            output.fill(0);
             return output.len();
         };
         let mut energy = 0.0f64;
-        for bytes in output.chunks_exact_mut(4) {
+        let mut samples = output.chunks_exact_mut(4);
+        for bytes in &mut samples {
             let sample = queue.next();
             energy += f64::from(sample).powi(2);
             bytes.copy_from_slice(&sample.to_le_bytes());
         }
+        samples.into_remainder().fill(0);
         self.record_level(energy, output.len() / 4);
         output.len()
     }
@@ -157,10 +160,10 @@ impl AudioPlaybackSession {
             0.0
         };
         Ok(AudioPlaybackInfo {
-            queued_ms: queue.samples.len() as f64 / 48.0,
+            queued_ms: queue.samples.len() as f64 / (f64::from(SAMPLE_RATE_HZ) / 1_000.0),
             level,
             underruns: queue.underruns,
-            underrun_ms: queue.underrun_samples as f64 / 48.0,
+            underrun_ms: queue.underrun_samples as f64 / (f64::from(SAMPLE_RATE_HZ) / 1_000.0),
         })
     }
 
@@ -194,9 +197,9 @@ impl AudioPlaybackState {
     }
 
     pub fn start(&self, session_id: &str, device_id: Option<&str>) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::AudioPlayback.validate_id(session_id)?;
         if let Some(device_id) = device_id {
-            validate_device_id(device_id)?;
+            validate_device_id(device_id, AUDIO_DEVICE_ID_MAX_BYTES, "invalid speaker device identifier")?;
         }
         self.stop(session_id)?;
         let session = Arc::new(AudioPlaybackSession::new());
@@ -205,7 +208,7 @@ impl AudioPlaybackState {
                 .sessions
                 .lock()
                 .map_err(|_| "audio playback unavailable".to_string())?;
-            if sessions.len() >= MAX_SESSIONS {
+            if sessions.len() >= MAX_PLAYBACK_SESSIONS {
                 return Err("audio playback session limit reached".to_string());
             }
             sessions.insert(session_id.to_string(), session.clone());
@@ -242,8 +245,8 @@ impl AudioPlaybackState {
         }
     }
 
-    pub fn push(&self, session_id: &str, input: &[u8]) -> Result<(), String> {
-        validate_session_id(session_id)?;
+    pub fn push(&self, session_id: &str, input: &[f32]) -> Result<(), String> {
+        MediaSession::AudioPlayback.validate_id(session_id)?;
         let session = self
             .sessions
             .lock()
@@ -255,7 +258,7 @@ impl AudioPlaybackState {
     }
 
     pub fn stop(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::AudioPlayback.validate_id(session_id)?;
         let session = self
             .sessions
             .lock()
@@ -268,7 +271,7 @@ impl AudioPlaybackState {
     }
 
     pub fn info(&self, session_id: &str) -> Result<AudioPlaybackInfo, String> {
-        validate_session_id(session_id)?;
+        MediaSession::AudioPlayback.validate_id(session_id)?;
         let session = self
             .sessions
             .lock()
@@ -295,7 +298,7 @@ fn run_playback(
     let result = (|| -> Result<(), String> {
         let capture = crate::android_media::Capture::start("playback", device_id, 0, 0, 0)?;
         let _ = started.send(Ok(()));
-        let mut buffer = vec![0; FRAME_SAMPLES * 4];
+        let mut buffer = vec![0; FRAME_BYTES];
         let mut deadline = Instant::now();
         while !session.stop.load(Ordering::Acquire) {
             session.fill(&mut buffer);
@@ -326,7 +329,6 @@ fn run_playback(
 ) {
     let result = run_pulse_playback(session.clone(), device_id, &started);
     if let Err(error) = result {
-        tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-failed");
         let _ = started.send(Err(error));
     }
 }
@@ -356,12 +358,12 @@ fn run_pulse_playback(
         .map_err(|_| "selected speaker is unavailable".to_string())?;
     let callback_session = session.clone();
     let callback = move |output: &mut [u8]| callback_session.fill(output);
-    let frame_bytes = (FRAME_SAMPLES * std::mem::size_of::<f32>()) as u32;
+    let frame_bytes = FRAME_BYTES as u32;
     let params = protocol::PlaybackStreamParams {
         sample_spec: protocol::SampleSpec {
             format: protocol::SampleFormat::Float32Le,
             channels: 1,
-            sample_rate: 48_000,
+            sample_rate: SAMPLE_RATE_HZ,
         },
         channel_map: protocol::ChannelMap::mono(),
         cvolume: Some(protocol::ChannelVolume::norm(1)),
@@ -391,16 +393,10 @@ fn run_pulse_playback(
         .map_err(|_| "audio playback stream could not be opened".to_string())?;
     if stream.sample_spec().format != protocol::SampleFormat::Float32Le
         || stream.sample_spec().channels != 1
-        || stream.sample_spec().sample_rate != 48_000
+        || stream.sample_spec().sample_rate != SAMPLE_RATE_HZ
     {
         return Err("audio playback stream format negotiation failed".to_string());
     }
-    tracing::info!(
-        sink_index = sink.index,
-        sample_rate = stream.sample_spec().sample_rate,
-        channels = stream.sample_spec().channels,
-        "[CALL-DIAG] native-audio-playback-started"
-    );
     let _ = started.send(Ok(()));
     runtime.block_on(async {
         while !session.stop.load(Ordering::Acquire) {
@@ -465,12 +461,6 @@ fn run_playback(
         if config.channels == 0 || config.sample_rate == 0 {
             return Err("invalid speaker format".to_string());
         }
-        tracing::info!(
-            sample_rate = config.sample_rate,
-            channels = config.channels,
-            sample_format = %selected.sample_format(),
-            "[CALL-DIAG] native-audio-playback-selected-profile"
-        );
         match selected.sample_format() {
             cpal::SampleFormat::F32 => output_stream::<f32>(&device, config, session.clone()),
             cpal::SampleFormat::F64 => output_stream::<f64>(&device, config, session.clone()),
@@ -490,17 +480,14 @@ fn run_playback(
     let stream = match open() {
         Ok(stream) => stream,
         Err(error) => {
-            tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-open-failed");
             let _ = started.send(Err(error));
             return;
         }
     };
-    if let Err(error) = stream.play() {
-        tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-start-failed");
+    if stream.play().is_err() {
         let _ = started.send(Err("speaker stream could not be started".to_string()));
         return;
     }
-    tracing::info!("[CALL-DIAG] native-audio-playback-started");
     let _ = started.send(Ok(()));
     while !session.stop.load(Ordering::Acquire) {
         thread::sleep(Duration::from_millis(20));
@@ -540,8 +527,7 @@ where
                 }
                 session.record_level(energy, output.len() / channels);
             },
-            move |error| {
-                tracing::warn!(error = %error, "[CALL-DIAG] native-audio-playback-stream-failed");
+            move |_| {
                 error_session.stop.store(true, Ordering::Release);
             },
             Some(Duration::from_secs(5)),
@@ -560,7 +546,7 @@ struct PlaybackResampler {
 impl PlaybackResampler {
     fn new(sample_rate: u32) -> Self {
         Self {
-            step: 48_000.0 / sample_rate as f64,
+            step: f64::from(SAMPLE_RATE_HZ) / f64::from(sample_rate),
             position: 0.0,
             samples: None,
         }
@@ -578,22 +564,4 @@ impl PlaybackResampler {
         self.samples = Some((left, right));
         value
     }
-}
-
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if session_id.len() != 32
-        || !session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err("invalid audio playback session".to_string());
-    }
-    Ok(())
-}
-
-fn validate_device_id(device_id: &str) -> Result<(), String> {
-    if device_id.is_empty() || device_id.len() > 1024 || device_id.chars().any(char::is_control) {
-        return Err("invalid speaker device identifier".to_string());
-    }
-    Ok(())
 }

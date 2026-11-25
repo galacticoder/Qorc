@@ -636,8 +636,7 @@ and replenishes it toward 80 ms in batches of at most four frames. The speaker
 clock, not one JavaScript timer callback per frame, determines consumption.
 The shared 48 kHz playback queue fades the first and last 5 ms around an underrun
 instead of stepping abruptly between speech and zero. Steady buffered speech
-is unchanged, the fade adds no queued latency. Native underrun counts and total
-underrun duration are included in the existing client-side audio telemetry.
+is unchanged and the fade adds no queued latency.
 Speaker-device changes pause replenishment and invalidate outstanding output
 reads without ending an otherwise healthy call. A call fails media startup when
 native playback cannot start. All queues remain bounded rather than growing with
@@ -652,12 +651,6 @@ rerender the chat screen. Values expire during silence and are cleared on call
 end, are never sent to the peer or server, and are not persisted or logged.
 The ring expands and brightens with loudness, fading during silence.
 Reduced-motion mode disables expansion while retaining the brightness indicator.
-
-Audio telemetry records decoded-frame counts and its renderer state: target and
-buffered duration, native queue duration, rebuffer events, concealment frames,
-late drops, hard-limit evictions, and native underrun counts and duration.
-No waveform, PCM, or loudness values are
-included in these logs.
 
 Code references:
 
@@ -688,11 +681,20 @@ Each visual stream owns one persistent WebCodecs `VideoEncoder` and one
 `VideoDecoder`. The fixed format is a raw VP8 elementary stream. The encoder
 draws the newest native camera image or live screen frame into one reused canvas,
 wraps that canvas in a short-lived `VideoFrame`, and submits it directly to VP8.
-The output callback copies only the compressed `EncodedVideoChunk`, it closes the
-input frame immediately. Raw RGBA pixels never cross the Tauri boundary. The
+The output callback copies only the compressed `EncodedVideoChunk`. Raw RGBA
+pixels never cross the Tauri boundary. The
 decoder accepts the authenticated raw VP8 chunk directly and returns a bounded
 `VideoFrame` to the latest-frame renderer. Camera and screen streams use the same
 implementation but own separate codecs, queues, canvases, and stream keys.
+
+Live-element capture observes presented source frames and reuses prepared pixels
+between changes. Native screen capture compares local JPEG digests when lengths
+match and reuses decoded pixels for identical frames. It still encodes on the
+existing schedule, including periodic and requested keyframes. Changing frames,
+mute changes, and resized profiles refresh the pixels. One prepared frame may
+remain in memory until its pixels change, the encoder closes, or sharing stops.
+Digests stay local and are wiped on replacement or stop. No new frame hashes or
+capture-state signals enter the call transport.
 
 Visual calls require WebCodecs `VideoEncoder`, `VideoDecoder`, `VideoFrame`, and
 `EncodedVideoChunk` support for VP8 plus `createImageBitmap()` JPEG decoding for
@@ -728,10 +730,14 @@ decoding the current JPEG. It validates the binary header, decodes one image,
 draws it into the reused canvas, closes it, and wipes the JPEG bytes. A slow
 renderer therefore drops old native frames instead of building a queue. Raw
 RGBA, JSON/base64 frames, and media-recorder data never cross Tauri IPC.
+If the encoder pipeline is full, the renderer wipes the incoming JPEG without
+decoding or drawing it. Native capture continues and the next available frame
+is admitted when capacity returns.
 
 The VP8 encoder admits at most three queued input frames and retains at most
 twelve timestamp-only metadata records awaiting codec output. A submitted canvas
-`VideoFrame` is closed synchronously. Raw VP8 output is limited to 1 MiB, and the
+`VideoFrame` is closed synchronously unless retained as the single prepared
+pixel source. Temporary clones close after submission. Raw VP8 output is limited to 1 MiB, and the
 encoded sender retains at most four frames around the active write. Encoder or
 transport pressure drops stale work, wipes owned byte arrays, and forces the next
 accepted input to be a keyframe. Codec reconfiguration is reserved for an actual
@@ -879,38 +885,6 @@ Code references:
 - `src-tauri/src/screen_capture.rs`
 - `scripts/stage-gstreamer-plugins.cjs`
 
-### Screen-Share Diagnostics
-
-`CALL-DIAG` phases deliberately cross the portal, native worker, encoder,
-transport, and receiver boundaries. Read the first missing transition in this
-order:
-
-```text
-native-screen-portal-create-after
-  -> native-screen-portal-select-after
-  -> native-screen-portal-start-after
-  -> native-screen-pipewire-ready
-  -> native-screen-gstreamer-start-after
-  -> native-screen-first-frame / native-screen-capture-window
-  -> screen.capture-request-after
-  -> screen.transport-created
-  -> screen.announcement-sent
-  -> screen.encoder-started / screen.local-first-frame
-  -> screen.peer-ready / screen.ready
-  -> remote screen first-frame pipeline event
-```
-
-If the portal and PipeWire phases succeed but every five-second native capture
-window reports zero frames, the failure is before WebCodecs, encryption, media
-lanes, and remote rendering. A `Failed to set pipeline to PAUSED` result after
-about 30 seconds is PipeWire's own source-activation timeout. Qorc does not wait
-for that timeout: it validates the SPA factories before spawning GStreamer and
-stops a child that produces no first frame within eight seconds. The
-GStreamer/PipeWire state trace then distinguishes a remote/node connection that
-remains in `CONNECTING` from stream-format negotiation that never reaches a
-usable state. Conversely, nonzero native source frames with zero transmit or
-receive counters move the fault boundary into the encoder or transport stages.
-
 The private SPA root must contain both its `support` modules and
 `videoconvert/libspa-videoconvert.so`, PipeWire's `client.conf` resolves
 `video.convert.*` through that adapter when `pipewiresrc` creates `video.adapt`.
@@ -937,45 +911,11 @@ their actual local camera state on connection, immediately after a successful
 toggle, and every two seconds to repair a dropped update. Audio calls reject
 camera-state frames. Updates belong to the active call, connection, and telemetry
 stream; they are not sent as server signaling or inferred from a retained canvas.
-The reported RTT subtracts the peer's measured response-processing interval. The
-displayed one-way estimate is RTT divided by two and is a diagnostic estimate,
-not a measurement of asymmetric path delay.
-
-Every five seconds the client emits one single-line JSON `CALL-TELEMETRY` sample,
-and cleanup emits a final sample. It contains:
-
-- latest, average, p95, maximum, lifetime-minimum, and lifetime-maximum RTT,
-- the RTT/2 one-way estimate, probe failures, protocol errors, connection age,
-  transport state, and time since transport activity,
-- ready, active, selected, secondary, and standby audio lanes with per-lane RTT,
-- the distinct visual lane and current visual adaptation level, dimensions,
-  bitrate, actual source-capped FPS target, encoded bitrate, adaptation health,
-  capture-loss and send-failure ratios, and recovery countdown,
-- event-loop lag distribution and document visibility state,
-- audio, video, and screen source, transmit, and validated-arrival rates and byte
-  rates, including source-frame losses,
-- decoder-admitted, decoded, and visibly rendered visual FPS,
-- native pull, native source age, JPEG decode, frame preparation, VP8 encode,
-  write, VP8 decode, capture-to-send, and clock-corrected capture-to-render
-  duration, arrival gap, and smoothed arrival jitter,
-- capture drops, send errors, receive errors, render drops, sequence
-  discontinuities, key-frame requests, received key-frame requests, and lifetime
-  totals,
-- current encoder queues, pending work, keyframe/restart state, last-progress
-  ages, failures, and delivery invalidations,
-- decoder queues, pending work, watchdog resets, stale-stage drops, pipeline
-  resets, last-progress ages, and waiting-for-keyframe state,
-- renderer queue depth, scheduled delay, replaced frames, buffering state,
-  canvas size, and last callback/render ages.
-
-The byte counters measure plaintext codec frames at the calling-service
-boundary. For audio, frame rates count individual Opus packets even when several
-share one transport write. For video and screen, transmit and receive rates count
-individual raw VP8 frames, `admittedFps`, `decodedFps`, and `renderedFps` describe
-receiver pipeline and displayed-frame progress. Write duration covers the stream
-write, including encryption and the native send. Probe timestamps estimate the
-peer clock offset so visual render age can represent capture-to-display latency.
-Telemetry stream setup is best effort and its absence does not prevent a call.
+Round-trip estimates subtract the peer's measured processing interval.
+Clock-offset estimates let the renderer drop stale frames. Qorc uses these
+measurements to drive audio routing and video playback during the call.
+Call-stream setup for these controls is best effort and its absence does not
+prevent a call.
 
 Code references:
 
@@ -993,7 +933,7 @@ Cleanup first invalidates outstanding media and device generations. It then:
 - stops the native Opus session and closes every visual encoder and decoder,
 - closes or aborts audio, video, telemetry, and screen logical streams,
 - wipes call-owned media scratch buffers,
-- cancels ring, telemetry-probe, telemetry-log, and screen-ready timers,
+- cancels ring, call probe, and screen-ready timers,
 - clears the active call and per-call screen identifiers.
 
 The end-call UI clears its active React call state synchronously before invoking

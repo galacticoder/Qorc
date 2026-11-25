@@ -1,5 +1,8 @@
 //! Secure Storage Module
 
+use crate::constants::storage::{
+    SECURE_STORE_MAX_ITEMS, SECURE_STORE_MAX_TOTAL_BYTES, SECURE_VALUE_MAX_BYTES,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,10 +29,7 @@ const NONCE_SIZE: usize = 36;
 const MAC_SIZE: usize = 32;
 const AES_NONCE_SIZE: usize = 12;
 const XCHACHA_NONCE_SIZE: usize = 24;
-pub const SECURE_VALUE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const ENCRYPTED_ITEM_MAX_BYTES: usize = SECURE_VALUE_MAX_BYTES + NONCE_SIZE + MAC_SIZE + 64;
-const SECURE_STORE_MAX_ITEMS: u64 = 4096;
-const SECURE_STORE_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct StoreUsage {

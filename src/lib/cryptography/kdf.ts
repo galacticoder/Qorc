@@ -4,10 +4,7 @@
 
 import { HashingService } from './hashing';
 import { SecureMemory } from './secure-memory';
-import {
-  CRYPTO_AES_KEY_SIZE,
-  CRYPTO_HKDF_HASH,
-} from '../constants';
+import { CRYPTO_AES_KEY_SIZE, CRYPTO_HKDF_HASH, KDF_CONTEXT_LENGTH_LIMIT } from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 
 const subtle = (globalThis as any).crypto?.subtle as SubtleCrypto | undefined;
@@ -86,7 +83,7 @@ export class KDF {
       ikm.length === 0 ||
       !(salt instanceof Uint8Array) ||
       salt.length === 0 ||
-      (context !== undefined && (typeof context !== 'string' || context.length > 1024))
+      (context !== undefined && (typeof context !== 'string' || context.length > KDF_CONTEXT_LENGTH_LIMIT))
     ) {
       throw new Error('Invalid WebCrypto HKDF parameters');
     }

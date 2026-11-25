@@ -103,7 +103,8 @@ export const createSessionResetRetryHandler = (
   pendingRetryMessagesRef: React.RefObject<Map<string, PendingRetryMessage[]>>,
   secureDBRef: React.RefObject<SecureDB | null>,
   activeAccountRef: React.RefObject<string | null>,
-  accountGenerationRef: React.RefObject<number>
+  accountGenerationRef: React.RefObject<number>,
+  deletingPeersRef: React.RefObject<ReadonlyMap<string, object>>,
 ) => {
   return async (event: Event) => {
     let isCurrent = () => false;
@@ -134,7 +135,8 @@ export const createSessionResetRetryHandler = (
         sanitizeMessageId(failedMessageId) !== failedMessageId ||
         !secureDBRef.current
       ) return;
-      if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
+      if (deletingPeersRef.current.has(peerUsername) ||
+          !blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
 
       const db = secureDBRef.current;
       const messageData = await db.retrieveEphemeral(
@@ -142,7 +144,8 @@ export const createSessionResetRetryHandler = (
         `${peerUsername}:${failedMessageId}`
       );
       if (!isCurrent()) return;
-      if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
+      if (deletingPeersRef.current.has(peerUsername) ||
+          !blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peerUsername)) return;
       const entry = recoverUnacknowledgedRetryEntry(messageData, peerUsername, failedMessageId);
       if (!entry) return;
 

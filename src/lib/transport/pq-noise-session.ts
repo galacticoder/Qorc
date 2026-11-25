@@ -2,10 +2,18 @@
  * PQ Noise Session Wrapper
  */
 
+import {
+  MAX_PENDING_DECRYPT_BYTES,
+  MAX_PENDING_ENCRYPT_BYTES,
+  MAX_PENDING_DECRYPT_OPERATIONS,
+  MAX_PENDING_ENCRYPT_OPERATIONS,
+  MAX_PENDING_REALTIME_ENCRYPT_OPERATIONS,
+  MAX_PENDING_VISUAL_ENCRYPT_OPERATIONS,
+} from '../constants';
 import { PQSession, clearNoiseHandshakeReplayCache } from '../cryptography/noise-protocol';
 import { PeerKeys, OwnKeys, HandshakeMessage, EncryptedFrame } from '../types/noise-types';
 import { PostQuantumUtils } from '../utils/pq-utils';
-import { encodeFrame, decodeFrame, MAX_MESSAGE_FRAME_SIZE } from './secure-transport';
+import { encodeFrame, decodeFrame } from './secure-transport';
 import { wipeHandshakeBytes } from '../cryptography/wipe';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import {
@@ -19,12 +27,6 @@ import { SecureMemory } from '../cryptography/secure-memory';
 import { Base64 } from '../cryptography/base64';
 
 const confirmationEncoder = new TextEncoder();
-const MAX_PENDING_ENCRYPT_OPERATIONS = 128;
-const MAX_PENDING_ENCRYPT_BYTES = 4 * MAX_MESSAGE_FRAME_SIZE;
-const MAX_PENDING_REALTIME_ENCRYPT_OPERATIONS = 5;
-const MAX_PENDING_VISUAL_ENCRYPT_OPERATIONS = 2;
-const MAX_PENDING_DECRYPT_OPERATIONS = 128;
-const MAX_PENDING_DECRYPT_BYTES = 4 * MAX_MESSAGE_FRAME_SIZE;
 
 interface PendingEncryptInput {
     plaintext: Uint8Array;

@@ -107,7 +107,7 @@ export const completeFileTransfer = async (
     );
     durablySaved = !!saveResult?.success;
     duplicate = !!saveResult?.duplicate;
-    if (!saveResult?.success && saveResult?.quotaExceeded) {
+    if (isCurrent() && !saveResult?.success && saveResult?.quotaExceeded) {
       toast.warning('Storage limit reached. File delivery is paused until space is available.', {
         duration: 5000
       });
@@ -132,7 +132,7 @@ export const completeFileTransfer = async (
     return { assembled: true, durablySaved: false };
   }
 
-  if (!duplicate) onNewMessage(message);
+  if (isCurrent() && !duplicate) onNewMessage(message);
 
   return { assembled: true, durablySaved };
 };

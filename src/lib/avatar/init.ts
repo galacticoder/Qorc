@@ -58,19 +58,15 @@ export async function initialize(
 
     const cachedAvatars = await secureDB.retrieve(STORAGE_KEYS.PROFILE_AVATARS, STORAGE_KEYS.AVATAR_CACHE);
     if (!isCurrent()) return;
-    if (cachedAvatars !== null) {
-        if (
-            !isPlainObject(cachedAvatars) ||
-            Object.keys(cachedAvatars).length > MAX_PEER_AVATAR_CACHE_ENTRIES
-        ) {
-            throw new Error('Invalid peer avatar cache');
-        }
+    if (
+        isPlainObject(cachedAvatars) &&
+        Object.keys(cachedAvatars).length <= MAX_PEER_AVATAR_CACHE_ENTRIES
+    ) {
         const cache = cachedAvatars as Record<string, CachedAvatar>;
         for (const [peerUsername, avatar] of Object.entries(cache)) {
-            if (!isCanonicalAuthUsername(peerUsername) || !isValidCachedAvatar(avatar)) {
-                throw new Error('Invalid peer avatar cache');
+            if (isCanonicalAuthUsername(peerUsername) && isValidCachedAvatar(avatar)) {
+                avatarCache.set(peerUsername, avatar);
             }
-            avatarCache.set(peerUsername, avatar);
         }
     }
 

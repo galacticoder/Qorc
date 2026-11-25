@@ -2,6 +2,7 @@
  * WebSocket PQ Handshake Manager
  */
 
+import { sleep } from '../runtime/sleep';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
@@ -15,17 +16,20 @@ import type {
   ServerKeyMaterial,
   SessionKeyMaterial,
 } from '../types/websocket-types';
-import { SESSION_REKEY_INTERVAL_MS } from '../constants';
+import {
+  SESSION_REKEY_INTERVAL_MS,
+  HANDSHAKE_ACK_BASE_TIMEOUT_MS,
+  HANDSHAKE_CONFIRM_BASE_TIMEOUT_MS,
+  HANDSHAKE_PHASE_MAX_TIMEOUT_MS,
+  SERVER_KEY_REQUEST_INTERVAL_MS,
+  SERVER_KEY_WAIT_BASE_TIMEOUT_MS,
+  HANDSHAKE_PERFORM_HANDSHAKE_DELAY_MS,
+  HANDSHAKE_ACK_SIGNATURE_LENGTH_LIMIT,
+} from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { ML_KEM_1024_CIPHERTEXT_BYTES } from '../../../shared/crypto-sizes.js';
 import { Base64 } from '../cryptography/base64';
 import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
-
-const SERVER_KEY_WAIT_BASE_TIMEOUT_MS = 45_000;
-const SERVER_KEY_REQUEST_INTERVAL_MS = 5_000;
-const HANDSHAKE_ACK_BASE_TIMEOUT_MS = 60_000;
-const HANDSHAKE_CONFIRM_BASE_TIMEOUT_MS = 60_000;
-const HANDSHAKE_PHASE_MAX_TIMEOUT_MS = 180_000;
 
 interface HandshakeRequestPayload {
   version: string;
@@ -191,7 +195,7 @@ export class WebSocketHandshake {
             console.error('[WebSocketHandshake] Failed to transmit request:', err);
           }
         }
-        await new Promise(resolve => setTimeout(resolve, 250));
+        await sleep(HANDSHAKE_PERFORM_HANDSHAKE_DELAY_MS);
       }
 
       serverMaterial = this.serverKeyMaterial;
@@ -455,7 +459,7 @@ export class WebSocketHandshake {
             ack.serverTime !== ack.timestamp ||
             typeof ack.signature !== 'string' ||
             ack.signature.length === 0 ||
-            ack.signature.length > 7000 ||
+            ack.signature.length > HANDSHAKE_ACK_SIGNATURE_LENGTH_LIMIT ||
             ack.signature.length % 4 !== 0 ||
             !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(ack.signature)
           ) {

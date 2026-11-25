@@ -104,8 +104,9 @@ pub async fn p2p_send(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=60_000).contains(value));
-    let data = super::binary_body(&request, crate::network::p2p::MAX_FRAME_BYTES)
-        .map_err(|()| "Invalid P2P frame".to_string())?;
+    let data = super::binary_body(&request, crate::constants::p2p::MAX_FRAME_BYTES)
+        .map_err(|()| "Invalid P2P frame".to_string())?
+        .into_owned();
     let p2p = state
         .inner()
         .p2p_handler()

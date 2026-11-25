@@ -1,5 +1,17 @@
 import { blake3 } from '@noble/hashes/blake3.js';
-import { AUTH_USERNAME_REGEX, CERT_CLOCK_SKEW_MS } from '../constants';
+import {
+  AUTH_USERNAME_REGEX,
+  CERT_CLOCK_SKEW_MS,
+  SIGNAL_BUNDLE_KEYS,
+  SIGNAL_SIGNED_PREKEY_KEYS,
+  SIGNAL_STATIC_ML_KEM_KEYS,
+  CERTIFIED_BUNDLE_KEYS,
+  ACCOUNT_ROOT_KEYS,
+  DEVICE_CERT_KEYS,
+  SUBKEY_BINDING_KEYS,
+  BINDING_ALGORITHM_KEYS,
+  HEX_64,
+} from '../constants';
 import type {
   AccountRootCert,
   CertifiedPeerBundleBuildInput,
@@ -31,42 +43,6 @@ import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { bytesToHex } from '../../../shared/bytes.js';
 
 const textEncoder = new TextEncoder();
-const HEX_64 = /^[a-f0-9]{64}$/i;
-const ACCOUNT_ROOT_KEYS = [
-  'version', 'authorityModel', 'username', 'algorithm', 'accountRootPublicKey',
-  'issuedAt', 'expiresAt', 'signedPayloadDigest', 'rootSelfSignature', 'rootFingerprint'
-] as const;
-const DEVICE_CERT_KEYS = [
-  'version', 'username', 'deviceId', 'accountRootFingerprint', 'signedBy',
-  'signatureAlgorithm', 'accountRootSignature', 'signedPayloadDigest',
-  'attestationFormat', 'attestationSignature', 'attestedPayloadDigest',
-  'deviceDilithiumPublicKey', 'deviceKyberPublicKey', 'deviceX25519PublicKey',
-  'issuedAt', 'expiresAt', 'deviceCertificateFingerprint'
-] as const;
-const SUBKEY_BINDING_KEYS = [
-  'version', 'username', 'deviceId', 'accountRootFingerprint',
-  'deviceCertificateFingerprint', 'algorithms', 'signalIdentityX25519PublicKey',
-  'signalPreKeyBundleDigest', 'kyberPublicKey', 'dilithiumPublicKey',
-  'x25519PublicKey', 'issuedAt', 'expiresAt', 'signedPayloadDigest',
-  'deviceSignature', 'bindingFingerprint'
-] as const;
-const BINDING_ALGORITHM_KEYS = [
-  'signature', 'kem', 'classicalKeyAgreement', 'signalIdentity'
-] as const;
-const CERTIFIED_BUNDLE_KEYS = [
-  'version', 'authorityModel', 'username', 'accountRoot', 'deviceCert',
-  'subkeyBinding', 'peerCertificateFingerprint', 'identityRootFingerprint',
-  'bundleFingerprint'
-] as const;
-
-const SIGNAL_BUNDLE_KEYS = [
-  'registrationId', 'deviceId', 'identityKeyBase64', 'signedPreKey',
-  'mlKemPreKey', 'staticMlKem'
-] as const;
-const SIGNAL_SIGNED_PREKEY_KEYS = [
-  'keyId', 'publicKeyBase64', 'signatureBase64'
-] as const;
-const SIGNAL_STATIC_ML_KEM_KEYS = ['publicKeyBase64', 'signatureBase64'] as const;
 
 function hasSerializedKeyTag(value: string, expectedBytes: number, tag: number): boolean {
   if (!isCanonicalBase64OfLength(value, expectedBytes)) return false;

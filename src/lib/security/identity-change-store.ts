@@ -1,3 +1,15 @@
+import {
+  MAX_HELD_BYTES,
+  MAX_HELD_GLOBAL,
+  MAX_HELD_MESSAGE_BYTES,
+  MAX_HELD_PER_PEER,
+  MAX_PENDING_PEERS,
+  IDENTITY_CHANGE_STORE_PEER_LENGTH_LIMIT,
+  IDENTITY_CHANGE_STORE_NEW_KEY_LENGTH_LIMIT,
+  IDENTITY_CHANGE_STORE_STABLE_DEDUP_KEY_LENGTH_MINIMUM,
+  IDENTITY_CHANGE_STORE_ENCRYPTED_MESSAGE_MESSAGE_ID_LENGTH_MINIMUM,
+  IDENTITY_CHANGE_STORE_DISPLAY_DEDUP_KEY_LENGTH_MINIMUM,
+} from '../constants';
 import { useEffect, useState } from 'react';
 
 export interface HeldMessage {
@@ -17,12 +29,6 @@ interface Entry extends PendingIdentityChange {
     displayDedupKey: string | null;
   }>;
 }
-
-const MAX_HELD_PER_PEER = 100;
-const MAX_PENDING_PEERS = 128;
-const MAX_HELD_GLOBAL = 256;
-const MAX_HELD_BYTES = 16 * 1024 * 1024;
-const MAX_HELD_MESSAGE_BYTES = 2 * 1024 * 1024;
 
 const pending = new Map<string, Entry>();
 const listeners = new Set<() => void>();
@@ -68,8 +74,8 @@ function snapshot(): PendingIdentityChange[] {
 
 export const identityChangeStore = {
   add(peer: string, newKey: string): boolean {
-    if (!peer || peer.length > 128) return false;
-    if (!newKey || newKey.length > 4096) return false;
+    if (!peer || peer.length > IDENTITY_CHANGE_STORE_PEER_LENGTH_LIMIT) return false;
+    if (!newKey || newKey.length > IDENTITY_CHANGE_STORE_NEW_KEY_LENGTH_LIMIT) return false;
     const existing = pending.get(peer);
     if (existing) {
       return existing.newKey === newKey;
@@ -88,15 +94,15 @@ export const identityChangeStore = {
   ): boolean {
     const entry = pending.get(peer);
     if (!entry || entry.held.length >= MAX_HELD_PER_PEER || heldGlobal >= MAX_HELD_GLOBAL) return false;
-    const suppliedKey = typeof stableDedupKey === 'string' && stableDedupKey.length <= 256
+    const suppliedKey = typeof stableDedupKey === 'string' && stableDedupKey.length <= IDENTITY_CHANGE_STORE_STABLE_DEDUP_KEY_LENGTH_MINIMUM
       ? stableDedupKey
       : null;
-    const visibleMessageId = typeof encryptedMessage?.messageId === 'string' && encryptedMessage.messageId.length <= 256
+    const visibleMessageId = typeof encryptedMessage?.messageId === 'string' && encryptedMessage.messageId.length <= IDENTITY_CHANGE_STORE_ENCRYPTED_MESSAGE_MESSAGE_ID_LENGTH_MINIMUM
       ? encryptedMessage.messageId
       : null;
     const dedupKey = suppliedKey || visibleMessageId;
     if (dedupKey && entry.held.some(held => held.dedupKey === dedupKey)) return true;
-    const suppliedDisplayKey = typeof displayDedupKey === 'string' && displayDedupKey.length <= 256
+    const suppliedDisplayKey = typeof displayDedupKey === 'string' && displayDedupKey.length <= IDENTITY_CHANGE_STORE_DISPLAY_DEDUP_KEY_LENGTH_MINIMUM
       ? displayDedupKey
       : null;
     const resolvedDisplayKey = displayDedupKey === undefined

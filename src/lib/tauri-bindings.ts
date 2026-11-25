@@ -3,6 +3,7 @@
  * Tauri TypeScript bindings for all commands
  */
 
+import { sleep } from './runtime/sleep';
 import { Channel, invoke, SERIALIZE_TO_IPC_FN } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Base64 } from './cryptography/base64';
@@ -10,7 +11,24 @@ import { PROTOCOL_KEYS } from './config/protocol-keys';
 import { isAndroidPlatform } from './runtime/platform';
 import { scopedStorageContext } from './security/scoped-storage-context';
 import { receiveCallbackBytes, receiveCallbackJson, type ByteCallbackChunk } from './runtime/callback-bytes';
-import { WS_FIXED_MESSAGE_SIZE_BYTES } from './constants';
+import {
+  ANONYMOUS_CALLBACK_MAX_CHUNK_BYTES,
+  WS_FIXED_MESSAGE_SIZE_BYTES,
+  CALL_AUDIO_FRAME_BYTES,
+  CALL_AUDIO_FRAME_SAMPLES,
+  CALL_AUDIO_SAMPLE_RATE_HZ,
+  TAURI_BINDINGS_BYTES_BYTES_EXPECTED,
+  TAURI_BINDINGS_PARSE_NATIVE_CAMERA_FRAME_BYTES_BYTES_EXPECTED,
+  TAURI_BINDINGS_BYTES_BYTES_MINIMUM,
+  TAURI_BINDINGS_BYTES_BYTES_LIMIT,
+  TAURI_BINDINGS_WIDTH_LIMIT,
+  TAURI_BINDINGS_HEIGHT_LIMIT,
+  TAURI_BINDINGS_PARSE_NATIVE_CAMERA_FRAME_HEIGHT_LIMIT,
+  TAURI_BINDINGS_JPEG_BYTES_MINIMUM,
+  TAURI_BINDINGS_FETCH_TIMEOUT_MS,
+  TAURI_BINDINGS_ON_WS_BINARY_DELAY_MS,
+  TAURI_BINDINGS_ON_P2_PMESSAGE_DELAY_MS,
+} from './constants';
 import type { AudioLaneTelemetry } from './transport/secure-transport';
 
 function invokeJsonResponse<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -38,7 +56,7 @@ export interface NativeCameraFrame {
     height: number;
     frameRate: number;
     enabled: boolean;
-    jpeg: Uint8Array;
+    jpeg: Uint8Array<ArrayBuffer>;
 }
 
 export interface NativeMicrophoneDevice {
@@ -55,8 +73,8 @@ export interface NativeMicrophoneFrame {
 
 const parseNativeMicrophoneFrame = (value: ArrayBuffer): NativeMicrophoneFrame | null => {
     const bytes = new Uint8Array(value);
-    if (bytes.byteLength === 24 && bytes.every(byte => byte === 0)) return null;
-    if (bytes.byteLength !== 24 + 960 * Float32Array.BYTES_PER_ELEMENT) {
+    if (bytes.byteLength === TAURI_BINDINGS_BYTES_BYTES_EXPECTED && bytes.every(byte => byte === 0)) return null;
+    if (bytes.byteLength !== 24 + CALL_AUDIO_FRAME_BYTES) {
         throw new Error('Invalid native microphone frame length');
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -64,8 +82,8 @@ const parseNativeMicrophoneFrame = (value: ArrayBuffer): NativeMicrophoneFrame |
     const capturedAt = Number(view.getBigUint64(8, false));
     if (
         view.getUint8(0) !== 1 || view.getUint8(1) > 1 ||
-        view.getUint16(2, false) !== 0 || view.getUint32(16, false) !== 48_000 ||
-        view.getUint16(20, false) !== 960 || view.getUint16(22, false) !== 0 ||
+        view.getUint16(2, false) !== 0 || view.getUint32(16, false) !== CALL_AUDIO_SAMPLE_RATE_HZ ||
+        view.getUint16(20, false) !== CALL_AUDIO_FRAME_SAMPLES || view.getUint16(22, false) !== 0 ||
         sequence === 0 || !Number.isSafeInteger(capturedAt) || capturedAt <= 0
     ) {
         throw new Error('Invalid native microphone frame');
@@ -80,8 +98,8 @@ const parseNativeMicrophoneFrame = (value: ArrayBuffer): NativeMicrophoneFrame |
 
 const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null => {
     const bytes = new Uint8Array(value);
-    if (bytes.byteLength === 32 && bytes.every(byte => byte === 0)) return null;
-    if (bytes.byteLength < 32 || bytes.byteLength > 4 * 1024 * 1024 + 32) {
+    if (bytes.byteLength === TAURI_BINDINGS_PARSE_NATIVE_CAMERA_FRAME_BYTES_BYTES_EXPECTED && bytes.every(byte => byte === 0)) return null;
+    if (bytes.byteLength < TAURI_BINDINGS_BYTES_BYTES_MINIMUM || bytes.byteLength > TAURI_BINDINGS_BYTES_BYTES_LIMIT) {
         throw new Error('Invalid native camera frame length');
     }
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -98,11 +116,11 @@ const parseNativeCameraFrame = (value: ArrayBuffer): NativeCameraFrame | null =>
         view.getUint8(3) !== 0 || view.getUint16(30, false) !== 0 ||
         !Number.isSafeInteger(sequence) || sequence <= 0 ||
         !Number.isSafeInteger(capturedAt) || capturedAt <= 0 ||
-        width < 2 || height < 2 || width > 1280 || height > 720 ||
+        width < 2 || height < 2 || width > TAURI_BINDINGS_WIDTH_LIMIT || height > TAURI_BINDINGS_HEIGHT_LIMIT ||
         frameRate < 1 || frameRate > 60 ||
-        width * height > 1280 * 720 || payloadLength !== jpeg.byteLength ||
+        width * height > TAURI_BINDINGS_PARSE_NATIVE_CAMERA_FRAME_HEIGHT_LIMIT || payloadLength !== jpeg.byteLength ||
         (enabled
-            ? jpeg.byteLength < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
+            ? jpeg.byteLength < TAURI_BINDINGS_JPEG_BYTES_MINIMUM || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
               jpeg[jpeg.byteLength - 2] !== 0xff || jpeg[jpeg.byteLength - 1] !== 0xd9
             : jpeg.byteLength !== 0)
     ) {
@@ -619,7 +637,7 @@ export const anonymousHttp = {
     fetch: async (
         body: Uint8Array,
         expectedServerUrl: string,
-        options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void; diagnosticId?: number },
+        options: { responseBytes: number; signal?: AbortSignal; onProgress?: (receivedBytes: number) => void },
     ) => {
         options.signal?.throwIfAborted();
         const android = isAndroidPlatform();
@@ -647,7 +665,7 @@ export const anonymousHttp = {
                 value.receivedBytes > options.responseBytes) return;
             receivedBytes = value.receivedBytes;
             if (android && receivedBytes === options.responseBytes && deliveryTimer === undefined) {
-                deliveryTimer = setTimeout(() => controller.abort(new Error('Native anonymous response delivery timed out')), 30_000);
+                deliveryTimer = setTimeout(() => controller.abort(new Error('Native anonymous response delivery timed out')), TAURI_BINDINGS_FETCH_TIMEOUT_MS);
             }
             options.onProgress?.(receivedBytes);
         }) : undefined;
@@ -656,7 +674,6 @@ export const anonymousHttp = {
                 [PROTOCOL_KEYS.EXPECTED_SERVER_HEADER]: expectedServerUrl,
                 'x-qorc-anonymous-request-id': requestId,
                 'x-qorc-anonymous-response-bytes': String(options.responseBytes),
-                ...(options.diagnosticId === undefined ? {} : { 'x-qorc-transfer-diagnostic': String(options.diagnosticId) }),
                 ...(progress ? { 'x-qorc-anonymous-progress': progress[SERIALIZE_TO_IPC_FN]() } : {}),
             };
             const response = android
@@ -665,7 +682,7 @@ export const anonymousHttp = {
                     return invoke<number>('anonymous_api_fetch_channel', body, {
                         headers: { ...headers, 'x-qorc-anonymous-response-channel': channel[SERIALIZE_TO_IPC_FN]() },
                     });
-                }, options.responseBytes, false, controller.signal)
+                }, options.responseBytes, true, controller.signal, ANONYMOUS_CALLBACK_MAX_CHUNK_BYTES)
                 : invoke<ArrayBuffer>('anonymous_api_fetch', body, { headers });
             return await Promise.race([response, aborted]);
         } finally {
@@ -718,6 +735,7 @@ export const database = {
     mutateSecure: (
         writes: Array<{ store: string; key: string; value: Uint8Array }>,
         deletions: Array<{ store: string; key: string }>,
+        nativeContent?: { delete?: string[]; evict?: string[] },
     ) => invoke<boolean>('db_mutate_secure', {
         mutationJson: serializeJsonForNative({
             writes: writes.map(({ store, key, value }) => ({
@@ -726,6 +744,8 @@ export const database = {
                 valueB64: Base64.arrayBufferToBase64(value),
             })),
             deletions,
+            nativeContentDeletions: nativeContent?.delete,
+            nativeContentEvictions: nativeContent?.evict,
         }),
     }),
     delete: (store: string, key: string) => invoke<boolean>('db_delete', { store, key }),
@@ -758,7 +778,7 @@ export const events = {
                     if (!active) return;
                     consecutiveFailures += 1;
                     if (consecutiveFailures >= 3) return;
-                    await new Promise(resolve => setTimeout(resolve, 250));
+                    await sleep(TAURI_BINDINGS_ON_WS_BINARY_DELAY_MS);
                 }
             }
         })();
@@ -779,7 +799,7 @@ export const events = {
                     if (!active) return;
                     consecutiveFailures += 1;
                     if (consecutiveFailures >= 3) return;
-                    await new Promise(resolve => setTimeout(resolve, 250));
+                    await sleep(TAURI_BINDINGS_ON_P2_PMESSAGE_DELAY_MS);
                 }
             }
         })();

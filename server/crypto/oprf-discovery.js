@@ -10,7 +10,7 @@ import { PROTOCOL_KEYS } from '../config/protocol-keys.js';
 import { SESSION_FINGERPRINT_RE } from '../../shared/patterns.js';
 
 const OPRF_KEY_INFO = UTF8_ENCODER.encode(PROTOCOL_KEYS.DISCOVERY_VOPRF_AUTHORITY);
-export const OPRF_DISCOVERY_POW_DIFFICULTY = 18;
+export { OPRF_DISCOVERY_POW_DIFFICULTY } from '../../shared/discovery-constants.js';
 const RATE_LIMIT_WINDOW_MS = 60000;
 const parsedGlobalMax = Number.parseInt(process.env.OPRF_GLOBAL_MAX_PER_MIN || '1200', 10);
 const GLOBAL_MAX_REQUESTS_PER_WINDOW = Math.min(

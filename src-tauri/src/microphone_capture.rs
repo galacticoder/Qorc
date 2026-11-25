@@ -1,3 +1,12 @@
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::media_utils::unix_time_ms;
+use crate::media_utils::{MediaSession, validate_device_id};
+use crate::constants::media::AUDIO_DEVICE_ID_MAX_BYTES;
+use crate::constants::audio::{CAPTURE_FRAME_WAIT, CAPTURE_START_WAIT, MAX_CAPTURE_SESSIONS};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::constants::audio::{FRAME_SAMPLES, SAMPLE_RATE_HZ};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::constants::audio::FRAME_BYTES;
 #[cfg(target_os = "windows")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 #[cfg(target_os = "windows")]
@@ -13,13 +22,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const TARGET_SAMPLE_RATE: u32 = 48_000;
-const FRAME_SAMPLES: usize = 960;
-const FRAME_WAIT: Duration = Duration::from_secs(1);
-const START_WAIT: Duration = Duration::from_secs(10);
-const MAX_SESSIONS: usize = 2;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub struct MicrophoneDevice {
@@ -116,7 +119,7 @@ impl MicrophoneSession {
             .slot
             .lock()
             .map_err(|_| "microphone frame queue unavailable".to_string())?;
-        let deadline = Instant::now() + FRAME_WAIT;
+        let deadline = Instant::now() + CAPTURE_FRAME_WAIT;
         loop {
             if slot
                 .frame
@@ -189,9 +192,9 @@ impl MicrophoneCaptureState {
     }
 
     pub fn start(&self, session_id: &str, device_id: Option<&str>) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Microphone.validate_id(session_id)?;
         if let Some(device_id) = device_id {
-            validate_device_id(device_id)?;
+            validate_device_id(device_id, AUDIO_DEVICE_ID_MAX_BYTES, "invalid microphone device identifier")?;
         }
         self.stop(session_id)?;
         let session = Arc::new(MicrophoneSession::new());
@@ -200,7 +203,7 @@ impl MicrophoneCaptureState {
                 .sessions
                 .lock()
                 .map_err(|_| "microphone capture unavailable".to_string())?;
-            if sessions.len() >= MAX_SESSIONS {
+            if sessions.len() >= MAX_CAPTURE_SESSIONS {
                 return Err("microphone capture session limit reached".to_string());
             }
             sessions.insert(session_id.to_string(), session.clone());
@@ -231,7 +234,7 @@ impl MicrophoneCaptureState {
             .worker
             .lock()
             .map_err(|_| "microphone capture unavailable".to_string())? = Some(worker);
-        match started_rx.recv_timeout(START_WAIT) {
+        match started_rx.recv_timeout(CAPTURE_START_WAIT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
                 self.stop(session_id)?;
@@ -245,7 +248,7 @@ impl MicrophoneCaptureState {
     }
 
     pub fn set_enabled(&self, session_id: &str, enabled: bool) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Microphone.validate_id(session_id)?;
         let session = self.session(session_id)?;
         session.set_enabled(enabled)
     }
@@ -255,12 +258,12 @@ impl MicrophoneCaptureState {
         session_id: &str,
         after_sequence: u32,
     ) -> Result<Option<MicrophoneFrame>, String> {
-        validate_session_id(session_id)?;
+        MediaSession::Microphone.validate_id(session_id)?;
         self.session(session_id)?.pull(after_sequence)
     }
 
     pub fn stop(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Microphone.validate_id(session_id)?;
         let session = self
             .sessions
             .lock()
@@ -282,9 +285,10 @@ impl MicrophoneCaptureState {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct CaptureProcessor {
     session: Arc<MicrophoneSession>,
-    source_rate: u32,
+    source_step: f64,
     #[cfg(target_os = "windows")]
     channels: usize,
     previous_sample: Option<f32>,
@@ -294,12 +298,13 @@ struct CaptureProcessor {
     sequence: u32,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl CaptureProcessor {
     #[allow(unused_variables)]
     fn new(session: Arc<MicrophoneSession>, source_rate: u32, channels: usize) -> Self {
         Self {
             session,
-            source_rate,
+            source_step: f64::from(source_rate) / f64::from(SAMPLE_RATE_HZ),
             #[cfg(target_os = "windows")]
             channels,
             previous_sample: None,
@@ -322,7 +327,7 @@ impl CaptureProcessor {
         let Some(previous) = self.previous_sample else {
             self.previous_sample = Some(sample);
             self.emit(sample);
-            self.next_output_position = self.source_rate as f64 / TARGET_SAMPLE_RATE as f64;
+            self.next_output_position = self.source_step;
             return;
         };
         self.source_index = self.source_index.wrapping_add(1);
@@ -330,7 +335,7 @@ impl CaptureProcessor {
         while self.next_output_position <= current_position {
             let fraction = (self.next_output_position - (current_position - 1.0)).clamp(0.0, 1.0);
             self.emit(previous + (sample - previous) * fraction as f32);
-            self.next_output_position += self.source_rate as f64 / TARGET_SAMPLE_RATE as f64;
+            self.next_output_position += self.source_step;
         }
         self.previous_sample = Some(sample);
     }
@@ -346,7 +351,7 @@ impl CaptureProcessor {
         std::mem::swap(&mut samples, &mut self.output);
         self.session.publish(MicrophoneFrame {
             sequence: self.sequence,
-            captured_at: now_ms(),
+            captured_at: unix_time_ms(),
             enabled,
             samples,
         });
@@ -536,8 +541,8 @@ fn run_capture(
                 enabled = current;
             }
             if let Some(mut frame) = capture.poll()? {
-                let mut bytes = frame.decode(FRAME_SAMPLES * 4)?;
-                if bytes.len() != FRAME_SAMPLES * 4 {
+                let mut bytes = frame.decode(FRAME_BYTES)?;
+                if bytes.len() != FRAME_BYTES {
                     bytes.fill(0);
                     return Err("Invalid Android microphone frame".into());
                 }
@@ -580,7 +585,6 @@ fn run_capture(
 ) {
     let result = run_pulse_capture(session.clone(), device_id, &started);
     if let Err(error) = result {
-        tracing::warn!(error = %error, "[CALL-DIAG] native-microphone-stream-failed");
         let _ = started.send(Err(error));
     }
 }
@@ -613,8 +617,8 @@ fn run_pulse_capture(
         .map_err(|_| "microphone device selection timed out".to_string())?
         .map_err(|_| "selected microphone is unavailable".to_string())?;
     let sink = PulseRecordSink {
-        processor: CaptureProcessor::new(session.clone(), TARGET_SAMPLE_RATE, 1),
-        pending: Vec::with_capacity(FRAME_SAMPLES * std::mem::size_of::<f32>() * 2),
+        processor: CaptureProcessor::new(session.clone(), SAMPLE_RATE_HZ, 1),
+        pending: Vec::with_capacity(FRAME_BYTES * 2),
         session: session.clone(),
     };
     let params = protocol::RecordStreamParams {
@@ -622,13 +626,13 @@ fn run_pulse_capture(
         sample_spec: protocol::SampleSpec {
             format: protocol::SampleFormat::Float32Le,
             channels: 1,
-            sample_rate: TARGET_SAMPLE_RATE,
+            sample_rate: SAMPLE_RATE_HZ,
         },
         channel_map: protocol::ChannelMap::mono(),
         cvolume: Some(protocol::ChannelVolume::norm(1)),
         buffer_attr: protocol::stream::BufferAttr {
-            max_length: (FRAME_SAMPLES * std::mem::size_of::<f32>() * 4) as u32,
-            fragment_size: (FRAME_SAMPLES * std::mem::size_of::<f32>()) as u32,
+            max_length: (FRAME_BYTES * 4) as u32,
+            fragment_size: FRAME_BYTES as u32,
             ..Default::default()
         },
         flags: protocol::stream::StreamFlags {
@@ -649,18 +653,10 @@ fn run_pulse_capture(
         .map_err(|_| "microphone stream could not be opened".to_string())?;
     if stream.sample_spec().format != protocol::SampleFormat::Float32Le
         || stream.sample_spec().channels != 1
-        || stream.sample_spec().sample_rate != TARGET_SAMPLE_RATE
+        || stream.sample_spec().sample_rate != SAMPLE_RATE_HZ
     {
         return Err("microphone stream format negotiation failed".to_string());
     }
-    tracing::info!(
-        source_rate = source.sample_spec.sample_rate,
-        source_channels = source.sample_spec.channels,
-        sample_rate = stream.sample_spec().sample_rate,
-        channels = stream.sample_spec().channels,
-        sample_format = ?stream.sample_spec().format,
-        "[CALL-DIAG] native-microphone-selected-profile"
-    );
     runtime
         .block_on(async { tokio::time::timeout(Duration::from_secs(5), stream.started()).await })
         .map_err(|_| "microphone stream startup timed out".to_string())?
@@ -700,12 +696,6 @@ fn run_capture(
     let config = selected.config();
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate;
-    tracing::info!(
-        sample_rate,
-        channels,
-        sample_format = %selected.sample_format(),
-        "[CALL-DIAG] native-microphone-selected-profile"
-    );
     let callback_session = session.clone();
     let mut processor = CaptureProcessor::new(callback_session, sample_rate, channels);
     let error_session = session.clone();
@@ -713,22 +703,19 @@ fn run_capture(
         config,
         selected.sample_format(),
         move |data, _| process_data(&mut processor, data),
-        move |error| {
-            tracing::warn!(error = %error, "[CALL-DIAG] native-microphone-stream-failed");
+        move |_| {
             error_session.fail("microphone capture stream failed".to_string());
         },
         Some(Duration::from_secs(5)),
     );
     let stream = match stream {
         Ok(stream) => stream,
-        Err(error) => {
-            tracing::warn!(error = %error, "[CALL-DIAG] native-microphone-open-failed");
+        Err(_) => {
             let _ = started.send(Err("microphone stream could not be opened".to_string()));
             return;
         }
     };
-    if let Err(error) = stream.play() {
-        tracing::warn!(error = %error, "[CALL-DIAG] native-microphone-play-failed");
+    if stream.play().is_err() {
         let _ = started.send(Err("microphone stream could not be started".to_string()));
         return;
     }
@@ -830,12 +817,12 @@ fn select_config(device: &Device) -> Result<SupportedStreamConfig, String> {
                 && supported_sample_format(config.sample_format())
         })
         .map(|config| {
-            let rate = TARGET_SAMPLE_RATE.clamp(config.min_sample_rate(), config.max_sample_rate());
+            let rate = SAMPLE_RATE_HZ.clamp(config.min_sample_rate(), config.max_sample_rate());
             config.with_sample_rate(rate)
         })
         .min_by_key(|config| {
             (
-                config.sample_rate().abs_diff(TARGET_SAMPLE_RATE),
+                config.sample_rate().abs_diff(SAMPLE_RATE_HZ),
                 channel_rank(config.channels()),
                 sample_format_rank(config.sample_format()),
             )
@@ -890,24 +877,9 @@ fn sequence_after(value: u32, previous: u32) -> bool {
     value != previous && value.wrapping_sub(previous) < (1 << 31)
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if session_id.len() != 32
-        || !session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err("invalid microphone capture session".to_string());
-    }
-    Ok(())
-}
 
-fn validate_device_id(device_id: &str) -> Result<(), String> {
-    if device_id.is_empty() || device_id.len() > 1024 || device_id.chars().any(char::is_control) {
-        return Err("invalid microphone device identifier".to_string());
-    }
-    Ok(())
-}
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn clean_label(label: &str) -> String {
     let cleaned = label
         .chars()
@@ -921,12 +893,4 @@ fn clean_label(label: &str) -> String {
     } else {
         cleaned
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
 }

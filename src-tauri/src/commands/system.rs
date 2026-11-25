@@ -1,5 +1,11 @@
 //! System Commands
 
+use crate::constants::system::{
+    MAX_EXTERNAL_URL_BYTES, MAX_FRONTEND_LOG_BATCH, MAX_FRONTEND_LOG_BATCH_BYTES,
+    MAX_FRONTEND_LOG_LINE_BYTES,
+};
+#[cfg(target_os = "linux")]
+use crate::constants::system::MEDIA_PERMISSION_LEASE_TTL;
 use crate::state::AppState;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -11,12 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-const MAX_EXTERNAL_URL_BYTES: usize = 8 * 1024;
-const MAX_FRONTEND_LOG_BATCH: usize = 32;
-const MAX_FRONTEND_LOG_LINE_BYTES: usize = 128 * 1024;
-const MAX_FRONTEND_LOG_BATCH_BYTES: usize = 4 * 1024 * 1024;
 static EXTERNAL_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MEDIA_DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -115,9 +117,6 @@ pub async fn android_runtime_wait(
         Err("Android clock is unavailable on this platform".into())
     }
 }
-
-#[cfg(target_os = "linux")]
-const MEDIA_PERMISSION_LEASE_TTL: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
 struct MediaPermissionLease {
@@ -277,7 +276,6 @@ pub async fn open_external(url: String, app: AppHandle) -> Result<bool, String> 
 
 #[tauri::command]
 pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, String> {
-    tracing::info!(kind = %kind, "[CALL-DIAG] native-media-request-enter");
     let (audio, video, description, enumeration_only) = match kind.as_str() {
         "audio" => (true, false, "microphone", false),
         "video" => (false, true, "camera or screen/window capture", false),
@@ -315,11 +313,9 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         let _ = (audio, video);
         if !enumeration_only {
             let _ = (description, app);
-            tracing::info!(kind = %kind, "[CALL-DIAG] native-media-request-auto-granted");
             return Ok(true);
         }
         let _dialog_guard = MediaDialogGuard::acquire()?;
-        tracing::info!(kind = %kind, "[CALL-DIAG] native-media-dialog-before");
         let confirmed = confirm_native_dialog(
             &app,
             "Show media devices",
@@ -327,14 +323,12 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
             "Show devices",
         )
         .await;
-        tracing::info!(kind = %kind, confirmed, "[CALL-DIAG] native-media-dialog-after");
         return Ok(confirmed);
     }
 
     #[cfg(target_os = "linux")]
     {
         let _dialog_guard = MediaDialogGuard::acquire()?;
-        tracing::info!(kind = %kind, "[CALL-DIAG] native-media-dialog-before");
         let confirmed = confirm_native_dialog(
             &app,
             if enumeration_only {
@@ -354,7 +348,6 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
             },
         )
         .await;
-        tracing::info!(kind = %kind, confirmed, "[CALL-DIAG] native-media-dialog-after");
 
         let mut slot = MEDIA_PERMISSION_LEASE
             .lock()
@@ -368,12 +361,6 @@ pub async fn request_media_access(kind: String, app: AppHandle) -> Result<bool, 
         } else {
             None
         };
-        tracing::info!(
-            kind = %kind,
-            confirmed,
-            lease_stored = confirmed && !enumeration_only && (audio || video),
-            "[CALL-DIAG] native-media-request-complete"
-        );
         Ok(confirmed)
     }
 }

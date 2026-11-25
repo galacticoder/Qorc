@@ -1,5 +1,12 @@
 //! Native Encrypted Database Module
 
+use crate::constants::database::{
+    DB_ACCOUNT_QUOTA_MAX_BYTES, DB_ENUMERATION_MAX_ENTRIES, DB_FILE_STORE_QUOTA_BYTES,
+    DB_MAX_CONVERSATION_DELETIONS, DB_MUTATION_MAX_DELETIONS, DB_MUTATION_MAX_JSON_BYTES,
+    DB_MUTATION_MAX_STRUCTURAL_TOKENS, DB_MUTATION_MAX_TOTAL_VALUE_BYTES, DB_MUTATION_MAX_WRITES,
+    DB_NAME_MAX_LEN, DB_RENDERER_STORE_QUOTA_BYTES, DB_VALUE_MAX_BYTES,
+    NATIVE_MESSAGE_CONTENT_MAX_BYTES, NATIVE_MESSAGE_ID_MAX_BYTES,
+};
 use parking_lot::Mutex;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
@@ -17,9 +24,6 @@ use crate::crypto::hash::{hkdf_sha3_derive_32, shake256};
 use crate::crypto::random::random_bytes;
 use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
-
-const NATIVE_MESSAGE_CONTENT_MAX_BYTES: usize = 66 * 1024;
-const NATIVE_MESSAGE_ID_MAX_BYTES: usize = 256;
 
 pub struct DatabaseManager {
     conn: Mutex<Connection>,
@@ -874,18 +878,6 @@ pub async fn db_lock(account_owner: String, state: State<'_, AppState>) -> Resul
     Ok(true)
 }
 
-const DB_NAME_MAX_LEN: usize = 256;
-const DB_VALUE_MAX_BYTES: usize = 128 * 1024 * 1024;
-const DB_FILE_STORE_QUOTA_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-const DB_RENDERER_STORE_QUOTA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const DB_ACCOUNT_QUOTA_MAX_BYTES: u64 = 12 * 1024 * 1024 * 1024;
-const DB_ENUMERATION_MAX_ENTRIES: usize = 10_000;
-const DB_MUTATION_MAX_WRITES: usize = 512;
-const DB_MUTATION_MAX_DELETIONS: usize = 2_048;
-const DB_MUTATION_MAX_TOTAL_VALUE_BYTES: usize = 128 * 1024 * 1024;
-const DB_MUTATION_MAX_JSON_BYTES: usize = 180 * 1024 * 1024;
-const DB_MUTATION_MAX_STRUCTURAL_TOKENS: usize = 14_000;
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DbMutationWrite {
@@ -906,6 +898,9 @@ pub struct DbMutationDelete {
 struct DbMutationRequest {
     writes: Vec<DbMutationWrite>,
     deletions: Vec<DbMutationDelete>,
+    native_content_deletions: Option<Vec<String>>,
+    #[serde(default)]
+    native_content_evictions: Vec<String>,
 }
 
 fn parse_db_mutation_request(mutation_json: &str) -> Result<DbMutationRequest, String> {
@@ -1129,11 +1124,27 @@ pub async fn db_mutate_secure(
     state: State<'_, AppState>,
     mutation_json: String,
 ) -> Result<bool, String> {
-    let DbMutationRequest { writes, deletions } = parse_db_mutation_request(&mutation_json)?;
-    if writes.is_empty() && deletions.is_empty() {
+    let DbMutationRequest {
+        writes,
+        deletions,
+        native_content_deletions,
+        native_content_evictions,
+    } = parse_db_mutation_request(&mutation_json)?;
+    let deletion_limit = if native_content_deletions.is_some() {
+        DB_MAX_CONVERSATION_DELETIONS
+    } else {
+        DB_MUTATION_MAX_DELETIONS
+    };
+    let native_content_deletions = native_content_deletions.unwrap_or_default();
+    if writes.is_empty() && deletions.is_empty() && native_content_deletions.is_empty()
+        && native_content_evictions.is_empty()
+    {
         return Err("Empty database mutation".to_string());
     }
-    if writes.len() > DB_MUTATION_MAX_WRITES || deletions.len() > DB_MUTATION_MAX_DELETIONS {
+    if writes.len() > DB_MUTATION_MAX_WRITES
+        || deletions.len() + native_content_deletions.len() > deletion_limit
+        || native_content_evictions.len() > DB_MUTATION_MAX_DELETIONS
+    {
         return Err("Database mutation limit exceeded".to_string());
     }
 
@@ -1167,6 +1178,14 @@ pub async fn db_mutate_secure(
         }
         decoded_deletions.push((deletion.store, deletion.key));
     }
+    let mut content_ids = HashSet::new();
+    for content_id in native_content_deletions.iter().chain(&native_content_evictions) {
+        DatabaseManager::validate_native_message_id(content_id)
+            .map_err(|error| error.safe_message())?;
+        if !content_ids.insert(content_id) {
+            return Err("Duplicate database mutation target".to_string());
+        }
+    }
 
     let lifecycle_lock = state.inner().database_lifecycle_lock.clone();
     let _lifecycle_guard = lifecycle_lock.lock_owned().await;
@@ -1185,13 +1204,31 @@ pub async fn db_mutate_secure(
     }
 
     let committed = run_database_task(move || {
+        let native_content_store = db.native_message_content_store();
+        let mut retained_content = Vec::new();
+        let mut evicted_content = Vec::new();
+        for key in &native_content_evictions {
+            if let Some(value) = crate::message_content::retain_evicted_content_for_send(db.as_ref(), key)? {
+                retained_content.push((key.as_str(), value));
+            } else {
+                evicted_content.push(key.as_str());
+            }
+        }
         let write_refs = decoded_writes
             .iter()
             .map(|(store, key, value)| (store.as_str(), key.as_str(), value.as_slice()))
+            .chain(retained_content.iter().map(|(key, value)| (native_content_store.as_str(), *key, value.as_slice())))
             .collect::<Vec<_>>();
         let deletion_refs = decoded_deletions
             .iter()
             .map(|(store, key)| (store.as_str(), key.as_str()))
+            .chain(
+                native_content_deletions
+                    .iter()
+                    .map(String::as_str)
+                    .chain(evicted_content)
+                    .map(|key| (native_content_store.as_str(), key)),
+            )
             .collect::<Vec<_>>();
         db.mutate_secure_batch_with_quotas(&write_refs, &deletion_refs)
     })

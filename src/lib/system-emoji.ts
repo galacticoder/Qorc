@@ -1,3 +1,12 @@
+import {
+  DEFAULT_EMOJI_SEARCH_LIMIT,
+  DEFAULT_FREQUENT_EMOJI_LIMIT,
+  MAX_EMOJI_USAGE_COUNT,
+  MAX_TRACKED_EMOJIS,
+  DEFAULT_FREQUENT_VALUES,
+  CATEGORY_SEARCH_ALIASES,
+  EMOJI_SEARCH_ALIASES,
+} from './constants';
 import { STORAGE_KEYS, STORAGE_STORES } from './database/storage-keys';
 import type { SecureDB } from './database/secureDB';
 import { hasPrototypePollutionKeys, isPlainObject } from './sanitizers';
@@ -42,80 +51,6 @@ interface UsageState {
 }
 
 type PersistedUsage = Record<string, readonly [count: number, lastUsed: number]>;
-
-const MAX_TRACKED_EMOJIS = 256;
-const MAX_USAGE_COUNT = 1_000_000;
-const DEFAULT_FREQUENT_LIMIT = 32;
-const DEFAULT_SEARCH_LIMIT = 240;
-
-const CATEGORY_SEARCH_ALIASES: Readonly<Record<string, string>> = {
-  'smileys-and-emotion': 'face smile happy sad laugh love heart feeling reaction',
-  'people-and-body': 'person people body hand gesture human skin tone',
-  'animals-and-nature': 'animal nature plant flower weather pet',
-  'food-and-drink': 'food drink meal fruit vegetable restaurant',
-  'travel-and-places': 'travel place transport vehicle building map weather',
-  activities: 'activity sport game event celebration art',
-  objects: 'object tool technology office household clothing',
-  symbols: 'symbol sign arrow shape mark button',
-  flags: 'flag country nation region',
-};
-
-const EMOJI_SEARCH_ALIASES: Readonly<Record<string, string>> = {
-  '😀': 'happy grin smile',
-  '😁': 'happy grin smile',
-  '😅': 'nervous relief sweat',
-  '🤣': 'lol lmao rofl laugh laughing funny',
-  '😂': 'lol lmao laugh laughing funny cry crying',
-  '🙂': 'happy smile',
-  '🙃': 'sarcasm sarcastic silly',
-  '😉': 'wink flirty',
-  '😊': 'happy blush smile',
-  '🥰': 'love affection hearts',
-  '😍': 'love crush heart eyes',
-  '😘': 'kiss love',
-  '🤔': 'think thinking hmm',
-  '🫡': 'salute respect',
-  '😐': 'blank neutral meh',
-  '🙄': 'eyeroll eye roll annoyed',
-  '😬': 'awkward grimace nervous',
-  '😴': 'sleep sleeping tired',
-  '🥳': 'party celebrate celebration birthday',
-  '😎': 'cool sunglasses',
-  '🥺': 'please pleading puppy eyes',
-  '😢': 'sad cry crying tear',
-  '😭': 'sad cry crying sob',
-  '😱': 'shock shocked scream scared',
-  '😡': 'angry mad rage',
-  '🤬': 'angry mad swear cursing',
-  '💀': 'dead dying funny skull',
-  '👻': 'ghost halloween spooky',
-  '❤️': 'love heart red',
-  '💔': 'heartbreak broken heart sad',
-  '🔥': 'fire hot lit',
-  '✨': 'sparkle sparkles magic',
-  '🎉': 'party celebrate celebration confetti',
-  '👍': 'yes like approve approved okay ok good thumbs up',
-  '👎': 'no dislike disapprove bad thumbs down',
-  '👏': 'clap applause congratulations',
-  '🙌': 'hooray praise celebrate hands',
-  '🙏': 'please pray prayer thanks thank you',
-  '🤝': 'deal agreement handshake',
-  '💪': 'strong strength muscle',
-  '👀': 'eyes look watching',
-  '✅': 'yes done check correct complete',
-  '❌': 'no wrong cancel cross',
-  '⚠️': 'warning caution alert',
-  '💯': 'hundred perfect agree',
-  '🚀': 'rocket launch fast ship',
-  '🇺🇸': 'usa america united states us flag',
-  '🇬🇧': 'uk britain british united kingdom flag',
-};
-
-const DEFAULT_FREQUENT_VALUES = [
-  '😂', '❤️', '👍', '🤣', '😊', '🙏', '😍', '🔥',
-  '🥰', '👏', '🎉', '😁', '💯', '😭', '🤔', '😎',
-  '✅', '👀', '🙌', '✨', '💪', '😉', '🥳', '🤝',
-] as const;
 
 function normalizeText(value: string): string {
   return value
@@ -202,7 +137,7 @@ function parseUsageEntry(value: unknown): UsageEntry {
   if (
     !Number.isSafeInteger(count) ||
     count <= 0 ||
-    count > MAX_USAGE_COUNT ||
+    count > MAX_EMOJI_USAGE_COUNT ||
     !Number.isSafeInteger(lastUsed) ||
     lastUsed < 0 ||
     lastUsed > Date.now()
@@ -284,7 +219,7 @@ function persistUsage(state: UsageState, secureDB: SecureDB): Promise<void> {
   return state.persistChain;
 }
 
-function getFrequentRecords(state: UsageState, limit = DEFAULT_FREQUENT_LIMIT): EmojiRecord[] {
+function getFrequentRecords(state: UsageState, limit = DEFAULT_FREQUENT_EMOJI_LIMIT): EmojiRecord[] {
   const now = Date.now();
   const ranked = [...state.stats.entries()]
     .map(([emoji, usage]) => ({ record: emojiByValue.get(emoji), score: usageScore(usage, now) }))
@@ -343,7 +278,7 @@ export async function getEmojiCatalog(secureDB: SecureDB): Promise<EmojiCatalogV
 export function searchEmojiCatalog(
   query: string,
   secureDB: SecureDB,
-  limit = DEFAULT_SEARCH_LIMIT,
+  limit = DEFAULT_EMOJI_SEARCH_LIMIT,
 ): readonly EmojiRecord[] {
   const trimmed = query.trim().slice(0, 80);
   if (!trimmed) return [];
@@ -379,7 +314,7 @@ export async function recordEmojiUsage(emoji: string, secureDB: SecureDB): Promi
 
   const previous = state.stats.get(emoji);
   state.stats.set(emoji, {
-    count: Math.min((previous?.count ?? 0) + 1, MAX_USAGE_COUNT),
+    count: Math.min((previous?.count ?? 0) + 1, MAX_EMOJI_USAGE_COUNT),
     lastUsed: Date.now(),
   });
   pruneUsage(state);

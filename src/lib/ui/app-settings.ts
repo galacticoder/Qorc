@@ -1,3 +1,4 @@
+import { MAX_APP_SETTINGS_CHARS, APP_SETTINGS_KEYS } from '../constants';
 import { encryptedStorage, syncEncryptedStorage } from '../database/encrypted-storage';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
@@ -14,16 +15,6 @@ export interface AppSettingsState {
   preferredSpeakerId?: string;
   preferredCameraId?: string;
 }
-
-const APP_SETTINGS_KEYS = new Set([
-  'navigationLayout',
-  'chatBackground',
-  'notifications',
-  'preferredCallMicId',
-  'preferredSpeakerId',
-  'preferredCameraId',
-]);
-const MAX_APP_SETTINGS_CHARS = 32 * 1024;
 
 function validDevicePreference(value: unknown): value is string {
   return value === '' || isValidMediaDeviceId(value);

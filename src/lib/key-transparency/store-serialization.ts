@@ -20,9 +20,11 @@ export function parseProtocolCollectionStore<T>(
     return options.corrupt(options.parseError);
   }
   const value = parsed as Record<string, unknown>;
+  if (!exactPlainObject(value, ['protocol', options.collectionKey])) {
+    return options.corrupt(options.structureError);
+  }
   const collection = value[options.collectionKey];
   if (
-    !exactPlainObject(value, ['protocol', options.collectionKey]) ||
     value.protocol !== options.protocol ||
     !Array.isArray(collection) ||
     collection.length > options.maxEntries

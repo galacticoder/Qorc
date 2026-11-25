@@ -1,3 +1,12 @@
+use crate::media_utils::MediaSession;
+use crate::constants::screen::{FRAME_WAIT, MAX_FRAME_BYTES, MAX_SESSIONS, START_WAIT};
+#[cfg(target_os = "linux")]
+use crate::constants::screen::{
+    CAPTURE_FRAME_RATE, CAPTURE_HEIGHT, CAPTURE_WIDTH, GSTREAMER_FIRST_FRAME_WAIT,
+    GSTREAMER_PIPE_WAIT_MS, MAX_CAPTURE_BUFFER_BYTES,
+};
+#[cfg(target_os = "linux")]
+use crate::media_utils::unix_time_ms;
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::future::Future;
@@ -5,7 +14,7 @@ use std::sync::{
     Arc, Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
@@ -22,16 +31,6 @@ use std::process::{Command, Stdio};
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
 
-const MAX_SESSIONS: usize = 1;
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CAPTURE_BUFFER_BYTES: usize = MAX_FRAME_BYTES * 2;
-const FRAME_WAIT: Duration = Duration::from_secs(1);
-const START_WAIT: Duration = Duration::from_secs(120);
-const CAPTURE_WIDTH: u16 = 1280;
-const CAPTURE_HEIGHT: u16 = 720;
-const CAPTURE_FRAME_RATE: u16 = 60;
-#[cfg(target_os = "linux")]
-const GSTREAMER_FIRST_FRAME_WAIT: Duration = Duration::from_secs(8);
 #[cfg(target_os = "linux")]
 const CAPTURE_PLUGINS: [&str; 5] = [
     "libgstcoreelements.so",
@@ -175,7 +174,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn start(self: &Arc<Self>, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Screen.validate_id(session_id)?;
         self.stop(session_id)?;
 
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -214,7 +213,6 @@ impl ScreenCaptureState {
                 let result = run_android_capture(task_session.clone(), task_notifier.clone()).await;
                 if let Err(error) = result {
                     notify_start(&task_notifier, Err(error.clone()));
-                    tracing::warn!(target: "qorc_call_diag", error = %error, "[CALL-DIAG] native-screen-capture-failed");
                 }
                 task_session.finish();
                 if let Some(state) = task_state.upgrade()
@@ -249,7 +247,7 @@ impl ScreenCaptureState {
     }
 
     pub fn stop(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Screen.validate_id(session_id)?;
         let session = self
             .sessions
             .lock()
@@ -266,7 +264,7 @@ impl ScreenCaptureState {
         session_id: &str,
         expected: &Arc<ScreenSession>,
     ) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Screen.validate_id(session_id)?;
         let session = {
             let mut sessions = self
                 .sessions
@@ -288,7 +286,7 @@ impl ScreenCaptureState {
     }
 
     fn session(&self, session_id: &str) -> Result<Arc<ScreenSession>, String> {
-        validate_session_id(session_id)?;
+        MediaSession::Screen.validate_id(session_id)?;
         self.sessions
             .lock()
             .map_err(|_| "screen capture unavailable".to_string())?
@@ -328,19 +326,12 @@ async fn run_portal_capture(
     session: Arc<ScreenSession>,
     notifier: StartNotifier,
 ) -> Result<(), String> {
-    let portal_started_at = Instant::now();
-    tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-portal-create-before");
     let proxy = portal_step(
         &session,
         Screencast::new(),
         "screen capture portal unavailable",
     )
     .await?;
-    tracing::info!(
-        target: "qorc_call_diag",
-        elapsed_ms = portal_started_at.elapsed().as_millis(),
-        "[CALL-DIAG] native-screen-portal-create-after"
-    );
     let available_sources = portal_step(
         &session,
         proxy.available_source_types(),
@@ -381,12 +372,6 @@ async fn run_portal_capture(
         select_request
             .response()
             .map_err(|error| format!("screen source selection was not allowed: {error}"))?;
-        tracing::info!(
-            target: "qorc_call_diag",
-            elapsed_ms = portal_started_at.elapsed().as_millis(),
-            "[CALL-DIAG] native-screen-portal-select-after"
-        );
-        tracing::info!(target: "qorc_call_diag", "[CALL-DIAG] native-screen-portal-start-before");
         let start_request = portal_step(
             &session,
             proxy.start(&portal_session, None, Default::default()),
@@ -396,11 +381,6 @@ async fn run_portal_capture(
         let response = start_request
             .response()
             .map_err(|error| format!("screen capture was not allowed: {error}"))?;
-        tracing::info!(
-            target: "qorc_call_diag",
-            elapsed_ms = portal_started_at.elapsed().as_millis(),
-            "[CALL-DIAG] native-screen-portal-start-after"
-        );
         let node_id = response
             .streams()
             .first()
@@ -412,12 +392,6 @@ async fn run_portal_capture(
             "screen capture PipeWire connection failed",
         )
         .await?;
-        tracing::info!(
-            target: "qorc_call_diag",
-            node_id,
-            elapsed_ms = portal_started_at.elapsed().as_millis(),
-            "[CALL-DIAG] native-screen-pipewire-ready"
-        );
         let worker_session = session.clone();
         let worker_notifier = notifier.clone();
         tokio::task::spawn_blocking(move || {
@@ -460,7 +434,6 @@ fn run_gstreamer_capture(
     node_id: u32,
     notifier: StartNotifier,
 ) -> Result<(), String> {
-    let capture_started_at = Instant::now();
     let launcher = resolve_gstreamer_launcher()
         .ok_or_else(|| "bundled GStreamer screen capture runtime is unavailable".to_string())?;
     let plugin_path = resolve_gstreamer_plugins()
@@ -471,16 +444,9 @@ fn run_gstreamer_capture(
         .ok_or_else(|| "bundled PipeWire SPA runtime is unavailable".to_string())?;
     let scanner = resolve_gstreamer_scanner()
         .ok_or_else(|| "bundled GStreamer plugin scanner is unavailable".to_string())?;
-    tracing::info!(
-        target: "qorc_call_diag",
-        launcher = %launcher.display(),
-        plugin_path = %plugin_path.display(),
-        target_fps = CAPTURE_FRAME_RATE,
-        "[CALL-DIAG] native-screen-gstreamer-start-before"
-    );
     let max_rate = format!("max-rate={CAPTURE_FRAME_RATE}");
     let output_caps = format!(
-        "video/x-raw,format=I420,width=1280,height=720,framerate={CAPTURE_FRAME_RATE}/1,pixel-aspect-ratio=1/1"
+        "video/x-raw,format=I420,width={CAPTURE_WIDTH},height={CAPTURE_HEIGHT},framerate={CAPTURE_FRAME_RATE}/1,pixel-aspect-ratio=1/1"
     );
     let mut command = Command::new(&launcher);
     command
@@ -555,12 +521,6 @@ fn run_gstreamer_capture(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("GStreamer screen capture could not start: {error}"))?;
-    tracing::info!(
-        target: "qorc_call_diag",
-        spawn_ms = capture_started_at.elapsed().as_millis(),
-        process_id = child.id(),
-        "[CALL-DIAG] native-screen-gstreamer-start-after"
-    );
     let Some(mut stdout) = child.stdout.take() else {
         terminate_capture_process(&mut child);
         return Err("GStreamer screen capture output is unavailable".to_string());
@@ -581,14 +541,10 @@ fn run_gstreamer_capture(
 
     let mut input = [0u8; 64 * 1024];
     let mut buffered = Vec::with_capacity(512 * 1024);
+    let mut jpeg_scan_from = 2;
     let mut stderr_input = [0u8; 4 * 1024];
     let mut stderr_output = Vec::new();
     let mut sequence = 0u64;
-    let mut total_jpeg_bytes = 0u64;
-    let mut overwritten_frames = 0u64;
-    let mut largest_jpeg_bytes = 0usize;
-    let mut report_started_at = Instant::now();
-    let mut report_frames = 0u64;
     let result = loop {
         drain_capture_stderr(&mut stderr, &mut stderr_input, &mut stderr_output);
         if session.stop.load(Ordering::Acquire) {
@@ -603,34 +559,20 @@ fn run_gstreamer_capture(
                     buffered.clear();
                     break Err("screen capture frame exceeded the size limit".to_string());
                 }
-                while let Some(mut frame) = take_jpeg_frame(&mut buffered) {
+                while let Some(mut frame) = take_jpeg_frame(&mut buffered, &mut jpeg_scan_from) {
                     if frame.len() > MAX_FRAME_BYTES {
                         frame.fill(0);
                         continue;
                     }
                     sequence = sequence.wrapping_add(1).max(1);
-                    let jpeg_bytes = frame.len();
-                    total_jpeg_bytes = total_jpeg_bytes.saturating_add(jpeg_bytes as u64);
-                    largest_jpeg_bytes = largest_jpeg_bytes.max(jpeg_bytes);
-                    report_frames += 1;
-                    if session.publish(ScreenFrame {
+                    session.publish(ScreenFrame {
                         sequence,
-                        captured_at: now_ms(),
+                        captured_at: unix_time_ms(),
                         width: CAPTURE_WIDTH,
                         height: CAPTURE_HEIGHT,
                         frame_rate: CAPTURE_FRAME_RATE,
                         bytes: frame,
-                    }) {
-                        overwritten_frames = overwritten_frames.saturating_add(1);
-                    }
-                    if sequence == 1 {
-                        tracing::info!(
-                            target: "qorc_call_diag",
-                            startup_ms = capture_started_at.elapsed().as_millis(),
-                            jpeg_bytes,
-                            "[CALL-DIAG] native-screen-first-frame"
-                        );
-                    }
+                    });
                     notify_start(&notifier, Ok(()));
                 }
             }
@@ -642,7 +584,9 @@ fn run_gstreamer_capture(
                 {
                     break Err(capture_process_exit_error(&mut child));
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                if let Err(error) = wait_for_capture_output(stdout.as_raw_fd()) {
+                    break Err(format!("screen capture output wait failed: {error}"));
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => break Err(format!("screen capture output failed: {error}")),
@@ -652,33 +596,10 @@ fn run_gstreamer_capture(
                 "GStreamer screen capture produced no first frame within 8 seconds".to_string(),
             );
         }
-        if report_started_at.elapsed() >= Duration::from_secs(5) {
-            let elapsed_seconds = report_started_at.elapsed().as_secs_f64().max(0.001);
-            tracing::info!(
-                target: "qorc_call_diag",
-                frames = report_frames,
-                fps = report_frames as f64 / elapsed_seconds,
-                overwritten_frames,
-                buffered_bytes = buffered.len(),
-                largest_jpeg_bytes,
-                "[CALL-DIAG] native-screen-capture-window"
-            );
-            report_started_at = Instant::now();
-            report_frames = 0;
-        }
     };
     terminate_capture_process(&mut child);
     drain_capture_stderr(&mut stderr, &mut stderr_input, &mut stderr_output);
     let stderr = String::from_utf8_lossy(&stderr_output).into_owned();
-    tracing::info!(
-        target: "qorc_call_diag",
-        frames = sequence,
-        total_jpeg_bytes,
-        overwritten_frames,
-        largest_jpeg_bytes,
-        elapsed_ms = capture_started_at.elapsed().as_millis(),
-        "[CALL-DIAG] native-screen-capture-ended"
-    );
     buffered.fill(0);
     match result {
         Err(error) if !stderr.trim().is_empty() => {
@@ -735,9 +656,10 @@ fn capture_process_exit_error(child: &mut std::process::Child) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn take_jpeg_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+fn take_jpeg_frame(buffer: &mut Vec<u8>, scan_from: &mut usize) -> Option<Vec<u8>> {
     let start = buffer.windows(2).position(|bytes| bytes == [0xff, 0xd8]);
     let Some(start) = start else {
+        *scan_from = 2;
         if buffer.last() == Some(&0xff) {
             let last = buffer.pop().unwrap_or_default();
             buffer.fill(0);
@@ -752,12 +674,35 @@ fn take_jpeg_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     if start > 0 {
         buffer[..start].fill(0);
         buffer.drain(..start);
+        *scan_from = 2;
     }
-    let end = buffer[2..]
+    let Some(position) = buffer[*scan_from..]
         .windows(2)
-        .position(|bytes| bytes == [0xff, 0xd9])?
-        + 4;
+        .position(|bytes| bytes == [0xff, 0xd9])
+    else {
+        // Retain one byte of overlap for an end marker split between reads.
+        *scan_from = buffer.len().saturating_sub(1).max(2);
+        return None;
+    };
+    let end = *scan_from + position + 2;
+    *scan_from = 2;
+    if end == buffer.len() {
+        return Some(std::mem::take(buffer));
+    }
     Some(buffer.drain(..end).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_capture_output(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let mut descriptor = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // The child stdout stays open for this synchronous wait.
+    if unsafe { libc::poll(&mut descriptor, 1, GSTREAMER_PIPE_WAIT_MS) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -829,25 +774,7 @@ fn resolve_gstreamer_registry_path() -> Option<PathBuf> {
     Some(registry_dir.join("gstreamer-registry-1.0.bin"))
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if (16..=64).contains(&session_id.len())
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(())
-    } else {
-        Err("invalid screen capture session".to_string())
-    }
-}
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
-}
 
 #[cfg(target_os = "android")]
 async fn run_android_capture(

@@ -459,7 +459,7 @@ export const useConversations = (
     markConversationAsRead(selectedConversation);
   }, [selectedConversation, messages, markConversationAsRead]);
 
-  const removeConversation = useCallback(async (username: string) => {
+  const removeConversation = useCallback(async (username: string, flushPendingSaves: () => Promise<void>) => {
     if (!username || typeof username !== 'string' || !currentUsername || activeAccountRef.current !== currentUsername) {
       return;
     }
@@ -478,6 +478,8 @@ export const useConversations = (
     }
     if (generation !== accountGenerationRef.current || activeAccountRef.current !== account) return;
     try {
+      await flushPendingSaves();
+      if (generation !== accountGenerationRef.current || activeDbRef.current !== db) return;
       await db.deleteConversationMessages(username);
     } catch (error) {
       if (generation === accountGenerationRef.current && activeAccountRef.current === account) {

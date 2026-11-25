@@ -1,12 +1,12 @@
+use crate::constants::audio::{
+    FRAME_BYTES, FRAME_SAMPLES, MAX_CODEC_SESSIONS, MAX_OPUS_PACKET_BYTES, OPUS_BITRATE_BPS,
+    OPUS_COMPLEXITY, OPUS_EXPECTED_PACKET_LOSS_PERCENT, SAMPLE_RATE_HZ, SILENCE_FADE_SAMPLES,
+};
+use crate::media_utils::MediaSession;
 use rusty_opus::{Application, OpusDecoder, OpusEncoder, repacketizer::samples_per_frame};
 use std::collections::HashMap;
 use std::sync::Mutex;
-
-const SAMPLE_RATE: u32 = 48_000;
-pub(crate) const FRAME_SAMPLES: usize = 960;
-const SILENCE_FADE_SAMPLES: usize = SAMPLE_RATE as usize / 200;
-pub(crate) const MAX_PACKET_BYTES: usize = 1276;
-const MAX_SESSIONS: usize = 4;
+use zeroize::Zeroizing;
 
 struct CodecSession {
     encoder: OpusEncoder,
@@ -27,21 +27,22 @@ impl AudioCodecState {
     }
 
     pub fn start(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
-        let mut encoder = OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::RestrictedLowDelay)
-            .map_err(|_| "failed to initialize Opus encoder".to_string())?;
-        encoder.bitrate_bps = 48_000;
-        encoder.complexity = 10;
+        MediaSession::AudioCodec.validate_id(session_id)?;
+        let mut encoder =
+            OpusEncoder::new(SAMPLE_RATE_HZ as i32, 1, Application::RestrictedLowDelay)
+                .map_err(|_| "failed to initialize Opus encoder".to_string())?;
+        encoder.bitrate_bps = OPUS_BITRATE_BPS;
+        encoder.complexity = OPUS_COMPLEXITY;
         encoder.use_cbr = false;
         encoder.use_dtx = false;
-        encoder.packet_loss_perc = 10;
-        let decoder = OpusDecoder::new(SAMPLE_RATE as i32, 1)
+        encoder.packet_loss_perc = OPUS_EXPECTED_PACKET_LOSS_PERCENT;
+        let decoder = OpusDecoder::new(SAMPLE_RATE_HZ as i32, 1)
             .map_err(|_| "failed to initialize Opus decoder".to_string())?;
         let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| "audio codec unavailable".to_string())?;
-        if !sessions.contains_key(session_id) && sessions.len() >= MAX_SESSIONS {
+        if !sessions.contains_key(session_id) && sessions.len() >= MAX_CODEC_SESSIONS {
             return Err("audio codec session limit reached".to_string());
         }
         sessions.insert(
@@ -57,7 +58,7 @@ impl AudioCodecState {
     }
 
     pub fn stop(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::AudioCodec.validate_id(session_id)?;
         let mut sessions = self
             .sessions
             .lock()
@@ -67,20 +68,19 @@ impl AudioCodecState {
     }
 
     pub fn encode(&self, session_id: &str, input: &[u8]) -> Result<Vec<u8>, String> {
-        validate_session_id(session_id)?;
-        if input.len() != FRAME_SAMPLES * std::mem::size_of::<f32>() {
+        MediaSession::AudioCodec.validate_id(session_id)?;
+        if input.len() != FRAME_BYTES {
             return Err("invalid Opus PCM frame".to_string());
         }
-        let mut pcm = vec![0.0f32; FRAME_SAMPLES];
+        let mut pcm = Zeroizing::new([0.0f32; FRAME_SAMPLES]);
         for (sample, bytes) in pcm.iter_mut().zip(input.chunks_exact(4)) {
             *sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             if !sample.is_finite() {
-                pcm.fill(0.0);
                 return Err("invalid Opus PCM sample".to_string());
             }
             *sample = sample.clamp(-1.0, 1.0);
         }
-        let mut packet = vec![0u8; MAX_PACKET_BYTES];
+        let mut packet = vec![0u8; MAX_OPUS_PACKET_BYTES];
         let result = {
             let mut sessions = self
                 .sessions
@@ -91,12 +91,11 @@ impl AudioCodecState {
                 .ok_or_else(|| "audio codec session unavailable".to_string())?;
             session
                 .encoder
-                .encode(&pcm, FRAME_SAMPLES, &mut packet)
+                .encode(&pcm[..], FRAME_SAMPLES, &mut packet)
                 .map_err(|_| "Opus encoding failed".to_string())
         };
-        pcm.fill(0.0);
         let encoded = result?;
-        if encoded == 0 || encoded > MAX_PACKET_BYTES {
+        if encoded == 0 || encoded > MAX_OPUS_PACKET_BYTES {
             packet.fill(0);
             return Err("invalid Opus packet length".to_string());
         }
@@ -104,19 +103,24 @@ impl AudioCodecState {
         Ok(packet)
     }
 
-    pub fn decode(&self, session_id: &str, packet: &[u8], fec: bool) -> Result<Vec<u8>, String> {
-        validate_session_id(session_id)?;
-        if packet.len() > MAX_PACKET_BYTES || (fec && packet.is_empty()) {
+    pub fn decode(
+        &self,
+        session_id: &str,
+        packet: &[u8],
+        fec: bool,
+        pcm: &mut [f32; FRAME_SAMPLES],
+    ) -> Result<usize, String> {
+        MediaSession::AudioCodec.validate_id(session_id)?;
+        if packet.len() > MAX_OPUS_PACKET_BYTES || (fec && packet.is_empty()) {
             return Err("invalid Opus packet".to_string());
         }
         if !packet.is_empty()
             && packet.len() <= 2
             && (packet[0] & 7 != 0
-                || samples_per_frame(packet[0], SAMPLE_RATE as i32) != FRAME_SAMPLES as i32)
+                || samples_per_frame(packet[0], SAMPLE_RATE_HZ as i32) != FRAME_SAMPLES as i32)
         {
             return Err("invalid Opus silence frame".to_string());
         }
-        let mut pcm = vec![0.0f32; FRAME_SAMPLES];
         let decoded = {
             let mut sessions = self
                 .sessions
@@ -128,7 +132,7 @@ impl AudioCodecState {
             let decoded = if fec && packet.len() > 2 {
                 session
                     .decoder
-                    .decode_fec(packet, FRAME_SAMPLES, &mut pcm)
+                    .decode_fec(packet, FRAME_SAMPLES, pcm)
                     .map_err(|_| "Opus FEC decoding failed".to_string())?
             } else {
                 session
@@ -136,12 +140,11 @@ impl AudioCodecState {
                     .decode(
                         if packet.len() <= 2 { &[] } else { packet },
                         FRAME_SAMPLES,
-                        &mut pcm,
+                        pcm,
                     )
                     .map_err(|_| "Opus decoding failed".to_string())?
             };
             if decoded == 0 || decoded > FRAME_SAMPLES {
-                pcm.fill(0.0);
                 return Err("invalid decoded Opus frame".to_string());
             }
             let explicit_silence = !fec && !packet.is_empty() && packet.len() <= 2;
@@ -169,34 +172,12 @@ impl AudioCodecState {
             };
             decoded
         };
-        pcm.truncate(decoded);
-        let mut output = Vec::with_capacity(pcm.len() * 4);
-        for sample in &mut pcm {
-            if !sample.is_finite() {
-                *sample = 0.0;
-            }
-            *sample = sample.clamp(-1.0, 1.0);
-            output.extend_from_slice(&sample.to_le_bytes());
-        }
-        pcm.fill(0.0);
-        Ok(output)
+        Ok(decoded)
     }
 }
 
 impl Default for AudioCodecState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if (16..=64).contains(&session_id.len())
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(())
-    } else {
-        Err("invalid audio codec session".to_string())
     }
 }

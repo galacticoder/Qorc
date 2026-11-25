@@ -1,9 +1,14 @@
 import {
-    MAX_AVATAR_SIZE_BYTES,
-    MAX_AVATAR_DIMENSION,
-    MAX_AVATAR_DATA_URL_CHARS,
-    ALLOWED_AVATAR_MIME_TYPES,
-    AVATAR_CACHE_TTL_MS
+  MAX_AVATAR_SIZE_BYTES,
+  MAX_AVATAR_DIMENSION,
+  MAX_AVATAR_DATA_URL_CHARS,
+  ALLOWED_AVATAR_MIME_TYPES,
+  AVATAR_CACHE_TTL_MS,
+  HEX_PATTERN,
+  DEFAULT_AVATAR_COLORS,
+  SAFE_DEFAULT_SVG,
+  AVATAR_UTILS_USERNAME_LENGTH_LIMIT,
+  AVATAR_UTILS_BYTE_LENGTH_MINIMUM,
 } from '../constants';
 import type { AvatarData, CachedAvatar } from '../types/avatar-types';
 import {
@@ -14,11 +19,6 @@ import {
 import { Base64 } from '../cryptography/base64';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { bytesToHex } from '../../../shared/bytes.js';
-
-const DEFAULT_AVATAR_COLORS = [
-  '#5865F2', '#57F287', '#FEE75C', '#EB459E', '#ED4245',
-  '#3BA55C', '#FAA61A', '#9B59B6', '#1ABC9C', '#E91E63'
-] as const;
 
 export function getDefaultAvatarColor(username: string): string {
   const normalized = (username || '').toLowerCase().trim();
@@ -32,7 +32,7 @@ export function getDefaultAvatarColor(username: string): string {
 // Truncates long hexadecimal usernames to first 8 characters
 export function truncateUsername(username: string): string {
   if (typeof username !== 'string' || username.length === 0) return '';
-  return username.length > 32 ? `${username.slice(0, 8)}...` : username;
+  return username.length > AVATAR_UTILS_USERNAME_LENGTH_LIMIT ? `${username.slice(0, 8)}...` : username;
 }
 
 // Generates a deterministic default avatar SVG for a username
@@ -40,7 +40,7 @@ export function generateDefaultAvatar(username: string): string {
   const color = getDefaultAvatarColor(username);
 
   let initials = '?';
-  const isHash = /^[a-f0-9]{32,}$/i.test(username);
+  const isHash = HEX_PATTERN.test(username);
   if (isHash) {
     initials = username.slice(0, 2).toUpperCase();
   } else {
@@ -62,8 +62,6 @@ interface ImageValidationOptions {
     maxDimension?: number;
     maxDataUrlChars?: number;
 }
-
-const SAFE_DEFAULT_SVG = /^\s*<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="512" height="512" viewBox="0 0 512 512">\s*<rect width="512" height="512" fill="#(?:5865F2|57F287|FEE75C|EB459E|ED4245|3BA55C|FAA61A|9B59B6|1ABC9C|E91E63)"\/>\s*<text x="50%" y="50%" font-family="Arial, sans-serif" font-weight="bold" font-size="256" fill="#FFFFFF" text-anchor="middle" dy="\.35em">[A-Z0-9._?\-]{1,2}<\/text>\s*<\/svg>\s*$/;
 
 function rasterDimensions(
     bytes: Uint8Array,
@@ -123,7 +121,7 @@ export function validateImageData(
             return { valid: false, mimeType, error: `Image too large: ${Math.round(byteLength / 1024)}KB (max ${MAX_AVATAR_SIZE_BYTES / 1024}KB)` };
         }
 
-        if (byteLength < 100) {
+        if (byteLength < AVATAR_UTILS_BYTE_LENGTH_MINIMUM) {
             return { valid: false, mimeType, error: 'Image too small or corrupted' };
         }
 

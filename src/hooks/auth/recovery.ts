@@ -194,13 +194,13 @@ export const createAttemptAuthRecovery = (
 };
 
 export const createStoreAuthenticationState = () => {
-  return async (username: string, originalUsername?: string) => {
-    await storeLastAuthenticatedAccount(username, originalUsername);
+  return async (username: string, displayName: string, assertCurrent: () => void) => {
+    await storeLastAuthenticatedAccount(username, displayName, assertCurrent);
   };
 };
 
 export const createClearAuthenticationState = () => {
-  return async () => {
-    await clearLastAuthenticatedAccount();
+  return async (assertCurrent: () => void) => {
+    await clearLastAuthenticatedAccount(assertCurrent);
   };
 };

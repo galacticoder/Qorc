@@ -56,10 +56,19 @@ Code: `server/routing/blind-router.js`.
 
 ## Tagged-Lane Retrieval
 
-Each pass, a client fetches the whole tag index (`spool/tag-index`), tests every
-unseen entry's probe against its own detection key, and issues one PIR query per
-match (`spool/pir`). Neither request carries a selector, an account, or a
-recipient. The server publishes the tag index and PIR database as one completed
+Each pass, a client fetches a padded 32 KiB cumulative update
+(`spool/tag-index-update`) and reconstructs the complete current tag index.
+The shared 256 KiB checkpoint (`spool/tag-index-base`) refreshes hourly and
+earlier when a cumulative update fills its capacity. Both are shared across
+clients. Requests contain empty objects and carry no client cursor, account,
+recipient, cache digest, or detected-message list. Checkpoint state is held in
+memory and cleared when retrieval stops. A mismatched checkpoint is refreshed
+locally. A rollover during download rejects that pair and retries on the next
+pass. The full current index (`spool/tag-index`) remains the bounded fallback.
+
+The client tests every unseen entry's probe against its own detection key and
+issues one PIR query per match (`spool/pir`). The server publishes the tag index
+and PIR database as one completed
 snapshot, its opaque snapshot ID prevents positions from being answered against
 a different ordering. Each 132,668-byte logical record is packed into nine
 fixed 16 KiB PIR rows. The native client batches all nine private row queries

@@ -32,14 +32,16 @@ export function installBackgroundTimers(
   let disposed = false;
   const delay = (value: unknown) => Math.max(0, Number(value) | 0);
   const reportFailure = (error: unknown) => {
+    if (disposed) return;
     console.error('Android background clock unavailable', error);
+    alarm = null;
     clockId = null;
     switchMode();
   };
   function cancelAlarm() {
     if (!alarm || clockId === null) return;
     alarm = null;
-    void backend.wait(clockId, ++sequence, 0).catch(reportFailure);
+    void backend.wait(clockId, ++sequence, 0).catch(() => { });
   }
   function fire(timer: Timer) {
     if (!timers.has(timer.id)) return;
@@ -83,10 +85,12 @@ export function installBackgroundTimers(
     void backend.wait(clockId, current.sequence, Math.max(4, Math.ceil(deadline - now())))
       .then(fired => {
         if (alarm !== current || !native || disposed) return;
-        alarm = null;
         if (!fired) throw new Error('Android clock lease was cancelled');
-        return deliver();
-      }).catch(reportFailure);
+        alarm = null;
+        void deliver().catch(reportError);
+      }).catch(error => {
+        if (alarm === current) reportFailure(error);
+      });
   }
 
   function switchMode() {

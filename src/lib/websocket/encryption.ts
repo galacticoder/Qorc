@@ -11,35 +11,41 @@ import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import type { EncryptionContext } from '../types/websocket-types';
-import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { MAX_REPLAY_WINDOW_MS, WS_FIXED_MESSAGE_SIZE_BYTES } from '../constants';
+import {
+  MAX_REPLAY_WINDOW_MS,
+  WS_FIXED_MESSAGE_SIZE_BYTES,
+  CELL_MAX_BUFFERED_BYTES,
+  CELL_MAX_CONCURRENT,
+  CELL_MAX_LOGICAL_BYTES,
+  CELL_REASSEMBLY_TIMEOUT_MS,
+  UINT32_RANGE,
+  CELL_PLAINTEXT_BYTES,
+  CELL_MAGIC,
+  CELL_VERSION,
+  CELL_FLAGS,
+  CELL_CIPHERTEXT_OFFSET,
+  CELL_SESSION_OFFSET,
+  CELL_FINGERPRINT_OFFSET,
+  CELL_MESSAGE_ID_OFFSET,
+  CELL_COUNTER_OFFSET,
+  CELL_TIMESTAMP_OFFSET,
+  CELL_CHUNK_INDEX_OFFSET,
+  CELL_CHUNK_COUNT_OFFSET,
+  CELL_TOTAL_LENGTH_OFFSET,
+  CELL_PLAINTEXT_LENGTH_OFFSET,
+  CELL_NONCE_OFFSET,
+  CELL_DOMAIN,
+  CELL_TAG_OFFSET,
+  CELL_MAX_CHUNKS,
+  ENCRYPTION_KEY_LENGTH_LIMIT,
+  ENCRYPTION_SESSION_ID_LENGTH_EXPECTED,
+  ENCRYPTION_FINGERPRINT_LENGTH_EXPECTED,
+  ENCRYPTION_PAYLOAD_TYPE_LENGTH_LIMIT,
+  WS_JSON_MAX_NODES,
+  WS_JSON_MAX_DEPTH,
+} from '../constants';
 import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
-import { SecureMemory } from '../cryptography/secure-memory';
-
-const CELL_MAGIC = new Uint8Array([0x51, 0x4f, 0x52, 0x43]);
-const CELL_VERSION = 1;
-const CELL_FLAGS = 0;
-const CELL_SESSION_OFFSET = 8;
-const CELL_FINGERPRINT_OFFSET = 24;
-const CELL_MESSAGE_ID_OFFSET = 56;
-const CELL_COUNTER_OFFSET = 72;
-const CELL_TIMESTAMP_OFFSET = 80;
-const CELL_CHUNK_INDEX_OFFSET = 88;
-const CELL_CHUNK_COUNT_OFFSET = 92;
-const CELL_TOTAL_LENGTH_OFFSET = 96;
-const CELL_PLAINTEXT_LENGTH_OFFSET = 100;
-const CELL_NONCE_OFFSET = 104;
-const CELL_TAG_OFFSET = CELL_NONCE_OFFSET + POST_QUANTUM_AEAD_NONCE_BYTES;
-const CELL_CIPHERTEXT_OFFSET = CELL_TAG_OFFSET + HASH_OUTPUT_BYTES;
-const CELL_PLAINTEXT_BYTES = WS_FIXED_MESSAGE_SIZE_BYTES
-  - CELL_CIPHERTEXT_OFFSET
-  - POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-const CELL_MAX_LOGICAL_BYTES = 24 * 1024 * 1024;
-const CELL_MAX_CHUNKS = Math.ceil(CELL_MAX_LOGICAL_BYTES / CELL_PLAINTEXT_BYTES);
-const CELL_MAX_CONCURRENT = 4;
-const CELL_MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
-const CELL_REASSEMBLY_TIMEOUT_MS = 200_000;
-const CELL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.WS_PQ_CELL_AAD);
+import { concatUint8Arrays, constantTimeBytesEqual } from '../../../shared/bytes.js';
 
 export type CellDecryptResult =
   | { status: 'pending' }
@@ -62,12 +68,12 @@ const safeJsonPayloadShape = (root: unknown): boolean => {
   while (stack.length > 0) {
     const current = stack.pop()!;
     nodes += 1;
-    if (nodes > 20_000 || current.depth > 32) return false;
+    if (nodes > WS_JSON_MAX_NODES || current.depth > WS_JSON_MAX_DEPTH) return false;
     if (!current.value || typeof current.value !== 'object') continue;
     if (!Array.isArray(current.value) && !isPlainObject(current.value)) return false;
     if (hasPrototypePollutionKeys(current.value)) return false;
     for (const [key, value] of Object.entries(current.value)) {
-      if (key.length > 256) return false;
+      if (key.length > ENCRYPTION_KEY_LENGTH_LIMIT) return false;
       stack.push({ value, depth: current.depth + 1 });
     }
   }
@@ -76,29 +82,15 @@ const safeJsonPayloadShape = (root: unknown): boolean => {
 
 function writeSafeU64(view: DataView, offset: number, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid fixed-cell integer');
-  view.setUint32(offset, Math.floor(value / 0x1_0000_0000), false);
+  view.setUint32(offset, Math.floor(value / UINT32_RANGE), false);
   view.setUint32(offset + 4, value >>> 0, false);
 }
 
 function readSafeU64(view: DataView, offset: number): number | null {
   const high = view.getUint32(offset, false);
   const low = view.getUint32(offset + 4, false);
-  const value = high * 0x1_0000_0000 + low;
+  const value = high * UINT32_RANGE + low;
   return Number.isSafeInteger(value) ? value : null;
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length && SecureMemory.constantTimeCompare(left, right);
-}
-
-function concatenate(...parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
 }
 
 export class WebSocketEncryption {
@@ -182,7 +174,7 @@ export class WebSocketEncryption {
     const sessionId = PostQuantumUtils.hexToBytes(session.sessionId);
     const fingerprint = PostQuantumUtils.hexToBytes(session.fingerprint);
     const messageId = PostQuantumRandom.randomBytes(16);
-    if (sessionId.length !== 16 || fingerprint.length !== 32) {
+    if (sessionId.length !== ENCRYPTION_SESSION_ID_LENGTH_EXPECTED || fingerprint.length !== ENCRYPTION_FINGERPRINT_LENGTH_EXPECTED) {
       payloadBytes.fill(0);
       sessionId.fill(0);
       fingerprint.fill(0);
@@ -224,7 +216,7 @@ export class WebSocketEncryption {
           const ciphertextEnd = CELL_CIPHERTEXT_OFFSET
             + plaintext.length
             + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-          aad = concatenate(
+          aad = concatUint8Arrays(
             CELL_DOMAIN,
             cell.subarray(0, CELL_TAG_OFFSET),
             cell.subarray(ciphertextEnd)
@@ -275,7 +267,7 @@ export class WebSocketEncryption {
 
     const view = new DataView(cell.buffer, cell.byteOffset, cell.byteLength);
     if (
-      !bytesEqual(cell.subarray(0, CELL_MAGIC.length), CELL_MAGIC) ||
+      !constantTimeBytesEqual(cell.subarray(0, CELL_MAGIC.length), CELL_MAGIC) ||
       view.getUint8(4) !== CELL_VERSION ||
       view.getUint8(5) !== CELL_FLAGS ||
       view.getUint16(6, false) !== CELL_CIPHERTEXT_OFFSET
@@ -285,10 +277,10 @@ export class WebSocketEncryption {
     const fingerprint = PostQuantumUtils.hexToBytes(session.fingerprint);
     try {
       if (
-        sessionId.length !== 16 ||
-        fingerprint.length !== 32 ||
-        !bytesEqual(cell.subarray(CELL_SESSION_OFFSET, CELL_FINGERPRINT_OFFSET), sessionId) ||
-        !bytesEqual(cell.subarray(CELL_FINGERPRINT_OFFSET, CELL_MESSAGE_ID_OFFSET), fingerprint)
+        sessionId.length !== ENCRYPTION_SESSION_ID_LENGTH_EXPECTED ||
+        fingerprint.length !== ENCRYPTION_FINGERPRINT_LENGTH_EXPECTED ||
+        !constantTimeBytesEqual(cell.subarray(CELL_SESSION_OFFSET, CELL_FINGERPRINT_OFFSET), sessionId) ||
+        !constantTimeBytesEqual(cell.subarray(CELL_FINGERPRINT_OFFSET, CELL_MESSAGE_ID_OFFSET), fingerprint)
       ) return { status: 'invalid' };
     } finally {
       sessionId.fill(0);
@@ -323,7 +315,7 @@ export class WebSocketEncryption {
       CELL_CIPHERTEXT_OFFSET,
       CELL_CIPHERTEXT_OFFSET + ciphertextLength
     );
-    const aad = concatenate(
+    const aad = concatUint8Arrays(
       CELL_DOMAIN,
       cell.subarray(0, CELL_TAG_OFFSET),
       cell.subarray(CELL_CIPHERTEXT_OFFSET + ciphertextLength)
@@ -440,7 +432,7 @@ export class WebSocketEncryption {
         !safeJsonPayloadShape(payload) ||
         typeof payload.type !== 'string' ||
         payload.type.length < 1 ||
-        payload.type.length > 100
+        payload.type.length > ENCRYPTION_PAYLOAD_TYPE_LENGTH_LIMIT
       ) return { status: 'invalid' };
       return { status: 'complete', payload };
     } catch {

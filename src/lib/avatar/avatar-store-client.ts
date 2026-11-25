@@ -2,6 +2,23 @@
  * Client the unlinkable avatar content store
  */
 
+import {
+  AVATAR_BLOB_TTL_MS,
+  AVATAR_COVER_BLOBS_PER_CLIENT,
+  AVATAR_COVER_REFRESH_MS,
+  AVATAR_COVER_TOTAL_IDS,
+  AVATAR_DECOY_CACHE_TTL_MS,
+  AVATAR_GET_POW_DIFFICULTY,
+  AVATAR_POOL_CACHE_TTL_MS,
+  AVATAR_POOL_SAMPLE_LIMIT,
+  AVATAR_PUT_POW_DIFFICULTY,
+  AVATAR_PUT_TRANSPORT_WARN_INTERVAL_MS,
+  AVATAR_REFRESH_MARGIN_MS,
+  AVATAR_UPLOAD_JITTER_MAX_MS,
+  AVATAR_UPLOAD_JITTER_MIN_MS,
+  AVATAR_UPLOAD_MAX_ATTEMPTS,
+  MAX_AVATAR_DECOY_CACHE_ENTRIES,
+} from '../constants';
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
 import {
     encryptAvatarToPurb,
@@ -9,7 +26,6 @@ import {
     AVATAR_PURB_WIRE_BYTES,
     type AvatarRef
 } from '../crypto/avatar-blob-crypto';
-import { PostQuantumUtils } from '../utils/pq-utils';
 import { hashAvatarData, isValidAvatarData } from '../utils/avatar-utils';
 import type { AvatarData } from '../types/avatar-types';
 import { PrivacyPassClient, PrivacyPassHelpers, type AnonymousToken } from '../cryptography/privacy-pass-client';
@@ -33,24 +49,8 @@ import {
     AVATAR_POOL_AUDIENCE,
 } from '../config/audiences';
 import { Base64 } from '../cryptography/base64';
+import { isValidAvatarRef } from './avatar-ref';
 import { DISCOVERY_EPOCH_DURATION_MS } from '../../../shared/discovery-constants.js';
-
-const AVATAR_COVER_TOTAL_IDS = 10;
-const AVATAR_BLOB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const POOL_CACHE_TTL_MS = 5 * 60 * 1000;
-const POOL_SAMPLE_LIMIT = 256;
-const COVER_BLOBS_PER_CLIENT = 12;
-const COVER_REFRESH_MS = 6 * 60 * 60 * 1000;
-const DECOY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const DECOY_CACHE_MAX = 1024;
-
-const AVATAR_UPLOAD_JITTER_MIN_MS = 1_000;
-const AVATAR_UPLOAD_JITTER_MAX_MS = 10_000;
-const AVATAR_REFRESH_MARGIN_MS = 24 * 60 * 60 * 1000;
-const AVATAR_UPLOAD_MAX_ATTEMPTS = 3;
-const AVATAR_PUT_TRANSPORT_WARN_INTERVAL_MS = 30_000;
-const AVATAR_GET_POW_DIFFICULTY = 16;
-const AVATAR_PUT_POW_DIFFICULTY = 18;
 
 interface AvatarPoolState {
     ids: string[];
@@ -86,11 +86,11 @@ async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState
     if (
         poolCache?.serverScope === context.serverScope &&
         poolCache.powEpoch === currentEpoch &&
-        now - poolCache.fetchedAt < POOL_CACHE_TTL_MS
+        now - poolCache.fetchedAt < AVATAR_POOL_CACHE_TTL_MS
     ) return poolCache;
     const resp: any = await anonymousHttpFetch(
         AVATAR_POOL_AUDIENCE,
-        { limit: POOL_SAMPLE_LIMIT },
+        { limit: AVATAR_POOL_SAMPLE_LIMIT },
         context.serverUrl
     );
     await assertCurrentServerContext(context);
@@ -101,7 +101,7 @@ async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState
         Object.keys(resp).sort().join(',') !== 'ids,ok,powEpoch' ||
         resp.ok !== true ||
         !Array.isArray(resp.ids) ||
-        resp.ids.length !== POOL_SAMPLE_LIMIT ||
+        resp.ids.length !== AVATAR_POOL_SAMPLE_LIMIT ||
         resp.ids.some((x: unknown) => typeof x !== 'string' || !/^[a-f0-9]{64}$/.test(x)) ||
         new Set(resp.ids).size !== resp.ids.length ||
         !Number.isSafeInteger(resp.powEpoch) ||
@@ -121,9 +121,7 @@ async function fetchPool(context: CurrentServerContext): Promise<AvatarPoolState
 function randomCoverPurbBase64(): string {
     const buf = new Uint8Array(AVATAR_PURB_WIRE_BYTES);
     try {
-        for (let off = 0; off < buf.length; off += 65536) {
-            crypto.getRandomValues(buf.subarray(off, Math.min(off + 65536, buf.length)));
-        }
+        PostQuantumRandom.fillRandomBytes(buf);
         return Base64.arrayBufferToBase64(buf);
     } finally {
         buf.fill(0);
@@ -260,14 +258,14 @@ function scheduleJitteredUpload(
  */
 export async function validateAvatarCoverBlobs(): Promise<void> {
     const now = Date.now();
-    if (coverUploadBatchPending || now - lastCoverUploadAt < COVER_REFRESH_MS) return;
+    if (coverUploadBatchPending || now - lastCoverUploadAt < AVATAR_COVER_REFRESH_MS) return;
     coverUploadBatchPending = true;
     const generation = accountGeneration;
     let anySucceeded = false;
 
     const uploadNext = (index: number) => {
         if (generation !== accountGeneration) return;
-        if (index >= COVER_BLOBS_PER_CLIENT) {
+        if (index >= AVATAR_COVER_BLOBS_PER_CLIENT) {
             coverUploadBatchPending = false;
             if (anySucceeded) lastCoverUploadAt = Date.now();
             return;
@@ -293,34 +291,6 @@ interface PendingAvatarUpload { hash: string; ref: AvatarRef; expiresAt: number;
 let avatarUploadState: AvatarUploadState | null = null;
 let pendingAvatarUpload: PendingAvatarUpload | null = null;
 let avatarUploadStateLoadedGeneration = -1;
-
-export function isValidAvatarRef(value: unknown, expectedHash: string): value is AvatarRef {
-    if (
-        !value ||
-        typeof value !== 'object' ||
-        Array.isArray(value) ||
-        Object.getPrototypeOf(value) !== Object.prototype ||
-        Object.keys(value).sort().join(',') !== 'blobId,hash,keyB64,mimeType'
-    ) return false;
-    const ref = value as Record<string, unknown>;
-    if (
-        typeof ref.blobId !== 'string' ||
-        !/^[a-f0-9]{64}$/.test(ref.blobId) ||
-        ref.hash !== expectedHash ||
-        typeof ref.keyB64 !== 'string' ||
-        ref.mimeType !== 'image/webp'
-    ) return false;
-    try {
-        const key = PostQuantumUtils.base64ToUint8Array(ref.keyB64);
-        try {
-            return key.length === 32 && Base64.arrayBufferToBase64(key) === ref.keyB64;
-        } finally {
-            key.fill(0);
-        }
-    } catch {
-        return false;
-    }
-}
 
 function parseAvatarUploadState(value: unknown, now = Date.now()): AvatarUploadState | null {
     if (value === null) return null;
@@ -470,12 +440,12 @@ function stableDecoysFor(targetBlobId: string, pool: string[], serverScope: stri
     const cached = decoyCache.get(cacheKey);
     if (cached && cached.expiresAt > now) return cached.ids;
 
-    if (decoyCache.size > DECOY_CACHE_MAX) {
+    if (decoyCache.size > MAX_AVATAR_DECOY_CACHE_ENTRIES) {
         for (const [k, v] of decoyCache) if (v.expiresAt <= now) decoyCache.delete(k);
-        if (decoyCache.size > DECOY_CACHE_MAX) decoyCache.clear();
+        if (decoyCache.size > MAX_AVATAR_DECOY_CACHE_ENTRIES) decoyCache.clear();
     }
     const decoys = PostQuantumRandom.shuffleInPlace(pool.filter((id) => id !== targetBlobId)).slice(0, Math.max(0, AVATAR_COVER_TOTAL_IDS - 1));
-    decoyCache.set(cacheKey, { ids: decoys, expiresAt: now + DECOY_CACHE_TTL_MS });
+    decoyCache.set(cacheKey, { ids: decoys, expiresAt: now + AVATAR_DECOY_CACHE_TTL_MS });
     return decoys;
 }
 

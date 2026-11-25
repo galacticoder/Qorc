@@ -2,7 +2,21 @@ import React, { useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 
 import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { isCanonicalAuthUsername, sanitizeMessageId } from '../../lib/sanitizers';
-import { RECEIPT_RETENTION_MS, RATE_LIMIT_MAX_RECEIPTS, RATE_LIMIT_WINDOW_MS } from '../../lib/constants';
+import {
+  RECEIPT_RETENTION_MS,
+  RATE_LIMIT_MAX_RECEIPTS,
+  RATE_LIMIT_WINDOW_MS,
+  IN_MEMORY_PENDING_RECEIPT_TTL_MS,
+  MAX_DB_RECEIPT_ATTEMPTS,
+  MAX_PENDING_RECEIPTS,
+  READ_RECEIPT_BACKOFF_BASE_MS,
+  READ_RECEIPT_BACKOFF_MAX_MS,
+  READ_RECEIPT_QUEUE_RECHECK_MS,
+  USE_MESSAGE_RECEIPTS_NEXT_ATTEMPTS_LIMIT,
+  DB_RECEIPT_RETRY_BASE_MS,
+  DB_RECEIPT_RETRY_MAX_EXPONENT,
+  DB_RECEIPT_RETRY_CAP_MS,
+} from '../../lib/constants';
 import type { RateLimitBucket, PendingReceiptInfo, DbQueuedReceipt } from '../../lib/types/message-sending-types';
 import {
   isReceiptEventDetail,
@@ -12,18 +26,12 @@ import {
   pruneOldReceipts,
   receiptOwnershipOk,
   updateMessageReceipt,
-  receiptScopeKey,
-  MAX_PENDING_RECEIPTS,
-  IN_MEMORY_PENDING_RECEIPT_TTL_MS
+  receiptScopeKey
 } from './receipts';
 import { receiptBatcher } from '../message-handling/receipt-batcher';
 import type { SecureDB } from '../../lib/database/secureDB';
 import type { StoredMessage } from '../../lib/types/database-types';
-
-const MAX_DB_RECEIPT_ATTEMPTS = 8;
-const READ_RECEIPT_RETRY_INTERVAL_MS = 1000;
-const READ_RECEIPT_BACKOFF_BASE_MS = 1000;
-const READ_RECEIPT_BACKOFF_MAX_MS = 60_000;
+import { blockingSystem } from '../../lib/blocking/blocking-system';
 
 const readReceiptRetryDelayMs = (attempts: number): number => Math.min(
   READ_RECEIPT_BACKOFF_MAX_MS,
@@ -83,12 +91,18 @@ export function useMessageReceipts(
   const rateLimitRef = useRef<RateLimitBucket>({ windowStart: Date.now(), count: 0 });
   const pendingReceiptsRef = useRef<Map<string, PendingReceiptInfo>>(new Map());
   const pendingOutgoingReadsRef = useRef<Map<string, PendingOutgoingReadReceipt>>(new Map());
+  const readRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dbReceiptQueueRef = useRef<Map<string, DbQueuedReceipt>>(new Map());
   const dbFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushDBReceiptsRef = useRef<(() => Promise<void>) | null>(null);
   const dbFlushOwnerRef = useRef<object | null>(null);
   const activeAccountRef = useRef<string | null>(null);
   const accountGenerationRef = useRef(0);
+
+  const cancelReadRetry = useCallback(() => {
+    if (readRetryTimerRef.current !== null) clearTimeout(readRetryTimerRef.current);
+    readRetryTimerRef.current = null;
+  }, []);
 
   useEffect(() => {
     const account = isCanonicalAuthUsername(currentUsername) ? currentUsername : null;
@@ -100,17 +114,19 @@ export function useMessageReceipts(
     rateLimitRef.current = { windowStart: Date.now(), count: 0 };
     pendingReceiptsRef.current.clear();
     pendingOutgoingReadsRef.current.clear();
+    cancelReadRetry();
     dbReceiptQueueRef.current.clear();
     dbFlushOwnerRef.current = null;
     if (dbFlushTimeoutRef.current) clearTimeout(dbFlushTimeoutRef.current);
     dbFlushTimeoutRef.current = null;
-  }, [currentUsername]);
+  }, [currentUsername, cancelReadRetry]);
 
   useLayoutEffect(() => {
     const purgePeer = (peer: string): void => {
       for (const [key, entry] of pendingOutgoingReadsRef.current) {
         if (entry.peer === peer) pendingOutgoingReadsRef.current.delete(key);
       }
+      if (pendingOutgoingReadsRef.current.size === 0) cancelReadRetry();
       for (const [key, entry] of pendingReceiptsRef.current) {
         if (entry.from === peer) pendingReceiptsRef.current.delete(key);
       }
@@ -120,7 +136,7 @@ export function useMessageReceipts(
     };
     receiptPeerPurgeListeners.add(purgePeer);
     return () => { receiptPeerPurgeListeners.delete(purgePeer); };
-  }, []);
+  }, [cancelReadRetry]);
 
   // Mark read receipts as sent only after their batch is confirmed delivered
   useEffect(() => {
@@ -132,9 +148,10 @@ export function useMessageReceipts(
           pendingOutgoingReadsRef.current.delete(receiptScopeKey(peer, id));
         } catch { }
       }
+      if (pendingOutgoingReadsRef.current.size === 0) cancelReadRetry();
     });
     return unsubscribe;
-  }, []);
+  }, [cancelReadRetry]);
 
   useEffect(() => {
     const flushDBReceipts = async () => {
@@ -176,7 +193,7 @@ export function useMessageReceipts(
       const scheduleRetry = (): void => {
         if (!isCurrent() || dbReceiptQueueRef.current.size === 0 || dbFlushTimeoutRef.current) return;
         const attempts = Math.min(...Array.from(dbReceiptQueueRef.current.values(), entry => entry.attempts));
-        const delay = Math.min(1000 * (2 ** Math.min(attempts, 5)), 30_000);
+        const delay = Math.min(DB_RECEIPT_RETRY_BASE_MS * (2 ** Math.min(attempts, DB_RECEIPT_RETRY_MAX_EXPONENT)), DB_RECEIPT_RETRY_CAP_MS);
         dbFlushTimeoutRef.current = setTimeout(() => {
           dbFlushTimeoutRef.current = null;
           void flushDBReceiptsRef.current?.();
@@ -283,7 +300,7 @@ export function useMessageReceipts(
             } catch { }
           } else if (result.status === 'missing') {
             const next = { ...meta, attempts: (meta.attempts || 0) + 1 };
-            if (next.attempts >= 5) {
+            if (next.attempts >= USE_MESSAGE_RECEIPTS_NEXT_ATTEMPTS_LIMIT) {
               pendingReceiptsRef.current.delete(pendingKey);
             } else {
               pendingReceiptsRef.current.set(pendingKey, next);
@@ -314,18 +331,21 @@ export function useMessageReceipts(
     [smartStatusMap],
   );
 
-  const flushPendingOutgoingReads = useCallback(() => {
+  const flushPendingOutgoingReads = useCallback((): void => {
+    cancelReadRetry();
     const account = activeAccountRef.current;
     if (!account) return;
     const now = Date.now();
     const bucket = rateLimitRef.current;
-    if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+    if (now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
       bucket.windowStart = now;
       bucket.count = 0;
     }
 
+    let nextWakeAt = Infinity;
     for (const [key, entry] of pendingOutgoingReadsRef.current) {
-      if (now - entry.addedAt > IN_MEMORY_PENDING_RECEIPT_TTL_MS) {
+      const expiresAt = entry.addedAt + IN_MEMORY_PENDING_RECEIPT_TTL_MS;
+      if (blockingSystem.isBlockedSync(entry.peer) || now >= expiresAt) {
         pendingOutgoingReadsRef.current.delete(key);
         continue;
       }
@@ -333,26 +353,35 @@ export function useMessageReceipts(
         pendingOutgoingReadsRef.current.delete(key);
         continue;
       }
-      if (receiptBatcher.hasPendingRead(account, entry.peer, entry.messageId)) continue;
-      
-      if (now < entry.nextAttemptAt) continue;
-      if (bucket.count >= RATE_LIMIT_MAX_RECEIPTS) break;
-      if (receiptBatcher.queueRead(account, entry.peer, entry.messageId)) {
+      const allowedAt = bucket.count >= RATE_LIMIT_MAX_RECEIPTS
+        ? bucket.windowStart + RATE_LIMIT_WINDOW_MS
+        : now;
+      const tryAt = Math.max(entry.nextAttemptAt, allowedAt);
+      if (tryAt > now) {
+        nextWakeAt = Math.min(nextWakeAt, tryAt, expiresAt);
+        continue;
+      }
+      if (!receiptBatcher.hasPendingRead(account, entry.peer, entry.messageId) &&
+          receiptBatcher.queueRead(account, entry.peer, entry.messageId)) {
         bucket.count += 1;
-        const attempts = entry.attempts + 1;
-        pendingOutgoingReadsRef.current.set(key, {
-          ...entry,
-          attempts,
-          nextAttemptAt: now + readReceiptRetryDelayMs(attempts),
-        });
+        entry.attempts += 1;
+        entry.nextAttemptAt = now + readReceiptRetryDelayMs(entry.attempts);
+        nextWakeAt = Math.min(nextWakeAt, entry.nextAttemptAt, expiresAt);
+      } else {
+        nextWakeAt = Math.min(nextWakeAt, now + READ_RECEIPT_QUEUE_RECHECK_MS, expiresAt);
       }
     }
-  }, []);
+    if (nextWakeAt === Infinity) return;
+    const generation = accountGenerationRef.current;
+    const timer = setTimeout(() => {
+      if (readRetryTimerRef.current !== timer || generation !== accountGenerationRef.current) return;
+      readRetryTimerRef.current = null;
+      flushPendingOutgoingReads();
+    }, Math.max(0, nextWakeAt - Date.now()));
+    readRetryTimerRef.current = timer;
+  }, [cancelReadRetry]);
 
-  useEffect(() => {
-    const interval = setInterval(flushPendingOutgoingReads, READ_RECEIPT_RETRY_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [flushPendingOutgoingReads]);
+  useEffect(() => cancelReadRetry, [cancelReadRetry]);
 
   const sendReadReceipt = useCallback(
     async (messageId: string, sender: string) => {
@@ -369,7 +398,7 @@ export function useMessageReceipts(
       if (!safeMessageId || !safeSender) {
         return;
       }
-      if (safeSender === account) {
+      if (safeSender === account || blockingSystem.isBlockedSync(safeSender)) {
         return;
       }
       if (hasRecentReceipt(sentReceiptsRef.current, safeSender, safeMessageId)) {

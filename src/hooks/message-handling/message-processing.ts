@@ -1,3 +1,4 @@
+import { MAX_FUTURE_MESSAGE_AGE_MS, MAX_PAST_MESSAGE_AGE_MS } from '../../lib/constants';
 import { SignalType } from '../../lib/types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
 import { sanitizeMessageId } from '../../lib/sanitizers';
@@ -215,9 +216,6 @@ export const processTextMessage = async (
 
   return { messageId, messageAdded: true, duplicate: false };
 };
-
-const MAX_FUTURE_MESSAGE_AGE_MS = 5 * 60 * 1000;
-const MAX_PAST_MESSAGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const normalizePeerTimestamp = (value: unknown, now = Date.now()): Date => {
   const parsed = typeof value === 'number'

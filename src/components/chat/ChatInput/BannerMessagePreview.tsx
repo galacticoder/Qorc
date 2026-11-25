@@ -1,3 +1,9 @@
+import {
+  BANNER_MESSAGE_PREVIEW_MAX_WIDTH,
+  BANNER_MESSAGE_PREVIEW_FONT_SIZE,
+  BANNER_MESSAGE_PREVIEW_HOST_CLIENT_WIDTH_MINIMUM,
+  BANNER_MESSAGE_PREVIEW_SCHEDULE_MEASURE_TIMEOUT_MS,
+} from '../../../lib/constants';
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { SecureCanvasText } from '../messaging/SecureCanvasText';
 
@@ -14,8 +20,8 @@ interface BannerMessagePreviewProps {
 export function BannerMessagePreview({
   messageId,
   contentVersion,
-  maxWidth = 800,
-  fontSize = 11,
+  maxWidth = BANNER_MESSAGE_PREVIEW_MAX_WIDTH,
+  fontSize = BANNER_MESSAGE_PREVIEW_FONT_SIZE,
   color = 'var(--qorc-reply-banner-preview-text)',
   className,
   maxLines = 1,
@@ -26,7 +32,7 @@ export function BannerMessagePreview({
 
   const measure = useCallback(() => {
     const host = previewRef.current;
-    if (!host || host.clientWidth < 20) return;
+    if (!host || host.clientWidth < BANNER_MESSAGE_PREVIEW_HOST_CLIENT_WIDTH_MINIMUM) return;
     const nextWidth = Math.max(20, Math.min(maxWidth, Math.floor(host.clientWidth)));
     setRenderWidth((currentWidth) => currentWidth === nextWidth ? currentWidth : nextWidth);
   }, [maxWidth]);
@@ -36,7 +42,7 @@ export function BannerMessagePreview({
     resizeTimerRef.current = window.setTimeout(() => {
       resizeTimerRef.current = null;
       measure();
-    }, 100);
+    }, BANNER_MESSAGE_PREVIEW_SCHEDULE_MEASURE_TIMEOUT_MS);
   }, [measure]);
 
   useLayoutEffect(() => {

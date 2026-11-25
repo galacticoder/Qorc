@@ -2,6 +2,7 @@
 //!
 //! Platform-specific system integration
 
+use crate::constants::system::MAX_INSTANCE_ID_BYTES;
 use crate::error::{QorcError, QorcResult};
 use fs2::FileExt;
 use std::{
@@ -17,7 +18,6 @@ pub mod power;
 pub mod tray;
 
 const DEFAULT_INSTANCE_ID: &str = "1";
-const MAX_INSTANCE_ID_BYTES: usize = 64;
 
 fn valid_instance_id(value: &str) -> Option<&str> {
     let value = value.trim();

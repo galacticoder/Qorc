@@ -15,21 +15,20 @@ import {
   MAX_FILE_SIZE,
   MAX_VOICE_NOTE_BYTES,
   MAX_VOICE_NOTE_DURATION_SECONDS,
+  MAX_CANVAS_DIMENSION,
+  MAX_CANVAS_PIXELS,
+  MAX_IMAGE_PREVIEW_BYTES,
+  MAX_IMAGE_PREVIEW_DIMENSION,
+  MAX_IMAGE_PREVIEW_PIXELS,
+  MEDIA_HEADER_BYTES,
+  VOICE_NOTE_MIME_BY_EXTENSION,
+  FILE_UTILS_BYTES_LENGTH_LIMIT,
+  FILE_UTILS_SNIFF_AUDIO_MIME_BYTES_LENGTH_LIMIT,
+  FILE_UTILS_BOX_SIZE_LIMIT,
+  FILE_UTILS_STRIP_IMAGE_METADATA_TIMEOUT_MS,
 } from '../constants';
 import { tryDecodeCanonicalBase64 } from '../cryptography/base64';
 import { asciiMatchesAt, bytesMatchAt, readUint32BE } from '../../../shared/bytes.js';
-
-const MAX_IMAGE_PREVIEW_BYTES = 32 * 1024 * 1024;
-const MAX_IMAGE_PREVIEW_DIMENSION = 8192;
-const MAX_IMAGE_PREVIEW_PIXELS = 16 * 1024 * 1024;
-const MEDIA_HEADER_BYTES = 64;
-
-const VOICE_NOTE_MIME_BY_EXTENSION = Object.freeze({
-  webm: 'audio/webm',
-  ogg: 'audio/ogg',
-  m4a: 'audio/mp4',
-  mp3: 'audio/mpeg',
-} as const);
 
 export const parseCurrentVoiceNoteFilename = (
   filename: unknown,
@@ -182,7 +181,7 @@ const sniffAudioMime = (bytes: Uint8Array, fileSize: number): string | null => {
   if (asciiMatchesAt(bytes, 0, 'RIFF') && asciiMatchesAt(bytes, 8, 'WAVE')) return 'audio/wav';
   if (asciiMatchesAt(bytes, 0, 'ID3')) return 'audio/mpeg';
   if (
-    bytes.length >= 4 &&
+    bytes.length >= FILE_UTILS_BYTES_LENGTH_LIMIT &&
     bytes[0] === 0xff &&
     (bytes[1] & 0xe0) === 0xe0 &&
     (bytes[1] & 0x18) !== 0x08 &&
@@ -193,9 +192,9 @@ const sniffAudioMime = (bytes: Uint8Array, fileSize: number): string | null => {
     return 'audio/mpeg';
   }
   if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return 'audio/aac';
-  if (bytes.length >= 12 && asciiMatchesAt(bytes, 4, 'ftyp')) {
+  if (bytes.length >= FILE_UTILS_SNIFF_AUDIO_MIME_BYTES_LENGTH_LIMIT && asciiMatchesAt(bytes, 4, 'ftyp')) {
     const boxSize = readUint32BE(bytes, 0);
-    if (boxSize >= 8 && boxSize <= fileSize) return 'audio/mp4';
+    if (boxSize >= FILE_UTILS_BOX_SIZE_LIMIT && boxSize <= fileSize) return 'audio/mp4';
   }
   return null;
 };
@@ -210,9 +209,9 @@ const sniffVideoMime = (bytes: Uint8Array, fileSize: number): string | null => {
   ) {
     return 'video/x-ms-wmv';
   }
-  if (bytes.length >= 12 && asciiMatchesAt(bytes, 4, 'ftyp')) {
+  if (bytes.length >= FILE_UTILS_SNIFF_AUDIO_MIME_BYTES_LENGTH_LIMIT && asciiMatchesAt(bytes, 4, 'ftyp')) {
     const boxSize = readUint32BE(bytes, 0);
-    if (boxSize >= 8 && boxSize <= fileSize) return 'video/mp4';
+    if (boxSize >= FILE_UTILS_BOX_SIZE_LIMIT && boxSize <= fileSize) return 'video/mp4';
   }
   return null;
 };
@@ -312,12 +311,10 @@ export async function stripImageMetadata(file: File): Promise<File> {
     const timeout = setTimeout(() => {
       try { img.src = ''; } catch { }
       finish(undefined, new Error('Image metadata removal timed out'));
-    }, 30_000);
+    }, FILE_UTILS_STRIP_IMAGE_METADATA_TIMEOUT_MS);
 
     img.onload = () => {
       try {
-        const MAX_CANVAS_DIMENSION = 8192;
-        const MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
         let width = img.width;
         let height = img.height;
 

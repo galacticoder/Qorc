@@ -2,6 +2,13 @@
  * Privacy Pass Client
  */
 
+import {
+  UUID_V4_REGEX,
+  PRIVACY_PASS_CLIENT_TOKENS_LENGTH_LIMIT,
+  PRIVACY_PASS_CLIENT_DESERIALIZE_BATCH_DATA_LENGTH_LIMIT,
+  PRIVACY_PASS_CLIENT_PARSED_LENGTH_LIMIT,
+} from '../constants';
+import { sleep } from '../runtime/sleep';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { Base64, decodeCanonicalBase64 } from './base64';
@@ -180,7 +187,7 @@ function deserializeTokenObject(parsed: any): AnonymousToken {
     if (Object.keys(parsed).sort().join(',') !== 'blindedElement,blindingFactor,id,issuedAt,pending,purpose,tokenSecret,unblindedToken,used') {
         throw new Error('Invalid token record shape');
     }
-    if (typeof parsed.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)) {
+    if (typeof parsed.id !== 'string' || !UUID_V4_REGEX.test(parsed.id)) {
         throw new Error('Invalid token ID');
     }
     if (!Number.isSafeInteger(parsed.issuedAt) || parsed.issuedAt <= 0) throw new Error('Invalid token timestamp');
@@ -266,7 +273,7 @@ export const TokenSerializer = {
      * Serialize batch for storage
      */
     async serializeBatch(tokens: AnonymousToken[]): Promise<string> {
-        if (!Array.isArray(tokens) || tokens.length > 1000) throw new Error('Invalid token batch');
+        if (!Array.isArray(tokens) || tokens.length > PRIVACY_PASS_CLIENT_TOKENS_LENGTH_LIMIT) throw new Error('Invalid token batch');
         const serialized = [];
         for (let i = 0; i < tokens.length; i++) {
             const t = tokens[i];
@@ -274,7 +281,7 @@ export const TokenSerializer = {
 
             // Yield every 50 tokens
             if (i % 50 === 0 && i > 0) {
-                await new Promise(resolve => setTimeout(resolve, 0));
+                await sleep(0);
             }
         }
         return JSON.stringify(serialized);
@@ -284,9 +291,9 @@ export const TokenSerializer = {
      * Deserialize batch from storage
      */
     async deserializeBatch(data: string): Promise<AnonymousToken[]> {
-        if (typeof data !== 'string' || data.length > 5 * 1024 * 1024) throw new Error('Invalid token batch');
+        if (typeof data !== 'string' || data.length > PRIVACY_PASS_CLIENT_DESERIALIZE_BATCH_DATA_LENGTH_LIMIT) throw new Error('Invalid token batch');
         const parsed = JSON.parse(data);
-        if (!Array.isArray(parsed) || parsed.length > 1000) throw new Error('Invalid token batch');
+        if (!Array.isArray(parsed) || parsed.length > PRIVACY_PASS_CLIENT_PARSED_LENGTH_LIMIT) throw new Error('Invalid token batch');
         const tokens: AnonymousToken[] = [];
         try {
             for (let i = 0; i < parsed.length; i++) {
@@ -301,7 +308,7 @@ export const TokenSerializer = {
                 }
 
                 if (i % 50 === 0 && i > 0) {
-                    await new Promise(resolve => setTimeout(resolve, 0));
+                    await sleep(0);
                 }
             }
             return tokens;

@@ -1,3 +1,7 @@
+import {
+  CALL_SPEAKER_LEVEL_UPDATE_CALL_SPEAKER_LEVEL_PUBLISH_TIMEOUT_MS,
+  CALL_SPEAKER_LEVEL_UPDATE_CALL_SPEAKER_LEVEL_TIMEOUT_MS,
+} from '../constants';
 const listeners = new Set<() => void>();
 let session: string | null = null;
 let level = 0;
@@ -24,9 +28,9 @@ export function updateCallSpeakerLevel(callId: string, rms: number): void {
     pendingLevel = Number.isFinite(rms) && rms > 0
         ? Math.max(0, Math.min(1, (20 * Math.log10(rms) + 50) / 40))
         : 0;
-    if (!publishTimer) publishTimer = setTimeout(publish, 60);
+    if (!publishTimer) publishTimer = setTimeout(publish, CALL_SPEAKER_LEVEL_UPDATE_CALL_SPEAKER_LEVEL_PUBLISH_TIMEOUT_MS);
     if (silenceTimer) clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => { pendingLevel = 0; publish(); }, 200);
+    silenceTimer = setTimeout(() => { pendingLevel = 0; publish(); }, CALL_SPEAKER_LEVEL_UPDATE_CALL_SPEAKER_LEVEL_TIMEOUT_MS);
 }
 
 export function clearCallSpeakerLevel(callId?: string): void {

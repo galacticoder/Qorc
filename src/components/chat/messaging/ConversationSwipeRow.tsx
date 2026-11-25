@@ -1,3 +1,7 @@
+import {
+  CONVERSATION_SWIPE_ROW_ACTION_WIDTH,
+  CONVERSATION_SWIPE_ROW_MATH_MAX_MINIMUM,
+} from '../../../lib/constants';
 import React, { useEffect, useRef, useState } from 'react';
 import { useAppBack } from '../../../hooks/useAppBack';
 
@@ -13,7 +17,7 @@ interface ConversationSwipeRowProps {
   className?: string;
 }
 
-export function ConversationSwipeRow({ enabled, open, onOpenChange, actions, children, actionWidth = 112,
+export function ConversationSwipeRow({ enabled, open, onOpenChange, actions, children, actionWidth = CONVERSATION_SWIPE_ROW_ACTION_WIDTH,
   allowButtonSwipes = false, popoverSelector = '.qorc-conversation-options-popover', className = '' }: ConversationSwipeRowProps) {
   const shellRef = useRef<HTMLDivElement>(null);
   const gesture = useRef<{ id: number; x: number; y: number; start: number; horizontal: boolean } | null>(null);
@@ -84,7 +88,7 @@ export function ConversationSwipeRow({ enabled, open, onOpenChange, actions, chi
           const dx = event.clientX - current.x;
           const dy = event.clientY - current.y;
           if (!current.horizontal) {
-            if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+            if (Math.max(Math.abs(dx), Math.abs(dy)) < CONVERSATION_SWIPE_ROW_MATH_MAX_MINIMUM) return;
             if (Math.abs(dy) >= Math.abs(dx)) { gesture.current = null; return; }
             
             if (dx < 0 && !open) { gesture.current = null; return; }

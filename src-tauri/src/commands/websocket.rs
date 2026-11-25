@@ -109,8 +109,9 @@ pub async fn ws_send_binary(
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| "Invalid WebSocket connection token".to_string())?;
-    let payload = super::binary_body(&request, crate::network::websocket::PQ_WS_FIXED_CELL_BYTES)
-        .map_err(|()| "Invalid WebSocket binary cell".to_string())?;
+    let payload = super::binary_body(&request, crate::constants::websocket::PQ_WS_FIXED_CELL_BYTES)
+        .map_err(|()| "Invalid WebSocket binary cell".to_string())?
+        .into_owned();
     let ws = state
         .inner()
         .websocket()

@@ -2,18 +2,16 @@
 //!
 //! Tauri commands for Signal Protocol operations
 
+use crate::constants::signal::{
+    MAX_SIGNAL_ACK_JSON_BYTES, MAX_SIGNAL_ENCRYPTED_JSON_BYTES, MAX_SIGNAL_ENCRYPTED_STRING_BYTES,
+    MAX_SIGNAL_PREKEY_BUNDLE_JSON_BYTES, MAX_SIGNAL_PREKEY_BUNDLE_STRING_BYTES,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tauri::State;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::signal_protocol::{EncryptedMessage, PreKeyBundle};
 use crate::state::AppState;
-
-const MAX_SIGNAL_PREKEY_BUNDLE_JSON_BYTES: usize = 16 * 1024;
-const MAX_SIGNAL_PREKEY_BUNDLE_STRING_BYTES: usize = 4 * 1024;
-const MAX_SIGNAL_ENCRYPTED_JSON_BYTES: usize = 768 * 1024;
-const MAX_SIGNAL_ENCRYPTED_STRING_BYTES: usize = 700 * 1024;
-const MAX_SIGNAL_ACK_JSON_BYTES: usize = 1024;
 
 fn parse_bounded_signal_json<T: DeserializeOwned>(
     body: &str,
@@ -243,7 +241,7 @@ pub async fn signal_encrypt(
     state: State<'_, AppState>,
 ) -> Result<EncryptedMessage, String> {
     let plaintext = Zeroizing::new(plaintext);
-    if plaintext.len() > crate::signal_protocol::MAX_SIGNAL_PLAINTEXT_BYTES {
+    if plaintext.len() > crate::constants::signal::MAX_SIGNAL_PLAINTEXT_BYTES {
         return Err("Signal plaintext exceeds size limit".to_string());
     }
     let handler = state
@@ -279,7 +277,7 @@ pub async fn signal_encrypt_content_ref(
     state: State<'_, AppState>,
 ) -> Result<EncryptedMessage, String> {
     let plaintext_template = Zeroizing::new(plaintext_template);
-    if plaintext_template.len() > crate::signal_protocol::MAX_SIGNAL_PLAINTEXT_BYTES {
+    if plaintext_template.len() > crate::constants::signal::MAX_SIGNAL_PLAINTEXT_BYTES {
         return Err("Signal plaintext exceeds size limit".to_string());
     }
     let handler = state
@@ -348,7 +346,7 @@ pub async fn signal_encrypt_content_ref(
         sensitive.zeroize();
     }
     drop(payload);
-    if plaintext.len() > crate::signal_protocol::MAX_SIGNAL_PLAINTEXT_BYTES {
+    if plaintext.len() > crate::constants::signal::MAX_SIGNAL_PLAINTEXT_BYTES {
         return Err("Signal plaintext exceeds size limit".to_string());
     }
 

@@ -2,13 +2,18 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react"
 import { SignalType } from "@/lib/types/signal-types";
 import { EventType } from "../lib/types/event-types";
 import websocketClient from "@/lib/websocket/websocket";
-import { WEBSOCKET_RATE_LIMIT_MAX_MESSAGES, WEBSOCKET_RATE_LIMIT_WINDOW_MS } from "@/lib/constants";
+import {
+  CONTROL_CHARS_REGEX,
+  WEBSOCKET_RATE_LIMIT_MAX_MESSAGES,
+  WEBSOCKET_RATE_LIMIT_WINDOW_MS,
+  ROUTE_QUEUE_MAX_BYTES,
+  ROUTE_QUEUE_MAX_COUNT,
+  USE_WEBSOCKET_TYPE_LENGTH_LIMIT,
+} from '@/lib/constants';
 import { isPlainObject, hasPrototypePollutionKeys } from "@/lib/sanitizers";
 import { BaseMessage, WebSocketMessageSchema, DEFAULT_ALLOWED_TYPES, DEFAULT_ENCRYPTED_TYPES, DEFAULT_SCHEMAS, WebSocketHookOptions } from "@/lib/types/websocket-types";
 
 type MessageHandler = (data: BaseMessage) => Promise<boolean | void>;
-const ROUTE_QUEUE_MAX_COUNT = 128;
-const ROUTE_QUEUE_MAX_BYTES = 24 * 1024 * 1024;
 
 const sanitizeIncomingMessage = (
   payload: unknown,
@@ -21,8 +26,8 @@ const sanitizeIncomingMessage = (
   if (hasPrototypePollutionKeys(payload)) return null;
 
   const type = (payload as BaseMessage).type;
-  if (typeof type !== 'string' || type.length === 0 || type.length > 128) return null;
-  if (/[\x00-\x1F\x7F]/.test(type)) return null;
+  if (typeof type !== 'string' || type.length === 0 || type.length > USE_WEBSOCKET_TYPE_LENGTH_LIMIT) return null;
+  if (type.search(CONTROL_CHARS_REGEX) !== -1) return null;
   if (!allowedTypes.has(type)) return null;
 
   const schema = schemas[type];

@@ -4,8 +4,8 @@
 
 pub mod account;
 pub mod audio;
-pub mod camera;
 pub mod callback_bytes;
+pub mod camera;
 pub mod crypto;
 pub mod discovery;
 pub mod message_content;
@@ -24,11 +24,18 @@ pub mod websocket;
 #[cfg(target_os = "android")]
 mod android_bytes;
 
-fn binary_body(request: &tauri::ipc::Request<'_>, max_bytes: usize) -> Result<Vec<u8>, ()> {
+use std::borrow::Cow;
+
+fn binary_body<'a>(
+    request: &'a tauri::ipc::Request<'_>,
+    max_bytes: usize,
+) -> Result<Cow<'a, [u8]>, ()> {
     match request.body() {
-        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= max_bytes => Ok(bytes.clone()),
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= max_bytes => Ok(Cow::Borrowed(bytes)),
         #[cfg(target_os = "android")]
-        tauri::ipc::InvokeBody::Json(value) => android_bytes::decode(value, max_bytes),
+        tauri::ipc::InvokeBody::Json(value) => {
+            android_bytes::decode(value, max_bytes).map(Cow::Owned)
+        }
         _ => Err(()),
     }
 }

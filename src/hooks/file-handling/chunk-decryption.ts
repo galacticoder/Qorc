@@ -5,7 +5,14 @@ import { resolveTrustedPeerDilithiumPublicKey, type PeerIdentityLike } from "../
 import { HashingService } from '../../lib/cryptography/hashing';
 import { isHybridEnvelopeWireShape } from '../../lib/transport/envelope-shape';
 import { SignalType } from '../../lib/types/signal-types';
-import { DEFAULT_CHUNK_SIZE_SMALL } from '../../lib/constants';
+import {
+  DEFAULT_CHUNK_SIZE_SMALL,
+  CHUNK_DECRYPTION_IV_LENGTH_EXPECTED,
+  CHUNK_DECRYPTION_AUTH_TAG_LENGTH_EXPECTED,
+  CHUNK_DECRYPTION_AES_KEY_BYTES_LENGTH_EXPECTED,
+  CHUNK_DECRYPTION_MAC_KEY_LENGTH_EXPECTED,
+  CHUNK_DECRYPTION_EXPECTED_MAC_LENGTH_EXPECTED,
+} from '../../lib/constants';
 
 export interface DecryptionContext {
   fileEntry: ExtendedFileState;
@@ -30,7 +37,7 @@ export const parseEncryptedChunk = (chunkData: string): { iv: Uint8Array; authTa
     const encrypted = parsed?.encrypted as Uint8Array | undefined;
 
     if (!(iv instanceof Uint8Array && authTag instanceof Uint8Array && encrypted instanceof Uint8Array) ||
-      iv.length !== 12 || authTag.length !== 16 || encrypted.length === 0 ||
+      iv.length !== CHUNK_DECRYPTION_IV_LENGTH_EXPECTED || authTag.length !== CHUNK_DECRYPTION_AUTH_TAG_LENGTH_EXPECTED || encrypted.length === 0 ||
       encrypted.length > DEFAULT_CHUNK_SIZE_SMALL + 1024) {
       iv?.fill(0);
       authTag?.fill(0);
@@ -60,6 +67,7 @@ export const decryptEnvelope = async (
 
   let aesKeyBytes: Uint8Array | null = null;
   let macKey: Uint8Array | null = null;
+  let plaintext: Uint8Array | undefined;
   try {
     const senderDilithiumPk = (envelope as any)?.routing?.from;
     const senderIdentity = await resolveTrustedPeerDilithiumPublicKey(
@@ -80,6 +88,7 @@ export const decryptEnvelope = async (
       }
     );
 
+    plaintext = decrypted?.payload;
     const aesPayload = (decrypted?.payloadJson ?? null) as { aesKey?: string; macKey?: string } | null;
     if (!aesPayload || typeof aesPayload.aesKey !== 'string' || typeof aesPayload.macKey !== 'string') {
       return null;
@@ -88,8 +97,8 @@ export const decryptEnvelope = async (
     aesKeyBytes = CryptoUtils.Base64.base64ToUint8Array(aesPayload.aesKey);
     macKey = CryptoUtils.Base64.base64ToUint8Array(aesPayload.macKey);
     if (
-      aesKeyBytes.length !== 32 ||
-      macKey.length !== 32 ||
+      aesKeyBytes.length !== CHUNK_DECRYPTION_AES_KEY_BYTES_LENGTH_EXPECTED ||
+      macKey.length !== CHUNK_DECRYPTION_MAC_KEY_LENGTH_EXPECTED ||
       CryptoUtils.Base64.arrayBufferToBase64(aesKeyBytes) !== aesPayload.aesKey ||
       CryptoUtils.Base64.arrayBufferToBase64(macKey) !== aesPayload.macKey
     ) {
@@ -116,6 +125,7 @@ export const decryptEnvelope = async (
     console.error('[chunk-decryption] Failed to decrypt envelope:', e);
     return null;
   } finally {
+    plaintext?.fill(0);
     aesKeyBytes?.fill(0);
     macKey?.fill(0);
   }
@@ -147,7 +157,7 @@ export const verifyChunkMac = async (
   try {
     expectedMac = CryptoUtils.Base64.base64ToUint8Array(chunkMac);
     if (
-      expectedMac.length !== 32 ||
+      expectedMac.length !== CHUNK_DECRYPTION_EXPECTED_MAC_LENGTH_EXPECTED ||
       CryptoUtils.Base64.arrayBufferToBase64(expectedMac) !== chunkMac
     ) return false;
     return await HashingService.verifyBlake3Mac(macInput, macKey, expectedMac);

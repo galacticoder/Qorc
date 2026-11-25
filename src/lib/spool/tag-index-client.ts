@@ -2,9 +2,9 @@
  * Spool Tag Index Fetch
  */
 
+import { applySpoolIndexUpdate, spoolIndexDigest, SPOOL_INDEX_MAX_ENTRIES, validateSpoolIndex, validateSpoolIndexUpdate } from '../../../shared/spool-index-updates.js';
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
 import { SPOOL_DETECTION_PROBE_HEX_CHARS, SPOOL_TAG_HEX_CHARS } from '../../../shared/spool-tag-protocol.js';
-import { SPOOL_TAG_INDEX_AUDIENCE } from '../config/audiences';
 import { SPOOL_TAG_PROTOCOL, SPOOL_PIR_LAYOUT } from '../../../shared/protocol-keys.js';
 
 export interface SpoolTagIndex {
@@ -13,8 +13,23 @@ export interface SpoolTagIndex {
   probes: string[];
 }
 
-export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagIndex> {
-  const raw = await anonymousHttpFetch(SPOOL_TAG_INDEX_AUDIENCE, {}, serverUrl) as Record<string, unknown> | null;
+export interface SpoolTagIndexCache {
+  readonly serverUrl: string;
+  readonly checkpoint: number;
+  readonly base: SpoolTagIndex | null;
+  readonly index: SpoolTagIndex;
+}
+
+async function fetchFullIndex(
+  operation: 'spool/tag-index' | 'spool/tag-index-base',
+  serverUrl: string, signal: AbortSignal,
+): Promise<SpoolTagIndex> {
+  const raw = await anonymousHttpFetch(operation, {}, serverUrl, { signal }) as Record<string, unknown> | null;
+  signal.throwIfAborted();
+  return parseIndex(raw);
+}
+
+function parseIndex(raw: Record<string, unknown> | null): SpoolTagIndex {
   if (
     !raw ||
     raw.ok !== true ||
@@ -31,7 +46,7 @@ export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagInd
   const count = raw.count as number;
   const packedProbes = raw.probes as string;
   if (
-    count < 0 ||
+    count < 0 || count > SPOOL_INDEX_MAX_ENTRIES ||
     packed.length !== count * SPOOL_TAG_HEX_CHARS ||
     packedProbes.length !== count * SPOOL_DETECTION_PROBE_HEX_CHARS
   ) throw new Error('Invalid spool tag index response');
@@ -45,5 +60,35 @@ export async function fetchSpoolTagIndex(serverUrl: string): Promise<SpoolTagInd
       (i + 1) * SPOOL_DETECTION_PROBE_HEX_CHARS
     );
   }
-  return { epoch: raw.epoch as number, tags, probes };
+  const index = validateSpoolIndex({ epoch: raw.epoch as number, tags, probes });
+  Object.freeze(index.tags);
+  Object.freeze(index.probes);
+  return Object.freeze(index);
+}
+
+export async function fetchSpoolTagIndex(
+  serverUrl: string,
+  signal: AbortSignal,
+  previous: SpoolTagIndexCache | null,
+): Promise<SpoolTagIndexCache> {
+  const update = validateSpoolIndexUpdate(await anonymousHttpFetch('spool/tag-index-update', {}, serverUrl, { signal }));
+  signal.throwIfAborted();
+  // The full path is chosen by the server's shared update capacity, never by detected messages.
+  if (update.mode === 'full') {
+    const index = await fetchFullIndex('spool/tag-index', serverUrl, signal);
+    const base = previous?.serverUrl === serverUrl && previous.checkpoint === update.checkpoint ? previous.base : null;
+    return { serverUrl, checkpoint: update.checkpoint, base, index };
+  }
+  const cachedBase = previous?.serverUrl === serverUrl && previous.checkpoint === update.checkpoint && previous.base;
+  let base = cachedBase
+    ? previous.base
+    : await fetchFullIndex('spool/tag-index-base', serverUrl, signal);
+  if (cachedBase && spoolIndexDigest(base) !== update.baseDigest) {
+    base = await fetchFullIndex('spool/tag-index-base', serverUrl, signal);
+  }
+  // A checkpoint can roll over during the two requests. Reject that pair and retry on the next pass.
+  if (spoolIndexDigest(base) !== update.baseDigest) throw new Error('Spool checkpoint changed during download');
+  const index = applySpoolIndexUpdate(base, update) as SpoolTagIndex;
+  signal.throwIfAborted();
+  return { serverUrl, checkpoint: update.checkpoint, base, index };
 }

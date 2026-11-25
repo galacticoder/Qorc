@@ -1,7 +1,8 @@
+import { SAVED_SERVER_LIMIT } from '../../lib/constants';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeft, Check, Loader2, MoreVertical, Pencil, Plus, Search, Server, Trash2, X } from 'lucide-react';
 import { useSavedServers } from '../../hooks/useSavedServers';
-import { SAVED_SERVER_LIMIT, savedServers, type SavedServer } from '../../lib/servers/saved-servers';
+import { savedServers, type SavedServer } from '../../lib/servers/saved-servers';
 import { normalizeToWss } from '../../lib/servers/server-address';
 import { SERVER_NAME_MAX_LENGTH } from '../../../shared/server-profile.js';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';

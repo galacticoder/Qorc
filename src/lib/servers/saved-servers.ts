@@ -1,3 +1,4 @@
+import { SAVED_SERVER_LIMIT, SAVED_SERVERS_RAW_LENGTH_LIMIT } from '../constants';
 import { storage } from '../tauri-bindings';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { normalizeToWss } from './server-address';
@@ -18,7 +19,6 @@ interface SavedServersState {
   readonly error: string;
 }
 
-export const SAVED_SERVER_LIMIT = 32;
 let state: SavedServersState = { servers: [], loaded: false, error: '' };
 let loadPromise: Promise<void> | null = null;
 let mutationTail: Promise<unknown> = Promise.resolve();
@@ -31,7 +31,7 @@ function publish(next: SavedServersState): void {
 
 function parseServers(raw: string | null): readonly SavedServer[] {
   if (raw === null) return [];
-  if (raw.length > 1_500_000) throw new Error('Saved server list is oversized');
+  if (raw.length > SAVED_SERVERS_RAW_LENGTH_LIMIT) throw new Error('Saved server list is oversized');
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed) || parsed.length > SAVED_SERVER_LIMIT) throw new Error('Invalid saved server list');
   const addresses = new Set<string>();

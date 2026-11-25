@@ -1,4 +1,5 @@
-const HARD_MAX_JSON_DEPTH: usize = 64;
+use crate::constants::validation::HARD_MAX_JSON_DEPTH;
+
 
 pub fn enforce_bounded_json_structure(
     body: &[u8],

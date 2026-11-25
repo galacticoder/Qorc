@@ -1,5 +1,9 @@
 //! Signal Protocol Storage
 
+use crate::constants::signal::{
+    MAX_BASE_KEYS_PER_KYBER_PAIR, MAX_KYBER_REPLAY_KEYS, MAX_KYBER_REPLAY_PAIRS,
+    MAX_STORED_ROTATING_PREKEY_RECORDS, MAX_STORED_SIGNAL_RECORDS, SIGNAL_DEVICE_ID_MAX,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,9 +18,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::post_quantum;
 
-const MAX_STORED_SIGNAL_RECORDS: usize = 10_000;
-const MAX_STORED_ROTATING_PREKEY_RECORDS: usize = 16;
-const MAX_SIGNAL_DEVICE_ID: u32 = 127;
 const SIGNAL_SIGNATURE_BYTES: usize = 64;
 
 pub type IdentityStoreDump = (u32, Vec<u8>, Vec<u8>, Vec<(String, Vec<u8>)>);
@@ -43,7 +44,7 @@ fn is_canonical_session_key(value: &str) -> bool {
     let Ok(device_id) = device.parse::<u32>() else {
         return false;
     };
-    (1..=MAX_SIGNAL_DEVICE_ID).contains(&device_id) && device == device_id.to_string()
+    (1..=SIGNAL_DEVICE_ID_MAX).contains(&device_id) && device == device_id.to_string()
 }
 
 pub(crate) fn validate_pq_ratchet_state(record: &SessionRecord) -> Result<(), String> {
@@ -590,10 +591,6 @@ pub struct InMemoryKyberPreKeyStore {
     base_keys_seen: RwLock<KyberReplayIndex>,
     base_key_count: AtomicUsize,
 }
-
-const MAX_BASE_KEYS_PER_KYBER_PAIR: usize = 16_384;
-const MAX_KYBER_REPLAY_PAIRS: usize = 4_096;
-const MAX_KYBER_REPLAY_KEYS: usize = 100_000;
 
 impl InMemoryKyberPreKeyStore {
     pub fn new() -> Self {

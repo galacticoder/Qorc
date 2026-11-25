@@ -69,7 +69,7 @@ export const useStartupAvatarReadiness = ({
                     await preloadForUsername(avatar.username, avatar.isCurrentUser);
                 }
             });
-            await Promise.all(workers);
+            await Promise.allSettled(workers);
             if (!cancelled) setReadyDatabase(secureDB);
         };
         void load();

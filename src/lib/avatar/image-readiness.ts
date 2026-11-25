@@ -1,14 +1,13 @@
+import { AVATAR_IMAGE_READY_TIMEOUT_MS, MAX_IMAGE_READINESS_ENTRIES } from '../constants';
 type AvatarImageStatus = 'ready' | 'failed';
 
-const MAX_TRACKED_IMAGES = 256;
-const LOAD_TIMEOUT_MS = 8_000;
 const statuses = new Map<string, AvatarImageStatus>();
 const pending = new Map<string, Promise<boolean>>();
 
 const remember = (url: string, status: AvatarImageStatus): void => {
     statuses.delete(url);
     statuses.set(url, status);
-    while (statuses.size > MAX_TRACKED_IMAGES) {
+    while (statuses.size > MAX_IMAGE_READINESS_ENTRIES) {
         const oldest = statuses.keys().next().value;
         if (!oldest) break;
         statuses.delete(oldest);
@@ -40,7 +39,7 @@ export const preloadAvatarImage = (url: string): Promise<boolean> => {
             remember(url, loaded ? 'ready' : 'failed');
             resolve(loaded);
         };
-        const timeout = window.setTimeout(() => finish(false), LOAD_TIMEOUT_MS);
+        const timeout = window.setTimeout(() => finish(false), AVATAR_IMAGE_READY_TIMEOUT_MS);
         image.onload = () => finish(image.naturalWidth > 0 && image.naturalHeight > 0);
         image.onerror = () => finish(false);
         image.decoding = 'async';

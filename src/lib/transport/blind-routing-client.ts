@@ -8,7 +8,12 @@ import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { account } from '../tauri-bindings';
 import { MessageFraming, FrameSize } from './message-framing';
-import { AUTH_USERNAME_REGEX } from '../constants';
+import {
+  AUTH_USERNAME_REGEX,
+  UUID_V4_REGEX,
+  SEALED_KDF_CONTEXT,
+  SEALED_AAD_CONTEXT,
+} from '../constants';
 import {
   SPOOL_TAG_BYTES,
   encodeSpoolTag,
@@ -23,8 +28,6 @@ import {
 import { concatUint8Arrays } from '../../../shared/bytes.js';
 import { Base64 } from '../cryptography/base64';
 
-const SEALED_KDF_CONTEXT = new TextEncoder().encode(PROTOCOL_KEYS.SEALED_SENDER_KDF);
-const SEALED_AAD_CONTEXT = new TextEncoder().encode(PROTOCOL_KEYS.SEALED_SENDER_AAD);
 const COVER_CIPHERTEXT_BYTES = FrameSize.STANDARD + 16;
 
 function deriveSealedSenderKey(sharedSecret: Uint8Array): Uint8Array {
@@ -228,7 +231,7 @@ export class BlindRoutingClient {
     if (!this.sendFn) {
       return false;
     }
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+    if (!UUID_V4_REGEX.test(requestId)) {
       return false;
     }
     const activationMessage = {

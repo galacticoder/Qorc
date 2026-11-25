@@ -1338,8 +1338,7 @@ function startGlobalMixPublicationDrain() {
   void drainPromise.then(finish, finish);
 }
 
-// captures tag index and its PIR records from one redis scan
-export async function readGlobalMixPirSnapshot(now = Date.now()) {
+export async function readGlobalMixPirSnapshot(now = Date.now(), published = null) {
   return withRedisClient(async (client) => {
     await trimExpiredGlobalMixSpool(client, now);
     const oldestReadable = (
@@ -1357,9 +1356,18 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
       if (!isCurrentGlobalSpoolRow(row)) continue;
       rows.push(row);
     }
-    if (rows.length === 0) {
-      return { ids: [], tags: [], probes: [], records: [] };
-    }
+    const index = {
+      ids: rows.map((row) => row.id),
+      tags: rows.map((row) => row.tag),
+      probes: rows.map((row) => row.probe)
+    };
+    // The row ID commits to the full envelope. A matching ordered index can reuse
+    // the already validated worker snapshot without fetching its ciphertexts.
+    if (published?.ids.length === rows.length && rows.every((row, position) =>
+      row.id === published.ids[position] &&
+      row.tag === published.tags[position] &&
+      row.probe === published.probes[position]
+    )) return { ...index, records: null };
 
     const records = [];
     try {
@@ -1391,12 +1399,7 @@ export async function readGlobalMixPirSnapshot(now = Date.now()) {
       for (const record of records) record.fill(0);
       throw error;
     }
-    return {
-      ids: rows.map((row) => row.id),
-      tags: rows.map((row) => row.tag),
-      probes: rows.map((row) => row.probe),
-      records
-    };
+    return { ...index, records };
   });
 }
 

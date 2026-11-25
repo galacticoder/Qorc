@@ -1,3 +1,8 @@
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use crate::media_utils::unix_time_ms;
+use crate::media_utils::{MediaSession, validate_device_id};
+use crate::constants::media::CAMERA_DEVICE_ID_MAX_BYTES;
+use crate::constants::camera::{FRAME_WAIT, MAX_FRAME_BYTES, MAX_SESSIONS, START_WAIT};
 use image::{ExtendedColorType, RgbImage, codecs::jpeg::JpegEncoder};
 #[cfg(target_os = "windows")]
 use nokhwa::{
@@ -15,7 +20,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use v4l::{
     Format, FourCC,
@@ -27,11 +32,6 @@ use v4l::{
     prelude::{Device, MmapStream},
     video::{Capture, capture::Parameters},
 };
-
-const MAX_SESSIONS: usize = 2;
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const FRAME_WAIT: Duration = Duration::from_secs(1);
-const START_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub struct CameraDevice {
@@ -232,14 +232,7 @@ impl CameraCaptureState {
             .lifecycle
             .lock()
             .map_err(|_| "camera capture unavailable".to_string())?;
-        tracing::info!(
-            width,
-            height,
-            frame_rate,
-            selected_device = device_id.is_some(),
-            "[CALL-DIAG] camera-state-start-enter"
-        );
-        validate_session_id(session_id)?;
+        MediaSession::Camera.validate_id(session_id)?;
         if !(2..=1280).contains(&width)
             || !(2..=720).contains(&height)
             || width.saturating_mul(height) > 1280 * 720
@@ -248,11 +241,9 @@ impl CameraCaptureState {
             return Err("invalid camera capture profile".to_string());
         }
         if let Some(device_id) = device_id {
-            validate_device_id(device_id)?;
+            validate_device_id(device_id, CAMERA_DEVICE_ID_MAX_BYTES, "invalid camera device identifier")?;
         }
-        tracing::info!("[CALL-DIAG] camera-state-previous-stop-before");
         self.stop_session(session_id)?;
-        tracing::info!("[CALL-DIAG] camera-state-previous-stop-after");
         let session = Arc::new(CameraSession::new());
         {
             let mut sessions = self
@@ -267,7 +258,6 @@ impl CameraCaptureState {
         let selected_device = device_id.map(str::to_string);
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let worker_session = session.clone();
-        tracing::info!("[CALL-DIAG] camera-worker-spawn-before");
         let worker = thread::Builder::new()
             .name("qorc-camera-capture".to_string())
             .spawn(move || {
@@ -281,10 +271,6 @@ impl CameraCaptureState {
                 );
                 worker_session.finish();
             });
-        tracing::info!(
-            spawned = worker.is_ok(),
-            "[CALL-DIAG] camera-worker-spawn-after"
-        );
         let worker = match worker {
             Ok(worker) => worker,
             Err(_) => {
@@ -299,19 +285,15 @@ impl CameraCaptureState {
             .lock()
             .map_err(|_| "camera capture unavailable".to_string())? = Some(worker);
         drop(lifecycle);
-        tracing::info!("[CALL-DIAG] camera-worker-ready-wait-before");
         match started_rx.recv_timeout(START_WAIT) {
             Ok(Ok(())) => {
-                tracing::info!("[CALL-DIAG] camera-worker-ready-wait-after");
                 Ok(())
             }
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, "[CALL-DIAG] camera-worker-start-reported-error");
                 let _ = self.stop_if_current(session_id, &session);
                 Err(error)
             }
             Err(_) => {
-                tracing::warn!("[CALL-DIAG] camera-worker-ready-wait-timeout");
                 let _ = self.stop_if_current(session_id, &session);
                 Err("camera capture startup timed out".to_string())
             }
@@ -332,7 +314,7 @@ impl CameraCaptureState {
     }
 
     pub fn stop(&self, session_id: &str) -> Result<(), String> {
-        validate_session_id(session_id)?;
+        MediaSession::Camera.validate_id(session_id)?;
         let _lifecycle = self
             .lifecycle
             .lock()
@@ -382,7 +364,7 @@ impl CameraCaptureState {
     }
 
     fn session(&self, session_id: &str) -> Result<Arc<CameraSession>, String> {
-        validate_session_id(session_id)?;
+        MediaSession::Camera.validate_id(session_id)?;
         self.sessions
             .lock()
             .map_err(|_| "camera capture unavailable".to_string())?
@@ -475,13 +457,6 @@ impl DeliveredCadence {
                 || cadence_delta.saturating_mul(100)
                     >= self.effective_frame_rate.saturating_mul(20);
             if cadence_delta >= 2 && meaningful_change {
-                tracing::info!(
-                    advertised_frame_rate = self.advertised_frame_rate,
-                    previous_frame_rate = self.effective_frame_rate,
-                    measured_frame_rate = measured,
-                    effective_frame_rate = candidate,
-                    "[CALL-DIAG] linux-camera-delivered-cadence-changed"
-                );
                 self.effective_frame_rate = candidate;
             }
             self.last_adjusted_at = Some(now);
@@ -576,85 +551,41 @@ fn run_capture(
     frame_rate: u32,
     started: std::sync::mpsc::SyncSender<Result<(), String>>,
 ) {
-    let capture_started_at = Instant::now();
-    tracing::info!("[CALL-DIAG] linux-camera-resolve-before");
     let paths = match resolve_linux_cameras(device_id) {
         Ok(paths) => paths,
         Err(error) => {
-            tracing::warn!(error = %error, "[CALL-DIAG] linux-camera-resolve-failed");
             let _ = started.send(Err(error));
             return;
         }
     };
-    tracing::info!(
-        device_count = paths.len(),
-        "[CALL-DIAG] linux-camera-resolve-after"
-    );
     let mut saw_device = false;
     let mut saw_profiles = false;
     let mut saw_busy = false;
     let mut configured = None;
-    'devices: for (device_index, path) in paths.into_iter().enumerate() {
-        tracing::info!(device_index, "[CALL-DIAG] linux-camera-open-before");
+    'devices: for path in paths {
         let device = match Device::with_path(path) {
-            Ok(device) => {
-                tracing::info!(device_index, "[CALL-DIAG] linux-camera-open-after");
-                device
-            }
+            Ok(device) => device,
             Err(error) => {
-                tracing::warn!(
-                    device_index,
-                    busy = error.kind() == std::io::ErrorKind::ResourceBusy,
-                    "[CALL-DIAG] linux-camera-open-failed"
-                );
                 saw_busy |= error.kind() == std::io::ErrorKind::ResourceBusy;
                 continue;
             }
         };
         saw_device = true;
-        tracing::info!(device_index, "[CALL-DIAG] linux-camera-profiles-before");
         let profiles = linux_capture_profiles(&device, width, height, frame_rate);
-        tracing::info!(
-            device_index,
-            profile_count = profiles.len(),
-            "[CALL-DIAG] linux-camera-profiles-after"
-        );
         if profiles.is_empty() {
             continue;
         }
         saw_profiles = true;
         let mut configured_profile = None;
-        for (profile_index, profile) in profiles.into_iter().enumerate() {
-            tracing::info!(
-                device_index,
-                profile_index,
-                width = profile.width,
-                height = profile.height,
-                frame_rate = profile.frame_rate,
-                fourcc = ?profile.fourcc,
-                "[CALL-DIAG] linux-camera-format-before"
-            );
+        for profile in profiles {
             let format = match device.set_format(&Format::new(
                 profile.width,
                 profile.height,
                 profile.fourcc,
             )) {
-                Ok(format) => {
-                    tracing::info!(
-                        device_index,
-                        profile_index,
-                        "[CALL-DIAG] linux-camera-format-after"
-                    );
-                    format
-                }
+                Ok(format) => format,
                 Err(error) => {
                     let busy = error.kind() == std::io::ErrorKind::ResourceBusy;
-                    tracing::warn!(
-                        device_index,
-                        profile_index,
-                        busy,
-                        "[CALL-DIAG] linux-camera-format-failed"
-                    );
                     saw_busy |= busy;
                     if busy {
                         continue 'devices;
@@ -663,35 +594,12 @@ fn run_capture(
                 }
             };
             if !linux_format_is_safe(&format) {
-                tracing::warn!(
-                    device_index,
-                    profile_index,
-                    "[CALL-DIAG] linux-camera-format-unsafe"
-                );
                 continue;
             }
-            tracing::info!(
-                device_index,
-                profile_index,
-                "[CALL-DIAG] linux-camera-params-before"
-            );
             let parameters = match device.set_params(&Parameters::with_fps(profile.frame_rate)) {
-                Ok(parameters) => {
-                    tracing::info!(
-                        device_index,
-                        profile_index,
-                        "[CALL-DIAG] linux-camera-params-after"
-                    );
-                    parameters
-                }
+                Ok(parameters) => parameters,
                 Err(error) => {
                     let busy = error.kind() == std::io::ErrorKind::ResourceBusy;
-                    tracing::warn!(
-                        device_index,
-                        profile_index,
-                        busy,
-                        "[CALL-DIAG] linux-camera-params-failed"
-                    );
                     saw_busy |= busy;
                     if busy {
                         continue 'devices;
@@ -731,13 +639,6 @@ fn run_capture(
         let _ = started.send(Err("camera returned an invalid frame rate".to_string()));
         return;
     };
-    tracing::info!(
-        width = format.width,
-        height = format.height,
-        frame_rate = actual_frame_rate,
-        fourcc = ?format.fourcc,
-        "[CALL-DIAG] linux-camera-selected-profile"
-    );
     let black = match encode_black_frame(format.width, format.height) {
         Ok(black) => black,
         Err(error) => {
@@ -745,15 +646,12 @@ fn run_capture(
             return;
         }
     };
-    tracing::info!("[CALL-DIAG] linux-camera-stream-open-before");
     let mut stream = match MmapStream::with_buffers(&device, Type::VideoCapture, 4) {
         Ok(mut stream) => {
             stream.set_timeout(Duration::from_millis(750));
-            tracing::info!("[CALL-DIAG] linux-camera-stream-open-after");
             Some(stream)
         }
         Err(_) => {
-            tracing::warn!("[CALL-DIAG] linux-camera-stream-open-failed");
             let _ = started.send(Err("camera stream could not be opened".to_string()));
             return;
         }
@@ -761,33 +659,7 @@ fn run_capture(
     let mut sequence = 0u64;
     let mut startup_signalled = false;
     let mut cadence = DeliveredCadence::new(actual_frame_rate);
-    let mut report_started_at = Instant::now();
-    let mut report_frames = 0u64;
-    let mut report_bytes = 0u64;
-    let mut report_overwrites = 0u64;
-    let mut report_timeouts = 0u64;
-    let mut report_errors = 0u64;
     while !session.stop.load(Ordering::Acquire) {
-        if report_started_at.elapsed() >= Duration::from_secs(5) {
-            let elapsed_seconds = report_started_at.elapsed().as_secs_f64().max(0.001);
-            tracing::info!(
-                frames = report_frames,
-                fps = report_frames as f64 / elapsed_seconds,
-                jpeg_bytes = report_bytes,
-                overwrites = report_overwrites,
-                timeouts = report_timeouts,
-                errors = report_errors,
-                advertised_frame_rate = actual_frame_rate,
-                effective_frame_rate = cadence.effective_frame_rate,
-                "[CALL-DIAG] linux-camera-capture-window"
-            );
-            report_started_at = Instant::now();
-            report_frames = 0;
-            report_bytes = 0;
-            report_overwrites = 0;
-            report_timeouts = 0;
-            report_errors = 0;
-        }
         let enabled = session.enabled.load(Ordering::Acquire);
         if !enabled {
             stream = None;
@@ -795,7 +667,7 @@ fn run_capture(
             sequence = sequence.wrapping_add(1).max(1);
             session.publish(CameraFrame {
                 sequence,
-                captured_at: now_ms(),
+                captured_at: unix_time_ms(),
                 width: format.width as u16,
                 height: format.height as u16,
                 frame_rate: actual_frame_rate as u16,
@@ -813,7 +685,6 @@ fn run_capture(
                     Some(stream)
                 }
                 Err(_) => {
-                    report_errors = report_errors.saturating_add(1);
                     thread::sleep(Duration::from_millis(250));
                     continue;
                 }
@@ -833,12 +704,10 @@ fn run_capture(
                         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                     ) =>
                 {
-                    report_timeouts = report_timeouts.saturating_add(1);
                     cadence.discontinuity();
                     continue;
                 }
                 Err(_) => {
-                    report_errors = report_errors.saturating_add(1);
                     cadence.discontinuity();
                     stream = None;
                     thread::sleep(Duration::from_millis(10));
@@ -850,7 +719,7 @@ fn run_capture(
                 continue;
             }
         };
-        let captured_at = now_ms();
+        let captured_at = unix_time_ms();
         let effective_frame_rate = cadence.observe(Instant::now());
         let bytes = if format.fourcc == FourCC::new(b"MJPG") {
             match normalize_jpeg(frame.to_vec()) {
@@ -867,8 +736,7 @@ fn run_capture(
             continue;
         }
         sequence = sequence.wrapping_add(1).max(1);
-        let byte_length = bytes.len() as u64;
-        if session.publish(CameraFrame {
+        session.publish(CameraFrame {
             sequence,
             captured_at,
             width: format.width as u16,
@@ -876,18 +744,9 @@ fn run_capture(
             frame_rate: effective_frame_rate as u16,
             enabled: true,
             bytes,
-        }) {
-            report_overwrites = report_overwrites.saturating_add(1);
-        }
-        report_frames = report_frames.saturating_add(1);
-        report_bytes = report_bytes.saturating_add(byte_length);
+        });
         if !startup_signalled {
             startup_signalled = true;
-            tracing::info!(
-                startup_ms = capture_started_at.elapsed().as_millis(),
-                jpeg_bytes = byte_length,
-                "[CALL-DIAG] linux-camera-first-frame"
-            );
             let _ = started.send(Ok(()));
         }
     }
@@ -1102,13 +961,6 @@ fn run_capture(
     };
     let selected_resolution = selected_format.resolution();
     let selected_frame_rate = selected_format.frame_rate().clamp(1, 60);
-    tracing::info!(
-        width = selected_resolution.width_x,
-        height = selected_resolution.height_y,
-        frame_rate = selected_frame_rate,
-        format = ?selected_format.format(),
-        "[CALL-DIAG] windows-camera-selected-profile"
-    );
     if camera
         .set_camera_requset(RequestedFormat::new::<RgbFormat>(
             RequestedFormatType::Exact(selected_format),
@@ -1143,7 +995,7 @@ fn run_capture(
             sequence = sequence.wrapping_add(1).max(1);
             session.publish(CameraFrame {
                 sequence,
-                captured_at: now_ms(),
+                captured_at: unix_time_ms(),
                 width: selected_resolution.width_x as u16,
                 height: selected_resolution.height_y as u16,
                 frame_rate: selected_frame_rate as u16,
@@ -1160,7 +1012,7 @@ fn run_capture(
             }
             stream_open = true;
         }
-        let captured_at = now_ms();
+        let captured_at = unix_time_ms();
         let frame = match camera.frame() {
             Ok(frame) => frame,
             Err(_) => {
@@ -1373,32 +1225,4 @@ fn clean_label(value: &str) -> String {
     } else {
         label.to_string()
     }
-}
-
-fn validate_device_id(device_id: &str) -> Result<(), String> {
-    if device_id.is_empty() || device_id.len() > 512 || device_id.chars().any(char::is_control) {
-        Err("invalid camera device identifier".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if (16..=64).contains(&session_id.len())
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(())
-    } else {
-        Err("invalid camera capture session".to_string())
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }

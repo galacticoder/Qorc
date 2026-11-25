@@ -2,19 +2,8 @@
  * Message Framing and Padding
  */
 
-export const FrameSize = {
-  STANDARD: 131072,
-  XLARGE: 262144
-} as const;
-
-// Frame structure
-const FRAME_VERSION = 0x02;
-const MESSAGE_FRAME_HEADER_SIZE = 18;
-
-// Frame types
-enum FrameType {
-  MESSAGE = 0x01
-}
+import { FrameSize, FrameType, MESSAGE_FRAME_HEADER_SIZE, MESSAGE_FRAME_VERSION } from '../constants';
+export { FrameSize } from '../constants/transport';
 
 interface PaddedFrame {
   data: Uint8Array;
@@ -77,7 +66,7 @@ function createPaddedFrame(
     const frame = new Uint8Array(frameSize);
     const headerView = new DataView(frame.buffer, frame.byteOffset, MESSAGE_FRAME_HEADER_SIZE);
 
-    headerView.setUint8(0, FRAME_VERSION);
+    headerView.setUint8(0, MESSAGE_FRAME_VERSION);
     headerView.setUint8(1, frameType);
     headerView.setUint32(2, 0, false);
     headerView.setUint16(6, 1, false);
@@ -116,7 +105,7 @@ function parsePaddedFrame(frameData: Uint8Array): ParsedFrame {
   const contentLength = headerView.getUint32(10, false);
   const paddingLength = headerView.getUint32(14, false);
   
-  if (version !== FRAME_VERSION) {
+  if (version !== MESSAGE_FRAME_VERSION) {
     return { valid: false, error: 'unsupported_version' };
   }
   if (frameType !== FrameType.MESSAGE) {

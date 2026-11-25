@@ -3,15 +3,51 @@
 * Handles communication with the post-quantum crypto worker
 */
 
+import { sleep } from '../runtime/sleep';
 import { PostQuantumRandom } from './random';
 import { hasExactKeys, isPlainObject, hasPrototypePollutionKeys } from '../sanitizers'
-import { PQ_WORKER_MAX_RESTART_ATTEMPTS } from '../constants';
+import {
+  PQ_WORKER_MAX_RESTART_ATTEMPTS,
+  ARGON2_MAX_QUEUED_OPERATIONS,
+  EXPECTED_AUTH_TOKEN_BYTES,
+  MAIN_WORKER_MAX_PENDING,
+  SIGNING_WORKER_MAX_PENDING,
+  WORKER_AEAD_MAX_AAD_BYTES,
+  WORKER_AEAD_MAX_INPUT_BYTES,
+  WORKER_READY_TIMEOUT_MS,
+  WORKER_RECOVERY_COOLDOWN_MS,
+  WORKER_STABILITY_WINDOW_MS,
+  WORKER_BRIDGE_WAIT_FOR_WORKER_AUTHENTICATION_DELAY_MS,
+  WORKER_BRIDGE_IS_WORKER_RESPONSE_FAILURE_MESSAGE_DATA_ID_LENGTH_MINIMUM,
+  WORKER_BRIDGE_IS_WORKER_RESPONSE_SUCCESS_MESSAGE_DATA_ID_LENGTH_MINIMUM,
+  WORKER_BRIDGE_IS_PPGENERATE_RESULT_RESULT_BLINDED_TOKENS_LENGTH_LIMIT,
+  WORKER_BRIDGE_TOKEN_LENGTH_EXPECTED,
+  WORKER_BRIDGE_TOKEN_TOKEN_SECRET_LENGTH_EXPECTED,
+  WORKER_BRIDGE_TOKEN_BLINDING_FACTOR_LENGTH_EXPECTED,
+  WORKER_BRIDGE_TOKEN_BLINDED_ELEMENT_LENGTH_EXPECTED,
+  WORKER_BRIDGE_TOKEN_ID_LENGTH_MINIMUM,
+  WORKER_BRIDGE_IS_PPUNBLIND_RESULT_RESULT_COMPLETED_TOKENS_LENGTH_LIMIT,
+  WORKER_BRIDGE_TOKEN_UNBLINDED_TOKEN_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_START_REG_RESULT_RESULT_BLINDED_ELEMENT_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_START_REG_RESULT_RESULT_BLINDING_FACTOR_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_FINISH_REG_RESULT_RESULT_ENVELOPE_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_FINISH_REG_RESULT_RESULT_EXPORT_KEY_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_FINISH_LOGIN_RESULT_RESULT_EXPORT_KEY_LENGTH_EXPECTED,
+  WORKER_BRIDGE_IS_OPAQUE_FINISH_LOGIN_RESULT_RESULT_ERROR_LENGTH_MINIMUM,
+  WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_HASH_LENGTH_MINIMUM,
+  WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_HASH_LENGTH_LIMIT,
+  WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_ENCODED_LENGTH_LIMIT,
+  WORKER_BRIDGE_VALIDATE_WORKER_DATA_ERROR_LENGTH_LIMIT,
+  WORKER_BRIDGE_AUTH_CHANNEL_BINDING_LENGTH_EXPECTED,
+  WORKER_BRIDGE_TIMEOUT_MS_MINIMUM,
+  WORKER_BRIDGE_KEY_LENGTH_EXPECTED,
+  WORKER_RESTART_BASE_DELAY_MS,
+  WORKER_RESTART_MAX_DELAY_MS,
+} from '../constants';
 import type { WorkerRequestMessage, Argon2HashResult } from '../types/crypto-types';
 import { SignalType } from '../types/signal-types';
 import { ACCOUNT_AUTH_PURPOSE, SERVER_ENTRY_PURPOSE } from '../config/audiences';
 import {
-  WORKER_AEAD_MAX_AAD_BYTES,
-  WORKER_AEAD_MAX_INPUT_BYTES,
   validateArgon2HashParams,
   validateArgon2VerifyParams,
   validateOpaqueLoginResponse,
@@ -39,8 +75,6 @@ import {
 } from '../../../shared/crypto-sizes.js';
 import { constantTimeBytesEqual } from '../../../shared/bytes.js';
 
-const EXPECTED_AUTH_TOKEN_BYTES = 32;
-
 function spawnPostQuantumWorker(): Worker {
   const trustedTypesAvailable = !!(window as any).trustedTypes;
   if (!trustedTypesAvailable) return new PQWorker();
@@ -52,11 +86,6 @@ function spawnPostQuantumWorker(): Worker {
   const workerSource = workerPolicy.createScriptURL(PQWorkerUrl);
   return new Worker(workerSource, { type: 'module' });
 }
-const MAIN_WORKER_MAX_PENDING = 32;
-const SIGNING_WORKER_MAX_PENDING = 16;
-const ARGON2_MAX_QUEUED_OPERATIONS = 3;
-const WORKER_READY_TIMEOUT_MS = 10_000;
-const WORKER_RECOVERY_COOLDOWN_MS = 30_000;
 
 function authTokenHex(token: Uint8Array): string {
   return Array.from(token, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -74,10 +103,9 @@ async function waitForWorkerAuthentication(
     if (current.worker && current.token) return authTokenHex(current.token);
     if (current.disabled) throw new PostQuantumWorkerInfrastructureError(`Worker recovery cooling down (${label})`);
     if (performance.now() >= deadline) throw new PostQuantumWorkerInfrastructureError(`Worker recovery timed out (${label})`);
-    await new Promise<void>(resolve => setTimeout(resolve, 50));
+    await sleep(WORKER_BRIDGE_WAIT_FOR_WORKER_AUTHENTICATION_DELAY_MS);
   }
 }
-
 
 export class PostQuantumWorkerInfrastructureError extends Error {
   readonly code = 'PQ_WORKER_INFRASTRUCTURE';
@@ -138,7 +166,7 @@ const isWorkerResponseFailureMessage = (data: Record<string, unknown>): data is 
   return (
     typeof data.id === 'string' &&
     data.id.length > 0 &&
-    data.id.length <= 256 &&
+    data.id.length <= WORKER_BRIDGE_IS_WORKER_RESPONSE_FAILURE_MESSAGE_DATA_ID_LENGTH_MINIMUM &&
     data.success === false &&
     typeof data.error === 'string'
   );
@@ -148,7 +176,7 @@ const isWorkerResponseSuccessMessage = (data: Record<string, unknown>): data is 
   return (
     typeof data.id === 'string' &&
     data.id.length > 0 &&
-    data.id.length <= 256 &&
+    data.id.length <= WORKER_BRIDGE_IS_WORKER_RESPONSE_SUCCESS_MESSAGE_DATA_ID_LENGTH_MINIMUM &&
     data.success === true &&
     Object.prototype.hasOwnProperty.call(data, 'result')
   );
@@ -204,19 +232,19 @@ const isPPGenerateResult = (result: unknown): result is { blindedTokens: Uint8Ar
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   if (!hasExactKeys(result, ['blindedTokens', 'tokenSecrets'])) return false;
   if (!Array.isArray(result.blindedTokens) || !Array.isArray(result.tokenSecrets)) return false;
-  if (result.blindedTokens.length < 1 || result.blindedTokens.length > 1000 || result.blindedTokens.length !== result.tokenSecrets.length) return false;
-  if (!result.blindedTokens.every((token) => token instanceof Uint8Array && token.length === 32)) return false;
+  if (result.blindedTokens.length < 1 || result.blindedTokens.length > WORKER_BRIDGE_IS_PPGENERATE_RESULT_RESULT_BLINDED_TOKENS_LENGTH_LIMIT || result.blindedTokens.length !== result.tokenSecrets.length) return false;
+  if (!result.blindedTokens.every((token) => token instanceof Uint8Array && token.length === WORKER_BRIDGE_TOKEN_LENGTH_EXPECTED)) return false;
   return result.tokenSecrets.every((token) =>
     isPlainObject(token)
     && !hasPrototypePollutionKeys(token)
     && token.tokenSecret instanceof Uint8Array
-    && token.tokenSecret.length === 36
+    && token.tokenSecret.length === WORKER_BRIDGE_TOKEN_TOKEN_SECRET_LENGTH_EXPECTED
     && token.blindingFactor instanceof Uint8Array
-    && token.blindingFactor.length === 32
+    && token.blindingFactor.length === WORKER_BRIDGE_TOKEN_BLINDING_FACTOR_LENGTH_EXPECTED
     && token.blindedElement instanceof Uint8Array
-    && token.blindedElement.length === 32
+    && token.blindedElement.length === WORKER_BRIDGE_TOKEN_BLINDED_ELEMENT_LENGTH_EXPECTED
     && typeof token.id === 'string'
-    && token.id.length <= 64
+    && token.id.length <= WORKER_BRIDGE_TOKEN_ID_LENGTH_MINIMUM
     && (token.purpose === ACCOUNT_AUTH_PURPOSE || token.purpose === SERVER_ENTRY_PURPOSE)
     && Number.isSafeInteger(token.issuedAt)
     && token.used === false
@@ -227,18 +255,18 @@ const isPPGenerateResult = (result: unknown): result is { blindedTokens: Uint8Ar
 const isPPUnblindResult = (result: unknown): result is { completedTokens: any[] } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   if (!hasExactKeys(result, ['completedTokens']) || !Array.isArray(result.completedTokens)) return false;
-  if (result.completedTokens.length < 1 || result.completedTokens.length > 1000) return false;
+  if (result.completedTokens.length < 1 || result.completedTokens.length > WORKER_BRIDGE_IS_PPUNBLIND_RESULT_RESULT_COMPLETED_TOKENS_LENGTH_LIMIT) return false;
   return result.completedTokens.every((token) =>
     isPlainObject(token)
     && !hasPrototypePollutionKeys(token)
     && token.tokenSecret instanceof Uint8Array
-    && token.tokenSecret.length === 36
+    && token.tokenSecret.length === WORKER_BRIDGE_TOKEN_TOKEN_SECRET_LENGTH_EXPECTED
     && token.unblindedToken instanceof Uint8Array
-    && token.unblindedToken.length === 64
+    && token.unblindedToken.length === WORKER_BRIDGE_TOKEN_UNBLINDED_TOKEN_LENGTH_EXPECTED
     && token.blindingFactor === undefined
     && token.blindedElement === undefined
     && typeof token.id === 'string'
-    && token.id.length <= 64
+    && token.id.length <= WORKER_BRIDGE_TOKEN_ID_LENGTH_MINIMUM
     && (token.purpose === ACCOUNT_AUTH_PURPOSE || token.purpose === SERVER_ENTRY_PURPOSE)
     && Number.isSafeInteger(token.issuedAt)
     && typeof token.used === 'boolean'
@@ -250,18 +278,18 @@ const isOpaqueStartRegResult = (result: unknown): result is { blindedElement: Ui
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['blindedElement', 'blindingFactor'])
     && result.blindedElement instanceof Uint8Array
-    && result.blindedElement.length === 32
+    && result.blindedElement.length === WORKER_BRIDGE_IS_OPAQUE_START_REG_RESULT_RESULT_BLINDED_ELEMENT_LENGTH_EXPECTED
     && result.blindingFactor instanceof Uint8Array
-    && result.blindingFactor.length === 32;
+    && result.blindingFactor.length === WORKER_BRIDGE_IS_OPAQUE_START_REG_RESULT_RESULT_BLINDING_FACTOR_LENGTH_EXPECTED;
 };
 
 const isOpaqueFinishRegResult = (result: unknown): result is { envelope: Uint8Array; exportKey: Uint8Array; authPublicKey: Uint8Array } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return hasExactKeys(result, ['envelope', 'exportKey', 'authPublicKey'])
     && result.envelope instanceof Uint8Array
-    && result.envelope.length === 72
+    && result.envelope.length === WORKER_BRIDGE_IS_OPAQUE_FINISH_REG_RESULT_RESULT_ENVELOPE_LENGTH_EXPECTED
     && result.exportKey instanceof Uint8Array
-    && result.exportKey.length === 32
+    && result.exportKey.length === WORKER_BRIDGE_IS_OPAQUE_FINISH_REG_RESULT_RESULT_EXPORT_KEY_LENGTH_EXPECTED
     && result.authPublicKey instanceof Uint8Array
     && result.authPublicKey.length === ML_DSA_87_PUBLIC_KEY_BYTES;
 };
@@ -276,7 +304,7 @@ const isOpaqueFinishLoginResult = (result: unknown): result is { success: boolea
   if (result.success === true) {
     return hasExactKeys(result, ['success', 'exportKey', 'authMessage'])
       && result.exportKey instanceof Uint8Array
-      && result.exportKey.length === 32
+      && result.exportKey.length === WORKER_BRIDGE_IS_OPAQUE_FINISH_LOGIN_RESULT_RESULT_EXPORT_KEY_LENGTH_EXPECTED
       && result.authMessage instanceof Uint8Array
       && result.authMessage.length === ML_DSA_87_SIGNATURE_BYTES;
   }
@@ -284,15 +312,15 @@ const isOpaqueFinishLoginResult = (result: unknown): result is { success: boolea
     && (hasExactKeys(result, ['success']) || (
       hasExactKeys(result, ['success', 'error'])
       && typeof result.error === 'string'
-      && result.error.length <= 2000
+      && result.error.length <= WORKER_BRIDGE_IS_OPAQUE_FINISH_LOGIN_RESULT_RESULT_ERROR_LENGTH_MINIMUM
     ));
 };
 
 const isArgon2HashResult = (result: unknown): result is Argon2HashResult => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   if (!hasExactKeys(result, ['hash', 'encoded'])) return false;
-  if (!(result.hash instanceof Uint8Array) || result.hash.length < 16 || result.hash.length > 128) return false;
-  if (typeof result.encoded !== 'string' || result.encoded.length === 0 || result.encoded.length > 512) return false;
+  if (!(result.hash instanceof Uint8Array) || result.hash.length < WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_HASH_LENGTH_MINIMUM || result.hash.length > WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_HASH_LENGTH_LIMIT) return false;
+  if (typeof result.encoded !== 'string' || result.encoded.length === 0 || result.encoded.length > WORKER_BRIDGE_IS_ARGON2_HASH_RESULT_RESULT_ENCODED_LENGTH_LIMIT) return false;
   return true;
 };
 
@@ -358,8 +386,6 @@ const validateWorkerResult = (expectedType: WorkerRequestMessage['type'], result
       return false;
   }
 };
-
-const WORKER_STABILITY_WINDOW_MS = 60_000;
 
 function operationTimeoutMs(type: WorkerRequestMessage['type']): number {
   switch (type) {
@@ -443,7 +469,7 @@ class WorkerChannel {
             if (!pending) return;
             clearTimeout(pending.timeoutId);
             this.pending.delete(data.id);
-            const errorText = data.error.length > 2000 ? data.error.slice(0, 2000) : data.error;
+            const errorText = data.error.length > WORKER_BRIDGE_VALIDATE_WORKER_DATA_ERROR_LENGTH_LIMIT ? data.error.slice(0, 2000) : data.error;
             pending.reject(new Error(errorText));
             return;
           }
@@ -539,7 +565,7 @@ class WorkerChannel {
       this.recoveryAfter = performance.now() + WORKER_RECOVERY_COOLDOWN_MS;
       return;
     }
-    const delay = Math.min(1000 * Math.pow(2, this.restartAttempts), 30_000);
+    const delay = Math.min(WORKER_RESTART_BASE_DELAY_MS * Math.pow(2, this.restartAttempts), WORKER_RESTART_MAX_DELAY_MS);
     this.restartAttempts += 1;
     setTimeout(() => {
       this.restarting = false;
@@ -684,7 +710,7 @@ export class PostQuantumWorker {
             }
             clearTimeout(pending.timeoutId);
             PostQuantumWorker.pending.delete(data.id);
-            const errorText = data.error.length > 2000 ? data.error.slice(0, 2000) : data.error;
+            const errorText = data.error.length > WORKER_BRIDGE_VALIDATE_WORKER_DATA_ERROR_LENGTH_LIMIT ? data.error.slice(0, 2000) : data.error;
             pending.reject(new Error(errorText));
             return;
           }
@@ -829,7 +855,7 @@ export class PostQuantumWorker {
       PostQuantumWorker.recoveryAfter = performance.now() + WORKER_RECOVERY_COOLDOWN_MS;
       return;
     }
-    const delay = Math.min(1000 * Math.pow(2, PostQuantumWorker.restartAttempts), 30_000);
+    const delay = Math.min(WORKER_RESTART_BASE_DELAY_MS * Math.pow(2, PostQuantumWorker.restartAttempts), WORKER_RESTART_MAX_DELAY_MS);
     PostQuantumWorker.restartAttempts += 1;
     setTimeout(() => {
       PostQuantumWorker.restarting = false;
@@ -1118,7 +1144,7 @@ export class PostQuantumWorker {
   ): Promise<{ success: boolean; exportKey?: Uint8Array; authMessage?: Uint8Array; error?: string }> {
     validateOpaquePassword(password);
     validateOpaqueLoginResponse(serverResponse);
-    if (!(authChannelBinding instanceof Uint8Array) || authChannelBinding.length !== 64) {
+    if (!(authChannelBinding instanceof Uint8Array) || authChannelBinding.length !== WORKER_BRIDGE_AUTH_CHANNEL_BINDING_LENGTH_EXPECTED) {
       throw new Error('Invalid authentication channel binding');
     }
     const boundedServerResponse = {
@@ -1156,7 +1182,7 @@ export class PostQuantumWorker {
   static async argon2Hash(params: unknown, timeoutMs?: number): Promise<Argon2HashResult> {
     validateArgon2HashParams(params);
     if (timeoutMs !== undefined && (
-      !Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > operationTimeoutMs('argon2.hash')
+      !Number.isInteger(timeoutMs) || timeoutMs < WORKER_BRIDGE_TIMEOUT_MS_MINIMUM || timeoutMs > operationTimeoutMs('argon2.hash')
     )) throw new Error('Invalid Argon2id timeout');
     return await PostQuantumWorker.runSerializedArgon2(() => (
       PostQuantumWorker.argon2Channel.request<Argon2HashResult>(
@@ -1171,7 +1197,7 @@ export class PostQuantumWorker {
   static async argon2Verify(params: unknown, timeoutMs?: number): Promise<boolean> {
     validateArgon2VerifyParams(params);
     if (timeoutMs !== undefined && (
-      !Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > operationTimeoutMs('argon2.verify')
+      !Number.isInteger(timeoutMs) || timeoutMs < WORKER_BRIDGE_TIMEOUT_MS_MINIMUM || timeoutMs > operationTimeoutMs('argon2.verify')
     )) throw new Error('Invalid Argon2id timeout');
     const response = await PostQuantumWorker.runSerializedArgon2(() => (
       PostQuantumWorker.argon2Channel.request<{ verified: boolean }>(
@@ -1193,7 +1219,7 @@ export class PostQuantumWorker {
     if (!(plaintext instanceof Uint8Array) || plaintext.length > WORKER_AEAD_MAX_INPUT_BYTES) {
       throw new Error('Invalid AEAD plaintext');
     }
-    if (!(key instanceof Uint8Array) || key.length !== 32) throw new Error('Invalid AEAD key');
+    if (!(key instanceof Uint8Array) || key.length !== WORKER_BRIDGE_KEY_LENGTH_EXPECTED) throw new Error('Invalid AEAD key');
     if (additionalData !== undefined && (
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
     )) throw new Error('Invalid AEAD additional data');
@@ -1248,7 +1274,7 @@ export class PostQuantumWorker {
     ) throw new Error('Invalid AEAD ciphertext');
     if (!(nonce instanceof Uint8Array) || nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) throw new Error('Invalid AEAD nonce');
     if (!(tag instanceof Uint8Array) || tag.length !== HASH_OUTPUT_BYTES) throw new Error('Invalid AEAD tag');
-    if (!(key instanceof Uint8Array) || key.length !== 32) throw new Error('Invalid AEAD key');
+    if (!(key instanceof Uint8Array) || key.length !== WORKER_BRIDGE_KEY_LENGTH_EXPECTED) throw new Error('Invalid AEAD key');
     if (additionalData !== undefined && (
       !(additionalData instanceof Uint8Array) || additionalData.length > WORKER_AEAD_MAX_AAD_BYTES
     )) throw new Error('Invalid AEAD additional data');

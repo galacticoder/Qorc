@@ -3,6 +3,22 @@
  * Executed inside the dedicated post-quantum worker
  */
 
+import {
+  CRYPTO_OPS_COUNT_LIMIT,
+  CRYPTO_OPS_TOKEN_SECRETS_LENGTH_LIMIT,
+  CRYPTO_OPS_PROOF_LENGTH_EXPECTED,
+  CRYPTO_OPS_SERVER_PUBLIC_KEY_LENGTH_EXPECTED,
+  CRYPTO_OPS_TOKEN_LENGTH_EXPECTED,
+  CRYPTO_OPS_TOKEN_TOKEN_SECRET_LENGTH_EXPECTED,
+  CRYPTO_OPS_TOKEN_BLINDING_FACTOR_LENGTH_EXPECTED,
+  CRYPTO_OPS_TOKEN_BLINDED_ELEMENT_LENGTH_EXPECTED,
+  CRYPTO_OPS_FINALIZED_LENGTH_EXPECTED,
+  CRYPTO_OPS_SERVER_RESPONSE_EVALUATED_ELEMENT_LENGTH_EXPECTED,
+  CRYPTO_OPS_SERVER_RESPONSE_SERVER_NONCE_LENGTH_EXPECTED,
+  CRYPTO_OPS_SERVER_RESPONSE_SALT_LENGTH_EXPECTED,
+  CRYPTO_OPS_SERVER_RESPONSE_ENVELOPE_LENGTH_EXPECTED,
+  CRYPTO_OPS_AUTH_SEED_LENGTH_EXPECTED,
+} from '../constants';
 import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
@@ -25,7 +41,7 @@ function privacyPassOprfInfo(purpose: string): Uint8Array {
  */
 export const PrivacyPassOps = {
     generateTokenBatch(count: number, purpose: string) {
-        if (!Number.isInteger(count) || count < 1 || count > 1000) {
+        if (!Number.isInteger(count) || count < 1 || count > CRYPTO_OPS_COUNT_LIMIT) {
             throw new Error('Invalid Privacy Pass batch size');
         }
         const blindedTokens: Uint8Array[] = [];
@@ -97,17 +113,17 @@ export const PrivacyPassOps = {
             !Array.isArray(tokenSecrets) ||
             tokenSecrets.length === 0 ||
             tokenSecrets.length !== signedBlindedTokens.length ||
-            tokenSecrets.length > 1000 ||
-            proof.length !== 64 ||
-            serverPublicKey.length !== 32 ||
-            !signedBlindedTokens.every((token) => token instanceof Uint8Array && token.length === 32)
+            tokenSecrets.length > CRYPTO_OPS_TOKEN_SECRETS_LENGTH_LIMIT ||
+            proof.length !== CRYPTO_OPS_PROOF_LENGTH_EXPECTED ||
+            serverPublicKey.length !== CRYPTO_OPS_SERVER_PUBLIC_KEY_LENGTH_EXPECTED ||
+            !signedBlindedTokens.every((token) => token instanceof Uint8Array && token.length === CRYPTO_OPS_TOKEN_LENGTH_EXPECTED)
         ) {
             throw new Error('Invalid Privacy Pass issuance response');
         }
         if (tokenSecrets.some((token) =>
-            !(token?.tokenSecret instanceof Uint8Array) || token.tokenSecret.length !== 36 ||
-            !(token.blindingFactor instanceof Uint8Array) || token.blindingFactor.length !== 32 ||
-            !(token.blindedElement instanceof Uint8Array) || token.blindedElement.length !== 32
+            !(token?.tokenSecret instanceof Uint8Array) || token.tokenSecret.length !== CRYPTO_OPS_TOKEN_TOKEN_SECRET_LENGTH_EXPECTED ||
+            !(token.blindingFactor instanceof Uint8Array) || token.blindingFactor.length !== CRYPTO_OPS_TOKEN_BLINDING_FACTOR_LENGTH_EXPECTED ||
+            !(token.blindedElement instanceof Uint8Array) || token.blindedElement.length !== CRYPTO_OPS_TOKEN_BLINDED_ELEMENT_LENGTH_EXPECTED
         )) {
             throw new Error('Invalid Privacy Pass token state');
         }
@@ -145,7 +161,7 @@ export const PrivacyPassOps = {
             for (let i = 0; i < tokenSecrets.length; i++) {
                 const source = tokenSecrets[i];
                 const finalized = finalizedTokens[i];
-                if (!(finalized instanceof Uint8Array) || finalized.length !== 64) {
+                if (!(finalized instanceof Uint8Array) || finalized.length !== CRYPTO_OPS_FINALIZED_LENGTH_EXPECTED) {
                     throw new Error('Invalid finalized Privacy Pass token');
                 }
                 completedTokens.push({
@@ -201,7 +217,7 @@ export const OPAQUEOps = {
             serverNonce: Uint8Array;
         }
     ) {
-        if (serverResponse.evaluatedElement.length !== 32 || serverResponse.serverNonce.length !== 32) {
+        if (serverResponse.evaluatedElement.length !== CRYPTO_OPS_SERVER_RESPONSE_EVALUATED_ELEMENT_LENGTH_EXPECTED || serverResponse.serverNonce.length !== CRYPTO_OPS_SERVER_RESPONSE_SERVER_NONCE_LENGTH_EXPECTED) {
             throw new Error('Invalid registration response');
         }
         let oprfInput: Uint8Array | null = null;
@@ -298,10 +314,10 @@ export const OPAQUEOps = {
         authChannelBinding: Uint8Array
     ) {
         if (
-            serverResponse.evaluatedElement.length !== 32 ||
-            serverResponse.serverNonce.length !== 32 ||
-            serverResponse.salt.length !== 32 ||
-            serverResponse.envelope.length !== 72 ||
+            serverResponse.evaluatedElement.length !== CRYPTO_OPS_SERVER_RESPONSE_EVALUATED_ELEMENT_LENGTH_EXPECTED ||
+            serverResponse.serverNonce.length !== CRYPTO_OPS_SERVER_RESPONSE_SERVER_NONCE_LENGTH_EXPECTED ||
+            serverResponse.salt.length !== CRYPTO_OPS_SERVER_RESPONSE_SALT_LENGTH_EXPECTED ||
+            serverResponse.envelope.length !== CRYPTO_OPS_SERVER_RESPONSE_ENVELOPE_LENGTH_EXPECTED ||
             authChannelBinding.length !== AUTH_CHANNEL_BINDING_BYTES
         ) {
             return { success: false };
@@ -347,7 +363,7 @@ export const OPAQUEOps = {
                 return { success: false };
             }
 
-            if (authSeed.length !== 32) {
+            if (authSeed.length !== CRYPTO_OPS_AUTH_SEED_LENGTH_EXPECTED) {
                 return { success: false };
             }
 

@@ -1,3 +1,27 @@
+import type { AnonymousHttpOperation } from '../constants/anonymous-http';
+import {
+  ANONYMOUS_HTTP_MAX_CLOCK_SKEW_MS,
+  ANONYMOUS_HTTP_OPERATION_POLICY,
+  DISCOVERY_HTTP_MAX_CONCURRENT_REQUESTS,
+  DISCOVERY_HTTP_MAX_QUEUED_REQUESTS,
+  BULK_HTTP_MAX_CONCURRENT_REQUESTS,
+  ANONYMOUS_HTTP_MAX_CONCURRENT_REQUESTS,
+  ANONYMOUS_HTTP_MAX_QUEUED_REQUESTS,
+  ANONYMOUS_HTTP_QUEUE_TIMEOUT_MS,
+  ANONYMOUS_HTTP_REQUEST_POW_DIFFICULTY,
+  RESERVED_JSON_KEYS,
+  RESPONSE_SIGNATURE_DOMAIN,
+  REQUEST_POW_DOMAIN,
+  ANONYMOUS_HTTP_REQUEST_MAGIC_BYTES,
+  REQUEST_AAD_DOMAIN,
+  ANONYMOUS_HTTP_RESPONSE_MAGIC_BYTES,
+  RESPONSE_AAD_DOMAIN,
+  PQ_ANONYMOUS_HTTP_KEY_LENGTH_LIMIT,
+  PQ_ANONYMOUS_HTTP_PLAINTEXT_LENGTH_MINIMUM,
+  PQ_ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_LENGTH_EXPECTED,
+  ANONYMOUS_PAYLOAD_MAX_JSON_NODES,
+  ANONYMOUS_PAYLOAD_MAX_JSON_DEPTH,
+} from '../constants';
 import { encodeAnonymousRequest, decodeAnonymousResponse } from '../../../shared/anonymous-http-codec.js';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumKEM } from '../cryptography/kem';
@@ -10,7 +34,6 @@ import { computeX25519SharedSecret, generateX25519KeyPair } from '../utils/noise
 import websocketClient from '../websocket/websocket';
 import { hasExactKeys, isPlainRecord } from '../sanitizers';
 import { AnonymousRequestLane } from './anonymous-request-lane';
-import { DiscoveryTransferDiagnostics } from './discovery-transfer-diagnostics';
 import type { AnonymousServerContext } from './anonymous-server-trust';
 import {
   assertCurrentServerContext,
@@ -18,108 +41,40 @@ import {
   type CurrentServerContext,
 } from '../security/local-account-scope';
 import {
-  ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
   DISCOVERY_LOOKUP_TIMEOUT_MS,
   isAnonymousResponseTimestampValid,
 } from '../../../shared/anonymous-transfer-policy.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import {
-  AVATAR_BLOB_GET_AUDIENCE,
-  AVATAR_BLOB_PUT_AUDIENCE,
-  AVATAR_POOL_AUDIENCE,
-  DISCOVERY_BUCKET_AUDIENCE,
-  DISCOVERY_MANIFEST_AUDIENCE,
-  KEY_TRANSPARENCY_APPEND_AUDIENCE,
-  KEY_TRANSPARENCY_SYNC_AUDIENCE,
-  OPRF_EVALUATE_AUDIENCE,
-  SPOOL_PIR_AUDIENCE,
-  SPOOL_TAG_INDEX_AUDIENCE,
-} from '../config/audiences';
-import {
-  KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES,
-  KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS,
-} from '../../../shared/key-transparency-protocol.js';
+import { DISCOVERY_BUCKET_AUDIENCE } from '../config/audiences';
 import {
   ANONYMOUS_HTTP_REQUEST_CIPHERTEXT_OFFSET,
-  ANONYMOUS_HTTP_REQUEST_LARGE_BYTES,
-  ANONYMOUS_HTTP_REQUEST_PIR_BYTES,
   ANONYMOUS_HTTP_REQUEST_POW_NONCE_OFFSET,
   ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET,
   ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES,
   ANONYMOUS_HTTP_REQUEST_SMALL_BYTES,
   ANONYMOUS_HTTP_REQUEST_TAG_OFFSET,
-  ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES,
   ANONYMOUS_HTTP_RESPONSE_CIPHERTEXT_OFFSET,
-  ANONYMOUS_HTTP_RESPONSE_PIR_BYTES,
   ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES,
   ANONYMOUS_HTTP_RESPONSE_SIGNATURE_OFFSET,
   ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES,
-  ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES,
   ANONYMOUS_HTTP_RESPONSE_TAG_OFFSET,
   ANONYMOUS_HTTP_WIRE_VERSION,
 } from '../../../shared/anonymous-http-layout.js';
 import { ML_KEM_1024_CIPHERTEXT_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES, POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES } from '../../../shared/crypto-sizes.js';
-import { SecureMemory } from '../cryptography/secure-memory';
 import { Base64 } from '../cryptography/base64';
-import { concatUint8Arrays } from '../../../shared/bytes.js';
+import { concatUint8Arrays, constantTimeBytesEqual } from '../../../shared/bytes.js';
 import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
 
-export type AnonymousHttpOperation =
-  | typeof AVATAR_BLOB_GET_AUDIENCE
-  | typeof AVATAR_BLOB_PUT_AUDIENCE
-  | typeof AVATAR_POOL_AUDIENCE
-  | typeof DISCOVERY_BUCKET_AUDIENCE
-  | typeof DISCOVERY_MANIFEST_AUDIENCE
-  | typeof KEY_TRANSPARENCY_SYNC_AUDIENCE
-  | typeof KEY_TRANSPARENCY_APPEND_AUDIENCE
-  | typeof OPRF_EVALUATE_AUDIENCE
-  | typeof SPOOL_TAG_INDEX_AUDIENCE
-  | typeof SPOOL_PIR_AUDIENCE;
+export type { AnonymousHttpOperation } from '../constants/anonymous-http';
 
-const REQUEST_MAGIC = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_REQUEST_MAGIC);
-const RESPONSE_MAGIC = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_MAGIC);
-const REQUEST_AAD_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_REQUEST_AAD);
-const RESPONSE_AAD_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_AAD);
-const RESPONSE_SIGNATURE_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_RESPONSE_SIGNATURE);
-const REQUEST_POW_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.PQ_ANONYMOUS_HTTP_ADMISSION_POW);
-
-
-
-
-const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
-const REQUEST_POW_DIFFICULTY = 12;
-const MAX_CONCURRENT_REQUESTS = 4;
-const MAX_QUEUED_REQUESTS = 64;
-const QUEUE_TIMEOUT_MS = 3 * 60 * 1000;
-const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-
-const OPERATION_POLICY: Readonly<Record<AnonymousHttpOperation, {
-  requestClass: number;
-  requestBytes: number;
-  responseClass: number;
-  responseBytes: number;
-}>> = Object.freeze({
-  [AVATAR_BLOB_GET_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 2, responseBytes: ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES },
-  [AVATAR_BLOB_PUT_AUDIENCE]: { requestClass: 2, requestBytes: ANONYMOUS_HTTP_REQUEST_LARGE_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES },
-  [AVATAR_POOL_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES },
-  [DISCOVERY_BUCKET_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 4, responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES },
-  [DISCOVERY_MANIFEST_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES },
-  [KEY_TRANSPARENCY_SYNC_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: KEY_TRANSPARENCY_SYNC_RESPONSE_CLASS, responseBytes: KEY_TRANSPARENCY_SYNC_RESPONSE_BYTES },
-  [KEY_TRANSPARENCY_APPEND_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES },
-  [OPRF_EVALUATE_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES },
-  [SPOOL_TAG_INDEX_AUDIENCE]: { requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES },
-  [SPOOL_PIR_AUDIENCE]: { requestClass: 3, requestBytes: ANONYMOUS_HTTP_REQUEST_PIR_BYTES, responseClass: 5, responseBytes: ANONYMOUS_HTTP_RESPONSE_PIR_BYTES },
-});
-
-const primaryRequestLane = new AnonymousRequestLane(MAX_CONCURRENT_REQUESTS, MAX_QUEUED_REQUESTS, QUEUE_TIMEOUT_MS);
-const discoveryRequestLane = new AnonymousRequestLane(2, 16, DISCOVERY_LOOKUP_TIMEOUT_MS);
-const bulkRequestLane = new AnonymousRequestLane(3, MAX_QUEUED_REQUESTS, DISCOVERY_LOOKUP_TIMEOUT_MS);
+const primaryRequestLane = new AnonymousRequestLane(ANONYMOUS_HTTP_MAX_CONCURRENT_REQUESTS, ANONYMOUS_HTTP_MAX_QUEUED_REQUESTS, ANONYMOUS_HTTP_QUEUE_TIMEOUT_MS);
+const discoveryRequestLane = new AnonymousRequestLane(DISCOVERY_HTTP_MAX_CONCURRENT_REQUESTS, DISCOVERY_HTTP_MAX_QUEUED_REQUESTS, DISCOVERY_LOOKUP_TIMEOUT_MS);
+const bulkRequestLane = new AnonymousRequestLane(BULK_HTTP_MAX_CONCURRENT_REQUESTS, ANONYMOUS_HTTP_MAX_QUEUED_REQUESTS, DISCOVERY_LOOKUP_TIMEOUT_MS);
 
 function isBulkTransportOperation(operation: AnonymousHttpOperation): boolean {
-  const policy = OPERATION_POLICY[operation];
+  const policy = ANONYMOUS_HTTP_OPERATION_POLICY[operation];
   return policy.requestBytes > ANONYMOUS_HTTP_REQUEST_SMALL_BYTES || policy.responseBytes > ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES;
 }
-
 
 function isSafeResponseTree(root: unknown): boolean {
   const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
@@ -127,23 +82,19 @@ function isSafeResponseTree(root: unknown): boolean {
   while (stack.length > 0) {
     const { value, depth } = stack.pop()!;
     nodes += 1;
-    if (nodes > 500_000 || depth > 32) return false;
+    if (nodes > ANONYMOUS_PAYLOAD_MAX_JSON_NODES || depth > ANONYMOUS_PAYLOAD_MAX_JSON_DEPTH) return false;
     if (!value || typeof value !== 'object') continue;
     if (!Array.isArray(value) && !isPlainRecord(value)) return false;
     for (const [key, child] of Object.entries(value)) {
-      if (key.length > 256 || RESERVED_JSON_KEYS.has(key)) return false;
+      if (key.length > PQ_ANONYMOUS_HTTP_KEY_LENGTH_LIMIT || RESERVED_JSON_KEYS.has(key)) return false;
       stack.push({ value: child, depth: depth + 1 });
     }
   }
   return true;
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length && SecureMemory.constantTimeCompare(left, right);
-}
-
 function assertMagic(body: Uint8Array, expected: Uint8Array): void {
-  if (!bytesEqual(body.subarray(0, expected.length), expected)) {
+  if (!constantTimeBytesEqual(body.subarray(0, expected.length), expected)) {
     throw new Error('Invalid anonymous transport response');
   }
 }
@@ -185,7 +136,7 @@ function decodeRawResponse(value: ArrayBuffer | Uint8Array): Uint8Array {
 }
 
 function decodePaddedResponse(operation: AnonymousHttpOperation, plaintext: Uint8Array): unknown {
-  if (plaintext.length < 5) throw new Error('Invalid anonymous transport response');
+  if (plaintext.length < PQ_ANONYMOUS_HTTP_PLAINTEXT_LENGTH_MINIMUM) throw new Error('Invalid anonymous transport response');
   const jsonLength = new DataView(
     plaintext.buffer,
     plaintext.byteOffset,
@@ -214,10 +165,9 @@ async function executeAnonymousHttpRequest(
   authentication: AnonymousServerContext,
   signal: AbortSignal,
   onProgress?: (receivedBytes: number) => void,
-  diagnostics?: DiscoveryTransferDiagnostics,
 ): Promise<unknown> {
   signal?.throwIfAborted();
-  const policy = OPERATION_POLICY[operation];
+  const policy = ANONYMOUS_HTTP_OPERATION_POLICY[operation];
   if (!policy || !isPlainRecord(body)) throw new Error('Invalid anonymous transport request');
   const serverMaterial = authentication.material;
   const trustedNow = authentication.now();
@@ -254,7 +204,6 @@ async function executeAnonymousHttpRequest(
   let signatureDigest: Uint8Array | null = null;
   let plaintextResponse: Uint8Array | null = null;
   try {
-    diagnostics?.phase('key-exchange');
     const staticEncapsulation = await PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
     staticKemCiphertext = staticEncapsulation.ciphertext;
     staticKemSecret = staticEncapsulation.sharedSecret;
@@ -265,7 +214,7 @@ async function executeAnonymousHttpRequest(
       serverMaterial.x25519PublicKey!
     );
 
-    request.set(REQUEST_MAGIC, 0);
+    request.set(ANONYMOUS_HTTP_REQUEST_MAGIC_BYTES, 0);
     request[8] = ANONYMOUS_HTTP_WIRE_VERSION;
     request[9] = policy.requestClass;
     request[10] = 0;
@@ -279,21 +228,18 @@ async function executeAnonymousHttpRequest(
     requestPowNonce = PostQuantumRandom.randomBytes(16);
     request.set(requestPowNonce, ANONYMOUS_HTTP_REQUEST_POW_NONCE_OFFSET);
     requestPowSeedBytes = requestPowSeed(request);
-    diagnostics?.phase('admission-pow');
     const requestPowSolutionBase64 = await solvePowChallenge({
       seed: Base64.arrayBufferToBase64(requestPowSeedBytes),
-      difficulty: REQUEST_POW_DIFFICULTY,
+      difficulty: ANONYMOUS_HTTP_REQUEST_POW_DIFFICULTY,
     }, signal);
     requestPowSolution = PostQuantumUtils.base64ToUint8Array(requestPowSolutionBase64);
     if (
-      requestPowSolution.length !== 8 ||
+      requestPowSolution.length !== PQ_ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_LENGTH_EXPECTED ||
       Base64.arrayBufferToBase64(requestPowSolution) !== requestPowSolutionBase64
     ) {
       throw new Error('Invalid anonymous transport admission work');
     }
     request.set(requestPowSolution, ANONYMOUS_HTTP_REQUEST_POW_SOLUTION_OFFSET);
-
-    diagnostics?.phase('request-encryption');
 
     requestAad = concatUint8Arrays(REQUEST_AAD_DOMAIN, request.subarray(0, ANONYMOUS_HTTP_REQUEST_PREFIX_BYTES));
     requestSalt = PostQuantumHash.blake3(requestAad);
@@ -333,19 +279,13 @@ async function executeAnonymousHttpRequest(
 
     await assertCurrentServerContext(serverContext);
     signal.throwIfAborted();
-    diagnostics?.phase('connecting-upload-waiting-headers');
     const nativeResponse = await anonymousHttp.fetch(
       request,
       serverContext.serverUrl,
       {
-        responseBytes: policy.responseBytes, signal, diagnosticId: diagnostics?.id,
-        onProgress: diagnostics ? (bytes) => {
-          diagnostics.progress(bytes);
-          onProgress?.(bytes);
-        } : onProgress,
+        responseBytes: policy.responseBytes, signal, onProgress,
       },
     );
-    diagnostics?.phase('response-authentication');
     signal?.throwIfAborted();
     response = decodeRawResponse(nativeResponse);
     await assertCurrentServerContext(serverContext);
@@ -358,7 +298,7 @@ async function executeAnonymousHttpRequest(
       response[11] !== 0
     ) {
       const lengthOk = response.length === policy.responseBytes;
-      const magicOk = bytesEqual(response.subarray(0, 8), RESPONSE_MAGIC);
+      const magicOk = constantTimeBytesEqual(response.subarray(0, 8), ANONYMOUS_HTTP_RESPONSE_MAGIC_BYTES);
       if (!magicOk && (lengthOk || response.length === ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES)) {
         throw new Error(
           `Anonymous transport request was rejected by the server (${operation}); ` +
@@ -373,17 +313,17 @@ async function executeAnonymousHttpRequest(
         `reserved ${response[10]},${response[11]}`
       );
     }
-    assertMagic(response, RESPONSE_MAGIC);
-    if (!bytesEqual(response.subarray(12, 44), requestId)) {
+    assertMagic(response, ANONYMOUS_HTTP_RESPONSE_MAGIC_BYTES);
+    if (!constantTimeBytesEqual(response.subarray(12, 44), requestId)) {
       throw new Error('Anonymous transport response request binding failed');
     }
     const responseView = new DataView(response.buffer, response.byteOffset, response.byteLength);
     const responseTimestamp = readTimestamp(responseView, 44);
     const currentTrustedNow = authentication.now();
-    if (!isAnonymousResponseTimestampValid(responseTimestamp, trustedNow, currentTrustedNow, MAX_CLOCK_SKEW_MS)) {
+    if (!isAnonymousResponseTimestampValid(responseTimestamp, trustedNow, currentTrustedNow, ANONYMOUS_HTTP_MAX_CLOCK_SKEW_MS)) {
       throw new Error('Anonymous transport response timestamp is invalid');
     }
-    if (!bytesEqual(response.subarray(52, 84), fingerprint)) {
+    if (!constantTimeBytesEqual(response.subarray(52, 84), fingerprint)) {
       throw new Error('Anonymous transport response fingerprint mismatch');
     }
 
@@ -400,7 +340,6 @@ async function executeAnonymousHttpRequest(
       throw new Error('Anonymous transport response authentication failed');
     }
 
-    diagnostics?.phase('response-decryption');
     responseKemCiphertext = new Uint8Array(response.subarray(84, ANONYMOUS_HTTP_RESPONSE_PREFIX_BYTES));
     responseSharedSecret = await PostQuantumKEM.decapsulate(
       responseKemCiphertext,
@@ -424,7 +363,6 @@ async function executeAnonymousHttpRequest(
     );
     await assertCurrentServerContext(serverContext);
     signal.throwIfAborted();
-    diagnostics?.phase('response-parse');
     return decodePaddedResponse(operation, plaintextResponse);
   } finally {
     requestId.fill(0);
@@ -479,10 +417,6 @@ export async function anonymousHttpFetch(
   const timer = setTimeout(abort, DISCOVERY_LOOKUP_TIMEOUT_MS);
   let releaseDiscovery: (() => void) | undefined;
   let release: (() => void) | undefined;
-  const diagnostics = operation === DISCOVERY_BUCKET_AUDIENCE || operation === KEY_TRANSPARENCY_SYNC_AUDIENCE
-    ? new DiscoveryTransferDiagnostics(OPERATION_POLICY[operation].responseBytes,
-      operation === DISCOVERY_BUCKET_AUDIENCE ? 'bucket' : 'key-transparency') : undefined;
-  let outcome: 'success' | 'cancelled' | 'error' = 'error';
   try {
     controller.signal.throwIfAborted();
     const serverContext = await captureCurrentServerContext(authentication.material);
@@ -490,26 +424,20 @@ export async function anonymousHttpFetch(
       throw new Error('Authenticated server changed before anonymous request');
     }
     if (operation === DISCOVERY_BUCKET_AUDIENCE) {
-      diagnostics?.phase('discovery-queue');
       releaseDiscovery = await discoveryRequestLane.acquire(controller.signal);
     }
-    diagnostics?.phase('bulk-queue');
     release = await (isBulkTransportOperation(operation) ? bulkRequestLane : primaryRequestLane).acquire(controller.signal);
     await assertCurrentServerContext(serverContext);
     controller.signal.throwIfAborted();
-    const result = await executeAnonymousHttpRequest(
+    return await executeAnonymousHttpRequest(
       operation,
       body,
       serverContext,
       authentication,
       controller.signal,
       options.onProgress,
-      diagnostics,
     );
-    outcome = 'success';
-    return result;
   } finally {
-    diagnostics?.finish(controller.signal.aborted ? 'cancelled' : outcome);
     release?.();
     releaseDiscovery?.();
     clearTimeout(timer);

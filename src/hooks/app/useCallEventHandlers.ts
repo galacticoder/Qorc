@@ -7,6 +7,8 @@ import { isValidCallId, isValidCallingUsername } from '../../lib/utils/calling-u
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
   LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS,
+  MAX_CALL_DURATION_SECONDS,
+  MAX_CALL_SIGNAL_CLOCK_SKEW_MS,
 } from '../../lib/constants';
 
 interface CallEventHandlersProps {
@@ -93,8 +95,8 @@ export function useCallEventHandlers({
       const historyOnly = (detail as any).historyOnly ?? false;
       if (
         !isValidCallId(callId) ||
-        !Number.isSafeInteger(at) || at < 0 || at > now + 5 * 60 * 1000 ||
-        !Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 30 * 24 * 60 * 60 * 1000 ||
+        !Number.isSafeInteger(at) || at < 0 || at > now + MAX_CALL_SIGNAL_CLOCK_SKEW_MS ||
+        !Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > MAX_CALL_DURATION_SECONDS * 1_000 ||
         typeof isVideo !== 'boolean' ||
         typeof isOutgoing !== 'boolean' ||
         typeof historyOnly !== 'boolean'

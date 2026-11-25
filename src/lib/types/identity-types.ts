@@ -1,6 +1,7 @@
+import { CERTIFIED_IDENTITY_BUNDLE_VERSION } from '../constants';
 import type { PeerCertificateBundle } from './p2p-types';
 
-export const CERTIFIED_IDENTITY_BUNDLE_VERSION = 3 as const;
+export { CERTIFIED_IDENTITY_BUNDLE_VERSION } from "../constants/validation";
 
 export type CertifiedIdentityAuthorityModel = 'account-device-chain';
 export type CertifiedIdentitySignatureAlgorithm = 'ML-DSA-87';

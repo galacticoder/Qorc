@@ -1,5 +1,7 @@
 //! Secure Storage Commands
 
+use crate::validation::is_hex_256;
+use crate::constants::storage::SECURE_KEY_MAX_LEN;
 use tauri::State;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -7,16 +9,10 @@ use zeroize::Zeroizing;
 use crate::state::AppState;
 use crate::local_account_data::AccountStorageOwnership;
 
-const SECURE_KEY_MAX_LEN: usize = 512;
-static SECURE_MUTATION_LOCK: Mutex<()> = Mutex::const_new(());
+pub(crate) static SECURE_MUTATION_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn has_hex_256_suffix(key: &str, prefix: &str) -> bool {
-    key.strip_prefix(prefix).is_some_and(|suffix| {
-        suffix.len() == 64
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    key.strip_prefix(prefix).is_some_and(is_hex_256)
 }
 
 fn secure_key_allowed(key: &str) -> bool {
@@ -65,7 +61,7 @@ pub async fn secure_set(
     if !secure_key_allowed(&key) {
         return Err(reject_secure_key(&key));
     }
-    if value.len() > crate::storage::SECURE_VALUE_MAX_BYTES {
+    if value.len() > crate::constants::storage::SECURE_VALUE_MAX_BYTES {
         return Err("Storage value exceeds its size limit".to_string());
     }
     let _account_guard = crate::local_account_data::cache_guard(state.inner(), &key, ownership.as_ref()).await?;

@@ -2,7 +2,10 @@
 //!
 //! System notifications
 
+#[cfg(not(target_os = "android"))]
+use crate::constants::system::{MAX_NOTIFICATIONS_PER_WINDOW, RATE_LIMIT_WINDOW_MS};
 use std::sync::Arc;
+#[cfg(not(target_os = "android"))]
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -10,13 +13,14 @@ use parking_lot::RwLock;
 use crate::error::{QorcError, QorcResult};
 use crate::state::AppState;
 
-const RATE_LIMIT_WINDOW_MS: u128 = 60_000;
-const MAX_NOTIFICATIONS_PER_WINDOW: usize = 5;
+#[cfg(not(target_os = "android"))]
 const NOTIFICATION_TITLE: &str = "New Qorc activity";
+#[cfg(not(target_os = "android"))]
 const NOTIFICATION_BODY: &str = "Open Qorc to view it";
 
 pub struct NotificationHandler {
     enabled: RwLock<bool>,
+    #[cfg(not(target_os = "android"))]
     notification_times: RwLock<Vec<Instant>>,
     #[cfg(target_os = "android")]
     app: Option<tauri::AppHandle>,
@@ -26,12 +30,14 @@ impl NotificationHandler {
     pub fn new() -> Self {
         Self {
             enabled: RwLock::new(true),
+            #[cfg(not(target_os = "android"))]
             notification_times: RwLock::new(Vec::new()),
             #[cfg(target_os = "android")]
             app: None,
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn try_reserve_notification(&self) -> bool {
         let now = Instant::now();
         let mut times = self.notification_times.write();

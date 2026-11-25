@@ -47,7 +47,7 @@ export interface LogoutSetters {
 export const createLogout = (
   refs: LogoutRefs,
   setters: LogoutSetters,
-  clearAuthenticationState: () => Promise<void>,
+  clearAuthenticationState: (assertCurrent: () => void) => Promise<void>,
   lifecycle: AuthLifecycle
 ) => {
   return async (secureDBRef: RefObject<SecureDB | null>, loginErrorMessage: string = "", options: { clearLocalData?: boolean; resetAllLocalData?: boolean } = {}) => {
@@ -59,8 +59,10 @@ export const createLogout = (
     if (destructive && !/^[a-f0-9]{64}$/.test(logoutAccountOwner)) {
       throw new Error('The account to delete could not be identified.');
     }
+    const beforeDeletion = lifecycle.capture();
     const deletionServerScope = options.clearLocalData ? await getCurrentServerScope() : null;
-    if (destructive && (secureDBRef.current !== logoutDatabase || refs.loginUsernameRef.current !== logoutUsername)) {
+    if (destructive && (!lifecycle.isCurrent(beforeDeletion) ||
+        secureDBRef.current !== logoutDatabase || refs.loginUsernameRef.current !== logoutUsername)) {
       throw new Error('The active account changed before deletion.');
     }
     const operation = lifecycle.begin('');
@@ -107,10 +109,12 @@ export const createLogout = (
       try {
         if (options.resetAllLocalData) {
           await Promise.all([connectionClose, p2pClose]);
+          isCurrent();
           if (!await account.resetAllLocalData(logoutAccountOwner)) throw new Error('The local app reset was rejected');
           return;
         } else if (options.clearLocalData) {
           await Promise.all([connectionClose, p2pClose]);
+          isCurrent();
           if (!deletionServerScope || !await account.clearLocalData(logoutAccountOwner, deletionServerScope)) {
             throw new Error('Local account deletion was rejected');
           }
@@ -120,7 +124,7 @@ export const createLogout = (
       } catch {
         localSecretCleanupFailed = true;
         accountDeletionFailed = destructive;
-        if (destructive) {
+        if (destructive && lifecycle.isCurrent(operation)) {
           try { await account.lock(logoutAccountOwner, { purgeTokens: true, serverScope: deletionServerScope || logoutServerScope }); } catch { }
         }
       }
@@ -140,7 +144,7 @@ export const createLogout = (
     }
     if (!isCurrent()) return;
 
-    await clearAuthenticationState().catch(() => {
+    await clearAuthenticationState(() => lifecycle.assertCurrent(operation)).catch(() => {
       localSecretCleanupFailed = true;
     });
     if (!isCurrent()) return;

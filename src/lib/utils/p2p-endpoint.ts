@@ -1,14 +1,17 @@
+import {
+  ONION_PREFIX,
+  ONION_HOST_RE,
+  P2P_ENDPOINT_NORMALIZE_P2_PENDPOINT_URL_INPUT_LENGTH_LIMIT,
+} from '../constants';
 export type ParsedP2PEndpoint = {
   endpointUrl: string;
   endpointId: string;
   hasDirectAddress: boolean;
 };
 
-const ONION_PREFIX = 'onion://';
-const ONION_HOST_RE = /^[a-z2-7]{56}\.onion$/;
 export function normalizeP2PEndpointUrl(input: string | null | undefined): string | undefined {
   if (typeof input !== 'string') return undefined;
-  if (input !== input.trim() || !input || input.length > 512) return undefined;
+  if (input !== input.trim() || !input || input.length > P2P_ENDPOINT_NORMALIZE_P2_PENDPOINT_URL_INPUT_LENGTH_LIMIT) return undefined;
   if (!input.startsWith(ONION_PREFIX)) return undefined;
 
   const host = input.slice(ONION_PREFIX.length).toLowerCase();

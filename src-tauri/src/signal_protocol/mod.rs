@@ -1,5 +1,11 @@
 //! Signal Protocol Handler
 
+use crate::constants::signal::{
+    MAX_PEER_ML_KEM_KEYS, MAX_PENDING_APPLICATION_TYPE_BYTES, MAX_PENDING_DECRYPT_TOTAL_BYTES,
+    MAX_PENDING_DECRYPTS, MAX_PENDING_TRANSPORT_MESSAGE_ID_BYTES, MAX_SIGNAL_CIPHERTEXT_BYTES,
+    MAX_SIGNAL_PLAINTEXT_BYTES, MAX_SIGNAL_STORE_BLOB_BYTES, PREKEY_RETENTION_MS,
+    PREKEY_ROTATION_MS, SIGNAL_DEVICE_ID_MAX,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -29,18 +35,9 @@ pub use store::*;
 const SIGNAL_PQ_KEM_ALGORITHM: &str = "ML-KEM-1024";
 const SIGNAL_PQ_KDF_ALGORITHM: &str = "BLAKE3-SHA3-512-DOMAIN-SEPARATED";
 const SIGNAL_PQ_AEAD_ALGORITHM: &str = "XCHACHA20-POLY1305";
-const SIGNAL_DEVICE_ID_MAX: u32 = 127;
-const MAX_SIGNAL_STORE_BLOB_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const MAX_SIGNAL_PLAINTEXT_BYTES: usize = 64 * 1024;
-const MAX_PENDING_DECRYPTS: usize = 512;
-const MAX_PENDING_DECRYPT_TOTAL_BYTES: usize = 8 * 1024 * 1024;
-const MAX_PENDING_TRANSPORT_MESSAGE_ID_BYTES: usize = 256;
-const MAX_PENDING_APPLICATION_TYPE_BYTES: usize = 64;
 const SIGNAL_CURVE_PUBLIC_KEY_BYTES: usize = 33;
 const SIGNAL_IDENTITY_SIGNATURE_BYTES: usize = 64;
 const SIGNAL_ML_KEM_PUBLIC_KEY_BYTES: usize = post_quantum::ML_KEM_PUBLIC_KEY_SIZE + 1;
-const MAX_SIGNAL_CIPHERTEXT_BYTES: usize = 512 * 1024;
-const MAX_PEER_ML_KEM_KEYS: usize = 10_000;
 type StaticMlKemKeyPair = (Vec<u8>, Zeroizing<Vec<u8>>);
 type SignalStores = (
     Arc<Mutex<InMemorySessionStore>>,
@@ -711,8 +708,6 @@ impl SignalHandler {
 
         self.generate_identity(username).await?;
 
-        const PREKEY_ROTATION_MS: u64 = 24 * 60 * 60 * 1000;
-        const PREKEY_RETENTION_MS: u64 = 7 * PREKEY_ROTATION_MS;
         let now_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_err(|e| QorcError::SignalProtocol(format!("System clock error: {}", e)))?

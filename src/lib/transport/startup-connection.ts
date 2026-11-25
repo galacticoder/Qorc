@@ -1,3 +1,9 @@
+import { sleep } from '../runtime/sleep';
+import {
+  STARTUP_CONNECT_ATTEMPTS,
+  STARTUP_CONNECT_RETRY_DELAY_MS,
+  STARTUP_CONNECTION_START_WATCHDOG_INTERVAL_MS,
+} from '../constants';
 import { getTorAutoSetup } from './tor-auto-setup';
 import { torNetworkManager } from './tor-network';
 import { websocket, storage, anonymousHttp } from '../tauri-bindings';
@@ -24,9 +30,6 @@ export interface TorPreferences {
   transport: 'obfs4' | 'snowflake';
   bridgeLines: string;
 }
-
-const CONNECT_ATTEMPTS = 2;
-const RETRY_DELAY_MS = 2500;
 
 export function humanizeConnectionError(err: unknown): string {
   const raw = (err instanceof Error ? err.message : (typeof err === 'string' ? err : '')) || '';
@@ -92,8 +95,6 @@ export async function saveTorPreferences(preferences: TorPreferences): Promise<v
     writeStringPreference(STORAGE_KEYS.TOR_BRIDGE_LINES, preferences.bridgeLines),
   ]);
 }
-
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 class StartupConnection {
   private state: StartupConnectionState = {
@@ -173,7 +174,7 @@ class StartupConnection {
       if (websocketClient.isConnectedToServer() && this.isTorRouteReady()) {
         this.update({ phase: 'ready', step: '', error: '', failureTarget: null });
       }
-    }, 1500);
+    }, STARTUP_CONNECTION_START_WATCHDOG_INTERVAL_MS);
   }
 
   private stopWatchdog(): void {
@@ -341,11 +342,11 @@ class StartupConnection {
       }
 
       let lastError: unknown = null;
-      for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
+      for (let attempt = 1; attempt <= STARTUP_CONNECT_ATTEMPTS; attempt++) {
         if (this.generation !== generation) return;
         this.update({ phase: 'server', step: 'Connecting to server...', error: '', failureTarget: null });
         const attemptStartedAt = Date.now();
-        this.diagnostic('server-attempt-begin', { attempt, attemptLimit: CONNECT_ATTEMPTS });
+        this.diagnostic('server-attempt-begin', { attempt, attemptLimit: STARTUP_CONNECT_ATTEMPTS });
 
         try {
           await websocketClient.connect({ autoReconnectOnFailure: false });
@@ -366,13 +367,13 @@ class StartupConnection {
             errorName: error instanceof Error ? error.name : 'UnknownError',
             errorMessage: error instanceof Error ? error.message : String(error),
           }, 'error');
-          if (attempt < CONNECT_ATTEMPTS) {
+          if (attempt < STARTUP_CONNECT_ATTEMPTS) {
             this.update({ step: 'Retrying connection...' });
             this.diagnostic('server-retry-delay', {
               attempt,
-              delayMs: RETRY_DELAY_MS,
+              delayMs: STARTUP_CONNECT_RETRY_DELAY_MS,
             }, 'warn');
-            await delay(RETRY_DELAY_MS);
+            await sleep(STARTUP_CONNECT_RETRY_DELAY_MS);
           }
         }
       }

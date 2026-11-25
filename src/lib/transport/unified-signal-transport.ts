@@ -1,3 +1,4 @@
+import { sleep } from '../runtime/sleep';
 import { SignalType } from '../types/signal-types';
 import { LIVE_ONLY_DELIVERY_POLICY } from '../config/audiences';
 import websocketClient from '../websocket/websocket';
@@ -19,6 +20,34 @@ import {
   OUTBOUND_RETRY_MAX_AGE_MS,
   WS_CONTROL_RESPONSE_TIMEOUT_MS,
   WS_CONTROL_SEND_TIMEOUT_MS,
+  BLIND_ROUTE_ACK_LIVENESS_POLL_MS,
+  CALL_SIGNAL_QUEUE_MAX_WAIT_MS,
+  DELIVERY_ACK_TIMEOUT_MS,
+  DURABLE_ACK_RESTORE_RETRY_BASE_MS,
+  DURABLE_ACK_RETRY_MS,
+  ENCRYPTION_DENIAL_FRESH_MS,
+  MAX_ACKED_CHUNK_TRANSFERS,
+  MAX_AWAITING_ACK,
+  MAX_BLIND_ACK_WAITERS,
+  MAX_CONCURRENT_ACK_SPOOLS,
+  MAX_CONCURRENT_SEND_TASKS,
+  MAX_DURABLE_ACK_BYTES,
+  MAX_EARLY_ACKS_PER_PEER,
+  MAX_PRIORITY_BURST,
+  MAX_QUEUED_PRIORITY_SENDS,
+  MAX_QUEUED_SENDS_PER_PEER,
+  MAX_TOTAL_SEND_TASKS,
+  REDELIVER_FLUSH_INTERVAL_MS,
+  REDELIVER_MAX_PENDING,
+  SPOOL_MAX_ATTEMPTS,
+  SPOOL_RETRY_BASE_MS,
+  UNIFIED_SIGNAL_TRANSPORT_QUEUE_RECOVERY_CLEAR_TIMEOUT_MS,
+  UNIFIED_SIGNAL_TRANSPORT_MSG_ERROR_LENGTH_LIMIT,
+  ACK_TRACKED_SIGNAL_TYPES,
+  LIVE_ONLY_SIGNAL_TYPES,
+  DURABLE_ACK_RECONCILE_BASE_MS,
+  DURABLE_ACK_RECONCILE_MAX_EXPONENT,
+  DURABLE_ACK_RECONCILE_CAP_MS,
 } from '../constants';
 import { hasExactObjectKeys, isCanonicalAuthUsername, sanitizeMessageId } from '../sanitizers';
 import { blockingSystem } from '../blocking/blocking-system';
@@ -26,45 +55,9 @@ import { isHybridEnvelopeWireShape } from './envelope-shape';
 import { ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 
-const ENCRYPTION_DENIAL_FRESH_MS = 60_000;
-const CALL_SIGNAL_QUEUE_MAX_WAIT_MS = 5_000;
-const REDELIVER_FLUSH_INTERVAL_MS = 3000;
-const REDELIVER_MAX_PENDING = 400;
-const DELIVERY_ACK_TIMEOUT_MS = 25_000;
-const BLIND_ROUTE_ACK_LIVENESS_POLL_MS = 1_000;
-const MAX_AWAITING_ACK = 500;
-const MAX_EARLY_ACKS_PER_PEER = 32;
-const SPOOL_MAX_ATTEMPTS = 3;
-const SPOOL_RETRY_BASE_MS = 1500;
-const MAX_ACKED_CHUNK_TRANSFERS = 64;
-
-const MAX_QUEUED_SENDS_PER_PEER = 100;
-const MAX_QUEUED_PRIORITY_SENDS = 256;
-const MAX_TOTAL_SEND_TASKS = 512;
-const MAX_CONCURRENT_SEND_TASKS = 8;
-const MAX_CONCURRENT_ACK_SPOOLS = 4;
-const MAX_BLIND_ACK_WAITERS = 512;
-const MAX_PRIORITY_BURST = 4;
-const MAX_DURABLE_ACK_BYTES = 16 * 1024 * 1024;
-const DURABLE_ACK_RETRY_MS = 30_000;
-const DURABLE_ACK_RESTORE_RETRY_BASE_MS = 1000;
-
-const ACK_TRACKED_SIGNAL_TYPES: ReadonlySet<SignalType> = new Set([
-    SignalType.MESSAGE,
-    SignalType.EDIT_MESSAGE, SignalType.DELETE_MESSAGE,
-    SignalType.REACTION_ADD, SignalType.REACTION_REMOVE,
-    SignalType.FILE_MESSAGE_CHUNK
-]);
-
 export function isAckTrackedSignalType(type: unknown): type is SignalType {
     return ACK_TRACKED_SIGNAL_TYPES.has(type as SignalType);
 }
-
-const LIVE_ONLY_SIGNAL_TYPES: ReadonlySet<SignalType> = new Set([
-    SignalType.CALL_SIGNAL,
-    SignalType.TYPING_START, SignalType.TYPING_STOP,
-    SignalType.FILE_MESSAGE_CHUNK, SignalType.FILE_TRANSFER_CANCEL
-]);
 
 export function isLiveOnlySignalType(type: unknown): type is SignalType {
     return LIVE_ONLY_SIGNAL_TYPES.has(type as SignalType);
@@ -635,7 +628,7 @@ class UnifiedSignalTransport {
         const generation = this.accountGeneration;
         const deliveryGeneration = this.deliveryAckGeneration;
         const persistence = this.deliveryAckPersistence;
-        const delay = Math.min(1000 * (2 ** Math.min(this.durableAckReconcileAttempts, 6)), 60_000);
+        const delay = Math.min(DURABLE_ACK_RECONCILE_BASE_MS * (2 ** Math.min(this.durableAckReconcileAttempts, DURABLE_ACK_RECONCILE_MAX_EXPONENT)), DURABLE_ACK_RECONCILE_CAP_MS);
         this.durableAckReconcileTimer = setTimeout(() => {
             this.durableAckReconcileTimer = null;
             if (
@@ -681,7 +674,7 @@ class UnifiedSignalTransport {
             this.recoveryClearTimer = setTimeout(() => {
                 this.recoveryClearTimer = null;
                 this.flushRecoveryClears();
-            }, 50);
+            }, UNIFIED_SIGNAL_TRANSPORT_QUEUE_RECOVERY_CLEAR_TIMEOUT_MS);
         }
     }
 
@@ -1146,7 +1139,7 @@ class UnifiedSignalTransport {
         if (
             msg.type !== SignalType.BLIND_ROUTE_ACK ||
             typeof msg.success !== 'boolean' ||
-            ('error' in msg && (typeof msg.error !== 'string' || msg.error.length < 1 || msg.error.length > 200))
+            ('error' in msg && (typeof msg.error !== 'string' || msg.error.length < 1 || msg.error.length > UNIFIED_SIGNAL_TRANSPORT_MSG_ERROR_LENGTH_LIMIT))
         ) return;
         const rid = msg?.requestId;
         if (
@@ -1800,7 +1793,7 @@ class UnifiedSignalTransport {
             
             let transmitted = false;
             for (let attempt = 0; attempt < SPOOL_MAX_ATTEMPTS && !transmitted; attempt++) {
-                if (attempt > 0) await new Promise(r => setTimeout(r, SPOOL_RETRY_BASE_MS * attempt));
+                if (attempt > 0) await sleep(SPOOL_RETRY_BASE_MS * attempt);
                 if (
                     generation !== this.accountGeneration ||
                     deliveryGeneration !== this.deliveryAckGeneration

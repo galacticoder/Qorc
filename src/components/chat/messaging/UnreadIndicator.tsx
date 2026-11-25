@@ -1,3 +1,4 @@
+import { UNREAD_INDICATOR_COUNT_LIMIT } from '../../../lib/constants';
 import { memo } from 'react';
 
 interface UnreadIndicatorProps {
@@ -12,7 +13,7 @@ export const UnreadIndicator = memo<UnreadIndicatorProps>(({ count }) => {
             className="qorc-conversation-unread-badge"
             aria-label={`${count} unread ${count === 1 ? 'message' : 'messages'}`}
         >
-            {count > 99 ? '99+' : count}
+            {count > UNREAD_INDICATOR_COUNT_LIMIT ? '99+' : count}
         </span>
     );
 });

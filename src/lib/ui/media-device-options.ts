@@ -1,3 +1,4 @@
+import { WHITESPACE_COLLAPSE_REGEX } from '../constants';
 export interface MediaDeviceOption {
   readonly deviceId: string;
   readonly label: string;
@@ -9,7 +10,7 @@ export function uniqueMediaDevices(devices: readonly MediaDeviceOption[], fallba
     if (!device.deviceId || byId.has(device.deviceId)) continue;
     byId.set(device.deviceId, {
       deviceId: device.deviceId,
-      label: device.label.trim().replace(/\s+/g, ' ') || fallback,
+      label: device.label.trim().replace(WHITESPACE_COLLAPSE_REGEX, ' ') || fallback,
     });
   }
   const counts = new Map<string, number>();

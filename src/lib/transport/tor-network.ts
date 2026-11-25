@@ -2,6 +2,7 @@
  * Tor network manager
  */
 
+import { sleep } from '../runtime/sleep';
 import {
   TorConfig,
   TorConnectionStats,
@@ -9,14 +10,15 @@ import {
 } from '../types/tor-types';
 import {
   TOR_DEFAULT_MONITOR_INTERVAL_MS,
-  TOR_MAX_BACKOFF_MS
+  TOR_MAX_BACKOFF_MS,
+  TOR_BOOTSTRAP_POLL_MS,
+  TOR_BOOTSTRAP_TIMEOUT_MS,
+  TOR_DEEP_HEALTH_CHECK_INTERVAL_MS,
+  TOR_DEGRADED_LATENCY_MS,
+  TOR_MONITOR_BACKOFF_BASE_MS,
 } from '../constants';
 import { tor, websocket } from '../tauri-bindings';
 import type { TorStatus } from '../tauri-bindings';
-
-const TOR_DEEP_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const TOR_BOOTSTRAP_TIMEOUT_MS = 150_000;
-const TOR_BOOTSTRAP_POLL_MS = 1_000;
 
 export class TorNetworkManager {
   private config: TorConfig;
@@ -152,7 +154,7 @@ export class TorNetworkManager {
       if (!status.is_running) {
         return null;
       }
-      await new Promise((resolve) => setTimeout(resolve, TOR_BOOTSTRAP_POLL_MS));
+      await sleep(TOR_BOOTSTRAP_POLL_MS);
     }
 
     return latestStatus?.bootstrapped ? latestStatus : null;
@@ -177,8 +179,8 @@ export class TorNetworkManager {
         attempt += 1;
         if (attempt > maxRetries) break;
 
-        const delay = Math.min(1000 * 2 ** (attempt - 1), TOR_MAX_BACKOFF_MS);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        const delay = Math.min(TOR_MONITOR_BACKOFF_BASE_MS * 2 ** (attempt - 1), TOR_MAX_BACKOFF_MS);
+        await sleep(delay);
       }
     }
 
@@ -321,7 +323,7 @@ export class TorNetworkManager {
       return;
     }
 
-    if (latency > 5000) {
+    if (latency > TOR_DEGRADED_LATENCY_MS) {
       this.stats.circuitHealth = 'degraded';
     } else {
       this.stats.circuitHealth = 'good';
@@ -468,7 +470,7 @@ export class TorNetworkManager {
       if (!result.success && result.error) {
         console.error('[TOR] Connection test failed:', result.error);
       } else if (result.success) {
-        this.stats.circuitHealth = latency > 5000 ? 'degraded' : 'good';
+        this.stats.circuitHealth = latency > TOR_DEGRADED_LATENCY_MS ? 'degraded' : 'good';
         this.stats.averageLatency = Number.isFinite(this.stats.averageLatency)
           ? this.stats.averageLatency * 0.8 + latency * 0.2
           : latency;

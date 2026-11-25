@@ -1,3 +1,5 @@
+import { AUTH_SUCCESS_CREATE_HANDLE_AUTH_SUCCESS_TIMEOUT_MS } from '../../lib/constants';
+import { sleep } from '../../lib/runtime/sleep';
 import { RefObject } from "react";
 import { clearExplicitLogout } from "../../lib/auth/logout-marker";
 import { computeBlindUserId } from "../../lib/utils/auth-utils";
@@ -22,7 +24,7 @@ export const createHandleAuthSuccess = (
   refs: AuthSuccessRefs,
   setters: AuthSuccessSetters,
   helpers: {
-    storeAuthenticationState: (username: string, originalUsername?: string) => Promise<void>;
+    storeAuthenticationState: (username: string, displayName: string, assertCurrent: () => void) => Promise<void>;
     lifecycle: AuthLifecycle;
   }
 ) => {
@@ -33,7 +35,8 @@ export const createHandleAuthSuccess = (
     const pseudonym = computeBlindUserId(username);
 
     try {
-      await clearExplicitLogout();
+      await helpers.storeAuthenticationState(username, displayName, () => helpers.lifecycle.assertCurrent(operation));
+      await clearExplicitLogout(() => helpers.lifecycle.assertCurrent(operation));
       helpers.lifecycle.assertCurrent(operation);
     } catch (error) {
       if (isStaleAuthOperation(error)) return;
@@ -41,8 +44,6 @@ export const createHandleAuthSuccess = (
     }
 
     refs.loginUsernameRef.current = username;
-    await helpers.storeAuthenticationState(username, displayName);
-    if (!helpers.lifecycle.isCurrent(operation)) return;
 
     setters.setAuthStatus("Authenticated");
     setters.setUsername(displayName);
@@ -51,12 +52,12 @@ export const createHandleAuthSuccess = (
     setters.setAccountAuthenticated(true);
     setters.setIsSubmittingAuth(false);
 
-    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
+    try { await sleep(0); } catch { }
     if (!helpers.lifecycle.isCurrent(operation)) return;
 
     setTimeout(() => {
       if (helpers.lifecycle.isCurrent(operation)) setters.setAuthStatus("");
-    }, 1000);
+    }, AUTH_SUCCESS_CREATE_HANDLE_AUTH_SUCCESS_TIMEOUT_MS);
     setters.setLoginError("");
   };
 };

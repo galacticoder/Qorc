@@ -1,3 +1,7 @@
+import {
+  NOISE_UTILS_PRIVATE_KEY_LENGTH_EXPECTED,
+  NOISE_UTILS_PUBLIC_KEY_LENGTH_EXPECTED,
+} from '../constants';
 import { x25519 } from '@noble/curves/ed25519.js';
 import type { X25519KeyPair } from '../types/noise-types';
 import { PostQuantumRandom } from '../cryptography/random';
@@ -29,7 +33,7 @@ export function generateX25519KeyPair(): X25519KeyPair {
 
 // Compute X25519 shared secret
 export function computeX25519SharedSecret(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
-    if (privateKey.length !== 32 || publicKey.length !== 32) {
+    if (privateKey.length !== NOISE_UTILS_PRIVATE_KEY_LENGTH_EXPECTED || publicKey.length !== NOISE_UTILS_PUBLIC_KEY_LENGTH_EXPECTED) {
         throw new Error('X25519 keys must be 32 bytes');
     }
     const shared = x25519.getSharedSecret(privateKey, publicKey);

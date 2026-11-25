@@ -9,6 +9,10 @@ import {
   MAX_NACK_ATTEMPTS,
   MAX_RETRANSMIT_CHUNKS_PER_REQUEST,
   MAX_FILE_SIZE,
+  FILE_PERSIST_RETRY_BASE_MS,
+  FILE_PERSIST_RETRY_MAX_MS,
+  MAX_CANCELED_FILE_TRANSFERS,
+  USE_FILE_HANDLER_SCHEDULE_RETRY_TIMEOUT_MS,
 } from '../../lib/constants';
 import { dispatchProgressEvent, dispatchCanceledEvent, totalInboundFileBytes, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
@@ -23,10 +27,6 @@ import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox
 import type { HybridKeys } from '../../lib/types/auth-types';
 import { isCanonicalAuthUsername, sanitizeMessageId } from '../../lib/sanitizers';
 import type { SecureDB } from '../../lib/database/secureDB';
-
-const FILE_PERSIST_RETRY_BASE_MS = 1_500;
-const FILE_PERSIST_RETRY_MAX_MS = 15_000;
-const MAX_CANCELED_FILE_TRANSFERS = 512;
 
 export function useFileHandler(
   getKeysOnDemand: () => Promise<HybridKeys | null>,
@@ -147,9 +147,8 @@ export function useFileHandler(
     clearTimer(fileKey);
     const generation = accountGenerationRef.current;
     const timeout = setTimeout(() => {
-      if (cleanupTimersRef.current.get(fileKey) === timeout) {
-        cleanupTimersRef.current.delete(fileKey);
-      }
+      if (cleanupTimersRef.current.get(fileKey) !== timeout) return;
+      cleanupTimersRef.current.delete(fileKey);
       if (generation !== accountGenerationRef.current) return;
       releaseFileEntry((incomingFileChunksRef.current as any)[fileKey]);
       delete (incomingFileChunksRef.current as any)[fileKey];
@@ -295,7 +294,7 @@ export function useFileHandler(
                 ackRetryTimersRef.current.delete(timer);
                 if (canAcknowledge()) sendAck(attempt);
                 else finish(false);
-              }, 1500);
+              }, USE_FILE_HANDLER_SCHEDULE_RETRY_TIMEOUT_MS);
               ackRetryTimersRef.current.add(timer);
             };
             const sendAck = (attempt: number) => {
@@ -366,6 +365,9 @@ export function useFileHandler(
         }
 
         if (fileEntry.transport !== data.transport) fileEntry.transport = 'relay';
+        const isTransferCurrent = () => (
+          isCurrent() && store[fileKey] === fileEntry && !fileEntry.transportAckCanceled
+        );
 
         const finalizeCompletedTransfer = async (): Promise<boolean> => {
           if ((fileEntry!.persistenceRetryAt || 0) > Date.now()) return false;
@@ -375,9 +377,9 @@ export function useFileHandler(
             toUser,
             secureDB,
             onNewMessage,
-            isCurrent
+            isTransferCurrent
           );
-          if (!isCurrent()) return false;
+          if (!isTransferCurrent()) return false;
           if (!result.assembled) {
             clearTimer(fileKey);
             clearNackTimer(fileKey);
@@ -436,94 +438,97 @@ export function useFileHandler(
 
         const { iv, authTag, encrypted } = parsed;
         try {
-
           if (!fileEntry.aesKey) {
-          const hybridKeys = await getKeysOnDemand();
-          if (!isCurrent()) return false;
-          if (!hybridKeys) {
-            return false;
-          }
+            const hybridKeys = await getKeysOnDemand();
+            if (!isTransferCurrent()) return false;
+            if (!hybridKeys) {
+              return false;
+            }
 
-          const keys = await decryptEnvelope(envelope, account, from, usersRef.current, findUser);
-          if (!isCurrent()) {
-            keys?.macKey.fill(0);
-            return false;
-          }
-          if (!keys) {
-            failTransfer(fileEntry, 'envelope-decrypt-failed', 'File transfer rejected (key envelope invalid)');
-            return;
-          }
+            const keys = await decryptEnvelope(envelope, account, from, usersRef.current, findUser);
+            if (!isTransferCurrent()) {
+              keys?.macKey.fill(0);
+              return false;
+            }
+            if (!keys) {
+              failTransfer(fileEntry, 'envelope-decrypt-failed', 'File transfer rejected (key envelope invalid)');
+              return;
+            }
 
-          fileEntry.aesKey = keys.aesKey;
-          macStateRef.current.set(fileKey, { macKey: keys.macKey });
-        }
+            if (!fileEntry.aesKey) {
+              fileEntry.aesKey = keys.aesKey;
+              macStateRef.current.set(fileKey, { macKey: keys.macKey });
+            } else {
+              keys.macKey.fill(0);
+            }
+          }
 
           const macEntry = macStateRef.current.get(fileKey);
-        if (!macEntry) {
-          failTransfer(fileEntry, 'chunk-mac-key-missing', 'File integrity key unavailable');
-          return;
-        }
+          if (!macEntry) {
+            failTransfer(fileEntry, 'chunk-mac-key-missing', 'File integrity key unavailable');
+            return;
+          }
           const ctx = { fileEntry, fileKey, from, safeFilename, chunkIndex, iv, authTag, encrypted };
           const valid = await verifyChunkMac(ctx, chunkMac, macEntry.macKey, totalChunks);
-        if (!isCurrent()) return false;
-        if (!valid) {
-          failTransfer(fileEntry, 'chunk-mac-failed', 'File integrity check failed');
-          return;
-        }
+          if (!isTransferCurrent()) return false;
+          if (!valid) {
+            failTransfer(fileEntry, 'chunk-mac-failed', 'File integrity check failed');
+            return;
+          }
 
           const decryptedBytes = await decryptChunk(iv, authTag, encrypted, fileEntry.aesKey!);
-        if (!isCurrent()) {
-          decryptedBytes?.fill(0);
-          return false;
-        }
-        if (!decryptedBytes) {
-          failTransfer(fileEntry, 'decrypt-failed', 'Failed to decrypt file chunk');
-          return;
-        }
+          if (!isTransferCurrent()) {
+            decryptedBytes?.fill(0);
+            return false;
+          }
+          if (!decryptedBytes) {
+            failTransfer(fileEntry, 'decrypt-failed', 'Failed to decrypt file chunk');
+            return;
+          }
 
-        const expectedChunkLength = chunkIndex === fileEntry.totalChunks - 1
-          ? fileEntry.fileSize! - (fileEntry.chunkSize! * (fileEntry.totalChunks - 1))
-          : fileEntry.chunkSize!;
-        if (decryptedBytes.length !== expectedChunkLength) {
-          decryptedBytes.fill(0);
-          failTransfer(fileEntry, 'chunk-size-mismatch', 'File transfer rejected (chunk size mismatch)');
-          return;
-        }
-
-        if (!fileEntry.receivedSet!.has(chunkIndex)) {
-          const chunkLength = decryptedBytes.length;
-          if (totalInboundFileBytes(store) + chunkLength > GLOBAL_INBOUND_FILE_MEMORY_BUDGET) {
+          const expectedChunkLength = chunkIndex === fileEntry.totalChunks - 1
+            ? fileEntry.fileSize! - (fileEntry.chunkSize! * (fileEntry.totalChunks - 1))
+            : fileEntry.chunkSize!;
+          if (decryptedBytes.length !== expectedChunkLength) {
             decryptedBytes.fill(0);
-            failTransfer(fileEntry, 'global-memory-exceeded', 'File transfer rejected (memory limit)');
+            failTransfer(fileEntry, 'chunk-size-mismatch', 'File transfer rejected (chunk size mismatch)');
             return;
           }
-          const ownedChunk = new Uint8Array(decryptedBytes.length);
-          ownedChunk.set(decryptedBytes);
-          fileEntry.decryptedChunks[chunkIndex] = ownedChunk;
-          decryptedBytes.fill(0);
-          fileEntry.receivedSet!.add(chunkIndex);
-          fileEntry.receivedCount++;
-          fileEntry.bytesReceivedApprox = (fileEntry.bytesReceivedApprox || 0) + chunkLength;
-          scheduleInactivityTimer(fileKey, from, safeFilename);
-          nackAttemptsRef.current.delete(fileKey);
 
-          if (fileEntry.bytesReceivedApprox > fileEntry.fileSize! ||
-            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE) {
-            failTransfer(fileEntry, 'size-exceeded', 'File transfer rejected (size exceeded)');
-            return;
+          if (!fileEntry.receivedSet!.has(chunkIndex)) {
+            const chunkLength = decryptedBytes.length;
+            if (totalInboundFileBytes(store) + chunkLength > GLOBAL_INBOUND_FILE_MEMORY_BUDGET) {
+              decryptedBytes.fill(0);
+              failTransfer(fileEntry, 'global-memory-exceeded', 'File transfer rejected (memory limit)');
+              return;
+            }
+            const ownedChunk = new Uint8Array(decryptedBytes.length);
+            ownedChunk.set(decryptedBytes);
+            fileEntry.decryptedChunks[chunkIndex] = ownedChunk;
+            decryptedBytes.fill(0);
+            fileEntry.receivedSet!.add(chunkIndex);
+            fileEntry.receivedCount++;
+            fileEntry.bytesReceivedApprox = (fileEntry.bytesReceivedApprox || 0) + chunkLength;
+            scheduleInactivityTimer(fileKey, from, safeFilename);
+            nackAttemptsRef.current.delete(fileKey);
+
+            if (fileEntry.bytesReceivedApprox > fileEntry.fileSize! ||
+              fileEntry.bytesReceivedApprox > MAX_FILE_SIZE) {
+              failTransfer(fileEntry, 'size-exceeded', 'File transfer rejected (size exceeded)');
+              return;
+            }
+          } else {
+            decryptedBytes.fill(0);
           }
-        } else {
-          decryptedBytes.fill(0);
-        }
 
-        dispatchProgressEvent({ from, filename: safeFilename, percent: Math.min(1, fileEntry.receivedCount / fileEntry.totalChunks), received: fileEntry.receivedCount, total: fileEntry.totalChunks });
+          dispatchProgressEvent({ from, filename: safeFilename, percent: Math.min(1, fileEntry.receivedCount / fileEntry.totalChunks), received: fileEntry.receivedCount, total: fileEntry.totalChunks });
 
-        if (fileEntry.receivedCount === fileEntry.totalChunks) {
-          return finalizeCompletedTransfer();
-        } else if (fileEntry.messageId) {
-          acknowledgeTransport();
-          scheduleNackCheck(fileKey, from, fileEntry.messageId, safeFilename);
-        }
+          if (fileEntry.receivedCount === fileEntry.totalChunks) {
+            return finalizeCompletedTransfer();
+          } else if (fileEntry.messageId) {
+            acknowledgeTransport();
+            scheduleNackCheck(fileKey, from, fileEntry.messageId, safeFilename);
+          }
           return true;
         } finally {
           iv.fill(0);

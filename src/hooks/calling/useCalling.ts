@@ -1,3 +1,5 @@
+import { USE_CALLING_ATTEMPT_MINIMUM, USE_CALLING_BASE_DELAY } from '../../lib/constants';
+import { sleep } from '../../lib/runtime/sleep';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { PostQuantumRandom } from '../../lib/cryptography/random';
@@ -146,13 +148,13 @@ export const useCalling = (
         setIsInitialized(true);
       } catch (_error) {
         if (cancelled) return;
-        if (attempt < 3) {
-          const baseDelay = 500;
+        if (attempt < USE_CALLING_ATTEMPT_MINIMUM) {
+          const baseDelay = USE_CALLING_BASE_DELAY;
           const jitterBytes = PostQuantumRandom.randomBytes(1);
           const jitter = jitterBytes[0] % 200;
           jitterBytes.fill(0);
           const delay = Math.min(5000, baseDelay * Math.pow(2, attempt)) + jitter;
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await sleep(delay);
           if (cancelled) return;
           await initializeService(attempt + 1);
           return;

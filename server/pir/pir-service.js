@@ -61,18 +61,6 @@ function snapshotEpoch(source) {
   }
 }
 
-function sameIndex(left, right) {
-  if (!left || left.tags.length !== right.tags.length) return false;
-  for (let index = 0; index < left.tags.length; index += 1) {
-    if (
-      left.tags[index] !== right.tags[index] ||
-      left.probes[index] !== right.probes[index] ||
-      left.ids[index] !== right.ids[index]
-    ) return false;
-  }
-  return true;
-}
-
 function validatePirRecords(records) {
   for (const record of records) {
     if (!Buffer.isBuffer(record) || record.length !== SPOOL_PIR_RECORD_BYTES) {
@@ -159,9 +147,9 @@ async function buildAndPublishSnapshot(now) {
   slot.snapshot = null;
   const startedAt = Date.now();
   try {
-    source = await readGlobalMixPirSnapshot(now);
+    source = await readGlobalMixPirSnapshot(now, publishedSlot?.snapshot);
     const preparationMs = Date.now() - startedAt;
-    if (sameIndex(publishedSlot?.snapshot, source)) {
+    if (source.records === null) {
       await prepareBuildSlot(slot);
       lastRefreshAt = Date.now();
       return publishedSlot.snapshot.epoch;

@@ -8,7 +8,25 @@ import { PostQuantumRandom } from './random';
 import { PostQuantumSignature } from './signature';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { SecureMemory } from './secure-memory';
-import { NOISE_MAX_SESSION_AGE_MS, NOISE_REPLAY_WINDOW_SIZE, AUTH_USERNAME_REGEX } from '../constants';
+import {
+  NOISE_MAX_SESSION_AGE_MS,
+  NOISE_REPLAY_WINDOW_SIZE,
+  AUTH_USERNAME_REGEX,
+  MAX_CALL_STREAM_KEYS,
+  MAX_NOISE_HANDSHAKE_REPLAY_ENTRIES,
+  NOISE_HANDSHAKE_FRESHNESS_MS,
+  NOISE_REPLAY_WINDOW_SLOTS,
+  SESSION_SALT,
+  CALL_STREAM_CONTEXT_RE,
+  CALL_STREAM_KEY_SALT,
+  MAX_SEQUENCE,
+  NOISE_PROTOCOL_INITIATOR_PQSECRET_LENGTH_EXPECTED,
+  NOISE_PROTOCOL_INITIATOR_X25519_SECRET_LENGTH_EXPECTED,
+  NOISE_PROTOCOL_TRANSCRIPT_HASH_LENGTH_EXPECTED,
+  NOISE_PROTOCOL_FRAME_TAG_LENGTH_EXPECTED,
+  NOISE_PROTOCOL_PRIOR_LENGTH_EXPECTED,
+  NOISE_PROTOCOL_INITIATOR_HASH_LENGTH_EXPECTED,
+} from '../constants';
 import type {
     PQKeyPair,
     X25519KeyPair,
@@ -30,22 +48,13 @@ import {
 import { PostQuantumHash } from '../../../shared/post-quantum-hash.js';
 import { constantTimeBytesEqual } from '../../../shared/bytes.js';
 
-const MAX_SEQUENCE = 0xffffffffffffffffn;
-const HANDSHAKE_FRESHNESS_MS = 5 * 60 * 1000;
-const MAX_HANDSHAKE_REPLAY_ENTRIES = 4096;
 const acceptedInitiatorHandshakes = new Map<string, number>();
 let acceptedInitiatorHandshakeGeneration = 0;
-const NOISE_REPLAY_WINDOW_SLOTS = Number(NOISE_REPLAY_WINDOW_SIZE);
 const monotonicNow = (): number => performance.now();
-const CALL_STREAM_CONTEXT_RE = /^call-(?:audio|video|telemetry|screen):[a-f0-9]{16,64}$/;
-const CALL_STREAM_KEY_SALT = new TextEncoder().encode(PROTOCOL_KEYS.NOISE_CALL_STREAM_KEY_SALT);
-const MAX_CALL_STREAM_KEYS = 128;
 
 if (!Number.isSafeInteger(NOISE_REPLAY_WINDOW_SLOTS) || NOISE_REPLAY_WINDOW_SLOTS < 1) {
     throw new Error('Invalid Noise replay window');
 }
-
-const SESSION_SALT = new TextEncoder().encode(PROTOCOL_KEYS.NOISE_SESSION_SALT);
 
 function consumeInitiatorHandshakeReplay(
     localPeerId: string,
@@ -69,12 +78,12 @@ function consumeInitiatorHandshakeReplay(
     if (acceptedInitiatorHandshakes.has(cacheKey)) {
         throw new Error('Replayed P2P handshake');
     }
-    while (acceptedInitiatorHandshakes.size >= MAX_HANDSHAKE_REPLAY_ENTRIES) {
+    while (acceptedInitiatorHandshakes.size >= MAX_NOISE_HANDSHAKE_REPLAY_ENTRIES) {
         const oldest = acceptedInitiatorHandshakes.keys().next().value;
         if (oldest === undefined) break;
         acceptedInitiatorHandshakes.delete(oldest);
     }
-    const expiresAt = now + HANDSHAKE_FRESHNESS_MS;
+    const expiresAt = now + NOISE_HANDSHAKE_FRESHNESS_MS;
     acceptedInitiatorHandshakes.set(cacheKey, expiresAt);
 }
 
@@ -249,7 +258,7 @@ export class PQSession {
             const initiatorKyberPublic = message.ephemeralKyberPublic;
 
             const age = Date.now() - message.timestamp;
-            if (age > HANDSHAKE_FRESHNESS_MS || age < -60 * 1000) {
+            if (age > NOISE_HANDSHAKE_FRESHNESS_MS || age < -60 * 1000) {
                 throw new Error('Handshake message expired');
             }
 
@@ -317,8 +326,8 @@ export class PQSession {
                 initiatorPQSecret = staticSecrets.pqSecret;
                 initiatorX25519Secret = staticSecrets.x25519Secret;
                 if (
-                    !(initiatorPQSecret instanceof Uint8Array) || initiatorPQSecret.length !== 32 ||
-                    !(initiatorX25519Secret instanceof Uint8Array) || initiatorX25519Secret.length !== 32
+                    !(initiatorPQSecret instanceof Uint8Array) || initiatorPQSecret.length !== NOISE_PROTOCOL_INITIATOR_PQSECRET_LENGTH_EXPECTED ||
+                    !(initiatorX25519Secret instanceof Uint8Array) || initiatorX25519Secret.length !== NOISE_PROTOCOL_INITIATOR_X25519_SECRET_LENGTH_EXPECTED
                 ) {
                     throw new Error('Native P2P handshake returned invalid session material');
                 }
@@ -430,7 +439,7 @@ export class PQSession {
                 throw new Error('Handshake response routing identity mismatch');
             }
             const responseAge = Date.now() - response.timestamp;
-            if (responseAge > HANDSHAKE_FRESHNESS_MS || responseAge < -60 * 1000) {
+            if (responseAge > NOISE_HANDSHAKE_FRESHNESS_MS || responseAge < -60 * 1000) {
                 throw new Error('Handshake response expired');
             }
             if (response.ephemeralKyberPublic?.length) {
@@ -549,7 +558,7 @@ export class PQSession {
         transcriptHash: Uint8Array,
         role: 'initiator' | 'responder'
     ): void {
-        if (transcriptHash.length !== 32) throw new Error('Invalid Noise transcript hash');
+        if (transcriptHash.length !== NOISE_PROTOCOL_TRANSCRIPT_HASH_LENGTH_EXPECTED) throw new Error('Invalid Noise transcript hash');
         const totalLen = pqSecret1.length + pqSecret2.length + classicalSecret1.length + classicalSecret2.length;
         const combined = new Uint8Array(totalLen);
         let offset = 0;
@@ -689,7 +698,7 @@ export class PQSession {
             !(frame.ciphertext instanceof Uint8Array) ||
             frame.ciphertext.length === 0 ||
             !(frame.tag instanceof Uint8Array) ||
-            frame.tag.length !== 32 ||
+            frame.tag.length !== NOISE_PROTOCOL_FRAME_TAG_LENGTH_EXPECTED ||
             !this.validateSequence(frame.sequence)
         ) {
             throw new Error('Replay attack detected');
@@ -759,7 +768,7 @@ export class PQSession {
         priorHandshakeHash?: Uint8Array
     ): Uint8Array {
         const prior = priorHandshakeHash || new Uint8Array(0);
-        if (prior.length !== 0 && prior.length !== 32) throw new Error('Invalid prior handshake hash');
+        if (prior.length !== 0 && prior.length !== NOISE_PROTOCOL_PRIOR_LENGTH_EXPECTED) throw new Error('Invalid prior handshake hash');
         const header = new TextEncoder().encode(
             `${PROTOCOL_KEYS.NOISE_PROTOCOL}:${type}:${from}:${to}:${sessionId}:${timestamp}`
         );
@@ -812,7 +821,7 @@ export class PQSession {
         responderStaticX25519PublicKey: Uint8Array
     ): Uint8Array {
         if (
-            initiatorHash.length !== 32 ||
+            initiatorHash.length !== NOISE_PROTOCOL_INITIATOR_HASH_LENGTH_EXPECTED ||
             responderStaticKyberPublicKey.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
             responderStaticX25519PublicKey.length !== X25519_KEY_BYTES
         )

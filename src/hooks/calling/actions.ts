@@ -7,9 +7,6 @@ import { preparePeerTransport } from '../../lib/p2p/prepare-peer';
 import { toast } from 'sonner';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 
-function callDiagnostic(phase: string, details: Record<string, unknown> = {}): void {
-  console.info('[CALL-DIAG]', { phase, ...details });
-}
 
 async function validatePeerMaterial(
   refs: ActionRefs,
@@ -17,7 +14,6 @@ async function validatePeerMaterial(
   expectedService: SecureCallingService,
   ownerUsername: string
 ): Promise<void> {
-  callDiagnostic('action.peer-material-enter');
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling service not initialized');
   }
@@ -28,13 +24,10 @@ async function validatePeerMaterial(
     refs.getPeerCertificate,
     () => refs.serviceRef.current === expectedService,
   );
-  callDiagnostic('action.peer-session-before');
   await refs.checkPeerSession(peer);
-  callDiagnostic('action.peer-session-after');
   if (refs.serviceRef.current !== expectedService) {
     throw new Error('Calling account changed while establishing the signaling session');
   }
-  callDiagnostic('action.peer-material-complete');
 }
 
 export interface ActionRefs {
@@ -63,8 +56,6 @@ export const createStartCall = (
   currentUsername: string
 ) => {
   return async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
-    const startedAt = performance.now();
-    callDiagnostic('action.start-enter', { callType });
     const service = refs.serviceRef.current;
     if (!service) {
       throw new Error('Calling service not initialized');
@@ -92,32 +83,13 @@ export const createStartCall = (
     if (!blockingSystem.isEnforcementReady() || blockingSystem.isBlockedSync(peer)) {
       throw new Error('recipient-blocked');
     }
-    callDiagnostic('action.start-validated', {
-      callType,
-      elapsedMs: Math.round(performance.now() - startedAt),
-    });
 
     try {
       await validatePeerMaterial(refs, peer, service, currentUsername);
-      callDiagnostic('action.service-start-before', {
-        callType,
-        elapsedMs: Math.round(performance.now() - startedAt),
-      });
 
       const callId = await service.startCall(peer, callType);
-      callDiagnostic('action.service-start-after', {
-        callType,
-        elapsedMs: Math.round(performance.now() - startedAt),
-      });
       return callId;
     } catch (_error: any) {
-      console.error('[CALL-DIAG]', {
-        phase: 'action.start-failed',
-        callType,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        errorName: _error instanceof Error ? _error.name : 'UnknownError',
-        errorMessage: _error instanceof Error ? _error.message : String(_error),
-      });
       if (_error.message === 'arbitration-loss') {
         return '';
       }

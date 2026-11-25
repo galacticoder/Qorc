@@ -1,11 +1,13 @@
+import {
+  AUDIO_FRAME_DURATION_MS,
+  CALL_AUDIO_INITIAL_BUFFER_MS,
+  CALL_AUDIO_MAX_BUFFER_MS,
+  CALL_AUDIO_MIN_BUFFER_MS,
+  MAX_CALL_AUDIO_BUFFER_PACKETS,
+  MAX_CALL_AUDIO_CONCEALMENT_FRAMES,
+  CALL_AUDIO_MAX_CAPTURE_GAP_MS,
+} from '../constants';
 import { SecureMemory } from '../cryptography/secure-memory';
-
-export const AUDIO_FRAME_DURATION_MS = 20;
-const INITIAL_BUFFER_MS = 100;
-const MIN_BUFFER_MS = 60;
-const MAX_BUFFER_MS = 600;
-const MAX_BUFFER_PACKETS = 60;
-const MAX_CONCEALMENT_FRAMES = 3;
 
 export interface BufferedAudioPacket {
     packet: Uint8Array;
@@ -28,7 +30,7 @@ export class CallAudioPlayout {
     private lastCapture: number | null = null;
     private jitterMs = 0;
     private peakVariationMs = 0;
-    private targetMs = INITIAL_BUFFER_MS;
+    private targetMs = CALL_AUDIO_INITIAL_BUFFER_MS;
     private losses = 0;
     private rebuffers = 0;
     private concealments = 0;
@@ -58,12 +60,12 @@ export class CallAudioPlayout {
         }
         if (this.lastArrival !== null && this.lastCapture !== null) {
             const captureGap = packet.capturedAt - this.lastCapture;
-            if (captureGap > 0 && captureGap < 10_000) {
+            if (captureGap > 0 && captureGap < CALL_AUDIO_MAX_CAPTURE_GAP_MS) {
                 const variation = Math.abs(packet.arrivedAt - this.lastArrival - captureGap);
                 this.jitterMs += (variation - this.jitterMs) / 16;
-                this.peakVariationMs = Math.max(this.peakVariationMs * 0.99, Math.min(MAX_BUFFER_MS, variation));
-                this.targetMs = Math.min(MAX_BUFFER_MS, Math.max(
-                    MIN_BUFFER_MS,
+                this.peakVariationMs = Math.max(this.peakVariationMs * 0.99, Math.min(CALL_AUDIO_MAX_BUFFER_MS, variation));
+                this.targetMs = Math.min(CALL_AUDIO_MAX_BUFFER_MS, Math.max(
+                    CALL_AUDIO_MIN_BUFFER_MS,
                     AUDIO_FRAME_DURATION_MS * 2 + this.jitterMs * 3,
                     this.peakVariationMs + AUDIO_FRAME_DURATION_MS * 2,
                 ));
@@ -74,7 +76,7 @@ export class CallAudioPlayout {
             this.lastCapture = packet.capturedAt;
         }
         this.packets.set(packet.sequence, packet);
-        while (this.packets.size > MAX_BUFFER_PACKETS) {
+        while (this.packets.size > MAX_CALL_AUDIO_BUFFER_PACKETS) {
             const oldest = this.sequences()[0];
             this.discard(oldest);
             this.overflowDrops++;
@@ -89,7 +91,7 @@ export class CallAudioPlayout {
         if (sequences.length === 0) {
             if (!this.buffering && nativeQueuedMs <= 0) {
                 this.rebuffers++;
-                this.targetMs = Math.min(MAX_BUFFER_MS, this.targetMs + AUDIO_FRAME_DURATION_MS * 2);
+                this.targetMs = Math.min(CALL_AUDIO_MAX_BUFFER_MS, this.targetMs + AUDIO_FRAME_DURATION_MS * 2);
                 this.buffering = true;
             }
             return null;
@@ -102,7 +104,7 @@ export class CallAudioPlayout {
             this.buffering = false;
         }
         let packet = this.packets.get(this.expected!);
-        if (!packet && (first.discontinuity || this.losses >= MAX_CONCEALMENT_FRAMES)) {
+        if (!packet && (first.discontinuity || this.losses >= MAX_CALL_AUDIO_CONCEALMENT_FRAMES)) {
             this.expected = first.sequence;
             packet = first;
             this.losses = 0;

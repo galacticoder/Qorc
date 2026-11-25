@@ -1,3 +1,4 @@
+import { KEY_TRANSPARENCY_MAX_PREFIX_CACHE_CONTACTS, MAX_CACHED_TRANSITIONS } from '../constants';
 import { computeKeyTransparencyRecordHash, deriveKeyTransparencyEpochLabel } from './crypto';
 import { verifyKeyTransparencyTransitions, type KeyTransparencyPublishedTransition } from './verifier';
 import type { VerifiedKeyTransparencyContactState } from './types';
@@ -13,8 +14,6 @@ interface VerifiedPrefix {
   fingerprints: string[];
   state: Readonly<VerifiedKeyTransparencyContactState> | null;
 }
-const MAX_CONTACTS = 16;
-const MAX_CACHED_TRANSITIONS = 4096;
 
 export class VerifiedPrefixCache {
   private context: string | null = null;
@@ -54,7 +53,7 @@ export class VerifiedPrefixCache {
         validPrefix ? published.slice(cached.fingerprints.length) : published,
         discoveryKey,
       );
-      if (!this.entries.has(label) && this.entries.size >= MAX_CONTACTS) {
+      if (!this.entries.has(label) && this.entries.size >= KEY_TRANSPARENCY_MAX_PREFIX_CACHE_CONTACTS) {
         const oldest = this.entries.keys().next().value;
         if (oldest !== undefined) this.entries.delete(oldest);
       }

@@ -8,35 +8,23 @@ import {
   MAX_PENDING_RETRY_PER_PEER,
   MAX_PENDING_RETRY_PEERS,
   OUTBOUND_RETRY_MAX_AGE_MS,
+  MAX_GLOBAL_PENDING_RETRIES,
+  MAX_RETRY_QUEUE_BYTES,
+  MAX_DURABLE_SEND_RETRY_ATTEMPTS,
+  RETRY_REPLY_KEYS,
+  RETRY_ENTRY_KEYS,
+  RETRY_USER_KEYS,
+  RETRY_SIGNAL_TYPES,
+  UNACKNOWLEDGED_ENTRY_KEYS,
 } from '../../lib/constants';
 import { SignalType } from '../../lib/types/signal-types';
 import { hasPrototypePollutionKeys, isCanonicalAuthUsername, isPlainObject, sanitizeContent, sanitizeMessageId } from '../../lib/sanitizers';
 import { isControlOperationId } from '../../lib/messages/message-controls';
 import { STORAGE_KEYS, STORAGE_STORES } from '../../lib/database/storage-keys';
 
-const MAX_RETRY_QUEUE_BYTES = 16 * 1024 * 1024;
-const MAX_GLOBAL_PENDING_RETRIES = 500;
 const persistenceChains = new WeakMap<SecureDB, Promise<void>>();
 
 type DurableEntry = PendingRetryMessage & { content: string };
-
-const RETRY_SIGNAL_TYPES = new Set<string>([
-  SignalType.MESSAGE,
-  SignalType.EDIT_MESSAGE,
-  SignalType.DELETE_MESSAGE,
-  SignalType.REACTION_ADD,
-  SignalType.REACTION_REMOVE,
-]);
-const RETRY_ENTRY_KEYS = new Set([
-  'content', 'editMessageId', 'messageSignalType', 'originalMessageId',
-  'queuedAt', 'replyTo', 'retryCount', 'retryId', 'user'
-]);
-const UNACKNOWLEDGED_ENTRY_KEYS = new Set([
-  ...RETRY_ENTRY_KEYS,
-  'timestamp'
-]);
-const RETRY_USER_KEYS = new Set(['username']);
-const RETRY_REPLY_KEYS = new Set(['content', 'id', 'sender']);
 
 const hasOnlyKeys = (value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean =>
   Object.keys(value).every((key) => allowed.has(key));
@@ -55,7 +43,7 @@ export const validateDurableRetryEntry = (value: unknown, peer: string): value i
   if (!isPlainObject(value.user) || hasPrototypePollutionKeys(value.user) || !hasOnlyKeys(value.user, RETRY_USER_KEYS)) return false;
   if (value.user.username !== peer || !isCanonicalAuthUsername(peer)) return false;
   if (typeof value.content !== 'string' || value.content.length > MAX_CONTENT_LENGTH) return false;
-  if (!Number.isInteger(value.retryCount) || (value.retryCount as number) < 0 || (value.retryCount as number) > 2) return false;
+  if (!Number.isInteger(value.retryCount) || (value.retryCount as number) < 0 || (value.retryCount as number) > MAX_DURABLE_SEND_RETRY_ATTEMPTS) return false;
   if (!Number.isSafeInteger(value.queuedAt) || (value.queuedAt as number) <= 0) return false;
   if (typeof value.messageSignalType !== 'string' || !RETRY_SIGNAL_TYPES.has(value.messageSignalType)) return false;
   if (sanitizeMessageId(value.retryId) !== value.retryId) return false;
@@ -117,8 +105,13 @@ export const isPendingRetryExpired = (
 );
 
 type ExpiredRetry = { peer: string; entry: PendingRetryMessage };
+const retiredRetries = new WeakMap<Map<string, PendingRetryMessage[]>, ExpiredRetry[]>();
 
-export const pruneExpiredRetryEntries = (
+export const hasExpiredRetries = (map: Map<string, PendingRetryMessage[]>): boolean => (
+  retiredRetries.has(map) || Array.from(map.values()).some(entries => entries.some(entry => isPendingRetryExpired(entry)))
+);
+
+const pruneExpiredRetryEntries = (
   map: Map<string, PendingRetryMessage[]>,
   now: number = Date.now(),
 ): ExpiredRetry[] => {
@@ -133,6 +126,14 @@ export const pruneExpiredRetryEntries = (
     else map.delete(peer);
   }
   return expired;
+};
+
+const retireExpiredRetries = (map: Map<string, PendingRetryMessage[]>, now?: number): void => {
+  const expired = pruneExpiredRetryEntries(map, now);
+  if (expired.length === 0) return;
+  const retired = retiredRetries.get(map) ?? [];
+  retired.push(...expired);
+  retiredRetries.set(map, retired);
 };
 
 const cleanupExpiredRetries = async (
@@ -151,9 +152,9 @@ const cleanupExpiredRetries = async (
     }
     ids.push(operationId);
     if (entry.messageSignalType === SignalType.MESSAGE) {
-      await nativeMessageContent.revokeSend(operationId).catch(() => false);
+      await nativeMessageContent.revokeSend(operationId);
     } else if (entry.messageSignalType === SignalType.EDIT_MESSAGE) {
-      await nativeMessageContent.delete(operationId).catch(() => false);
+      await nativeMessageContent.delete(operationId);
     }
   }
   for (const [peer, operationIds] of operationIdsByPeer) {
@@ -173,7 +174,10 @@ export const enqueueRetry = (
   if (!validateDurableRetryEntry(entry, peer)) {
     throw new Error('Pending retry entry is invalid');
   }
-  pruneExpiredRetryEntries(map);
+  retireExpiredRetries(map);
+  if (isPendingRetryExpired(entry) || retiredRetries.get(map)?.some(item => item.entry.retryId === entry.retryId)) {
+    throw new Error('Pending retry entry has expired');
+  }
   let queue = map.get(peer);
   if (!queue) {
     if (map.size >= MAX_PENDING_RETRY_PEERS && !map.has(peer)) {
@@ -288,13 +292,29 @@ export const persistRetryQueue = async (
 ): Promise<void> => {
   const db = secureDBRef.current;
   if (!db || !isCurrent()) throw new Error('Secure database account is not current');
-  const expired = pruneExpiredRetryEntries(map);
-  if (expired.length > 0) await cleanupExpiredRetries(db, expired, isCurrent);
+  retireExpiredRetries(map);
   const snapshot = cloneRetryMap(map);
   const previous = persistenceChains.get(db) || Promise.resolve();
-  const write = previous.catch(() => { }).then(() => (
-    persistRetrySnapshot(db, snapshot, isCurrent, outgoingMessage)
-  ));
+  const write = previous.catch(() => { }).then(async () => {
+    if (!isCurrent()) throw new Error('Account changed before retry persistence');
+    const now = Date.now();
+    retireExpiredRetries(map, now);
+    const retired = retiredRetries.get(map);
+    const pendingCleanup = retired?.slice() ?? [];
+    if (pendingCleanup.length > 0) await cleanupExpiredRetries(db, pendingCleanup, isCurrent);
+    // An older queued write must not restore an entry another operation has retired.
+    const retiredIds = new Set(pendingCleanup.map(({ entry }) => entry.retryId));
+    for (const [peer, entries] of snapshot) {
+      const live = entries.filter(entry => !retiredIds.has(entry.retryId) && !isPendingRetryExpired(entry, now));
+      if (live.length > 0) snapshot.set(peer, live);
+      else snapshot.delete(peer);
+    }
+    await persistRetrySnapshot(db, snapshot, isCurrent, outgoingMessage);
+    if (retired) {
+      retired.splice(0, pendingCleanup.length);
+      if (retired.length === 0) retiredRetries.delete(map);
+    }
+  });
   persistenceChains.set(db, write);
   try {
     await write;
@@ -351,6 +371,7 @@ export const loadRetryQueue = async (
     for (const e of entries) {
       const contentKey = e.retryId;
       if (
+        !isPendingRetryExpired(e) &&
         (e.messageSignalType === SignalType.MESSAGE || e.messageSignalType === SignalType.EDIT_MESSAGE) &&
         !await nativeMessageContent.has(contentKey)
       ) throw new Error('Pending retry queue references missing message content');

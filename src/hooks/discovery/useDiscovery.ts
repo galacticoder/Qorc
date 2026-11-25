@@ -2,6 +2,8 @@
  * OPRF peer discovery hook
  */
 
+import { PostQuantumRandom } from '../../lib/cryptography/random';
+import { sleep } from '../../lib/runtime/sleep';
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, RefObject } from 'react';
 import { SignalType } from '@/lib/types/signal-types';
 import { EventType } from '@/lib/types/event-types';
@@ -31,16 +33,44 @@ import {
     validateCertifiedPeerBundle
 } from '@/lib/utils/certified-identity-utils';
 import type { AvatarData } from '@/lib/types/avatar-types';
-import { publishAvatarToStore, fetchAvatarFromStore, validateAvatarCoverBlobs as validateAvatarCoverBlobs, isValidAvatarRef } from '@/lib/avatar/avatar-store-client';
+import { publishAvatarToStore, fetchAvatarFromStore, validateAvatarCoverBlobs as validateAvatarCoverBlobs } from '@/lib/avatar/avatar-store-client';
+import { isValidAvatarRef } from '@/lib/avatar/avatar-ref';
 import type { AvatarRef } from '@/lib/crypto/avatar-blob-crypto';
 import type { HybridKeys } from '@/lib/types/auth-types';
 import type { PeerCertificateBundle } from '@/lib/types/p2p-types';
 import {
-    AUTH_USERNAME_REGEX,
-    DISCOVERY_EPOCH_DURATION_MS,
-    P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS,
-    P2P_PEER_CERT_TTL_MS,
-    P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS,
+  AUTH_USERNAME_REGEX,
+  AVATAR_FETCH_MAX_IN_FLIGHT,
+  AVATAR_FETCH_RETRY_DELAYS_MS,
+  DISCOVERY_COVER_PUBLISH_INITIAL_JITTER_MS,
+  DISCOVERY_COVER_PUBLISH_INITIAL_MIN_MS,
+  DISCOVERY_COVER_PUBLISH_INTERVAL_MS,
+  DISCOVERY_EPOCH_DURATION_MS,
+  DISCOVERY_FORCED_REFETCH_MIN_INTERVAL_MS,
+  DISCOVERY_FORWARD_PUBLISH_EPOCHS,
+  DISCOVERY_LIFECYCLE_PUBLISH_COALESCE_MS,
+  DISCOVERY_LOOKUP_MAX_IN_FLIGHT,
+  DISCOVERY_NEGATIVE_CACHE_TTL_MS,
+  DISCOVERY_POSITIVE_CACHE_TTL_MS,
+  DISCOVERY_PUBLISH_POW_DIFFICULTY,
+  DISCOVERY_RESULT_CACHE_MAX_ENTRIES,
+  DISCOVERY_TIMEOUT_CACHE_TTL_MS,
+  DISCOVERY_TOKEN_CACHE_MAX_ENTRIES,
+  OPRF_EPOCH_OPERATION_SAFETY_MS,
+  OPRF_EPOCH_REFRESH_DELAY_MS,
+  P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS,
+  P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS,
+  P2P_PEER_CERT_TTL_MS,
+  WS_CONTROL_RESPONSE_TIMEOUT_MS,
+  WS_CONTROL_SEND_TIMEOUT_MS,
+  OPRF_DISCOVERY_POW_DIFFICULTY,
+  PRE_READY_PUBLISH_FAILURES,
+  USE_DISCOVERY_COUNTER_LIMIT,
+  USE_DISCOVERY_BYTES,
+  USE_DISCOVERY_TIMEOUT_MS,
+  USE_DISCOVERY_LAST_PUBLISH_ATTEMPT_REF_MINIMUM,
+  USE_DISCOVERY_FIND_USER_DELAY_MS,
+  OPRF_KEY_REQUEST_COOLDOWN_MS,
 } from '@/lib/constants';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { shouldAttemptDiscovery } from '@/lib/utils/discovery-utils';
@@ -57,10 +87,9 @@ import { solvePowChallenge } from '@/lib/cryptography/proof-of-work';
 import { Base64 } from '@/lib/cryptography/base64';
 import { createAnonymousHttpPow } from '@/lib/cryptography/anonymous-http-pow';
 import { keyTransparencyClient } from '@/lib/key-transparency/client';
-import { markKeyTransparencyVerifiedMaterial } from '@/lib/key-transparency/verified-material';
+import { isKeyTransparencyVerifiedMaterial } from '@/lib/key-transparency/verified-material';
 import { createBoundedMapSetter } from '@/lib/utils/message-state-limits';
 import { bytesToHex } from '../../../shared/bytes.js';
-import { savePersistedDiscoveryMaterial } from '@/lib/discovery/persisted-discovery-material';
 import { loadTrustedPersistedDiscoveryMaterial } from '@/lib/utils/signal-bundle-utils';
 import {
     ownDetectionPublicKeyHex,
@@ -77,13 +106,12 @@ import {
     type DiscoveryLookupOptions,
     type DiscoveryProgressObserver,
 } from '@/lib/discovery/progress';
-import { DiscoveryRequestError, parsePublicationAck, requestDiscoveryResponse } from '@/lib/discovery/request';
+import { parsePublicationAck, requestDiscoveryResponse } from '@/lib/discovery/request';
 import {
     canReuseDiscoveryPublication,
     canRetryPreparedPublication,
     type PreparedDiscoveryPublication,
 } from '@/lib/discovery/publication-retry';
-import { WS_CONTROL_RESPONSE_TIMEOUT_MS, WS_CONTROL_SEND_TIMEOUT_MS } from '../../lib/constants';
 
 type DiscoveryTokenMaterial = { token: string; encryptionKey: Uint8Array };
 
@@ -96,7 +124,6 @@ interface DiscoveryTokenCacheEntry {
 }
 
 const discoveryTokenCache = new Map<string, DiscoveryTokenCacheEntry>();
-const DISCOVERY_TOKEN_CACHE_MAX_ENTRIES = 256;
 
 function wipeRetiredDiscoveryTokenCacheEntry(entry: DiscoveryTokenCacheEntry): void {
     if (!entry.retired || entry.readers !== 0 || entry.wipeScheduled) return;
@@ -258,7 +285,7 @@ async function buildDiscoveryPublication(
             if (bucketIds.size > DISCOVERY_PUBLICATION_BUCKET_COUNT) return null;
         }
         for (let counter = 0; bucketIds.size < DISCOVERY_PUBLICATION_BUCKET_COUNT; counter += 1) {
-            if (counter >= 1024) return null;
+            if (counter >= USE_DISCOVERY_COUNTER_LIMIT) return null;
             const fillerToken = coverKey
                 ? coverPublicationHex(coverKey, serverScope, publicationWindow, 'padding', counter)
                 : await account.discoveryPublication(serverScope, publicationWindow, 'padding', counter);
@@ -280,10 +307,6 @@ const findUserCache = new Map<string, Promise<OPRFDiscoveryMaterial | null>>();
 const forceRefreshFindUserCache = new Map<string, Promise<OPRFDiscoveryMaterial | null>>();
 const findUserInFlightLock = new Map<string, Promise<OPRFDiscoveryMaterial | null>>();
 const discoveryResultCache = new Map<string, { value: OPRFDiscoveryMaterial | null; expiresAt: number }>();
-const DISCOVERY_RESULT_CACHE_MAX_ENTRIES = 1024;
-const DISCOVERY_LOOKUP_MAX_IN_FLIGHT = 2;
-const LIFECYCLE_PUBLISH_COALESCE_MS = 3000;
-const FORCED_REFETCH_MIN_INTERVAL_MS = 60 * 1000;
 const discoveryNetworkFetchAt = new Map<string, number>();
 
 const setDiscoveryResultCache = createBoundedMapSetter(DISCOVERY_RESULT_CACHE_MAX_ENTRIES);
@@ -306,30 +329,6 @@ const scopedDiscoveryCacheKey = (
     }
     return `${publicKey.toLowerCase()}:${ownerScope.toLowerCase()}:${normalizedHandle.toLowerCase()}`;
 };
-
-const DISCOVERY_POSITIVE_CACHE_TTL_MS = 5 * 60 * 1000;
-const DISCOVERY_NEGATIVE_CACHE_TTL_MS = 30 * 1000;
-const DISCOVERY_TIMEOUT_CACHE_TTL_MS = 25 * 1000;
-const OPRF_EPOCH_OPERATION_SAFETY_MS = 15000;
-const OPRF_EPOCH_REFRESH_DELAY_MS = 250;
-const DISCOVERY_PUBLISH_POW_DIFFICULTY = 18;
-const DISCOVERY_FORWARD_PUBLISH_WINDOW_MS = 24 * 60 * 60 * 1000;
-const DISCOVERY_FORWARD_PUBLISH_EPOCHS = Math.max(
-    0,
-    Math.ceil(DISCOVERY_FORWARD_PUBLISH_WINDOW_MS / DISCOVERY_EPOCH_DURATION_MS) - 1
-);
-function secureRandomUnit(): number {
-    const sample = new Uint32Array(1);
-    crypto.getRandomValues(sample);
-    return (sample[0] + 0.5) / 0x100000000;
-}
-
-const PRE_READY_PUBLISH_FAILURES = new Set([
-    'missing-handle',
-    'auth-transport-not-ready',
-    'missing-oprf-epoch',
-    'missing-certified-identity-keys'
-]);
 
 type DiscoveryOprfState = {
     publicKey: string;
@@ -361,7 +360,7 @@ function parseDiscoveryOprfState(value: unknown): DiscoveryOprfState | null {
         epoch !== Math.floor(Date.now() / DISCOVERY_EPOCH_DURATION_MS) ||
         !Number.isSafeInteger(epochRotatesAt) ||
         epochRotatesAt !== ((epoch as number) + 1) * DISCOVERY_EPOCH_DURATION_MS ||
-        powDifficulty !== 18
+        powDifficulty !== OPRF_DISCOVERY_POW_DIFFICULTY
     ) {
         return null;
     }
@@ -377,10 +376,8 @@ function isPreReadyPublishFailure(reason: string): boolean {
     return PRE_READY_PUBLISH_FAILURES.has(reason);
 }
 
-const AVATAR_FETCH_RETRY_DELAYS_MS = [4000, 8000, 15000, 30000];
 const avatarFetchInFlight = new Set<string>();
 const avatarFetchRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const AVATAR_FETCH_MAX_IN_FLIGHT = 32;
 
 function clearAvatarFetchInFlight(): void {
     for (const timer of avatarFetchRetryTimers.values()) clearTimeout(timer);
@@ -461,14 +458,11 @@ function publishForceAttemptDelayMs(lastFailure: string | null): number {
 }
 
 function publishRetryDelayMs(reason: string, preReadyReason: boolean): number {
-    if (reason === 'oprf-token-missing') return 60_000 + Math.floor(secureRandomUnit() * 15_000);
-    if (canRetryPreparedPublication(reason)) return 15_000 + Math.floor(secureRandomUnit() * 15_000);
-    if (preReadyReason) return 5_000 + Math.floor(secureRandomUnit() * 10_000);
-    return 15_000 + Math.floor(secureRandomUnit() * 15_000);
+    if (reason === 'oprf-token-missing') return 60_000 + Math.floor(PostQuantumRandom.randomUnit(true) * 15_000);
+    if (canRetryPreparedPublication(reason)) return 15_000 + Math.floor(PostQuantumRandom.randomUnit(true) * 15_000);
+    if (preReadyReason) return 5_000 + Math.floor(PostQuantumRandom.randomUnit(true) * 10_000);
+    return 15_000 + Math.floor(PostQuantumRandom.randomUnit(true) * 15_000);
 }
-const DISCOVERY_COVER_PUBLISH_INTERVAL_MS = 5 * 60 * 1000;
-const DISCOVERY_COVER_PUBLISH_INITIAL_MIN_MS = 20 * 1000;
-const DISCOVERY_COVER_PUBLISH_INITIAL_JITTER_MS = 40 * 1000;
 
 const stableStringify = (value: any): string => {
     if (value === null || value === undefined) return 'null';
@@ -498,7 +492,7 @@ const randomBytesForDiscovery = (length: number): Uint8Array => {
     return bytes;
 };
 
-const randomHexForDiscovery = (bytes = 32): string => {
+const randomHexForDiscovery = (bytes = USE_DISCOVERY_BYTES): string => {
     const random = randomBytesForDiscovery(bytes);
     try {
         return bytesToHex(random);
@@ -688,9 +682,7 @@ export const useDiscovery = (
         setDiscoveryTransportReadyVersion((version) => (version + 1) % Number.MAX_SAFE_INTEGER);
     }, [isDiscoveryTransportReady]);
 
-
     const waitForOprfState = useCallback(async (
-        reason: string,
         timeoutMs: number = WS_CONTROL_RESPONSE_TIMEOUT_MS
     ): Promise<DiscoveryOprfState | null> => {
         const operationOwnerScope = ownerScope;
@@ -710,7 +702,6 @@ export const useDiscovery = (
             Number.isSafeInteger(current.epochRotatesAt) &&
             (current.epochRotatesAt as number) > Date.now() + OPRF_EPOCH_OPERATION_SAFETY_MS
         ) {
-            console.log('[DISCOVERY] oprf: using cached OPRF state', { reason, epoch: current.epoch });
             return current as DiscoveryOprfState;
         }
 
@@ -771,14 +762,7 @@ export const useDiscovery = (
                 );
             },
             parse: (detail) => parseDiscoveryOprfState(detail) ?? undefined,
-        }).catch((error) => {
-            console.warn('[DISCOVERY] OPRF state request failed', {
-                reason,
-                error: error instanceof Error ? error.message : String(error),
-                detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
-            });
-            return null;
-        }).finally(() => {
+        }).catch(() => null).finally(() => {
             if (oprfReadyPromiseRef.current === readyPromise) oprfReadyPromiseRef.current = null;
         });
         if (!isCurrentOwner()) return null;
@@ -787,14 +771,14 @@ export const useDiscovery = (
         return readyPromise;
     }, [ownerScope]);
 
-    const requestOprfKey = useCallback((reason: string | Event = 'auto', force = false) => {
+    const requestOprfKey = useCallback((force = false) => {
         if (!ownerScope || activeOwnerScopeRef.current !== ownerScope) return;
         const now = Date.now();
-        if (!force && now - lastOprfKeyRequestRef.current < 5000) return;
+        if (!force && now - lastOprfKeyRequestRef.current < OPRF_KEY_REQUEST_COOLDOWN_MS) return;
         if (!isDiscoveryTransportReady()) return;
         lastOprfKeyRequestRef.current = now;
         if (force) oprfStateRef.current = {};
-        void waitForOprfState(typeof reason === 'string' ? reason : reason.type);
+        void waitForOprfState();
     }, [isDiscoveryTransportReady, ownerScope, waitForOprfState]);
 
     const pruneDiscoveryTokenCache = useCallback((epoch?: number) => {
@@ -815,12 +799,11 @@ export const useDiscovery = (
     }, []);
 
     const waitForPqSession = useCallback(async (
-        timeoutMs: number = 15000,
+        timeoutMs: number = USE_DISCOVERY_TIMEOUT_MS,
         abortSignal?: AbortSignal
     ): Promise<boolean> => {
         if (abortSignal?.aborted) return false;
         if (websocketClient.isPQSessionEstablished()) return true;
-
 
         return new Promise<boolean>((resolve) => {
             let settled = false;
@@ -853,7 +836,6 @@ export const useDiscovery = (
             if (abortSignal?.aborted) onAbort();
         });
     }, []);
-
 
     const buildSelfPeerCertificate = async (
         username: string,
@@ -952,17 +934,13 @@ export const useDiscovery = (
             activeOwnerScopeRef.current === operationOwnerScope
         );
         if (!isCurrentOwner()) return null;
-        const reject = (reason: string): null => {
-            console.warn('[DISCOVERY] validate: rejected decrypted material', { target: targetHandle, reason });
-            return null;
-        };
         if (
             !material ||
             typeof material !== 'object' ||
             Array.isArray(material) ||
             Object.getPrototypeOf(material) !== Object.prototype
         ) {
-            return reject('material-shape');
+            return null;
         }
 
         const certifiedCandidate = material.certifiedPeerBundle as any;
@@ -971,7 +949,7 @@ export const useDiscovery = (
             !deviceCandidate ||
             typeof deviceCandidate !== 'object' ||
             Array.isArray(deviceCandidate)
-        ) return reject('missing-device-cert');
+        ) return null;
         const sanitizedPublicKeys = sanitizeHybridKeys({
             kyberPublicBase64: deviceCandidate.deviceKyberPublicKey,
             dilithiumPublicBase64: deviceCandidate.deviceDilithiumPublicKey,
@@ -982,7 +960,7 @@ export const useDiscovery = (
             !sanitizedPublicKeys?.dilithiumPublicBase64 ||
             !sanitizedPublicKeys?.x25519PublicBase64
         ) {
-            return reject('device-public-keys');
+            return null;
         }
 
         const validated: OPRFDiscoveryMaterial = {
@@ -1012,7 +990,7 @@ export const useDiscovery = (
         );
         if (!isCurrentOwner()) return null;
         if (!cert) {
-            return reject('peer-certificate-invalid');
+            return null;
         }
 
         const peerCertificateFingerprint = computePeerCertificateFingerprint(cert);
@@ -1024,7 +1002,7 @@ export const useDiscovery = (
         });
         if (!isCurrentOwner()) return null;
         if (certifiedIdentity.valid === false) {
-            return reject(`certified-bundle:${certifiedIdentity.reason || 'invalid'}`);
+            return null;
         }
 
         validated.peerCertificate = cert;
@@ -1093,25 +1071,17 @@ export const useDiscovery = (
         if (!isCurrentOwner()) return null;
         let transparencyCheckFailed = false;
         
-        let decryptedCount = 0;
-        const decryptStats = { selectorMatches: 0 };
-        let validationRejected = 0;
-        let missingAccountRoot = 0;
-        let transparencyError: string | null = null;
         for (const encryptedBlob of encryptedBlobs) {
             if (typeof encryptedBlob !== 'string' || encryptedBlob.length === 0) continue;
             for (const key of encryptionKeys) {
                 if (!key) continue;
-                const material = oprfDiscoveryClient.decryptDiscoveryBlob(encryptedBlob, key, decryptStats);
+                const material = await oprfDiscoveryClient.decryptDiscoveryBlob(encryptedBlob, key);
+                if (!isCurrentOwner() || lookupSignal.aborted) return null;
                 if (!material) continue;
-                decryptedCount += 1;
 
                 const validated = await validateDiscoveryMaterial(targetHandle, material);
                 if (!isCurrentOwner()) return null;
-                if (!validated) {
-                    validationRejected += 1;
-                    continue;
-                }
+                if (!validated) continue;
 
                 await keyTransparencyClient.ingestPublishedTransition(
                     accountOwner,
@@ -1121,55 +1091,35 @@ export const useDiscovery = (
 
                 const accountRootPublicKey =
                     validated.certifiedPeerBundle?.accountRoot?.accountRootPublicKey;
-                if (typeof accountRootPublicKey !== 'string') {
-                    missingAccountRoot += 1;
-                    continue;
-                }
-                let transparencyContact: Awaited<ReturnType<
-                    typeof keyTransparencyClient.verifyDiscoveredIdentity
-                >>;
+                if (typeof accountRootPublicKey !== 'string') continue;
+                const peer = String(targetHandle).trim().toLowerCase();
                 try {
                     progress.setPhase('checking-keys');
-                    transparencyContact = await keyTransparencyClient.verifyDiscoveredIdentity({
+                    await keyTransparencyClient.verifyDiscoveredIdentity({
                         ownerUsername: accountOwner!,
-                        peerUsername: String(targetHandle).trim().toLowerCase(),
+                        peerUsername: peer,
                         monitorContact,
                         discoveryEncryptionKey: key,
                         accountRootPublicKeyBase64: accountRootPublicKey,
+                        material: validated,
+                        isCurrent: isCurrentOwner,
                         signal: lookupSignal,
                         onRetry: () => progress.setPhase('retrying-keys'),
                     });
-                } catch (error) {
+                } catch {
                     transparencyCheckFailed = true;
-                    transparencyError = error instanceof Error ? error.message : String(error);
                     continue;
                 }
-                if (!isCurrentOwner()) return null;
-                markKeyTransparencyVerifiedMaterial(
-                    validated,
-                    accountOwner!,
-                    String(targetHandle).trim().toLowerCase(),
-                    transparencyContact,
-                );
+                const isAuthorized = () => isCurrentOwner() &&
+                    isKeyTransparencyVerifiedMaterial(validated, accountOwner!, peer);
+                if (!isAuthorized()) return null;
 
-                await savePersistedDiscoveryMaterial(
-                    accountOwner!,
-                    String(targetHandle).trim().toLowerCase(),
-                    validated,
-                    {
-                        rootCommitment: transparencyContact.rootCommitment,
-                        version: transparencyContact.version,
-                    }
-                );
-                if (!isCurrentOwner()) return null;
-                await keyTransparencyClient.persistAuthorizations(accountOwner!);
-                if (!isCurrentOwner()) return null;
                 await persistPeerDetectionKey(
                     accountOwner!,
                     targetHandle,
                     validated.spoolDetectionKey,
                 );
-                if (!isCurrentOwner()) return null;
+                if (!isAuthorized()) return null;
 
                 const cacheUsername = validated.peerCertificate?.username || String(targetHandle);
                 void cachePeerAvatarFromRef(
@@ -1185,21 +1135,6 @@ export const useDiscovery = (
                 return validated;
             }
         }
-
-        console.warn('[DISCOVERY] finalize: no material accepted', {
-            detail: JSON.stringify({
-                target: targetHandle,
-                key8: encryptionKeys
-                    .filter(Boolean)
-                    .map((key) => bytesToHex(key.slice(0, 8))),
-                blobs: encryptedBlobs.length,
-                selectorMatches: decryptStats.selectorMatches,
-                decrypted: decryptedCount,
-                validationRejected,
-                missingAccountRoot,
-                transparencyError,
-            }),
-        });
 
         if (cacheNegative && !transparencyCheckFailed) {
             setDiscoveryResultCache(discoveryResultCache, cacheKey, {
@@ -1267,7 +1202,7 @@ export const useDiscovery = (
 
             return new Map();
         }
-        const scopeState = await waitForOprfState('token-cache-scope');
+        const scopeState = await waitForOprfState();
         if (!isCurrentOwner()) return null;
         if (!scopeState?.publicKey || !/^[a-f0-9]{64}$/i.test(scopeState.publicKey)) {
             return null;
@@ -1300,7 +1235,6 @@ export const useDiscovery = (
 
             return results;
         }
-
 
         const evaluation = await evaluateHandleWithOprf(normalizedHandle);
         if (!isCurrentOwner()) {
@@ -1348,7 +1282,6 @@ export const useDiscovery = (
             throw error;
         }
 
-
         return results;
     }, [getDiscoveryHandle, waitForOprfState, ownerScope]);
 
@@ -1371,9 +1304,8 @@ export const useDiscovery = (
             return null;
         }
 
-
         const [oprfState, sessionReady] = await Promise.all([
-            waitForOprfState('oprf-token-batch'),
+            waitForOprfState(),
             waitForPqSession(15_000, operationAbortSignal)
         ]);
         if (!isCurrentOwner() || !isDiscoveryTransportReady()) return null;
@@ -1470,11 +1402,8 @@ export const useDiscovery = (
 
         const sendPreparedPublication = async (
             prepared: PreparedDiscoveryPublication,
-            reused: boolean,
         ): Promise<boolean> => {
             const requestId = prepared.requestId;
-            const startedAt = performance.now();
-            console.log('[DISCOVERY] publication request', { requestId, phase: 'sending', reused });
             try {
                 await requestDiscoveryResponse({
                     operation: 'publish',
@@ -1493,11 +1422,6 @@ export const useDiscovery = (
                         }, { failIfQueued: true, signal });
                     },
                     parse: (detail) => parsePublicationAck(detail, requestId),
-                    onSent: (durationMs) => {
-                        console.log('[DISCOVERY] publication request', {
-                            requestId, phase: 'awaiting-ack', durationMs,
-                        });
-                    },
                 });
                 if (!isCurrentOwner()) return false;
                 lastPublishedRef.current = Date.now();
@@ -1506,21 +1430,12 @@ export const useDiscovery = (
                 lastPublishedAvatarStateVersionRef.current = prepared.avatarStateVersion;
                 lastPublishFailureRef.current = null;
                 if (preparedPublicationRef.current === prepared) preparedPublicationRef.current = null;
-                console.log('[DISCOVERY] publication request', {
-                    requestId, phase: 'accepted', durationMs: Math.round(performance.now() - startedAt),
-                });
                 return true;
             } catch (error) {
                 const reason = error instanceof Error ? error.message : String(error);
                 if (!canRetryPreparedPublication(reason) && preparedPublicationRef.current === prepared) {
                     preparedPublicationRef.current = null;
                 }
-                console.warn('[DISCOVERY] publication request failed', {
-                    requestId,
-                    error: reason,
-                    detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
-                    durationMs: Math.round(performance.now() - startedAt),
-                });
                 return fail(reason);
             }
         };
@@ -1603,8 +1518,6 @@ export const useDiscovery = (
                     return fail('missing-certified-identity-keys');
                 }
 
-
-
                 const peerCertificate = await buildSelfPeerCertificate(
                     String(bundleUsername),
                     accountKeys
@@ -1631,7 +1544,6 @@ export const useDiscovery = (
                         account.sign(PROTOCOL_KEYS.DEVICE_CERTIFICATE_SIGNING, canonicalPayload),
                 });
                 if (!isCurrentOwner()) return false;
-
 
                 publishedAvatarStateVersion = avatarStateVersionRef.current;
                 const avatar = await getAvatarForDiscovery();
@@ -1664,7 +1576,7 @@ export const useDiscovery = (
 
 
                 // Build publish token set
-                const oprfState = await waitForOprfState('publish-missing-epoch');
+                const oprfState = await waitForOprfState();
                 if (!isCurrentOwner()) return false;
                 if (!oprfState || oprfState.epoch === undefined) {
 
@@ -1687,7 +1599,7 @@ export const useDiscovery = (
                     connectionEpoch: operationConnectionEpoch,
                     avatarStateVersion: publishedAvatarStateVersion,
                 })) {
-                    return await sendPreparedPublication(prepared, true);
+                    return await sendPreparedPublication(prepared);
                 }
                 preparedPublicationRef.current = null;
                     
@@ -1740,7 +1652,6 @@ export const useDiscovery = (
                         encryptionKey: cached.encryptionKey
                     });
                 }
-
 
                 if (missingEpochs.length > 0) {
 
@@ -1866,7 +1777,8 @@ export const useDiscovery = (
                     lastPublishedAvatarStateVersionRef.current = publishedAvatarStateVersion;
                     return true;
                 }
-                const encryptedBlob = oprfDiscoveryClient.encryptDiscoveryBlob(material, currentResult.encryptionKey);
+                const encryptedBlob = await oprfDiscoveryClient.encryptDiscoveryBlob(material, currentResult.encryptionKey);
+                if (!isCurrentOwner()) return false;
                 const publishWork = await createAnonymousHttpPow(
                     PROTOCOL_KEYS.DISCOVERY_PUBLISH_POW,
                     publication.epochId,
@@ -1899,7 +1811,7 @@ export const useDiscovery = (
                     return fail('discovery_epoch_expired');
                 }
                 preparedPublicationRef.current = preparedPublication;
-                return await sendPreparedPublication(preparedPublication, false);
+                return await sendPreparedPublication(preparedPublication);
             } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
 
@@ -1933,35 +1845,11 @@ export const useDiscovery = (
         }
     }, [effectiveHandle, getDiscoveryHandle, evaluateHandleWithOprf, accountUsername, hybridKeysRef, getAvatarForDiscovery, waitForOprfState, isDiscoveryTransportReady, ownerScope]);
 
-    const publishSelf = useCallback(async (
-        force = false,
-        bypassAttemptDelay = false,
-        trigger = 'unspecified'
-    ): Promise<boolean> => {
-        const triggerId = crypto.randomUUID();
-        const startedAt = performance.now();
-        let success = false;
-        let error: string | undefined;
-        console.log('[DISCOVERY] publish triggered', {
-            triggerId,
-            trigger,
-            force,
-            bypassAttemptDelay,
-        });
+    const publishSelf = useCallback(async (force = false, bypassAttemptDelay = false): Promise<boolean> => {
         try {
-            success = await runPublishSelf(force, bypassAttemptDelay);
-            return success;
-        } catch (caught) {
-            error = caught instanceof Error ? caught.message : String(caught);
+            return await runPublishSelf(force, bypassAttemptDelay);
+        } catch {
             return false;
-        } finally {
-            console.log('[DISCOVERY] publish result', {
-                triggerId,
-                trigger,
-                success,
-                durationMs: Math.round(performance.now() - startedAt),
-                error: success ? undefined : error || lastPublishFailureRef.current || 'not-completed',
-            });
         }
     }, [runPublishSelf]);
 
@@ -1987,7 +1875,7 @@ export const useDiscovery = (
 
             return false;
         }
-        if (Date.now() - lastPublishAttemptRef.current < 60_000) {
+        if (Date.now() - lastPublishAttemptRef.current < USE_DISCOVERY_LAST_PUBLISH_ATTEMPT_REF_MINIMUM) {
 
             return false;
         }
@@ -2050,12 +1938,7 @@ export const useDiscovery = (
                 parse: (detail) => parsePublicationAck(detail, requestId),
             });
             return isCurrentOwner();
-        } catch (error) {
-            console.warn('[DISCOVERY] Cover publication request failed', {
-                requestId,
-                error: error instanceof Error ? error.message : String(error),
-                detail: error instanceof DiscoveryRequestError ? error.detail : undefined,
-            });
+        } catch {
             return false;
         }
     }, [effectiveHandle, isDiscoveryTransportReady, ownerScope]);
@@ -2068,23 +1951,15 @@ export const useDiscovery = (
             if (ready) onReady();
         };
 
-        const lifecyclePublishReasons = new Set<string>();
         let lifecycleStopped = false;
 
-        const requestLifecyclePublish = (reason: string, delayMs = LIFECYCLE_PUBLISH_COALESCE_MS) => {
+        const requestLifecyclePublish = (delayMs = DISCOVERY_LIFECYCLE_PUBLISH_COALESCE_MS) => {
             if (lifecycleStopped) return;
-            lifecyclePublishReasons.add(reason);
             if (lifecyclePublishTimerRef.current !== null) return;
             lifecyclePublishTimerRef.current = window.setTimeout(async () => {
                 lifecyclePublishTimerRef.current = null;
                 if (lifecycleStopped || activeOwnerScopeRef.current !== ownerScope) return;
-                const triggerReasons = Array.from(lifecyclePublishReasons).sort();
-                lifecyclePublishReasons.clear();
-                const success = await publishSelf(
-                    true,
-                    false,
-                    `lifecycle:${triggerReasons.join('+') || 'unspecified'}`
-                );
+                const success = await publishSelf(true);
                 if (
                     !success &&
                     !lifecycleStopped &&
@@ -2093,7 +1968,6 @@ export const useDiscovery = (
                 ) {
                     const failure = lastPublishFailureRef.current || 'unknown';
                     requestLifecyclePublish(
-                        `retry:${failure}`,
                         publishRetryDelayMs(failure, isPreReadyPublishFailure(failure))
                     );
                 }
@@ -2144,10 +2018,10 @@ export const useDiscovery = (
                         oprfEpochRefreshTimeoutRef.current = null;
                         if (activeOwnerScopeRef.current !== ownerScope) return;
                         oprfStateRef.current = {};
-                        requestOprfKey('epoch-rotation', true);
+                        requestOprfKey(true);
                     }, refreshDelay);
                     if (publicationContextChanged && isDiscoveryTransportReady()) {
-                        requestLifecyclePublish('oprf-context-changed');
+                        requestLifecyclePublish();
                     }
                 } else {
 
@@ -2158,14 +2032,14 @@ export const useDiscovery = (
         const onUnlinkedReady = () => {
             noteDiscoveryTransportReadinessChanged('unlinked-ready');
             runWhenDiscoveryTransportReady(() => {
-                requestOprfKey('unlinked-ready');
-                requestLifecyclePublish('unlinked-ready');
+                requestOprfKey();
+                requestLifecyclePublish();
             });
         };
         const onHybridKeys = () => {
             cachedBundleRef.current = null;
             runWhenDiscoveryTransportReady(() => {
-                requestLifecyclePublish('hybrid-keys');
+                requestLifecyclePublish();
             });
         };
 
@@ -2181,13 +2055,13 @@ export const useDiscovery = (
                 certificate.expiresAt - Date.now() <= P2P_PEER_CERT_PUBLISH_REFRESH_LEAD_MS &&
                 isDiscoveryTransportReady()
             ) {
-                requestLifecyclePublish('peer-certificate-renewal');
+                requestLifecyclePublish();
             }
         }, P2P_PEER_CERT_PUBLISH_CHECK_INTERVAL_MS);
 
         if (isDiscoveryTransportReady()) {
-            requestOprfKey('initial-ready');
-            requestLifecyclePublish('initial-ready');
+            requestOprfKey();
+            requestLifecyclePublish();
         }
 
         return () => {
@@ -2201,12 +2075,11 @@ export const useDiscovery = (
                 clearTimeout(lifecyclePublishTimerRef.current);
                 lifecyclePublishTimerRef.current = null;
             }
-            lifecyclePublishReasons.clear();
 
         };
     }, [requestOprfKey, publishSelf, pruneDiscoveryTokenCache, isDiscoveryTransportReady, noteDiscoveryTransportReadinessChanged, ownerScope]);
 
-    const scheduleAvatarPublish = useCallback((reason: string) => {
+    const scheduleAvatarPublish = useCallback(() => {
 
         if (!effectiveHandle) {
 
@@ -2225,8 +2098,7 @@ export const useDiscovery = (
         }
         pendingAvatarPublishRef.current = true;
 
-        const jitterMs = 5000 + Math.floor(secureRandomUnit() * 25000);
-
+        const jitterMs = 5000 + Math.floor(PostQuantumRandom.randomUnit(true) * 25000);
 
         const runScheduledPublish = async (): Promise<void> => {
             pendingAvatarPublishRef.current = false;
@@ -2235,7 +2107,7 @@ export const useDiscovery = (
             let success = false;
             for (let handoff = 0; handoff < 2; handoff += 1) {
                 const targetVersion = avatarStateVersionRef.current;
-                success = await publishSelf(true, true, `profile:${reason}`);
+                success = await publishSelf(true, true);
                 if (activeOwnerScopeRef.current !== ownerScope) return;
                 if (
                     success &&
@@ -2291,7 +2163,7 @@ export const useDiscovery = (
         };
 
         const initialDelay = DISCOVERY_COVER_PUBLISH_INITIAL_MIN_MS
-            + Math.floor(secureRandomUnit() * DISCOVERY_COVER_PUBLISH_INITIAL_JITTER_MS);
+            + Math.floor(PostQuantumRandom.randomUnit(true) * DISCOVERY_COVER_PUBLISH_INITIAL_JITTER_MS);
 
         scheduleNext(initialDelay);
 
@@ -2308,7 +2180,6 @@ export const useDiscovery = (
             return;
         }
 
-
         const handler = (ev: Event) => {
             try {
                 if (ev.type === EventType.PROFILE_PICTURE_UPDATED) {
@@ -2316,7 +2187,7 @@ export const useDiscovery = (
 
                     if (detail?.type === 'own') {
                         avatarStateVersionRef.current += 1;
-                        scheduleAvatarPublish('profile-picture-updated');
+                        scheduleAvatarPublish();
                     }
                 }
             } catch { }
@@ -2360,7 +2231,6 @@ export const useDiscovery = (
         }
         const normalizedHandle = getDiscoveryHandle(targetHandle);
         if (!normalizedHandle) {
-            console.warn('[DISCOVERY] findUser: could not normalize handle', { target: targetHandle });
             return null;
         }
         if (!forceRefresh && effectiveHandle) {
@@ -2377,10 +2247,9 @@ export const useDiscovery = (
         networkIdentityCaptured = true;
         if (!isCurrentOwner()) return null;
         if (!isDiscoveryTransportReady()) {
-            console.warn('[DISCOVERY] findUser: transport not ready', { target: targetHandle });
             return null;
         }
-        const scopeState = await waitForOprfState('lookup-cache-scope');
+        const scopeState = await waitForOprfState();
         if (!isCurrentOwner()) return null;
         if (!scopeState?.publicKey || !/^[a-f0-9]{64}$/i.test(scopeState.publicKey)) {
             return null;
@@ -2410,7 +2279,7 @@ export const useDiscovery = (
             const cachedEntry = discoveryResultCache.get(lookupCacheKey);
             if (
                 lastFetchAt > 0 &&
-                sinceFetch < FORCED_REFETCH_MIN_INTERVAL_MS &&
+                sinceFetch < DISCOVERY_FORCED_REFETCH_MIN_INTERVAL_MS &&
                 cachedEntry &&
                 cachedEntry.expiresAt > Date.now() &&
                 cachedEntry.value
@@ -2441,10 +2310,6 @@ export const useDiscovery = (
             return null;
         }
 
-        console.log('[DISCOVERY] findUser: network lookup started', {
-            target: targetHandle,
-            forceRefresh,
-        });
         const abortLookup = () => lookupController.abort();
         operationAbortSignal.addEventListener('abort', abortLookup, { once: true });
         operationIdentity?.addEventListener('abort', abortLookup, { once: true });
@@ -2454,13 +2319,11 @@ export const useDiscovery = (
         const rawLookup = (async () => {
             let epochResults: Map<number, { token: string; encryptionKey: Uint8Array }> | null = null;
             try {
-                const oprfState = await waitForOprfState('find-missing-epoch');
+                const oprfState = await waitForOprfState();
                 if (!oprfState || oprfState.epoch === undefined) {
-                    console.warn('[DISCOVERY] findUser: no oprf epoch available', { target: targetHandle });
                     return null;
                 }
                 const { epoch } = oprfState;
-
 
                 const lookupEpochs = [epoch];
                 epochResults = await getDiscoveryTokensForEpochs(normalizedHandle, lookupEpochs);
@@ -2469,7 +2332,7 @@ export const useDiscovery = (
                     if (epochResults) {
                         for (const result of epochResults.values()) result.encryptionKey.fill(0);
                     }
-                    await new Promise((resolve) => setTimeout(resolve, 500));
+                    await sleep(USE_DISCOVERY_FIND_USER_DELAY_MS);
                     if (!isCurrentOwner()) return null;
                     epochResults = await getDiscoveryTokensForEpochs(normalizedHandle, lookupEpochs);
                     if (!isCurrentOwner()) return null;
@@ -2504,12 +2367,10 @@ export const useDiscovery = (
                             if (!isCurrentOwner()) return null;
                             if (bucketResult) {
                                 noteDiscoveryNetworkFetch(lookupCacheKey);
-                                console.log('[DISCOVERY] findUser: FOUND', { target: targetHandle });
                                 return bucketResult;
                             }
                         }
-                    } catch (e) {
-                        console.warn('[DISCOVERY] findUser: bucket lookup threw', { target: targetHandle, error: e instanceof Error ? e.message : String(e) });
+                    } catch {
                         bucketLookupFailed = true;
                     }
                     return null;
@@ -2532,10 +2393,7 @@ export const useDiscovery = (
                     });
                 }
                 return null;
-            } catch (error) {
-                console.warn('[DISCOVERY] findUser: lookup failed', {
-                    error: error instanceof Error ? error.message : String(error),
-                });
+            } catch {
                 return null;
             } finally {
                 operationAbortSignal.removeEventListener('abort', abortLookup);
@@ -2565,10 +2423,6 @@ export const useDiscovery = (
                     rawLookup,
                     new Promise<OPRFDiscoveryMaterial | null>((resolve) => {
                         timer = setTimeout(() => {
-                            console.warn('[DISCOVERY] findUser: HARD TIMEOUT, cancelling lookup', {
-                                target: targetHandle,
-                                ms: DISCOVERY_LOOKUP_TIMEOUT_MS,
-                            });
                             abortLookup();
                             
                             if (findUserInFlightLock.get(lookupCacheKey) === promise) {

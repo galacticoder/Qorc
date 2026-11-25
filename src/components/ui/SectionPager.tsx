@@ -1,3 +1,7 @@
+import {
+  SECTION_PAGER_FINISH_COMPLETE_TIMEOUT_MS,
+  SECTION_PAGER_MATH_MAX_MINIMUM,
+} from '../../lib/constants';
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { SectionNavigationContext } from '../../lib/ui/section-navigation';
 
@@ -70,7 +74,7 @@ export function SectionPager({ activeTab, mobile, swipeEnabled = true, onTabChan
     destination.current = commit ? motionRef.current.target : null;
     update({ ...motionRef.current, phase: 'settling', offset: commit ? Math.sign(offset) * current.width : 0 });
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) complete();
-    else timer.current = setTimeout(complete, 280);
+    else timer.current = setTimeout(complete, SECTION_PAGER_FINISH_COMPLETE_TIMEOUT_MS);
   };
 
   return (
@@ -94,7 +98,7 @@ export function SectionPager({ activeTab, mobile, swipeEnabled = true, onTabChan
         if (!current || current.id !== event.pointerId) return;
         const dx = event.clientX - current.x, dy = event.clientY - current.y;
         if (!current.horizontal) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) < 10) return;
+          if (Math.max(Math.abs(dx), Math.abs(dy)) < SECTION_PAGER_MATH_MAX_MINIMUM) return;
           if (Math.abs(dy) >= Math.abs(dx)) { gesture.current = null; return; }
           
           if (dx > 0 && (event.target as Element).closest('.qorc-conversation-swipe')) { gesture.current = null; return; }

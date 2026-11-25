@@ -2,6 +2,10 @@
  * Total Blind Gatekeeper Client
  */
 
+import {
+  GATEKEEPER_MAX_ACTIVE_TOKENS,
+  GATEKEEPER_CLIENT_WORKER_HASH_LENGTH_EXPECTED,
+} from '../constants';
 import { OPAQUEClient, OPAQUEClientHelpers } from './opaque-client';
 import { PrivacyPassClient, TokenSerializer, AnonymousToken, getPrivacyPassBatchEpoch, isPrivacyPassTokenUsable } from './privacy-pass-client';
 import { SignalType } from '../types/signal-types';
@@ -18,7 +22,6 @@ import { SERVER_ENTRY_PURPOSE } from '../config/audiences';
 const GATEKEEPER_KDF_SALT = blake3(new TextEncoder().encode(PROTOCOL_KEYS.GATEKEEPER_KDF), { dkLen: 32 });
 
 export class GatekeeperClient {
-    private static readonly MAX_ACTIVE_TOKENS = 1000;
     private opaqueClient: OPAQUEClient;
     private ppClient: PrivacyPassClient;
     private storedTokens: AnonymousToken[] = [];
@@ -82,7 +85,7 @@ export class GatekeeperClient {
                 hashLen: 32
             });
             workerHash = derived.hash instanceof Uint8Array ? derived.hash : null;
-            if (!workerHash || workerHash.length !== 32) throw new Error('Invalid server entry KDF result');
+            if (!workerHash || workerHash.length !== GATEKEEPER_CLIENT_WORKER_HASH_LENGTH_EXPECTED) throw new Error('Invalid server entry KDF result');
             this.pendingEntrySecret = new Uint8Array(workerHash);
             const { blindedElement } = await this.opaqueClient.startLogin(this.pendingEntrySecret);
             try {
@@ -148,7 +151,7 @@ export class GatekeeperClient {
                 for (const token of staleSecrets) wipeAnonymousToken(token);
             }
 
-            generated = await this.ppClient.generateTokenBatch(GatekeeperClient.MAX_ACTIVE_TOKENS);
+            generated = await this.ppClient.generateTokenBatch(GATEKEEPER_MAX_ACTIVE_TOKENS);
             this.storedTokens = [...this.storedTokens, ...generated.tokenSecrets];
             tokensCommitted = true;
 
@@ -352,7 +355,7 @@ export class GatekeeperClient {
                 this.storedTokens = [];
             }
             if (
-                this.storedTokens.length > GatekeeperClient.MAX_ACTIVE_TOKENS ||
+                this.storedTokens.length > GATEKEEPER_MAX_ACTIVE_TOKENS ||
                 this.storedTokens.some(t => t.purpose !== SERVER_ENTRY_PURPOSE)
             ) {
                 throw new Error('Invalid gatekeeper token store');
@@ -367,7 +370,7 @@ export class GatekeeperClient {
     }
 
     private async saveTokens(): Promise<void> {
-        const selected = this.selectTokensForStorage(GatekeeperClient.MAX_ACTIVE_TOKENS);
+        const selected = this.selectTokensForStorage(GATEKEEPER_MAX_ACTIVE_TOKENS);
         const serialized = await TokenSerializer.serializeBatch(selected);
         if (!await storage.set(this.storageKey, serialized)) {
             throw new Error('Native secure storage rejected the gatekeeper token update');

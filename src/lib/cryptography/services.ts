@@ -2,6 +2,7 @@
  * Crypto Services
  */
 
+import { SERVICES_ENCRYPTED_BYTES_LENGTH_MINIMUM } from '../constants';
 import { Base64 } from './base64';
 import { AES } from './aes-gcm';
 import { PostQuantumKEM } from './kem';
@@ -78,7 +79,7 @@ export class EncryptService {
 
 export class DecryptService {
   static deserializeEncryptedDataFromUint8Array(encryptedBytes: Uint8Array) {
-    if (!encryptedBytes || encryptedBytes.length < 7) {
+    if (!encryptedBytes || encryptedBytes.length < SERVICES_ENCRYPTED_BYTES_LENGTH_MINIMUM) {
       throw new Error('Invalid encrypted data: insufficient length');
     }
     const combined = new Uint8Array(encryptedBytes);

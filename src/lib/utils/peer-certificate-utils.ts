@@ -3,21 +3,15 @@ import type { PeerCertificateBundle } from '../types/p2p-types';
 import { CryptoUtils } from './crypto-utils';
 import { toUint8 } from './p2p-utils';
 import { Base64, decodeCanonicalBase64 } from '../cryptography/base64';
-import { AUTH_USERNAME_REGEX, CERT_CLOCK_SKEW_MS, P2P_PEER_CERT_TTL_MS } from '../constants';
+import {
+  AUTH_USERNAME_REGEX,
+  CERT_CLOCK_SKEW_MS,
+  P2P_PEER_CERT_TTL_MS,
+  PEER_CERTIFICATE_KEYS,
+} from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES, X25519_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 import { bytesToHex } from '../../../shared/bytes.js';
-
-const PEER_CERTIFICATE_KEYS = [
-  'username',
-  'dilithiumPublicKey',
-  'kyberPublicKey',
-  'x25519PublicKey',
-  'proof',
-  'issuedAt',
-  'expiresAt',
-  'signature'
-] as const;
 
 function hasExactCertificateShape(value: unknown): value is PeerCertificateBundle {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

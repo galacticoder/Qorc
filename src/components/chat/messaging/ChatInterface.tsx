@@ -22,8 +22,12 @@ import {
   SCROLL_THRESHOLD,
   NEAR_BOTTOM_THRESHOLD,
   CONVERSATION_SEGMENT_SIZE,
-  SEGMENT_UNLOAD_IDLE_MS
-} from "../../../lib/constants";
+  SEGMENT_UNLOAD_IDLE_MS,
+  CHAT_INTERFACE_TIMEOUT_MS,
+  CHAT_INTERFACE_HANDLE_REPLY_CLICK_TIMEOUT_MS,
+  READ_RECEIPTABLE_MESSAGE_TYPES,
+  CHAT_ARRIVAL_ANIMATION_MAX_AGE_MS,
+} from '../../../lib/constants';
 import { releaseUnretainedVaultEntries } from "../../../lib/utils/message-state-limits";
 import type { HybridKeys } from "../../../lib/types/auth-types";
 import type { SecureDB } from '../../../lib/database/secureDB';
@@ -69,13 +73,6 @@ const distanceFromChatBottom = (container: Element): number => (
 const distanceFromChatTop = (container: Element): number => (
   Math.max(0, container.scrollHeight - container.clientHeight + container.scrollTop)
 );
-
-const READ_RECEIPTABLE_MESSAGE_TYPES: ReadonlySet<string> = new Set([
-  SignalType.MESSAGE,
-  SignalType.TEXT,
-  SignalType.FILE,
-  SignalType.FILE_MESSAGE,
-]);
 
 const shouldCreateReadReceipt = (message: Message, currentUsername: string): boolean => (
   message.sender !== currentUsername &&
@@ -205,7 +202,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     // conversation; warm messages remain visible throughout the refresh.
     const loadingTimer = setTimeout(() => {
       if (isCurrentLoad() && messagesRef.current.length === 0) setOpeningConversation(conversationToLoad);
-    }, 120);
+    }, CHAT_INTERFACE_TIMEOUT_MS);
 
     const loadBackgroundMessages = async () => {
       try {
@@ -253,7 +250,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const sameConversation = arrivalScope.current === scope;
     const canAnimate = sameConversation && arrivalHistoryReady.current && !isLoadingMore;
     const ids = new Set(messages.map(message => message.id));
-    const arrivals = canAnimate ? messages.filter(message => !knownArrivalIds.current.has(message.id) && Date.now() - message.timestamp.getTime() < 5000).map(message => message.id) : [];
+    const arrivals = canAnimate ? messages.filter(message => !knownArrivalIds.current.has(message.id) && Date.now() - message.timestamp.getTime() < CHAT_ARRIVAL_ANIMATION_MAX_AGE_MS).map(message => message.id) : [];
     knownArrivalIds.current = ids;
     arrivalScope.current = scope;
     arrivalHistoryReady.current = initialHistoryComplete === selectedConversation;
@@ -513,7 +510,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer || isLoadingMore) return;
 
-    const isNearBottom = distanceFromChatBottom(scrollContainer) < 100;
+    const isNearBottom = distanceFromChatBottom(scrollContainer) < NEAR_BOTTOM_THRESHOLD;
 
     if (isNearBottom) {
       scrollToBottom(scrollContainer);
@@ -523,7 +520,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const handleTypingUpdate = useCallback(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
-    const isNearBottom = distanceFromChatBottom(scrollContainer) < 100;
+    const isNearBottom = distanceFromChatBottom(scrollContainer) < NEAR_BOTTOM_THRESHOLD;
     if (isNearBottom) {
       scrollToBottom(scrollContainer);
     }
@@ -532,16 +529,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Handle audio call initiation
   const handleAudioCall = useCallback(async () => {
     if (!selectedConversation) return;
-    console.info('[CALL-DIAG]', { phase: 'ui.audio-click' });
     try {
       await startCall(selectedConversation, 'audio');
-      console.info('[CALL-DIAG]', { phase: 'ui.audio-start-resolved' });
     } catch (_error) {
-      console.error('[CALL-DIAG]', {
-        phase: 'ui.audio-start-failed',
-        errorName: _error instanceof Error ? _error.name : 'UnknownError',
-        errorMessage: _error instanceof Error ? _error.message : String(_error),
-      });
       toast.error('Failed to start call', {
         description: (_error as Error).message,
       });
@@ -551,16 +541,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Handle video call initiation
   const handleVideoCall = useCallback(async () => {
     if (!selectedConversation) return;
-    console.info('[CALL-DIAG]', { phase: 'ui.video-click' });
     try {
       await startCall(selectedConversation, 'video');
-      console.info('[CALL-DIAG]', { phase: 'ui.video-start-resolved' });
     } catch (_error) {
-      console.error('[CALL-DIAG]', {
-        phase: 'ui.video-start-failed',
-        errorName: _error instanceof Error ? _error.name : 'UnknownError',
-        errorMessage: _error instanceof Error ? _error.message : String(_error),
-      });
       toast.error('Failed to start video call', {
         description: (_error as Error).message,
       });
@@ -617,7 +600,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('bg-secondary/20');
-      setTimeout(() => el.classList.remove('bg-secondary/20'), 1500);
+      setTimeout(() => el.classList.remove('bg-secondary/20'), CHAT_INTERFACE_HANDLE_REPLY_CLICK_TIMEOUT_MS);
     }
   }, []);
 

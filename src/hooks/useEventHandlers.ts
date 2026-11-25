@@ -1,3 +1,10 @@
+import {
+  USE_EVENT_HANDLERS_MAYBE_KYBER_LENGTH_LIMIT,
+  USE_EVENT_HANDLERS_MAYBE_DILITHIUM_LENGTH_LIMIT,
+  USE_EVENT_HANDLERS_MAYBE_X25519_LENGTH_LIMIT,
+  USE_EVENT_HANDLERS_PROCESSED_KEYS_AVAILABLE_REF_SIZE_LIMIT,
+  SESSION_EVENT_COOLDOWN_MS,
+} from '../lib/constants';
 import React, { useEffect } from 'react';
 import { isCanonicalAuthUsername, isPlainObject, hasPrototypePollutionKeys } from '../lib/sanitizers';
 import { sanitizeHybridKeys } from '../lib/utils/messaging-validators';
@@ -54,9 +61,9 @@ export function useEventHandlers({
         const maybeKyber = (hybridKeysRaw as any).kyberPublicBase64;
         const maybeDilithium = (hybridKeysRaw as any).dilithiumPublicBase64;
         const maybeX25519 = (hybridKeysRaw as any).x25519PublicBase64;
-        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) ||
-          (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) return;
-        if (typeof maybeX25519 === 'string' && maybeX25519.length > 1_000) return;
+        if ((typeof maybeKyber === 'string' && maybeKyber.length > USE_EVENT_HANDLERS_MAYBE_KYBER_LENGTH_LIMIT) ||
+          (typeof maybeDilithium === 'string' && maybeDilithium.length > USE_EVENT_HANDLERS_MAYBE_DILITHIUM_LENGTH_LIMIT)) return;
+        if (typeof maybeX25519 === 'string' && maybeX25519.length > USE_EVENT_HANDLERS_MAYBE_X25519_LENGTH_LIMIT) return;
 
         const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
         if (
@@ -90,10 +97,10 @@ export function useEventHandlers({
 
         const eventId = `${username}\0${incomingPeerCertificateFingerprint}\0${incomingIdentityRootFingerprint}\0${incomingIdentityBundleFingerprint}`;
         const last = processedKeysAvailableRef.get(eventId) || 0;
-        if (now - last < 2000) return;
+        if (now - last < SESSION_EVENT_COOLDOWN_MS) return;
         processedKeysAvailableRef.delete(eventId);
         processedKeysAvailableRef.set(eventId, now);
-        while (processedKeysAvailableRef.size > 512) {
+        while (processedKeysAvailableRef.size > USE_EVENT_HANDLERS_PROCESSED_KEYS_AVAILABLE_REF_SIZE_LIMIT) {
           const oldest = processedKeysAvailableRef.keys().next().value as string | undefined;
           if (!oldest) break;
           processedKeysAvailableRef.delete(oldest);

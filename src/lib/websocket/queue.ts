@@ -10,6 +10,7 @@ import {
   OUTBOUND_RETRY_MAX_AGE_MS,
   QUEUE_FLUSH_INTERVAL_MS,
   RATE_LIMIT_BACKOFF_MS,
+  QUEUE_ENTRY_ATTEMPT_MINIMUM,
 } from '../constants';
 
 export class WebSocketQueue {
@@ -134,7 +135,7 @@ export class WebSocketQueue {
         } catch {
           if (generation !== this.lifecycleGeneration) break;
           entry.attempt += 1;
-          if (entry.attempt < 3) {
+          if (entry.attempt < QUEUE_ENTRY_ATTEMPT_MINIMUM) {
             entry.flushAfter = Date.now() + RATE_LIMIT_BACKOFF_MS * entry.attempt;
             this.pendingQueue.unshift(entry);
             this.pendingBytes += entry.byteLength;

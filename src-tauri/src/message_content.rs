@@ -1,5 +1,10 @@
 //! Native-only private message content handling
 
+use crate::validation::is_canonical_auth_username;
+use crate::constants::message_content::{
+    MAX_LINK_URL_BYTES, MAX_MESSAGE_LINK_PREVIEWS, MAX_PRIVATE_MESSAGE_CHARS, MAX_RENDER_HEIGHT,
+    MAX_RENDER_WIDTH,
+};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -11,12 +16,6 @@ use crate::database::DatabaseManager;
 use crate::error::{QorcError, QorcResult};
 use crate::signal_protocol::PendingDecryptedMessage;
 
-const MAX_PRIVATE_MESSAGE_CHARS: usize = 16 * 1024;
-const MAX_RENDER_WIDTH: u32 = 800;
-const MAX_RENDER_HEIGHT: u32 = 4096;
-const MAX_USERNAME_BYTES: usize = 100;
-const MAX_LINK_URL_BYTES: usize = 2048;
-const MAX_MESSAGE_LINK_PREVIEWS: usize = 3;
 
 static MESSAGE_LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -36,6 +35,7 @@ pub struct OutboundContentBinding {
 pub struct NativeMessageContentRecord {
     pub content: Zeroizing<Vec<u8>>,
     pub outbound: Option<OutboundContentBinding>,
+    delete_after_send: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,15 +404,6 @@ fn private_text_application_type(application_type: &str) -> bool {
     matches!(application_type, "message" | "edit-message")
 }
 
-fn valid_username(value: &str) -> bool {
-    value.len() >= 3
-        && value.len() <= MAX_USERNAME_BYTES
-        && value == value.trim().to_lowercase()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
-}
-
 fn encode_record(record: &NativeMessageContentRecord) -> QorcResult<Zeroizing<Vec<u8>>> {
     let (recipient, application_type, wire_message_id) = match record.outbound.as_ref() {
         Some(binding) => (
@@ -442,7 +433,7 @@ fn encode_record(record: &NativeMessageContentRecord) -> QorcResult<Zeroizing<Ve
         })?;
     let mut encoded = Zeroizing::new(Vec::with_capacity(capacity));
     encoded.extend_from_slice(crate::protocol_keys::NATIVE_MESSAGE_CONTENT_MAGIC);
-    encoded.push(u8::from(record.outbound.is_some()));
+    encoded.push(u8::from(record.outbound.is_some()) | (u8::from(record.delete_after_send) << 1));
     encoded.extend_from_slice(&recipient_len.to_be_bytes());
     encoded.extend_from_slice(&type_len.to_be_bytes());
     encoded.extend_from_slice(&wire_len.to_be_bytes());
@@ -474,9 +465,10 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorcResult<NativeMessageContent
             "Invalid native content record".to_string(),
         ));
     }
-    let has_outbound = match encoded[4] {
-        0 => false,
-        1 => true,
+    let (has_outbound, delete_after_send) = match encoded[4] {
+        0 => (false, false),
+        1 => (true, false),
+        3 => (true, true),
         _ => {
             return Err(QorcError::DecryptionFailed(
                 "Invalid native content record".to_string(),
@@ -519,7 +511,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorcResult<NativeMessageContent
     offset += wire_len;
     let content = Zeroizing::new(encoded[offset..].to_vec());
     let outbound = if has_outbound {
-        if !valid_username(&recipient)
+        if !is_canonical_auth_username(&recipient)
             || !private_text_application_type(&application_type)
             || !valid_message_id(&wire_message_id)
         {
@@ -540,7 +532,7 @@ fn decode_record(encoded: Zeroizing<Vec<u8>>) -> QorcResult<NativeMessageContent
         }
         None
     };
-    Ok(NativeMessageContentRecord { content, outbound })
+    Ok(NativeMessageContentRecord { content, outbound, delete_after_send })
 }
 
 pub fn load_native_content_record(
@@ -550,6 +542,13 @@ pub fn load_native_content_record(
     db.get_native_message_content(storage_id)?
         .map(decode_record)
         .transpose()
+}
+
+pub(crate) fn load_native_display_content_record(
+    db: &DatabaseManager,
+    storage_id: &str,
+) -> QorcResult<Option<NativeMessageContentRecord>> {
+    Ok(load_native_content_record(db, storage_id)?.filter(|record| !record.delete_after_send))
 }
 
 fn persist_native_content_record(
@@ -724,6 +723,7 @@ pub fn commit_pending_content(
         &NativeMessageContentRecord {
             content: Zeroizing::new(content.as_bytes().to_vec()),
             outbound: None,
+            delete_after_send: false,
         },
     )?;
     Ok(ContentCommitResult {
@@ -742,7 +742,7 @@ pub fn store_outgoing_content(
     overwrite: bool,
 ) -> QorcResult<ContentCommitResult> {
     if !valid_message_id(storage_id)
-        || !valid_username(recipient)
+        || !is_canonical_auth_username(recipient)
         || !private_text_application_type(application_type)
         || !valid_message_id(wire_message_id)
         || storage_id != wire_message_id
@@ -780,6 +780,7 @@ pub fn store_outgoing_content(
         &NativeMessageContentRecord {
             content: Zeroizing::new(content.as_bytes().to_vec()),
             outbound: Some(outbound),
+            delete_after_send: false,
         },
     )?;
     Ok(ContentCommitResult {
@@ -824,6 +825,7 @@ pub fn clone_content_for_display(
         &NativeMessageContentRecord {
             content: Zeroizing::new(source.content.as_slice().to_vec()),
             outbound: None,
+            delete_after_send: false,
         },
     )?;
     Ok(ContentCommitResult {
@@ -836,9 +838,27 @@ pub fn revoke_outbound_binding(db: &DatabaseManager, storage_id: &str) -> QorcRe
     let Some(mut record) = load_native_content_record(db, storage_id)? else {
         return Ok(false);
     };
+    if record.delete_after_send {
+        db.delete_native_message_content(storage_id)?;
+        return Ok(true);
+    }
     if record.outbound.take().is_none() {
         return Ok(true);
     }
     persist_native_content_record(db, storage_id, &record)?;
     Ok(true)
+}
+
+pub(crate) fn retain_evicted_content_for_send(
+    db: &DatabaseManager,
+    storage_id: &str,
+) -> QorcResult<Option<Zeroizing<Vec<u8>>>> {
+    let Some(mut record) = load_native_content_record(db, storage_id)? else {
+        return Ok(None);
+    };
+    if record.outbound.is_none() {
+        return Ok(None);
+    }
+    record.delete_after_send = true;
+    encode_record(&record).map(Some)
 }

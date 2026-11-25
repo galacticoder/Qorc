@@ -1,3 +1,4 @@
+import { QUICK_CHAT_REACTIONS } from '../../../lib/constants';
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import { Pencil, Reply, Trash2, Check, Download, Loader2, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
@@ -55,8 +56,6 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     const menuRef = useRef<HTMLDivElement>(null);
     const [position, setPosition] = useState<MenuPosition | null>(null);
     useAppBack(true, onClose, 100);
-
-    const QUICK_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢'];
 
     useLayoutEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -152,7 +151,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
         >
             {(onReactionSelect || onReact) && (
             <div className="qorc-message-context-reactions">
-                {QUICK_REACTIONS.map((emoji) => (
+                {QUICK_CHAT_REACTIONS.map((emoji) => (
                     <button
                         key={emoji}
                         type="button"

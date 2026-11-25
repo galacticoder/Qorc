@@ -1,3 +1,4 @@
+import { SELECT_TYPEAHEAD_RESET_MS } from '../../lib/constants';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
@@ -42,7 +43,7 @@ export function AppSelect({ id, className = '', label, value, options, disabled 
     }
     else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== ' ') {
       const now = Date.now();
-      const text = (now - searchRef.current.time < 700 ? searchRef.current.text : '') + event.key.toLowerCase();
+      const text = (now - searchRef.current.time < SELECT_TYPEAHEAD_RESET_MS ? searchRef.current.text : '') + event.key.toLowerCase();
       searchRef.current = { text, time: now };
       const query = [...text].every((character) => character === text[0]) ? text[0] : text;
       for (let offset = 1; offset <= items.length; offset++) {

@@ -48,7 +48,9 @@ import type { CallState } from "../lib/types/calling-types";
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
   LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS,
-} from "../lib/constants";
+  INDEX_WIDTH_LIMIT,
+  INDEX_WIDTH_MINIMUM,
+} from '../lib/constants';
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
@@ -352,7 +354,7 @@ const ChatApp: React.FC = () => {
         const saved = await getInstanceLocalStorageItem('conversationPanelWidth');
         if (cancelled || !saved) return;
         const width = parseInt(saved, 10);
-        if (!isNaN(width) && width >= 260 && width <= 520) {
+        if (!isNaN(width) && width >= INDEX_WIDTH_LIMIT && width <= INDEX_WIDTH_MINIMUM) {
           setConversationPanelWidth(width);
         }
       } catch { }
@@ -395,7 +397,6 @@ const ChatApp: React.FC = () => {
     Database.secureDBRef,
     findUser
   );
-
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.loginUsernameRef,
@@ -494,9 +495,18 @@ const ChatApp: React.FC = () => {
   });
 
   const handleRemoveConversation = useCallback(async (username: string) => {
-    Database.discardPreloadedConversationMessages(username);
-    await removeConversation(username);
-  }, [Database.discardPreloadedConversationMessages, removeConversation]);
+    try {
+      await messageSender.deleteConversationWithSendCleanup(username, async () => {
+        Database.discardPreloadedConversationMessages(username);
+        await removeConversation(username, Database.flushPendingSaves);
+      });
+    } catch {
+      toast.error('Could not delete the conversation. Try again.');
+    }
+  }, [
+    Database.discardPreloadedConversationMessages, Database.flushPendingSaves,
+    messageSender.deleteConversationWithSendCleanup, removeConversation,
+  ]);
 
   useEffect(() => {
     if (selectedConversation) {

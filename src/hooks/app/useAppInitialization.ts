@@ -40,10 +40,10 @@ export function useAppInitialization({
     let cancelled = false;
     setAvatarDataLoaded(false);
     profilePictureSystem.setSecureDB(db);
-    void profilePictureSystem.initialize().then(() => {
-      if (!cancelled && Database.secureDBRef.current === db) setAvatarDataLoaded(true);
-    }).catch((error) => {
+    void profilePictureSystem.initialize().catch((error) => {
       console.error('[App] Failed to initialize profile pictures', error);
+    }).finally(() => {
+      if (!cancelled && Database.secureDBRef.current === db) setAvatarDataLoaded(true);
     });
     return () => { cancelled = true; };
   }, [Database.dbInitialized, Database.secureDBRef.current]);

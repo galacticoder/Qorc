@@ -1,22 +1,20 @@
 import { SignalType } from '../types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
 import { sanitizeMessageId, sanitizeUsername } from '../sanitizers';
-import { AUTH_USERNAME_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
+import {
+  AUTH_USERNAME_REGEX,
+  MAX_ID_CACHE_SIZE,
+  ID_CACHE_TTL_MS,
+  MAX_SESSION_REQUEST_PEERS,
+  SIGNAL_TYPE_MAP,
+} from '../constants';
 import type { IdCache, SessionApi } from '../types/message-sending-types';
 import { nativeMessageContent, signal } from '../tauri-bindings';
 import { setBoundedMapEntry } from './message-state-limits';
 import { CryptoUtils } from './crypto-utils';
 
-const MAX_SESSION_REQUEST_PEERS = 256;
-
 // Signal type mapping for message types
-export const SIGNAL_TYPE_MAP: Record<string, string> = {
-  [SignalType.MESSAGE]: SignalType.MESSAGE,
-  [SignalType.DELETE_MESSAGE]: SignalType.DELETE_MESSAGE,
-  [SignalType.EDIT_MESSAGE]: SignalType.EDIT_MESSAGE,
-  [SignalType.REACTION_ADD]: SignalType.REACTION_ADD,
-  [SignalType.REACTION_REMOVE]: SignalType.REACTION_REMOVE,
-};
+export { SIGNAL_TYPE_MAP } from "../constants/messaging";
 
 // Get session API wrapper for Tauri signal bindings
 export const getSessionApi = (): SessionApi => {

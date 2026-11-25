@@ -2,6 +2,12 @@
  * Client-side proof of work solver for the adaptive auth throttle
  */
 
+import {
+  POW_MAX_DIFFICULTY_BITS,
+  POW_MAX_SOLVE_MS,
+  POW_NATIVE_BATCH_ITERATIONS,
+  PROOF_OF_WORK_SEED_LENGTH_EXPECTED,
+} from '../constants';
 import { Base64 } from './base64';
 import { authPow } from '../tauri-bindings';
 
@@ -9,10 +15,6 @@ export interface PowChallenge {
   seed?: string;
   difficulty?: number;
 }
-
-const MAX_DIFFICULTY_BITS = 28;
-const MAX_SOLVE_MS = 60_000;
-const NATIVE_BATCH_ITERATIONS = 0x40000;
 
 // Solve a PoW challenge
 export async function solvePowChallenge(
@@ -28,12 +30,12 @@ export async function solvePowChallenge(
   throwIfAborted();
   const difficulty = challenge?.difficulty ?? 0;
   if (!challenge || !challenge.seed || difficulty <= 0) return '';
-  if (!Number.isInteger(difficulty) || difficulty > MAX_DIFFICULTY_BITS) {
+  if (!Number.isInteger(difficulty) || difficulty > POW_MAX_DIFFICULTY_BITS) {
     throw new Error('Invalid proof-of-work difficulty');
   }
 
   const seed = Base64.base64ToUint8Array(challenge.seed);
-  if (seed.length !== 16 || Base64.arrayBufferToBase64(seed) !== challenge.seed) {
+  if (seed.length !== PROOF_OF_WORK_SEED_LENGTH_EXPECTED || Base64.arrayBufferToBase64(seed) !== challenge.seed) {
     seed.fill(0);
     throw new Error('Invalid proof-of-work seed');
   }
@@ -51,7 +53,7 @@ export async function solvePowChallenge(
         challenge.seed,
         difficulty,
         nextNonce,
-        NATIVE_BATCH_ITERATIONS
+        POW_NATIVE_BATCH_ITERATIONS
       );
       if (batch.solution) {
         return batch.solution;
@@ -59,7 +61,7 @@ export async function solvePowChallenge(
       nextNonce = batch.nextNonce;
 
       const elapsed = Date.now() - started;
-      if (elapsed > MAX_SOLVE_MS) {
+      if (elapsed > POW_MAX_SOLVE_MS) {
         throw new Error('Proof-of-work timed out');
       }
       if (elapsed - (lastProgressLog - started) >= 10_000) {

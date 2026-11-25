@@ -1,3 +1,10 @@
+import {
+  LINK_PREVIEW_CACHE_TTL_MS,
+  MAX_LINK_PREVIEW_CACHE_BYTES,
+  MAX_LINK_PREVIEW_CACHE_ENTRIES,
+  MAX_LINK_PREVIEW_IMAGE_DATA_URL_LENGTH,
+  MAX_LINK_PREVIEW_RECORD_BYTES,
+} from '../constants';
 import { blake3 } from '@noble/hashes/blake3.js';
 import type { NativeLinkPreview } from '../tauri-bindings';
 import { hasExactObjectKeys } from '../sanitizers';
@@ -23,12 +30,8 @@ interface LinkPreviewCacheIndex {
   entries: LinkPreviewCacheIndexEntry[];
 }
 
-const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-const MAX_CACHE_ENTRIES = 48;
-const MAX_CACHE_BYTES = 24 * 1024 * 1024;
-const MAX_RECORD_BYTES = 3 * 1024 * 1024;
-const MAX_IMAGE_DATA_URL_LENGTH = 2_100_000;
-const writeChains = new WeakMap<SecureDB, Promise<void>>();
+const cacheOperations = new WeakMap<SecureDB, Promise<void>>();
+const reconciledCaches = new WeakSet<SecureDB>();
 const encoder = new TextEncoder();
 
 const cacheKey = (url: string): string => {
@@ -60,7 +63,7 @@ const parsePreview = (value: unknown, expectedUrl: string): NativeLinkPreview | 
     !isBoundedString(candidate.host, 253) ||
     !isNullableBoundedString(candidate.title, 120) ||
     !isNullableBoundedString(candidate.description, 240) ||
-    !isNullableBoundedString(candidate.imageDataUrl, MAX_IMAGE_DATA_URL_LENGTH) ||
+    !isNullableBoundedString(candidate.imageDataUrl, MAX_LINK_PREVIEW_IMAGE_DATA_URL_LENGTH) ||
     (candidate.imageDataUrl !== null && !/^data:image\/(?:png|jpeg|gif|webp);base64,/.test(candidate.imageDataUrl))
   ) {
     return null;
@@ -84,7 +87,7 @@ const parseIndex = (value: unknown): LinkPreviewCacheIndexEntry[] => {
   if (candidate.version !== 1 || !Array.isArray(candidate.entries)) {
     throw new Error('Link preview cache index is invalid');
   }
-  if (candidate.entries.length > MAX_CACHE_ENTRIES) {
+  if (candidate.entries.length > MAX_LINK_PREVIEW_CACHE_ENTRIES) {
     throw new Error('Link preview cache index exceeds its fixed capacity');
   }
   const seen = new Set<string>();
@@ -97,7 +100,7 @@ const parseIndex = (value: unknown): LinkPreviewCacheIndexEntry[] => {
       entry.fetchedAt <= 0 ||
       !Number.isSafeInteger(entry.size) ||
       entry.size <= 0 ||
-      entry.size > MAX_RECORD_BYTES ||
+      entry.size > MAX_LINK_PREVIEW_RECORD_BYTES ||
       seen.has(entry.key)
     ) {
       throw new Error('Link preview cache index is invalid');
@@ -108,32 +111,43 @@ const parseIndex = (value: unknown): LinkPreviewCacheIndexEntry[] => {
   return entries;
 };
 
-const enqueueWrite = (db: SecureDB, operation: () => Promise<void>): Promise<void> => {
-  const previous = writeChains.get(db) || Promise.resolve();
-  const next = previous.catch(() => undefined).then(operation);
-  writeChains.set(db, next);
-  void next.finally(() => {
-    if (writeChains.get(db) === next) writeChains.delete(db);
-  }).catch(() => undefined);
-  return next;
+const enqueueCacheOperation = <T>(db: SecureDB, operation: () => Promise<T>): Promise<T> => {
+  const previous = cacheOperations.get(db) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.then(() => undefined, () => undefined);
+  cacheOperations.set(db, tail);
+  void tail.then(() => {
+    if (cacheOperations.get(db) === tail) cacheOperations.delete(db);
+  });
+  return result;
 };
 
-const removeRecord = (db: SecureDB, key: string): Promise<void> => enqueueWrite(db, async () => {
-  const rawIndex = await db.retrieve(STORAGE_STORES.LINK_PREVIEWS, STORAGE_KEYS.LINK_PREVIEW_INDEX);
-  const entries = parseIndex(rawIndex).filter((entry) => entry.key !== key);
-  await db.delete(STORAGE_STORES.LINK_PREVIEWS, key);
-  await db.store(STORAGE_STORES.LINK_PREVIEWS, STORAGE_KEYS.LINK_PREVIEW_INDEX, {
-    version: 1,
-    entries,
-  } satisfies LinkPreviewCacheIndex);
-});
+const loadIndex = async (db: SecureDB): Promise<LinkPreviewCacheIndexEntry[]> => (
+  parseIndex(await db.retrieve(STORAGE_STORES.LINK_PREVIEWS, STORAGE_KEYS.LINK_PREVIEW_INDEX))
+);
+
+async function reconcileCache(db: SecureDB): Promise<void> {
+  if (reconciledCaches.has(db)) return;
+  const [index, keys] = await Promise.all([loadIndex(db), db.listLinkPreviewCacheKeys()]);
+  const existing = new Set(keys.filter(key => key !== STORAGE_KEYS.LINK_PREVIEW_INDEX));
+  const indexed = new Set(index.map(entry => entry.key));
+  const orphans = [...existing].filter(key => !indexed.has(key));
+  if (orphans.length) await db.removeUnindexedLinkPreviews(orphans);
+  const cutoff = Date.now() - LINK_PREVIEW_CACHE_TTL_MS;
+  const entries = index.filter(entry => existing.has(entry.key) && entry.fetchedAt >= cutoff);
+  const kept = new Set(entries.map(entry => entry.key));
+  const deletedKeys = index.flatMap(({ key }) => existing.has(key) && !kept.has(key) ? [key] : []);
+  if (entries.length !== index.length) {
+    await db.mutateLinkPreviewCache({ version: 1, entries } satisfies LinkPreviewCacheIndex, deletedKeys);
+  }
+  reconciledCaches.add(db);
+}
 
 export const loadLinkPreviewFromCache = async (
   db: SecureDB,
   url: string,
-): Promise<NativeLinkPreview | null> => {
-  const pendingWrite = writeChains.get(db);
-  if (pendingWrite) await pendingWrite;
+): Promise<NativeLinkPreview | null> => enqueueCacheOperation(db, async () => {
+  await reconcileCache(db);
   const key = cacheKey(url);
   const value = await db.retrieve(STORAGE_STORES.LINK_PREVIEWS, key);
   if (value === null || value === undefined) return null;
@@ -149,18 +163,19 @@ export const loadLinkPreviewFromCache = async (
     record.fetchedAt! <= 0 ||
     !Number.isSafeInteger(record.size) ||
     record.size! <= 0 ||
-    record.size! > MAX_RECORD_BYTES ||
+    record.size! > MAX_LINK_PREVIEW_RECORD_BYTES ||
     record.size !== actualSize ||
     !preview
   ) {
     throw new Error('Link preview cache record is invalid');
   }
-  if (Date.now() - record.fetchedAt! > CACHE_TTL_MS) {
-    await removeRecord(db, key);
+  if (Date.now() - record.fetchedAt! > LINK_PREVIEW_CACHE_TTL_MS) {
+    const entries = (await loadIndex(db)).filter(entry => entry.key !== key);
+    await db.mutateLinkPreviewCache({ version: 1, entries } satisfies LinkPreviewCacheIndex, [key]);
     return null;
   }
   return preview;
-};
+});
 
 export const saveLinkPreviewToCache = async (
   db: SecureDB,
@@ -171,15 +186,15 @@ export const saveLinkPreviewToCache = async (
   const fetchedAt = Date.now();
   const serializedPreview = JSON.stringify(normalized);
   const size = encoder.encode(serializedPreview).byteLength;
-  if (size <= 0 || size > MAX_RECORD_BYTES) throw new Error('Link preview exceeds its fixed capacity');
+  if (size <= 0 || size > MAX_LINK_PREVIEW_RECORD_BYTES) throw new Error('Link preview exceeds its fixed capacity');
   const key = cacheKey(normalized.url);
   const record: LinkPreviewCacheRecord = { version: 1, fetchedAt, size, preview: normalized };
 
-  await enqueueWrite(db, async () => {
-    const rawIndex = await db.retrieve(STORAGE_STORES.LINK_PREVIEWS, STORAGE_KEYS.LINK_PREVIEW_INDEX);
-    const expiredBefore = fetchedAt - CACHE_TTL_MS;
+  await enqueueCacheOperation(db, async () => {
+    await reconcileCache(db);
+    const expiredBefore = fetchedAt - LINK_PREVIEW_CACHE_TTL_MS;
     const expiredKeys: string[] = [];
-    const entries = parseIndex(rawIndex).filter((entry) => {
+    const entries = (await loadIndex(db)).filter((entry) => {
       const keep = entry.key !== key && entry.fetchedAt >= expiredBefore;
       if (!keep && entry.key !== key) expiredKeys.push(entry.key);
       return keep;
@@ -187,20 +202,17 @@ export const saveLinkPreviewToCache = async (
     entries.sort((left, right) => right.fetchedAt - left.fetchedAt);
     entries.unshift({ key, fetchedAt, size });
     let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
-    while (entries.length > MAX_CACHE_ENTRIES || totalBytes > MAX_CACHE_BYTES) {
+    while (entries.length > MAX_LINK_PREVIEW_CACHE_ENTRIES || totalBytes > MAX_LINK_PREVIEW_CACHE_BYTES) {
       const evicted = entries.pop();
       if (!evicted) break;
       totalBytes -= evicted.size;
       if (evicted.key !== key) expiredKeys.push(evicted.key);
     }
 
-    await db.store(STORAGE_STORES.LINK_PREVIEWS, key, record);
-    await db.store(STORAGE_STORES.LINK_PREVIEWS, STORAGE_KEYS.LINK_PREVIEW_INDEX, {
-      version: 1,
-      entries,
-    } satisfies LinkPreviewCacheIndex);
-    await Promise.all(expiredKeys.map((expiredKey) => (
-      db.delete(STORAGE_STORES.LINK_PREVIEWS, expiredKey)
-    )));
+    await db.mutateLinkPreviewCache(
+      { version: 1, entries } satisfies LinkPreviewCacheIndex,
+      expiredKeys,
+      { key, value: record },
+    );
   });
 };

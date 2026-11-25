@@ -1,3 +1,4 @@
+import { KEY_TRANSPARENCY_HEAD_KEYS, KEY_TRANSPARENCY_SYNC_KEYS } from '../constants';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
@@ -34,17 +35,6 @@ import type {
 import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
 import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
 
-const HEAD_KEYS = ['entryCount', 'epoch', 'genesisEpoch', 'protocol', 'rootHash', 'signature', 'signerKeyId'];
-const SYNC_KEYS = [
-  'currentEpoch',
-  'firstLogIndex',
-  'fromEpoch',
-  'head',
-  'protocol',
-  'records',
-  'toEpoch',
-];
-
 export class KeyTransparencyGlobalVerificationError extends Error {
   constructor(message: string) {
     super(message);
@@ -67,7 +57,7 @@ function decodeKeyTransparencyBase64(value: unknown, expectedBytes: number): Uin
 export function parseKeyTransparencyHead(value: unknown): KeyTransparencyLogHead {
   const head = value as KeyTransparencyLogHead;
   if (
-    !exactPlainObject(head, HEAD_KEYS) ||
+    !exactPlainObject(head, KEY_TRANSPARENCY_HEAD_KEYS) ||
     head.protocol !== KEY_TRANSPARENCY_PROTOCOL ||
     !Number.isSafeInteger(head.epoch) ||
     head.epoch < 0 ||
@@ -136,7 +126,7 @@ export function keyTransparencyGenesisCheckpoint(genesisEpoch = 0): KeyTranspare
 function parseSyncResult(value: unknown): KeyTransparencySyncResult {
   const sync = value as KeyTransparencySyncResult;
   if (
-    !exactPlainObject(sync, SYNC_KEYS) ||
+    !exactPlainObject(sync, KEY_TRANSPARENCY_SYNC_KEYS) ||
     sync.protocol !== KEY_TRANSPARENCY_PROTOCOL ||
     !Number.isSafeInteger(sync.currentEpoch) ||
     sync.currentEpoch < 0 ||
@@ -157,15 +147,18 @@ function parseSyncResult(value: unknown): KeyTransparencySyncResult {
 
 export interface VerifiedKeyTransparencyDelta {
   checkpoint: KeyTransparencyCheckpoint;
+  sealedCheckpoint: KeyTransparencyCheckpoint | null;
   records: KeyTransparencyRecord[];
   head: KeyTransparencyLogHead;
 }
 
-// Fold a delta onto a checkpoint and confirm the result is the head the server signed.
+// Partial pages are provisional until the fold reaches a signed head.
 export function verifyKeyTransparencyDelta(
   previous: KeyTransparencyCheckpoint,
   value: unknown,
   signerPublicKey: Uint8Array,
+  requestedToEpoch: number,
+  knownHead: KeyTransparencyLogHead | null,
 ): VerifiedKeyTransparencyDelta {
   const sync = parseSyncResult(value);
   const head = verifyKeyTransparencyHead(sync.head, signerPublicKey);
@@ -173,6 +166,15 @@ export function verifyKeyTransparencyDelta(
   if (sync.fromEpoch !== previous.epoch) {
     globalFailure('Key-transparency delta does not continue the stored checkpoint');
   }
+  if (sync.currentEpoch !== head.epoch || sync.toEpoch !== Math.min(requestedToEpoch, head.epoch)) {
+    globalFailure('Key-transparency response has an unexpected epoch range');
+  }
+  if (knownHead && (
+    head.epoch < knownHead.epoch ||
+    head.entryCount < knownHead.entryCount ||
+    (knownHead.entryCount > 0 && head.genesisEpoch !== knownHead.genesisEpoch) ||
+    (head.entryCount === knownHead.entryCount && head.rootHash !== knownHead.rootHash)
+  )) globalFailure('Key-transparency head conflicts with the previously signed head');
   if (sync.firstLogIndex !== previous.entryCount) {
     globalFailure('Key-transparency delta does not start at the stored log position');
   }
@@ -182,18 +184,44 @@ export function verifyKeyTransparencyDelta(
   if (head.epoch < previous.epoch) {
     globalFailure('Key-transparency log rolled back to an earlier epoch');
   }
+  let lastEpoch = previous.epoch;
+  for (const record of sync.records) {
+    if (record.epoch < lastEpoch || record.epoch < head.genesisEpoch || record.epoch > sync.toEpoch) {
+      globalFailure('Key-transparency records are outside the requested epoch order');
+    }
+    lastEpoch = record.epoch;
+  }
 
   const entryCount = previous.entryCount + sync.records.length;
   if (entryCount > KEY_TRANSPARENCY_MAX_LOG_SIZE) {
     globalFailure('Key-transparency log exceeded its maximum size');
   }
 
-  const rootHash = keyTransparencyFoldRecords(sha3_512, previous.rootHash, sync.records);
+  let rootHash: string;
+  if (knownHead && knownHead.entryCount >= previous.entryCount && knownHead.entryCount <= entryCount) {
+    const cursor = knownHead.entryCount - previous.entryCount;
+    const prefixRoot = keyTransparencyFoldRecords(sha3_512, previous.rootHash, sync.records.slice(0, cursor));
+    if (prefixRoot !== knownHead.rootHash) globalFailure('Key-transparency history diverges from a previously signed head');
+    rootHash = keyTransparencyFoldRecords(sha3_512, prefixRoot, sync.records.slice(cursor));
+  } else {
+    rootHash = keyTransparencyFoldRecords(sha3_512, previous.rootHash, sync.records);
+  }
 
+  let sealedCheckpoint: KeyTransparencyCheckpoint | null = null;
   if (sync.toEpoch >= head.epoch) {
     if (entryCount !== head.entryCount || rootHash !== head.rootHash) {
       globalFailure('Key-transparency records do not reproduce the signed head');
     }
+
+    const closedRecords = sync.records.filter((record) => record.epoch < head.epoch);
+    sealedCheckpoint = {
+      protocol: KEY_TRANSPARENCY_PROTOCOL,
+      epoch: head.epoch,
+      entryCount: previous.entryCount + closedRecords.length,
+      rootHash: closedRecords.length === sync.records.length
+        ? rootHash
+        : keyTransparencyFoldRecords(sha3_512, previous.rootHash, closedRecords),
+    };
   } else if (entryCount > head.entryCount) {
     globalFailure('Key-transparency delta exceeds the signed head');
   }
@@ -205,6 +233,7 @@ export function verifyKeyTransparencyDelta(
       entryCount,
       rootHash,
     },
+    sealedCheckpoint,
     records: sync.records,
     head,
   };

@@ -1,9 +1,8 @@
+use crate::constants::system::CALLBACK_CHUNK_BYTES;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use tauri::{AppHandle, State, ipc::Channel};
 use crate::state::AppState;
-
-const CHUNK_BYTES: usize = 5 * 1024;
 
 #[derive(Serialize)]
 pub struct ByteChunk {
@@ -12,8 +11,16 @@ pub struct ByteChunk {
 }
 
 pub(super) fn send_bytes(bytes: &[u8], channel: &Channel<ByteChunk>) -> Result<usize, String> {
-    for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-        channel.send(ByteChunk { offset: index * CHUNK_BYTES, data: STANDARD.encode(chunk) })
+    send_bytes_in_chunks(bytes, channel, CALLBACK_CHUNK_BYTES)
+}
+
+pub(super) fn send_bytes_in_chunks(
+    bytes: &[u8],
+    channel: &Channel<ByteChunk>,
+    chunk_bytes: usize,
+) -> Result<usize, String> {
+    for (index, chunk) in bytes.chunks(chunk_bytes).enumerate() {
+        channel.send(ByteChunk { offset: index * chunk_bytes, data: STANDARD.encode(chunk) })
             .map_err(|_| "Native callback delivery failed".to_string())?;
     }
     Ok(bytes.len())

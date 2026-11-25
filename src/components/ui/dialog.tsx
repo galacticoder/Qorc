@@ -1,3 +1,4 @@
+import { DIALOG_CONTENT_TIMEOUT_MS } from '../../lib/constants';
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils/shared-utils';
@@ -48,7 +49,7 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string; 
       const timer = setTimeout(() => {
         setIsVisible(false);
         setIsAnimatingOut(false);
-      }, 200);
+      }, DIALOG_CONTENT_TIMEOUT_MS);
       return () => clearTimeout(timer);
     }
   }, [context.isOpen, isVisible]);

@@ -1,5 +1,6 @@
 //! Narrow renderer commands for the native persistent account boundary
 
+use crate::constants::account::SIGN_INPUT_MAX_BYTES;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -7,8 +8,6 @@ use zeroize::Zeroizing;
 
 use crate::account_vault::{self, AccountPublicKeys};
 use crate::state::AppState;
-
-const SIGN_INPUT_MAX_BYTES: usize = 1024 * 1024;
 
 async fn acquire_token_vault_session(
     state: &AppState,

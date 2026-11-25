@@ -2,6 +2,12 @@
  * Token Vault
  */
 
+import { sleep } from '../runtime/sleep';
+import {
+  TOKEN_VAULT_MAX_STORED_CHARS,
+  TOKEN_VAULT_MAX_TOKENS,
+  TOKEN_VAULT_EXISTING_0_BLINDED_ELEMENT_LENGTH_EXPECTED,
+} from '../constants';
 import { account } from '../tauri-bindings';
 import type { AnonymousToken } from '../cryptography/privacy-pass-client';
 import {
@@ -15,12 +21,6 @@ import { Base64 } from '../cryptography/base64';
 import { getCurrentServerScope } from '../security/local-account-scope';
 import { wipeAnonymousToken } from '../cryptography/wipe';
 import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
-
-// Vault configuration
-const VAULT_CONFIG = {
-    MAX_STORED_CHARS: 7 * 1024 * 1024,
-    MAX_TOKENS: 250,
-};
 
 function cloneToken(token: AnonymousToken): AnonymousToken {
     return {
@@ -130,7 +130,7 @@ export class TokenVault {
 
     private async replaceTokensInternal(newTokens: AnonymousToken[], generation: number): Promise<void> {
         await this.validateCurrentOwner(generation);
-        if (!Array.isArray(newTokens) || newTokens.length !== VAULT_CONFIG.MAX_TOKENS) {
+        if (!Array.isArray(newTokens) || newTokens.length !== TOKEN_VAULT_MAX_TOKENS) {
             throw new Error('Invalid replacement token batch');
         }
 
@@ -168,7 +168,7 @@ export class TokenVault {
 
     private async storeTokensInternal(newTokens: AnonymousToken[], generation: number): Promise<void> {
         await this.validateCurrentOwner(generation);
-        if (!Array.isArray(newTokens) || newTokens.length > 250) throw new Error('Invalid token batch');
+        if (!Array.isArray(newTokens) || newTokens.length > TOKEN_VAULT_MAX_TOKENS) throw new Error('Invalid token batch');
         const originalTokens = this.tokens;
         const discarded = originalTokens.filter((token) => !isPrivacyPassTokenEpochUsable(token.tokenSecret));
         const nextTokens = originalTokens.filter((token) => isPrivacyPassTokenEpochUsable(token.tokenSecret));
@@ -189,13 +189,13 @@ export class TokenVault {
                 added.push(owned);
                 existingIds.add(token.id);
             }
-            if (nextTokens.length > VAULT_CONFIG.MAX_TOKENS) {
+            if (nextTokens.length > TOKEN_VAULT_MAX_TOKENS) {
                 throw new Error('Token vault capacity exceeded');
             }
 
             this.tokens = nextTokens;
 
-            await new Promise(resolve => setTimeout(resolve, 0));
+            await sleep(0);
             this.assertGeneration(generation);
             await this.saveToStorage(generation);
             this.assertGeneration(generation);
@@ -223,7 +223,7 @@ export class TokenVault {
         if (batchSize !== 1) throw new Error('Invalid account-auth replacement batch size');
         const existing = await this.getPendingTokens(2);
         if (existing.length > 0) {
-            if (existing.length !== 1 || existing[0].blindedElement?.length !== 32) {
+            if (existing.length !== 1 || existing[0].blindedElement?.length !== TOKEN_VAULT_EXISTING_0_BLINDED_ELEMENT_LENGTH_EXPECTED) {
                 for (const token of existing) wipeAnonymousToken(token);
                 throw new Error('Invalid pending account-auth replacement');
             }
@@ -281,10 +281,10 @@ export class TokenVault {
     /**
      * Get tokens that are pending issuance
      */
-    async getPendingTokens(limit: number = 250): Promise<AnonymousToken[]> {
+    async getPendingTokens(limit: number = TOKEN_VAULT_MAX_TOKENS): Promise<AnonymousToken[]> {
         return this.withMutation(async (generation) => {
             await this.validateCurrentOwner(generation);
-            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > TOKEN_VAULT_MAX_TOKENS) {
                 throw new Error('Invalid pending token limit');
             }
             return this.tokens
@@ -325,7 +325,7 @@ export class TokenVault {
 
     private async updateTokensInternal(updatedTokens: AnonymousToken[], generation: number): Promise<void> {
         await this.validateCurrentOwner(generation);
-        if (!Array.isArray(updatedTokens) || updatedTokens.length > 250) {
+        if (!Array.isArray(updatedTokens) || updatedTokens.length > TOKEN_VAULT_MAX_TOKENS) {
             throw new Error('Invalid token update batch');
         }
 
@@ -353,11 +353,11 @@ export class TokenVault {
                 }
 
                 if (i > 0 && i % 50 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 0));
+                    await sleep(0);
                     this.assertGeneration(generation);
                 }
             }
-            if (nextTokens.length > VAULT_CONFIG.MAX_TOKENS) {
+            if (nextTokens.length > TOKEN_VAULT_MAX_TOKENS) {
                 throw new Error('Token vault capacity exceeded');
             }
 
@@ -428,7 +428,7 @@ export class TokenVault {
             if (stored === null) {
                 return [];
             }
-            if (typeof stored !== 'string' || stored.length > VAULT_CONFIG.MAX_STORED_CHARS) {
+            if (typeof stored !== 'string' || stored.length > TOKEN_VAULT_MAX_STORED_CHARS) {
                 throw new Error('Token vault record is oversized');
             }
 
@@ -441,7 +441,7 @@ export class TokenVault {
                 removedAmbiguousToken = true;
                 return false;
             });
-            if (loadedTokens.length > VAULT_CONFIG.MAX_TOKENS) {
+            if (loadedTokens.length > TOKEN_VAULT_MAX_TOKENS) {
                 throw new Error('Token vault exceeds its fixed capacity');
             }
             if (removedAmbiguousToken) {
@@ -478,12 +478,12 @@ export class TokenVault {
     ): Promise<void> {
         try {
             // Serialize tokens
-            await new Promise(resolve => setTimeout(resolve, 0));
+            await sleep(0);
             this.assertGeneration(generation);
             const tokenData = await TokenSerializer.serializeBatch(tokens);
             this.assertGeneration(generation);
 
-            if (tokenData.length > VAULT_CONFIG.MAX_STORED_CHARS) {
+            if (tokenData.length > TOKEN_VAULT_MAX_STORED_CHARS) {
                 throw new Error('Token vault record is oversized');
             }
             if (!await account.tokenVaultStore(serverScope, 'working', tokenData)) {
@@ -531,5 +531,3 @@ export class TokenVault {
 }
 
 export const tokenVault = new TokenVault();
-
-export { VAULT_CONFIG };

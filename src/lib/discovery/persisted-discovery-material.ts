@@ -2,16 +2,14 @@
  * Persisted Discovery Material
  */
 
+import { MAX_PERSISTED_DISCOVERY_CHARS, DETECTION_KEY_RE } from '../constants';
 import { storage } from '../tauri-bindings';
 import { getCurrentLocalAccountScope } from '../security/local-account-scope';
 import { canonicalAuthUsername, hasExactKeys, hasPrototypePollutionKeys, isPlainRecord } from '../sanitizers';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
-import { SPOOL_DETECTION_KEY_BYTES } from '../../../shared/spool-tag-protocol.js';
 import { isKeyTransparencyHash } from '../../../shared/key-transparency-protocol.js';
-
-const MAX_PERSISTED_DISCOVERY_CHARS = 256 * 1024;
 
 const persistedKey = async (owner: string, peer: string): Promise<string> => {
   const accountScope = await getCurrentLocalAccountScope(
@@ -34,8 +32,6 @@ export interface PersistedDiscoveryRecord {
   material: Record<string, unknown>;
   transparency: PersistedDiscoveryTransparency | null;
 }
-
-const DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_BYTES * 2}}$`);
 
 function parseTransparency(value: unknown): PersistedDiscoveryTransparency | null {
   if (value === null) return null;

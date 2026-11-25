@@ -2,6 +2,8 @@
  * Tor setup and management
  */
 
+import { TOR_AUTO_SETUP_MAX_ATTEMPTS, TOR_AUTO_SETUP_LOCAL_VERIFY_ATTEMPTS_LIMIT } from '../constants';
+import { sleep } from '../runtime/sleep';
 import { TorSetupStatus, TorSetupOptions } from '../types/tor-types';
 import {
   DEFAULT_BRIDGE_TRANSPORT_PATH,
@@ -124,7 +126,7 @@ export class TorAutoSetup {
   // Verify Tor connection
   private async verifyTorConnection(): Promise<boolean> {
     try {
-      const maxAttempts = 90;
+      const maxAttempts = TOR_AUTO_SETUP_MAX_ATTEMPTS;
       const waitMs = 2000;
       let localVerifyAttempts = 0;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -149,11 +151,11 @@ export class TorAutoSetup {
           if (result && result.success) {
             return true;
           }
-          if (localVerifyAttempts >= 5) {
+          if (localVerifyAttempts >= TOR_AUTO_SETUP_LOCAL_VERIFY_ATTEMPTS_LIMIT) {
             return false;
           }
         }
-        await new Promise((res) => setTimeout(res, waitMs));
+        await sleep(waitMs);
       }
       return false;
     } catch {

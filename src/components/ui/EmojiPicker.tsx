@@ -1,3 +1,8 @@
+import {
+  EMOJI_PICKER_GRID_COLUMNS,
+  EMOJI_PICKER_PAGE_SIZE,
+  EMOJI_PICKER_HANDLE_WHEEL_TIMEOUT_MS,
+} from '../../lib/constants';
 import { useAppBack } from '../../hooks/useAppBack';
 import { useMobileLayout } from '../../hooks/useMobileLayout';
 import {
@@ -70,9 +75,6 @@ const CATEGORY_ICONS: Readonly<Record<string, LucideIcon>> = {
   flags: Flag,
 };
 
-const GRID_COLUMNS = 6;
-const PAGE_SIZE = 160;
-
 function findTrigger(triggerId?: string): HTMLElement | null {
   if (triggerId) {
     for (const element of document.querySelectorAll<HTMLElement>('[data-emoji-trigger]')) {
@@ -101,7 +103,7 @@ export function EmojiPicker({
   const [loadFailed, setLoadFailed] = useState(false);
   const [activeCategory, setActiveCategory] = useState('frequent');
   const [searchQuery, setSearchQuery] = useState('');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [visibleCount, setVisibleCount] = useState(EMOJI_PICKER_PAGE_SIZE);
   const [position, setPosition] = useState<PickerPosition | null>(null);
 
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -266,7 +268,7 @@ export function EmojiPicker({
   }, [onClose]);
 
   useEffect(() => {
-    setVisibleCount(PAGE_SIZE);
+    setVisibleCount(EMOJI_PICKER_PAGE_SIZE);
     scrollRef.current?.scrollTo({ top: 0 });
   }, [activeCategory, searchQuery]);
 
@@ -288,7 +290,7 @@ export function EmojiPicker({
       categories.scrollTo({ left: nextIndex * step, behavior: 'smooth' });
       categoryWheelLockRef.current = setTimeout(() => {
         categoryWheelLockRef.current = null;
-      }, 180);
+      }, EMOJI_PICKER_HANDLE_WHEEL_TIMEOUT_MS);
     };
     categories.addEventListener('wheel', handleWheel, { passive: false });
     return () => {
@@ -306,7 +308,7 @@ export function EmojiPicker({
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          setVisibleCount((current) => Math.min(current + PAGE_SIZE, matchingEmojis.length));
+          setVisibleCount((current) => Math.min(current + EMOJI_PICKER_PAGE_SIZE, matchingEmojis.length));
         }
       },
       { root, rootMargin: '160px 0px' },
@@ -340,8 +342,8 @@ export function EmojiPicker({
     let nextIndex = currentIndex;
     if (event.key === 'ArrowLeft') nextIndex -= 1;
     else if (event.key === 'ArrowRight') nextIndex += 1;
-    else if (event.key === 'ArrowUp') nextIndex -= GRID_COLUMNS;
-    else if (event.key === 'ArrowDown') nextIndex += GRID_COLUMNS;
+    else if (event.key === 'ArrowUp') nextIndex -= EMOJI_PICKER_GRID_COLUMNS;
+    else if (event.key === 'ArrowDown') nextIndex += EMOJI_PICKER_GRID_COLUMNS;
     else if (event.key === 'Home') nextIndex = 0;
     else if (event.key === 'End') nextIndex = buttons.length - 1;
     else return;

@@ -1,6 +1,11 @@
 import React from 'react';
 import { Message } from '../../components/chat/messaging/types';
-import { RECEIPT_RETENTION_MS } from '../../lib/constants';
+import {
+  RECEIPT_RETENTION_MS,
+  MAX_PENDING_RECEIPTS,
+  MAX_SENT_RECEIPT_HISTORY,
+  RECEIPTS_UPDATE_MESSAGE_RECEIPT_TIMEOUT_MS,
+} from '../../lib/constants';
 import type { ReceiptEventDetail, ReceiptUpdater, DbQueuedReceipt } from '../../lib/types/message-sending-types';
 import { setMessagesWithResult } from '../../lib/utils/set-messages-result';
 import {
@@ -9,10 +14,6 @@ import {
   isPlainObject,
   sanitizeMessageId,
 } from '../../lib/sanitizers';
-
-export const MAX_PENDING_RECEIPTS = 512;
-export const IN_MEMORY_PENDING_RECEIPT_TTL_MS = 10 * 60 * 1000;
-export const MAX_SENT_RECEIPT_HISTORY = 4096;
 
 export const receiptScopeKey = (peer: string, messageId: string): string => (
   `${peer.length}:${peer}${messageId}`
@@ -200,7 +201,7 @@ export const updateMessageReceipt = async (
           dbFlushTimeoutRef.current = null;
           const flushFn = flushDBReceiptsRef.current;
           if (flushFn) void flushFn();
-        }, 500);
+        }, RECEIPTS_UPDATE_MESSAGE_RECEIPT_TIMEOUT_MS);
       }
     }
   }

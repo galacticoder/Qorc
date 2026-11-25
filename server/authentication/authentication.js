@@ -61,6 +61,7 @@ import { SHA_256_ALGORITHM } from '../utils/crypto-consts.js';
 import * as ServerConfig from '../config/config.js';
 import { UserDatabase } from '../database/user-db.js';
 import { AUTH_CHANNEL_BINDING_BYTES } from '../../shared/auth-channel-binding.js';
+import { PRIVACY_PASS_CONFIG } from '../../shared/privacy-pass-protocol.js';
 
 async function rejectConnection(ws, type, reason, code = 1008, authRequestId = undefined) {
   console.warn('[AUTH] Rejecting connection', { type });
@@ -550,7 +551,7 @@ export class AccountAuthHandler {
           'type'
         ]) ||
         !Array.isArray(data?.blindedTokens) ||
-        data.blindedTokens.length !== 250
+        data.blindedTokens.length !== PRIVACY_PASS_CONFIG.DEFAULT_BATCH_SIZE
       ) {
         throw new Error(INVALID_TOKEN_BATCH_MESSAGE);
       }
@@ -900,7 +901,7 @@ export class AccountAuthHandler {
       }
 
       try {
-        if (!Array.isArray(data?.blindedTokens) || data.blindedTokens.length !== 250) {
+        if (!Array.isArray(data?.blindedTokens) || data.blindedTokens.length !== PRIVACY_PASS_CONFIG.DEFAULT_BATCH_SIZE) {
           throw new Error('Invalid blinded token batch');
         }
         issuanceEpoch = this.ppServer.validateIssuanceEpoch(data.tokenEpoch);

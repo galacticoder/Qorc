@@ -1,3 +1,4 @@
+import { MAX_AUTHORIZED_PEERS } from '../constants';
 import { isValidDilithiumPublicKeyBase64, isValidKyberPublicKeyBase64, isValidX25519PublicKeyBase64 } from '../utils/messaging-validators';
 import {
   clearPeerIdentityRevocations,
@@ -10,7 +11,6 @@ import {
 import { keyTransparencyPeerKey } from './peer-key';
 import { canonicalAuthUsername } from '../sanitizers';
 
-const MAX_AUTHORIZED_PEERS = 2048;
 let verifiedMaterials = new WeakMap<object, {
   account: string;
   peer: string;
@@ -76,6 +76,10 @@ export function markKeyTransparencyVerifiedMaterial(
   ) throw new Error('Invalid verified key-transparency contact state');
   const key = authorizationKey(normalizedAccount, normalizedPeer);
   const existing = authorizedPeerKeys.get(key);
+  if (existing && (
+    contact.version < existing.version ||
+    (contact.version === existing.version && contact.rootCommitment !== existing.rootCommitment)
+  )) throw new Error('Stale or conflicting key-transparency contact state');
   const sameAuthorization = existing?.rootCommitment === contact.rootCommitment &&
     existing.version === contact.version &&
     existing.kyberPublicBase64 === keys.kyberPublicBase64 &&
@@ -104,11 +108,6 @@ export function markKeyTransparencyVerifiedMaterial(
     identityRootFingerprint: fingerprint(value.identityRootFingerprint, true),
     identityBundleFingerprint: fingerprint(value.identityBundleFingerprint, true),
   };
-  verifiedMaterials.set(material, {
-    account: normalizedAccount,
-    peer: normalizedPeer,
-    authorizationGeneration,
-  });
   const revoked = revokedPeers.get(key);
   if (revoked) {
     if (
@@ -119,6 +118,11 @@ export function markKeyTransparencyVerifiedMaterial(
       throw new Error('Native peer-identity revocation has not completed');
     }
   }
+  verifiedMaterials.set(material, {
+    account: normalizedAccount,
+    peer: normalizedPeer,
+    authorizationGeneration,
+  });
   revokedPeers.delete(key);
   authorizedPeerKeys.delete(key);
   authorizedPeerKeys.set(key, entry);

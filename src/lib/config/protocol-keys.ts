@@ -21,7 +21,7 @@ export const PROTOCOL_KEYS = Object.freeze({
   DEVICE_SUBKEY_BINDING: 'qorc-device-subkey-binding',
   DEVICE_SUBKEY_BINDING_PAYLOAD: 'qorc-device-subkey-binding-payload',
   EXPECTED_SERVER_HEADER: 'x-qorc-expected-server-url',
-  DISCOVERY_BLOB_AAD: 'qorc-discovery-blob-purb',
+  DISCOVERY_BLOB_AAD: 'qorc-discovery-blob-purb-deflate-v1',
   DISCOVERY_BLOB_SELECTOR: 'qorc-discovery-blob-selector',
   DISCOVERY_COVER_PUBLICATION: 'qorc-discovery-cover-publication',
   DISCOVERY_QUERY_DECOY: 'qorc-discovery-query-decoy',

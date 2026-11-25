@@ -31,6 +31,17 @@ import {
   P2P_RATE_LIMITER_MAX_ENTRIES,
   P2P_ROUTE_PROOF_TTL_MS,
   MAX_EVENT_USERNAME_LENGTH,
+  MAX_MESSAGE_FRAME_SIZE,
+  MAX_PENDING_P2P_VERIFICATIONS_GLOBAL,
+  MAX_PENDING_P2P_VERIFICATIONS_PER_PEER,
+  MAX_PENDING_P2P_VERIFICATION_BYTES_GLOBAL,
+  MAX_PENDING_P2P_VERIFICATION_BYTES_PER_PEER,
+  P2P_ROUTE_REPLAY_WINDOW,
+  SECURE_P2P_SERVICE_IS_DIRECT_P2_PPAYLOAD_VALUE_FILE_TRANSFER_ID_LENGTH_LIMIT,
+  SECURE_P2P_SERVICE_IDENTITY_X25519_PUBLIC_KEY_LENGTH_EXPECTED,
+  SECURE_P2P_SERVICE_TIMEOUT_MS,
+  SECURE_P2P_SERVICE_CERTIFIED_IDENTITY_X25519_PUBLIC_KEY_LENGTH_EXPECTED,
+  SECURE_P2P_SERVICE_KEYS_X25519_PUBLIC_KEY_LENGTH_EXPECTED,
 } from '../constants';
 import {
   isPlainObject,
@@ -40,18 +51,12 @@ import {
   sanitizeEventUsername,
 } from '../sanitizers';
 import { P2PTransport, p2pTransport } from './p2p-transport';
-import { ConnectionState, MAX_MESSAGE_FRAME_SIZE, type SecureConnection } from './secure-transport';
+import { ConnectionState, type SecureConnection } from './secure-transport';
 import { isHybridEnvelopeWireShape } from './envelope-shape';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES, ML_KEM_1024_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 import { SecureMemory } from '../cryptography/secure-memory';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
-
-const MAX_PENDING_P2P_VERIFICATIONS_PER_PEER = 16;
-const MAX_PENDING_P2P_VERIFICATION_BYTES_PER_PEER = 8 * 1024 * 1024;
-const MAX_PENDING_P2P_VERIFICATIONS_GLOBAL = 64;
-const MAX_PENDING_P2P_VERIFICATION_BYTES_GLOBAL = 16 * 1024 * 1024;
-const P2P_ROUTE_REPLAY_WINDOW = 4096;
 
 // Deterministic JSON stringifier
 const stringifyDeterministic = (obj: any): string | undefined => {
@@ -82,7 +87,7 @@ const isDirectP2PPayload = (value: unknown): value is P2PMessage['payload'] => {
     if (sanitizeMessageId(value.messageId) !== value.messageId) return false;
     if ('fileTransferId' in value && (
         sanitizeMessageId(value.fileTransferId) !== value.fileTransferId ||
-        value.fileTransferId.length > 128 ||
+        value.fileTransferId.length > SECURE_P2P_SERVICE_IS_DIRECT_P2_PPAYLOAD_VALUE_FILE_TRANSFER_ID_LENGTH_LIMIT ||
         value.fileTransferId.length < 1
     )) return false;
     return isHybridEnvelopeWireShape(value.envelope, 'libsignal-message');
@@ -326,7 +331,7 @@ export class SecureP2PService {
             identity.username !== peer ||
             identity.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
             identity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
-            identity.x25519PublicKey?.length !== 32 ||
+            identity.x25519PublicKey?.length !== SECURE_P2P_SERVICE_IDENTITY_X25519_PUBLIC_KEY_LENGTH_EXPECTED ||
             !Number.isSafeInteger(identity.certificateExpiresAt)
         ) return null;
         return session;
@@ -420,7 +425,7 @@ export class SecureP2PService {
         };
     }
 
-    private async waitForConnectedSession(peer: string, timeoutMs: number = 5000): Promise<PeerSession | null> {
+    private async waitForConnectedSession(peer: string, timeoutMs: number = SECURE_P2P_SERVICE_TIMEOUT_MS): Promise<PeerSession | null> {
         const initial = this.getSessionForPeer(peer);
         if (initial?.state === 'connected' && initial.connection.state === 'connected') {
             return initial;
@@ -548,7 +553,7 @@ export class SecureP2PService {
                     certifiedIdentity.username !== appPeerId ||
                     certifiedIdentity.kyberPublicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
                     certifiedIdentity.dilithiumPublicKey?.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
-                    certifiedIdentity.x25519PublicKey?.length !== 32 ||
+                    certifiedIdentity.x25519PublicKey?.length !== SECURE_P2P_SERVICE_CERTIFIED_IDENTITY_X25519_PUBLIC_KEY_LENGTH_EXPECTED ||
                     !Number.isSafeInteger(certifiedIdentity.certificateExpiresAt)
                 ) {
                     this.transport.requestPeerCertificate(appPeerId);
@@ -676,7 +681,7 @@ export class SecureP2PService {
             keys.native !== true ||
             !dilithiumPublic || dilithiumPublic.length !== ML_DSA_87_PUBLIC_KEY_BYTES ||
             keys.kyber?.publicKey?.length !== ML_KEM_1024_PUBLIC_KEY_BYTES ||
-            keys.x25519?.publicKey?.length !== 32 ||
+            keys.x25519?.publicKey?.length !== SECURE_P2P_SERVICE_KEYS_X25519_PUBLIC_KEY_LENGTH_EXPECTED ||
             typeof keys.signTranscript !== 'function' ||
             typeof keys.respondToHandshake !== 'function'
         ) {
@@ -1258,7 +1263,7 @@ export class SecureP2PService {
             return !!dilithiumPublic &&
                 dilithiumPublic.length === ML_DSA_87_PUBLIC_KEY_BYTES &&
                 keys.kyber?.publicKey?.length === ML_KEM_1024_PUBLIC_KEY_BYTES &&
-                keys.x25519?.publicKey?.length === 32 &&
+                keys.x25519?.publicKey?.length === SECURE_P2P_SERVICE_KEYS_X25519_PUBLIC_KEY_LENGTH_EXPECTED &&
                 SecureMemory.constantTimeCompare(this.dilithiumPublicKey, dilithiumPublic) &&
                 SecureMemory.constantTimeCompare(this.kyberPublicKey, keys.kyber.publicKey) &&
                 SecureMemory.constantTimeCompare(this.x25519PublicKey, keys.x25519.publicKey);

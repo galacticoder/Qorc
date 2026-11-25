@@ -1,5 +1,10 @@
 /** Fixed-shape k-anonymous discovery bucket client. */
 
+import {
+  DISCOVERY_BUCKET_POW_DIFFICULTY,
+  DISCOVERY_MANIFEST_CACHE_MAX_ENTRIES,
+  MAX_DECOY_BUCKET_DERIVATIONS,
+} from '../constants';
 import { anonymousHttpFetch } from '../transport/pq-anonymous-http';
 import { runAnonymousRequestBatch } from '../transport/anonymous-request-lane';
 import { transferAnonymousRead } from '../transport/read-only-transfer';
@@ -52,10 +57,7 @@ type ManifestResponse = {
   error?: string;
 };
 
-const MAX_DECOY_BUCKET_DERIVATIONS = 1_024;
-const DISCOVERY_BUCKET_POW_DIFFICULTY = 18;
 const manifestCache = new Map<string, { manifest: DiscoveryBucketManifest; expiresAt: number }>();
-const MANIFEST_CACHE_MAX_ENTRIES = 16;
 const manifestContexts = new WeakMap<DiscoveryBucketManifest, CurrentServerContext>();
 
 export interface DiscoveryBucketFetchResult {
@@ -141,7 +143,7 @@ export async function requestDiscoveryManifest(
     if (!manifest) return { success: false, error: 'discovery_manifest_invalid' };
     manifestContexts.set(manifest, context);
     manifestCache.delete(cacheKey);
-    while (manifestCache.size >= MANIFEST_CACHE_MAX_ENTRIES) {
+    while (manifestCache.size >= DISCOVERY_MANIFEST_CACHE_MAX_ENTRIES) {
       const oldest = manifestCache.keys().next().value;
       if (typeof oldest !== 'string') break;
       manifestCache.delete(oldest);
@@ -277,18 +279,12 @@ async function fetchDiscoveryBlobsOnce(
   }
   const ids = PostQuantumRandom.shuffleInPlace(Array.from(bucketIds));
   
-  console.log('[DISCOVERY] bucket download started', {
-    buckets: ids.length,
-    responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
-    totalBytes: ids.length * ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
-  });
   const reportProgress = createBucketProgress(ids.length, ANONYMOUS_DISCOVERY_RESPONSE_BYTES, onProgress);
   const speedReference = { responseBytes: ANONYMOUS_DISCOVERY_RESPONSE_BYTES, bytesPerMs: 0 };
   const perBucket = await runAnonymousRequestBatch(ids.map((id, index) => async (signal: AbortSignal) => {
     const response: unknown = await transferAnonymousRead(
       ANONYMOUS_DISCOVERY_RESPONSE_BYTES,
       async (attemptSignal, progress) => {
-        const workStartedAt = performance.now();
         const work = await createAnonymousHttpPow(
           PROTOCOL_KEYS.DISCOVERY_BUCKET_HTTP_POW,
           manifest.epochId,
@@ -296,9 +292,6 @@ async function fetchDiscoveryBlobsOnce(
           DISCOVERY_BUCKET_POW_DIFFICULTY,
           attemptSignal,
         );
-        console.info('[DISCOVERY-PERF]', JSON.stringify({
-          event: 'bucket-pow', slot: index, elapsedMs: Math.round(performance.now() - workStartedAt),
-        }));
         await assertCurrentServerContext(context);
         return anonymousHttpFetch(
           DISCOVERY_BUCKET_AUDIENCE,

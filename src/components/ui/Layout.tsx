@@ -1,3 +1,4 @@
+import { NAVIGATION_SWITCH_MS } from '../../lib/constants';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { readNavigationLayout, type NavigationLayout } from '../../lib/ui/navigation-layout';
@@ -6,8 +7,6 @@ import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { useMobileLayout } from '../../hooks/useMobileLayout';
 import { ScreenContext } from './StandaloneScreen';
 import { SectionNavigationContext, type SectionNavigationMotion } from '../../lib/ui/section-navigation';
-
-const NAVIGATION_SWITCH_MS = 180;
 
 interface LayoutProps {
     children: React.ReactNode;

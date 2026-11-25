@@ -1,5 +1,5 @@
 import { ExternalLink, Link2 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
     nativeMessageContent,
     system,
@@ -11,7 +11,13 @@ import {
     loadLinkPreviewFromCache,
     saveLinkPreviewToCache,
 } from '../../../lib/database/link-preview-cache';
-import { SEGMENT_UNLOAD_IDLE_MS } from '../../../lib/constants';
+import {
+  SEGMENT_UNLOAD_IDLE_MS,
+  MAX_LINK_PREVIEW_MESSAGE_TARGETS,
+  MESSAGE_LINK_PREVIEW_ATTEMPT_MINIMUM,
+  MESSAGE_LINK_PREVIEW_ATTEMPT_EXPECTED,
+  NATIVE_MESSAGE_RENDER_RETRY_STEP_MS,
+} from '../../../lib/constants';
 
 interface MessageLinkPreviewsProps {
     messageId: string;
@@ -20,244 +26,174 @@ interface MessageLinkPreviewsProps {
     onContextMenu?: (event: React.MouseEvent) => void;
 }
 
-const previewRequests = new Map<string, Promise<NativeLinkPreview>>();
-const MAX_CACHED_PREVIEWS = 16;
-const MAX_CACHED_MESSAGE_TARGETS = 2048;
-const MAX_CACHED_MESSAGE_PREVIEWS = 512;
-
-type ExpiringTargetRequest = {
+type TargetRequest = {
     expiresAt: number;
     request: Promise<NativeMessageLinkTarget[]>;
 };
 
-type ExpiringMessagePreviews = {
-    expiresAt: number;
-    previews: NativeLinkPreview[];
-};
+const targetRequests = new WeakMap<SecureDB, Map<string, TargetRequest>>();
 
-const targetRequests = new Map<string, ExpiringTargetRequest>();
-const messagePreviewCache = new Map<string, ExpiringMessagePreviews>();
-
-const messageCacheKey = (
-    messageId: string,
-    contentVersion: string | undefined,
-    secureDB: SecureDB,
-): string => {
-    const scope = secureDB.getAccountScope();
-    const version = contentVersion || '';
-    return `${scope.length}:${scope}${messageId.length}:${messageId}${version.length}:${version}`;
-};
-
-const trimExpiredCache = <T,>(cache: Map<string, T & { expiresAt: number }>, maximum: number): void => {
+function cachedTargets(secureDB: SecureDB, cacheKey: string, messageId: string): Promise<NativeMessageLinkTarget[]> {
+    const cache = targetRequests.get(secureDB) ?? new Map<string, TargetRequest>();
+    targetRequests.set(secureDB, cache);
     const now = Date.now();
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        cache.delete(cacheKey);
+        cached.expiresAt = now + SEGMENT_UNLOAD_IDLE_MS;
+        cache.set(cacheKey, cached);
+        return cached.request;
+    }
     for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
     }
-    while (cache.size >= maximum) {
+    if (cache.size >= MAX_LINK_PREVIEW_MESSAGE_TARGETS) {
         const oldest = cache.keys().next().value;
-        if (!oldest) break;
-        cache.delete(oldest);
+        if (oldest !== undefined) cache.delete(oldest);
     }
-};
 
-const cachedTargets = (cacheKey: string, messageId: string): Promise<NativeMessageLinkTarget[]> => {
-    const now = Date.now();
-    const cached = targetRequests.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-        targetRequests.delete(cacheKey);
-        cached.expiresAt = now + SEGMENT_UNLOAD_IDLE_MS;
-        targetRequests.set(cacheKey, cached);
-        return cached.request;
-    }
-    if (cached) targetRequests.delete(cacheKey);
-    trimExpiredCache(targetRequests, MAX_CACHED_MESSAGE_TARGETS);
-
-    const request = (async (): Promise<NativeMessageLinkTarget[]> => {
-        let lastError: unknown;
-        for (let attempt = 0; attempt < 5; attempt += 1) {
+    const request = (async () => {
+        for (let attempt = 0; attempt < MESSAGE_LINK_PREVIEW_ATTEMPT_MINIMUM; attempt += 1) {
+            if (!secureDB.isInitialized()) return [];
             try {
                 return (await nativeMessageContent.linkTargets(messageId)).slice(0, 3);
             } catch (error) {
-                lastError = error;
-                if (attempt < 4) {
-                    await new Promise((resolve) => window.setTimeout(resolve, 50 * (attempt + 1)));
-                }
+                if (attempt === MESSAGE_LINK_PREVIEW_ATTEMPT_EXPECTED) throw error;
+                await new Promise((resolve) => window.setTimeout(resolve, NATIVE_MESSAGE_RENDER_RETRY_STEP_MS * (attempt + 1)));
             }
         }
-        throw lastError;
+        return [];
     })();
-    const entry = {
-        expiresAt: now + SEGMENT_UNLOAD_IDLE_MS,
-        request,
-    };
-    targetRequests.set(cacheKey, entry);
+    const entry = { expiresAt: now + SEGMENT_UNLOAD_IDLE_MS, request };
+    cache.set(cacheKey, entry);
     void request.catch(() => {
-        if (targetRequests.get(cacheKey) === entry) targetRequests.delete(cacheKey);
+        if (cache.get(cacheKey) === entry) cache.delete(cacheKey);
     });
     return request;
-};
+}
 
-const readMessagePreviewCache = (cacheKey: string): NativeLinkPreview[] | undefined => {
-    const cached = messagePreviewCache.get(cacheKey);
-    if (!cached) return undefined;
-    if (cached.expiresAt <= Date.now()) {
-        messagePreviewCache.delete(cacheKey);
-        return undefined;
-    }
-    messagePreviewCache.delete(cacheKey);
-    cached.expiresAt = Date.now() + SEGMENT_UNLOAD_IDLE_MS;
-    messagePreviewCache.set(cacheKey, cached);
-    return cached.previews;
-};
-
-const writeMessagePreviewCache = (cacheKey: string, previews: NativeLinkPreview[]): void => {
-    trimExpiredCache(messagePreviewCache, MAX_CACHED_MESSAGE_PREVIEWS);
-    messagePreviewCache.delete(cacheKey);
-    messagePreviewCache.set(cacheKey, {
-        expiresAt: Date.now() + SEGMENT_UNLOAD_IDLE_MS,
-        previews,
-    });
-};
-
-const fetchCachedPreview = (
-    target: NativeMessageLinkTarget,
-    secureDB: SecureDB,
-): Promise<NativeLinkPreview> => {
-    const requestKey = `${secureDB.getAccountScope()}:${target.url}`;
-    const existing = previewRequests.get(requestKey);
-    if (existing) return existing;
-    if (previewRequests.size >= MAX_CACHED_PREVIEWS) {
-        const oldest = previewRequests.keys().next().value;
-        if (oldest) previewRequests.delete(oldest);
-    }
-    const request = (async () => {
-        const cached = await loadLinkPreviewFromCache(secureDB, target.url);
-        if (cached) return cached;
-        const preview = await nativeMessageContent.fetchLinkPreview(target.url);
-        await saveLinkPreviewToCache(secureDB, preview);
-        return preview;
-    })();
-    previewRequests.set(requestKey, request);
-    void request.catch(() => {
-        previewRequests.delete(requestKey);
-    });
-    return request;
-};
-
-export function MessageLinkPreviews({
-    messageId,
-    contentVersion,
-    secureDB,
-    onContextMenu,
-}: MessageLinkPreviewsProps) {
-    const cacheKey = messageCacheKey(messageId, contentVersion, secureDB);
-    const [previews, setPreviews] = useState<NativeLinkPreview[]>(() => (
-        readMessagePreviewCache(cacheKey) || []
-    ));
+function LinkPreviewCard({ target, secureDB, onContextMenu }: {
+    target: NativeMessageLinkTarget;
+    secureDB: SecureDB;
+    onContextMenu: MessageLinkPreviewsProps['onContextMenu'];
+}) {
+    const [preview, setPreview] = useState<NativeLinkPreview | null>(null);
+    const [status, setStatus] = useState<'idle' | 'loading' | 'failed'>('idle');
+    const isMounted = useRef(false);
+    const isLoading = useRef(false);
 
     useEffect(() => {
-        const retained = readMessagePreviewCache(cacheKey);
-        setPreviews(retained || []);
+        isMounted.current = true;
         let cancelled = false;
-        const load = async (): Promise<void> => {
-            let targets: NativeMessageLinkTarget[];
-            try {
-                targets = await cachedTargets(cacheKey, messageId);
-            } catch {
-                return;
-            }
-            if (cancelled) return;
-            if (targets.length === 0) {
-                writeMessagePreviewCache(cacheKey, []);
-                setPreviews([]);
-                return;
-            }
-            const previous = readMessagePreviewCache(cacheKey);
-            const sameTargets = previous?.length === targets.length && previous.every((preview, index) => (
-                preview.url === targets[index].url
-            ));
-            if (!sameTargets) {
-                writeMessagePreviewCache(cacheKey, []);
-                setPreviews([]);
-            } else if (previous) {
-                setPreviews(previous);
-            }
-            const enrich = async (target: NativeMessageLinkTarget): Promise<void> => {
-                for (let attempt = 0; attempt < 3 && !cancelled; attempt += 1) {
-                    try {
-                        const enriched = await fetchCachedPreview(target, secureDB);
-                        if (cancelled) return;
-                        setPreviews((current) => {
-                            const byUrl = new Map(current.map((preview) => [preview.url, preview]));
-                            byUrl.set(target.url, enriched);
-                            const next = targets.flatMap((candidate) => {
-                                const preview = byUrl.get(candidate.url);
-                                return preview ? [preview] : [];
-                            });
-                            writeMessagePreviewCache(cacheKey, next);
-                            return next;
-                        });
-                        return;
-                    } catch {
-                        console.warn('[LINK-PREVIEW] metadata invoke failed');
-                    }
-                    if (attempt < 2) {
-                        await new Promise((resolve) => window.setTimeout(resolve, 1500 * (attempt + 1)));
-                    }
-                }
-            };
-            const targetsToEnrich = targets.filter((target) => !previous?.some((preview) => (
-                preview.url === target.url
-            )));
-            await Promise.all(targetsToEnrich.map(enrich));
+        void loadLinkPreviewFromCache(secureDB, target.url).then((cached) => {
+            if (!cancelled && cached) setPreview((current) => current ?? cached);
+        }).catch(() => { });
+        return () => {
+            cancelled = true;
+            isMounted.current = false;
         };
-        void load();
+    }, [secureDB, target.url]);
+
+    const loadPreview = async () => {
+        if (isLoading.current || !secureDB.isInitialized()) return;
+        isLoading.current = true;
+        setStatus('loading');
+        try {
+            const loaded = await nativeMessageContent.fetchLinkPreview(target.url);
+            if (!secureDB.isInitialized()) return;
+            if (isMounted.current) {
+                setPreview(loaded);
+                setStatus('idle');
+            }
+            await saveLinkPreviewToCache(secureDB, loaded).catch(() => { });
+        } catch {
+            if (isMounted.current) setStatus('failed');
+        } finally {
+            isLoading.current = false;
+        }
+    };
+
+    if (!preview) {
+        const label = status === 'loading' ? 'Loading link preview…'
+            : status === 'failed' ? 'Retry link preview'
+            : 'Load link preview';
+        return (
+            <button
+                type="button"
+                className="qorc-message-link-preview"
+                onClick={() => void loadPreview()}
+                onContextMenu={onContextMenu}
+                aria-label={`${label} for ${target.host}`}
+                disabled={status === 'loading'}
+            >
+                <span className="qorc-message-link-preview-icon" aria-hidden="true"><Link2 /></span>
+                <span className="qorc-message-link-preview-body">
+                    <span className="qorc-message-link-preview-host">{target.host}</span>
+                    <span className="qorc-message-link-preview-title">{label}</span>
+                </span>
+            </button>
+        );
+    }
+
+    return (
+        <button
+            type="button"
+            className={`qorc-message-link-preview${preview.imageDataUrl ? ' has-image' : ''}`}
+            onClick={() => void system.openExternal(preview.url).catch(() => { })}
+            onContextMenu={onContextMenu}
+            aria-label={`Open link to ${preview.host}`}
+        >
+            {preview.imageDataUrl ? (
+                <img
+                    className="qorc-message-link-preview-image"
+                    src={preview.imageDataUrl}
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                />
+            ) : (
+                <span className="qorc-message-link-preview-icon" aria-hidden="true"><Link2 /></span>
+            )}
+            <span className="qorc-message-link-preview-body">
+                <span className="qorc-message-link-preview-host">{preview.host}</span>
+                <span className="qorc-message-link-preview-title">{preview.title || preview.displayUrl}</span>
+                {preview.description ? (
+                    <span className="qorc-message-link-preview-description">{preview.description}</span>
+                ) : null}
+            </span>
+            <ExternalLink className="qorc-message-link-preview-open" aria-hidden="true" />
+        </button>
+    );
+}
+
+export function MessageLinkPreviews({ messageId, contentVersion, secureDB, onContextMenu }: MessageLinkPreviewsProps) {
+    const cacheKey = JSON.stringify([messageId, contentVersion]);
+    const [resolved, setResolved] = useState<{
+        secureDB: SecureDB;
+        cacheKey: string;
+        targets: NativeMessageLinkTarget[];
+    } | null>(null);
+    const targets = resolved?.secureDB === secureDB && resolved.cacheKey === cacheKey ? resolved.targets : [];
+
+    useEffect(() => {
+        let cancelled = false;
+        void cachedTargets(secureDB, cacheKey, messageId).then((targets) => {
+            if (!cancelled) setResolved({ secureDB, cacheKey, targets });
+        }).catch(() => { });
         return () => { cancelled = true; };
     }, [cacheKey, messageId, secureDB]);
 
-    const openPreview = useCallback((url: string) => {
-        void system.openExternal(url).catch(() => { });
-    }, []);
-
-    if (previews.length === 0) return null;
+    if (targets.length === 0) return null;
 
     return (
         <div className="qorc-message-link-previews" role="group" aria-label="Link previews">
-            {previews.map((preview) => (
-                <button
-                    key={preview.url}
-                    type="button"
-                    className={`qorc-message-link-preview${preview.imageDataUrl ? ' has-image' : ''}`}
-                    onClick={() => openPreview(preview.url)}
+            {targets.map((target) => (
+                <LinkPreviewCard
+                    key={JSON.stringify([secureDB.getAccountScope(), cacheKey, target.url])}
+                    target={target}
+                    secureDB={secureDB}
                     onContextMenu={onContextMenu}
-                    aria-label={`Open link to ${preview.host}`}
-                >
-                    {preview.imageDataUrl ? (
-                        <img
-                            className="qorc-message-link-preview-image"
-                            src={preview.imageDataUrl}
-                            alt=""
-                            aria-hidden="true"
-                            draggable={false}
-                        />
-                    ) : (
-                        <span className="qorc-message-link-preview-icon" aria-hidden="true">
-                            <Link2 />
-                        </span>
-                    )}
-                    <span className="qorc-message-link-preview-body">
-                        <span className="qorc-message-link-preview-host">{preview.host}</span>
-                        <span className="qorc-message-link-preview-title">
-                            {preview.title || preview.displayUrl}
-                        </span>
-                        {preview.description ? (
-                            <span className="qorc-message-link-preview-description">
-                                {preview.description}
-                            </span>
-                        ) : null}
-                    </span>
-                    <ExternalLink className="qorc-message-link-preview-open" aria-hidden="true" />
-                </button>
+                />
             ))}
         </div>
     );

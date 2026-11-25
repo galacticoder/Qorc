@@ -1,5 +1,6 @@
 //! Native decryption for the application hybrid envelope
 
+use crate::constants::hybrid::{MAX_ENVELOPE_JSON_BYTES, MAX_OUTER_BYTES, MAX_PLAINTEXT_BYTES};
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -24,9 +25,6 @@ const INNER_SALT_BYTES: usize = 32;
 const INNER_NONCE_BYTES: usize = 36;
 const INNER_TAG_BYTES: usize = 32;
 const INNER_EPHEMERAL_BYTES: usize = 32;
-const MAX_PLAINTEXT_BYTES: usize = 1024 * 1024;
-const MAX_OUTER_BYTES: usize = 2 * 1024 * 1024;
-const MAX_ENVELOPE_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

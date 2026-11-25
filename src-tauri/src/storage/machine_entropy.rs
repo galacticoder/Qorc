@@ -1,13 +1,12 @@
 //! Stable machine context for local key binding.
 
+#[cfg(target_os = "linux")]
+use crate::constants::storage::MAX_MACHINE_ID_BYTES;
 use zeroize::Zeroizing;
 
 use crate::error::QorcResult;
 #[cfg(not(target_os = "android"))]
 use crate::error::QorcError;
-
-#[cfg(target_os = "linux")]
-const MAX_MACHINE_ID_BYTES: u64 = 256;
 
 #[cfg(not (target_os = "android"))]
 fn valid_machine_id(value: &str) -> Option<&str> {

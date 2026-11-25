@@ -35,12 +35,10 @@ export function requestDiscoveryResponse<T>(options: {
   parse: (detail: unknown) => T | undefined;
   sendTimeoutMs?: number;
   responseTimeoutMs?: number;
-  onSent?: (durationMs: number) => void;
   registerConnectionCancel?: (cancel: () => void) => () => void;
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const controller = new AbortController();
-    const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     let unregisterConnectionCancel = () => {};
@@ -107,7 +105,6 @@ export function requestDiscoveryResponse<T>(options: {
       timer = setTimeout(() => {
         finish(new DiscoveryRequestError(`${options.operation}-response-timeout`));
       }, options.responseTimeoutMs ?? WS_CONTROL_RESPONSE_TIMEOUT_MS);
-      options.onSent?.(Math.round(performance.now() - startedAt));
     }).catch((error) => {
       finish(new DiscoveryRequestError(
         `${options.operation}-send-failed`,

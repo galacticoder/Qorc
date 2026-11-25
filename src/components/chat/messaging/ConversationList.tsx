@@ -16,6 +16,8 @@ import {
   UI_CALL_STATUS_RATE_MAX,
   MAX_UI_CALL_STATUS_PEER_LENGTH,
   MAX_UI_CALL_STATUS_VALUE_LENGTH,
+  CONVERSATION_LIST_MIN_AGE_MS_LIMIT,
+  CONVERSATION_LIST_GET_REFRESH_INTERVAL_MIN_AGE_MS_LIMIT,
 } from '../../../lib/constants';
 import { RelativeMessageTime } from './RelativeMessageTime';
 import { BannerMessagePreview } from "../ChatInput/BannerMessagePreview";
@@ -563,10 +565,10 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       }
 
       // If all messages are older than a week, no need to refresh
-      if (minAgeMs >= 7 * 24 * 60 * 60 * 1000) return 0;
+      if (minAgeMs >= CONVERSATION_LIST_MIN_AGE_MS_LIMIT) return 0;
 
       // If newest message is days old, refresh every hour
-      if (minAgeMs >= 24 * 60 * 60 * 1000) return 60 * 60 * 1000;
+      if (minAgeMs >= CONVERSATION_LIST_GET_REFRESH_INTERVAL_MIN_AGE_MS_LIMIT) return 60 * 60 * 1000;
 
       // If newest message is hours old, refresh every 5 minutes
       if (minAgeMs >= 60 * 60 * 1000) return 5 * 60 * 1000;

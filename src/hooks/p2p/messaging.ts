@@ -1,8 +1,14 @@
+import { sleep } from '../../lib/runtime/sleep';
 import { RefObject } from "react";
-import { AUTH_USERNAME_REGEX } from "../../lib/constants";
+import {
+  AUTH_USERNAME_REGEX,
+  MAX_INFLIGHT_P2P_RETRIES,
+  MAX_INFLIGHT_P2P_RETRY_BYTES,
+  MAX_MESSAGE_FRAME_SIZE,
+  P2P_RETRY_DELAYS_MS,
+} from "../../lib/constants";
 import { SignalType } from "../../lib/types/signal-types";
 import type { P2PMessage } from "../../lib/types/p2p-types";
-import { MAX_MESSAGE_FRAME_SIZE } from "../../lib/transport/secure-transport";
 import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
 
 export interface MessagingRefs {
@@ -10,10 +16,6 @@ export interface MessagingRefs {
   accountGenerationRef: RefObject<number>;
   inFlightRetriesRef: RefObject<{ generation: number; count: number; bytes: number }>;
 }
-
-const MAX_INFLIGHT_P2P_RETRIES = 32;
-const MAX_INFLIGHT_P2P_RETRY_BYTES = 16 * 1024 * 1024;
-const P2P_RETRY_DELAYS_MS = [250, 750, 1500];
 
 // Forward sealed envelope P2P traffic into encrypted message handler
 export function createHandleIncomingP2PMessage(refs: MessagingRefs) {
@@ -83,7 +85,7 @@ export function createHandleIncomingP2PMessage(refs: MessagingRefs) {
     retryState.bytes += retryBytes;
     try {
       for (const delay of P2P_RETRY_DELAYS_MS) {
-        await new Promise((r) => setTimeout(r, delay));
+        await sleep(delay);
         if (generation !== refs.accountGenerationRef.current) return false;
         const retryHandler = refs.handleEncryptedMessagePayloadRef.current;
         if (!retryHandler) return false;

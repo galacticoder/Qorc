@@ -1,3 +1,4 @@
+import { NOTIFICATION_PREFERENCES_RAW_LENGTH_LIMIT } from '../constants';
 import { syncEncryptedStorage } from '../database/encrypted-storage';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { hasPrototypePollutionKeys, isCanonicalAuthUsername, isPlainObject } from '../sanitizers';
@@ -20,7 +21,7 @@ function validMutes(value: unknown): value is NotificationMutes {
 
 export function parseNotificationPreferences(raw: string | null): NotificationPreferences {
   if (raw === null) return { doNotDisturb: { messages: false, calls: false }, conversations: [] };
-  if (raw.length > 128 * 1024) throw new Error('Notification preferences are too large');
+  if (raw.length > NOTIFICATION_PREFERENCES_RAW_LENGTH_LIMIT) throw new Error('Notification preferences are too large');
   const value: unknown = JSON.parse(raw);
   if (
     !isPlainObject(value) || hasPrototypePollutionKeys(value) ||

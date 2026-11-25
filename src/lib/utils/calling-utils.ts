@@ -1,14 +1,15 @@
 import {
   CALLING_MAX_USERNAME_LENGTH,
   CALLING_MAX_CALL_ID_LENGTH,
-  CALLING_EVENT_ALLOWED_PAYLOAD_KEYS
+  CALLING_EVENT_ALLOWED_PAYLOAD_KEYS,
+  MAX_MEDIA_DEVICE_ID_LENGTH,
+  CALL_SCREEN_STREAM_ID_REGEX,
+  CALL_SIGNAL_BASE_KEYS,
+  CALLING_UTILS_MAX_QUEUED_EVENTS,
+  CALLING_UTILS_ENQUEUE_FLUSH_TIMEOUT_MS,
 } from '../constants';
 import { hasExactKeys, hasPrototypePollutionKeys, isPlainObject } from '../sanitizers';
 import type { CallSignal } from '../types/calling-types';
-
-const CALL_SIGNAL_BASE_KEYS = ['callId', 'from', 'timestamp', 'to', 'type'] as const;
-const CALL_SCREEN_STREAM_ID_REGEX = /^call-screen:[a-f0-9]{16,64}$/;
-const MAX_MEDIA_DEVICE_ID_LENGTH = 1024;
 
 export const releaseVisualCanvas = (canvas: HTMLCanvasElement | null): void => {
   if (!canvas) return;
@@ -153,7 +154,7 @@ const sanitizeCallingEventDetail = (detail: any): Record<string, unknown> => {
 export const debounceEventDispatcher = () => {
   const queue: Array<{ name: string; detail: Record<string, unknown>; timestamp: number }> = [];
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  const maxQueuedEvents = 128;
+  const maxQueuedEvents = CALLING_UTILS_MAX_QUEUED_EVENTS;
 
   const flush = () => {
     if (timeoutId !== null) {
@@ -181,7 +182,7 @@ export const debounceEventDispatcher = () => {
     if (queue.length >= maxQueuedEvents) flush();
     queue.push({ name, detail: sanitizeCallingEventDetail(detail), timestamp: Date.now() });
     if (timeoutId === null) {
-      timeoutId = setTimeout(flush, 20);
+      timeoutId = setTimeout(flush, CALLING_UTILS_ENQUEUE_FLUSH_TIMEOUT_MS);
     }
   };
 

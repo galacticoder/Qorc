@@ -1,3 +1,23 @@
+import {
+  ARGON2_MAX_INPUT_BYTES,
+  ARGON2_MAX_MEMORY_KIB,
+  ARGON2_MAX_PARALLELISM,
+  ARGON2_MAX_TIME_COST,
+  OPAQUE_PASSWORD_MAX_BYTES,
+  UUID_V4_REGEX,
+  WORKER_AEAD_MAX_AAD_BYTES,
+  WORKER_AEAD_MAX_INPUT_BYTES,
+  WORKER_SIGNATURE_MAX_MESSAGE_BYTES,
+  WORKER_AUTH_REGEX,
+  WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_HASH_PARAMS_PARAMS_SALT_LENGTH_MINIMUM,
+  WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_HASH_PARAMS_PARAMS_SALT_LENGTH_LIMIT,
+  WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_VERIFY_PARAMS_PARAMS_ENCODED_LENGTH_LIMIT,
+  WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_TOKEN_SECRET_LENGTH_EXPECTED,
+  WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_BLINDING_FACTOR_LENGTH_EXPECTED,
+  WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_BLINDED_ELEMENT_LENGTH_EXPECTED,
+  WORKER_REQUEST_VALIDATION_TOKEN_LENGTH_EXPECTED,
+  WORKER_REQUEST_VALIDATION_VALIDATE_WORKER_REQUEST_VALUE_TYPE_LENGTH_LIMIT,
+} from '../constants';
 import type { WorkerRequestMessage } from '../types/crypto-types';
 import { AUTH_CHANNEL_BINDING_BYTES } from '../../../shared/auth-channel-binding.js';
 import { PRIVACY_PASS_CONFIG } from '../../../shared/privacy-pass-protocol.js';
@@ -15,17 +35,6 @@ import {
   POST_QUANTUM_AEAD_NONCE_BYTES,
 } from '../../../shared/crypto-sizes.js';
 
-export const ARGON2_MAX_INPUT_BYTES = 8192;
-export const ARGON2_MAX_MEMORY_KIB = 512 * 1024;
-export const ARGON2_MAX_TIME_COST = 10;
-export const ARGON2_MAX_PARALLELISM = 4;
-export const WORKER_AEAD_MAX_INPUT_BYTES = 20 * 1024 * 1024;
-export const WORKER_AEAD_MAX_AAD_BYTES = 1024 * 1024;
-export const WORKER_SIGNATURE_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
-export const OPAQUE_PASSWORD_MAX_BYTES = 4096;
-
-const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const WORKER_AUTH_REGEX = /^[0-9a-f]{64}$/;
 const textEncoder = new TextEncoder();
 
 function assertPlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
@@ -64,7 +73,7 @@ export function validateArgon2HashParams(params: unknown): void {
   const { time, mem, parallelism, type, version, hashLen } = params;
   if (
     !validArgon2Pass(params.pass) ||
-    !(params.salt instanceof Uint8Array) || params.salt.length < 16 || params.salt.length > 64 ||
+    !(params.salt instanceof Uint8Array) || params.salt.length < WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_HASH_PARAMS_PARAMS_SALT_LENGTH_MINIMUM || params.salt.length > WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_HASH_PARAMS_PARAMS_SALT_LENGTH_LIMIT ||
     typeof time !== 'number' || !Number.isInteger(time) || time < 1 || time > ARGON2_MAX_TIME_COST ||
     typeof parallelism !== 'number' || !Number.isInteger(parallelism) || parallelism < 1 || parallelism > ARGON2_MAX_PARALLELISM ||
     typeof mem !== 'number' || !Number.isInteger(mem) || mem < 8 * parallelism || mem > ARGON2_MAX_MEMORY_KIB ||
@@ -81,7 +90,7 @@ export function validateArgon2VerifyParams(params: unknown): void {
     !hasExactKeys(params, ['pass', 'encoded']) ||
     !validArgon2Pass(params.pass) ||
     typeof params.encoded !== 'string' ||
-    params.encoded.length > 512
+    params.encoded.length > WORKER_REQUEST_VALIDATION_VALIDATE_ARGON2_VERIFY_PARAMS_PARAMS_ENCODED_LENGTH_LIMIT
   ) {
     throw new Error('Invalid Argon2id verification parameters');
   }
@@ -135,9 +144,9 @@ function validatePendingPrivacyPassToken(value: unknown): void {
   if (keys !== baseKeys && keys !== persistedKeys) throw new Error('Invalid Privacy Pass token state');
   if (
     typeof value.id !== 'string' || !UUID_V4_REGEX.test(value.id) ||
-    !(value.tokenSecret instanceof Uint8Array) || value.tokenSecret.length !== 36 ||
-    !(value.blindingFactor instanceof Uint8Array) || value.blindingFactor.length !== 32 ||
-    !(value.blindedElement instanceof Uint8Array) || value.blindedElement.length !== 32 ||
+    !(value.tokenSecret instanceof Uint8Array) || value.tokenSecret.length !== WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_TOKEN_SECRET_LENGTH_EXPECTED ||
+    !(value.blindingFactor instanceof Uint8Array) || value.blindingFactor.length !== WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_BLINDING_FACTOR_LENGTH_EXPECTED ||
+    !(value.blindedElement instanceof Uint8Array) || value.blindedElement.length !== WORKER_REQUEST_VALIDATION_VALIDATE_PENDING_PRIVACY_PASS_TOKEN_VALUE_BLINDED_ELEMENT_LENGTH_EXPECTED ||
     (value.purpose !== ACCOUNT_AUTH_PURPOSE && value.purpose !== SERVER_ENTRY_PURPOSE) ||
     !Number.isSafeInteger(value.issuedAt) || (value.issuedAt as number) <= 0 ||
     value.used !== false || value.pending !== false ||
@@ -159,7 +168,7 @@ function validatePrivacyPassUnblindInput(data: Record<string, unknown>): void {
     throw new Error('Invalid Privacy Pass issuance batch');
   }
   for (const token of tokenSecrets) validatePendingPrivacyPassToken(token);
-  if (!signedBlindedTokens.every((token) => token instanceof Uint8Array && token.length === 32)) {
+  if (!signedBlindedTokens.every((token) => token instanceof Uint8Array && token.length === WORKER_REQUEST_VALIDATION_TOKEN_LENGTH_EXPECTED)) {
     throw new Error('Invalid Privacy Pass signed token batch');
   }
   assertExactBytes(proof, 64, 'Privacy Pass proof');
@@ -170,7 +179,7 @@ export function validateWorkerRequest(value: unknown): asserts value is WorkerRe
   assertPlainObject(value, 'worker request');
   if (
     typeof value.id !== 'string' || !UUID_V4_REGEX.test(value.id) ||
-    typeof value.type !== 'string' || value.type.length > 64 ||
+    typeof value.type !== 'string' || value.type.length > WORKER_REQUEST_VALIDATION_VALIDATE_WORKER_REQUEST_VALUE_TYPE_LENGTH_LIMIT ||
     typeof value.auth !== 'string' || !WORKER_AUTH_REGEX.test(value.auth)
   ) {
     throw new Error('Malformed worker request');

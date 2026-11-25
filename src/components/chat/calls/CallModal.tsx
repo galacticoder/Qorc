@@ -1,3 +1,9 @@
+import {
+  CALL_MODAL_REVEAL_CONTROLS_TIMEOUT_MS,
+  CALL_MODAL_UPDATE_DURATION_INTERVAL_MS,
+  CALL_MODAL_BOUNDS_WIDTH_DEFAULT,
+  CALL_MODAL_BOUNDS_HEIGHT_DEFAULT,
+} from '../../../lib/constants';
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown, Volume2 } from 'lucide-react';
 import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
@@ -414,7 +420,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current);
     setControlsVisible(true);
     if (devicePicker === null) {
-      controlsTimerRef.current = setTimeout(() => setControlsVisible(false), 5000);
+      controlsTimerRef.current = setTimeout(() => setControlsVisible(false), CALL_MODAL_REVEAL_CONTROLS_TIMEOUT_MS);
     }
   }, [devicePicker]);
 
@@ -522,7 +528,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     if (isConnected && call?.startTime) {
       const updateDuration = () => setCallDuration(Math.floor((Date.now() - call.startTime!) / 1000));
       updateDuration();
-      const interval = setInterval(updateDuration, 1000);
+      const interval = setInterval(updateDuration, CALL_MODAL_UPDATE_DURATION_INTERVAL_MS);
       return () => clearInterval(interval);
     }
     setCallDuration(0);
@@ -543,8 +549,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     e.preventDefault();
     const bounds = wrapperRef.current?.getBoundingClientRect();
     setPosition({
-      x: Math.max(0, Math.min(window.innerWidth - (bounds?.width ?? 320), initialPosRef.current.x + e.clientX - start.x)),
-      bottom: Math.max(0, Math.min(window.innerHeight - (bounds?.height ?? 80), initialPosRef.current.bottom - e.clientY + start.y)),
+      x: Math.max(0, Math.min(window.innerWidth - (bounds?.width ?? CALL_MODAL_BOUNDS_WIDTH_DEFAULT), initialPosRef.current.x + e.clientX - start.x)),
+      bottom: Math.max(0, Math.min(window.innerHeight - (bounds?.height ?? CALL_MODAL_BOUNDS_HEIGHT_DEFAULT), initialPosRef.current.bottom - e.clientY + start.y)),
     });
   };
   const handleDragEnd = (e: React.PointerEvent<HTMLDivElement>) => {

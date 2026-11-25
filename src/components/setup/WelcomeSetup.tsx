@@ -1,3 +1,4 @@
+import { SERVER_SETUP_URL } from '../../lib/constants';
 import { useAppBack } from '../../hooks/useAppBack';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QorcBrandLogo } from '../ui/QorcBrandLogo';
@@ -13,8 +14,6 @@ import {
   saveTorPreferences,
   startupConnection,
 } from '../../lib/transport/startup-connection';
-
-const SERVER_SETUP_URL = 'https://www.qorc.app/docs.html#SERVER_SETUP.md';
 
 interface WelcomeSetupProps {
   readonly onConnected: (serverUrl: string) => void;

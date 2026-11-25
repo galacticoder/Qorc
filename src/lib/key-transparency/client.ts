@@ -1,3 +1,5 @@
+import { PostQuantumRandom } from '../cryptography/random';
+import { sleep } from '../runtime/sleep';
 import { VerifiedPrefixCache } from './verified-prefix-cache';
 import { keyTransparencyStoreKey } from './store-key';
 import { sha3_512 } from '@noble/hashes/sha3.js';
@@ -29,7 +31,23 @@ import {
   type AnonymousToken,
 } from '../cryptography/privacy-pass-client';
 import { tokenVault } from '../database/token-vault';
-import { AUTH_USERNAME_REGEX } from '../constants';
+import { savePersistedDiscoveryMaterial } from '../discovery/persisted-discovery-material';
+import {
+  AUTH_USERNAME_REGEX,
+  CONTACT_MONITOR_MAX_INTERVAL_MS,
+  CONTACT_MONITOR_MIN_INTERVAL_MS,
+  CONTACT_MONITOR_RETRY_MS,
+  CONTACT_MONITOR_SWEEP_MS,
+  COVER_MONITOR_JITTER_MS,
+  COVER_MONITOR_MIN_INTERVAL_MS,
+  GOSSIP_AUDIT_ATTEMPTS,
+  GOSSIP_AUDIT_RETRY_MS,
+  GOSSIP_DEFERRED_RETRY_MS,
+  MAX_AUDITED_GOSSIP_HEADS,
+  MAX_PENDING_GOSSIP_HEADS,
+  MAX_SYNC_ROUNDS,
+  KEY_TRANSPARENCY_GOSSIP_HEAD_KEYS,
+} from '../constants';
 import {
   assertCurrentServerContext,
   captureCurrentServerContext,
@@ -61,6 +79,7 @@ import type {
 } from './types';
 import {
   commitKeyTransparencyDelta,
+  KeyTransparencyRecordStoreCorruptionError,
   findKeyTransparencyRecordsForContact,
   loadKeyTransparencyCheckpoint,
   loadKeyTransparencyTransition,
@@ -86,6 +105,7 @@ import {
   exportKeyTransparencyAuthorizations,
   getKeyTransparencyAuthorizedPeerState,
   importKeyTransparencyAuthorizations,
+  markKeyTransparencyVerifiedMaterial,
   revokeKeyTransparencyPeerAuthorization,
 } from './verified-material';
 import {
@@ -111,20 +131,6 @@ import {
 } from '../../../shared/protocol-keys.js';
 
 type KeyTransparencyReadOptions = { signal?: AbortSignal; onRetry?: () => void };
-
-const MAX_SYNC_ROUNDS = 64;
-const GOSSIP_AUDIT_ATTEMPTS = 3;
-const GOSSIP_AUDIT_RETRY_MS = 15_000;
-const GOSSIP_DEFERRED_RETRY_MS = 60_000;
-const MAX_PENDING_GOSSIP_HEADS = 64;
-const MAX_AUDITED_GOSSIP_HEADS = 256;
-const CONTACT_MONITOR_SWEEP_MS = 24 * 60 * 60 * 1000;
-const CONTACT_MONITOR_MIN_INTERVAL_MS = 60_000;
-const CONTACT_MONITOR_MAX_INTERVAL_MS = 30 * 60 * 1000;
-const CONTACT_MONITOR_RETRY_MS = 5 * 60 * 1000;
-const COVER_MONITOR_MIN_INTERVAL_MS = 10 * 60 * 1000;
-const COVER_MONITOR_JITTER_MS = 20 * 60 * 1000;
-const TREE_HEAD_KEYS = ['protocol', 'rootHash', 'signature', 'signerKeyId', 'timestamp', 'treeSize'];
 
 export type OwnKeyTransparencyStatus =
   | { status: 'ready'; contact: VerifiedKeyTransparencyContactState }
@@ -191,7 +197,7 @@ function parseStoredHead(raw: string | null): KeyTransparencyLogHead | null {
   }
   const head = parsed as KeyTransparencyLogHead;
   if (
-    !exactPlainObject(head, TREE_HEAD_KEYS) ||
+    !exactPlainObject(head, KEY_TRANSPARENCY_GOSSIP_HEAD_KEYS) ||
     head.protocol !== KEY_TRANSPARENCY_PROTOCOL ||
     !isKeyTransparencyHash(head.rootHash) ||
     !isKeyTransparencyHash(head.signerKeyId) ||
@@ -216,7 +222,7 @@ function exactQueryWrapper(value: unknown): value is { ok: true; result: unknown
 function parseGossipCandidate(value: unknown): KeyTransparencyLogHead | null {
   const head = value as KeyTransparencyLogHead;
   if (
-    !exactPlainObject(head, TREE_HEAD_KEYS) ||
+    !exactPlainObject(head, KEY_TRANSPARENCY_GOSSIP_HEAD_KEYS) ||
     head.protocol !== KEY_TRANSPARENCY_PROTOCOL ||
     !isKeyTransparencyHash(head.rootHash) ||
     !isKeyTransparencyHash(head.signerKeyId) ||
@@ -230,12 +236,6 @@ function parseGossipCandidate(value: unknown): KeyTransparencyLogHead | null {
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(head.signature)
   ) return null;
   return { ...head };
-}
-
-function randomUnit(): number {
-  const value = new Uint32Array(1);
-  crypto.getRandomValues(value);
-  return value[0] / 0x1_0000_0000;
 }
 
 class KeyTransparencyClient {
@@ -366,7 +366,6 @@ class KeyTransparencyClient {
     if (!await storage.set(key, serialized) || await storage.get(key) !== serialized) {
       throw new Error('Key-transparency head could not be persisted');
     }
-    this.latestHead = { ...head };
   }
 
   private async persistContact(
@@ -427,6 +426,7 @@ class KeyTransparencyClient {
     checkpoint: KeyTransparencyCheckpoint;
     generation: number;
     toEpoch: number;
+    knownHead: KeyTransparencyLogHead | null;
     options: KeyTransparencyReadOptions;
   }): Promise<ReturnType<typeof verifyKeyTransparencyDelta>> {
     this.assertGeneration(input.generation);
@@ -450,6 +450,8 @@ class KeyTransparencyClient {
           input.checkpoint,
           response.result,
           material.dilithiumPublicKey,
+          input.toEpoch,
+          input.knownHead,
         );
       } catch {
         await this.recordIncident(input.context);
@@ -494,6 +496,18 @@ class KeyTransparencyClient {
     }
   }
 
+  private async loadSyncHead(context: CurrentServerContext): Promise<KeyTransparencyLogHead | null> {
+    const material = websocketClient.getAnonymousHttpServerKeyMaterial();
+    try {
+      if (!material?.dilithiumPublicKey) throw new Error('Authenticated key-transparency signer is unavailable');
+      return await this.loadHead(context, material.dilithiumPublicKey);
+    } finally {
+      material?.kyberPublicKey.fill(0);
+      material?.dilithiumPublicKey?.fill(0);
+      material?.x25519PublicKey?.fill(0);
+    }
+  }
+
   // Bring the local log up to the current epoch
   private async syncLogUnlocked(
     ownerUsername: string,
@@ -507,47 +521,50 @@ class KeyTransparencyClient {
     const trustedNow = websocketClient.getAnonymousHttpServerNow();
     if (trustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
     const nowEpoch = keyTransparencyCurrentEpoch(trustedNow);
-    let checkpoint = await loadKeyTransparencyCheckpoint(context, ownerUsername);
+    let checkpoint = await this.runRecordStoreOperation(
+      context,
+      () => loadKeyTransparencyCheckpoint(context, ownerUsername),
+    );
     if (checkpoint && checkpoint.epoch > nowEpoch) {
       throw new Error('Stored key-transparency checkpoint is ahead of authenticated server time');
     }
+    let knownHead = await this.loadSyncHead(context);
     if (!checkpoint) {
       const probe = await this.requestHead(context, generation, options);
+      knownHead ??= probe;
       checkpoint = keyTransparencyGenesisCheckpoint(probe.genesisEpoch);
     }
-    const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
-    if (currentTrustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
-    const currentEpoch = keyTransparencyCurrentEpoch(currentTrustedNow);
-
-    for (let round = 0; round < MAX_SYNC_ROUNDS && checkpoint.epoch <= currentEpoch; round += 1) {
-      if (generation !== this.generation) throw new Error('Key-transparency account changed');
+    const fromEpoch = checkpoint.epoch;
+    const pendingRecords: StoredKeyTransparencyRecord[] = [];
+    for (let round = 0; round < MAX_SYNC_ROUNDS; round += 1) {
+      this.assertGeneration(generation);
+      const currentTrustedNow = websocketClient.getAnonymousHttpServerNow();
+      if (currentTrustedNow === null) throw new Error('Authenticated key-transparency time is unavailable');
+      const currentEpoch = keyTransparencyCurrentEpoch(currentTrustedNow);
       const toEpoch = Math.min(
         currentEpoch,
         checkpoint.epoch + KEY_TRANSPARENCY_DELTA_MAX_EPOCHS - 1,
       );
-      const openEpoch = toEpoch >= currentEpoch;
-      const beforeRound = checkpoint;
-      const verified = await this.requestDelta({ context, checkpoint, generation, toEpoch, options });
-      await commitKeyTransparencyDelta(
-        context,
-        ownerUsername,
-        verified.records,
-        openEpoch ? beforeRound : verified.checkpoint,
-      );
-      await this.persistHead(context, verified.head);
+      if (checkpoint.epoch > toEpoch) throw new Error('Authenticated key-transparency time is behind the next page');
+      const verified = await this.requestDelta({ context, checkpoint, generation, toEpoch, knownHead, options });
+      pendingRecords.push(...verified.records);
+      checkpoint = verified.checkpoint;
+      const sealedCheckpoint = verified.sealedCheckpoint;
+      if (!sealedCheckpoint) continue;
+
+      await this.runRecordStoreOperation(context, () => commitKeyTransparencyDelta(
+        context, ownerUsername, pendingRecords, fromEpoch, sealedCheckpoint,
+        () => this.assertGeneration(generation),
+      ));
       await assertCurrentServerContext(context);
       this.assertGeneration(generation);
-      checkpoint = verified.checkpoint;
-      if (openEpoch) break;
-    }
-
-    if (!this.latestHead) {
-      const head = await this.requestHead(context, generation, options);
+      await this.persistHead(context, verified.head);
       this.assertGeneration(generation);
-      await this.persistHead(context, head);
+      this.latestHead = { ...verified.head };
+      return { context, checkpoint };
     }
 
-    return { context, checkpoint };
+    throw new Error('Key-transparency sync did not reach the signed head within its page limit');
   }
 
   // Sync the log then resolve a contact entirely from local state
@@ -558,24 +575,24 @@ class KeyTransparencyClient {
     options: KeyTransparencyReadOptions = {},
   ): Promise<VerifiedQueryState> {
     let { context, checkpoint } = await this.syncLogUnlocked(ownerUsername, generation, options);
-    let records = await findKeyTransparencyRecordsForContact(
+    let records = await this.runRecordStoreOperation(context, () => findKeyTransparencyRecordsForContact(
       context,
       ownerUsername,
       discoveryEncryptionKey,
       Math.max(0, checkpoint.epoch - 1),
-    );
+    ));
     this.assertGeneration(generation);
 
     if (records.length === 0) {
       const resynced = await this.syncLogUnlocked(ownerUsername, generation, options);
       context = resynced.context;
       checkpoint = resynced.checkpoint;
-      records = await findKeyTransparencyRecordsForContact(
+      records = await this.runRecordStoreOperation(context, () => findKeyTransparencyRecordsForContact(
         context,
         ownerUsername,
         discoveryEncryptionKey,
         Math.max(0, checkpoint.epoch - 1),
-      );
+      ));
       this.assertGeneration(generation);
     }
 
@@ -585,7 +602,10 @@ class KeyTransparencyClient {
       epoch: number;
     }> = [];
     for (const record of records) {
-      const cached = await loadKeyTransparencyTransition(context, ownerUsername, record.recordHash);
+      const cached = await this.runRecordStoreOperation(
+        context,
+        () => loadKeyTransparencyTransition(context, ownerUsername, record.recordHash),
+      );
       if (!cached) {
         throw new Error('Key-transparency contact transition is missing');
       }
@@ -653,9 +673,11 @@ class KeyTransparencyClient {
     monitorContact?: boolean;
     discoveryEncryptionKey: Uint8Array;
     accountRootPublicKeyBase64: string;
+    material: object;
+    isCurrent: () => boolean;
     signal?: AbortSignal;
     onRetry?: () => void;
-  }): Promise<VerifiedKeyTransparencyContactState> {
+  }): Promise<void> {
     const generation = this.generation;
     return this.enqueue(async () => {
       this.assertGeneration(generation);
@@ -705,9 +727,10 @@ class KeyTransparencyClient {
         const previous = monitored ?? (liveAuthorization ? {
           peer: input.peerUsername,
           rootCommitment: liveAuthorization.rootCommitment,
+          version: liveAuthorization.version,
         } : null);
         if (previous) {
-          await this.revokeChangedMonitoredRoot(input.ownerUsername, previous, contact);
+          await this.revokeChangedMonitoredRoot(result.context, input.ownerUsername, previous, contact);
           this.assertGeneration(generation);
         }
 
@@ -738,11 +761,31 @@ class KeyTransparencyClient {
         }
         await assertCurrentServerContext(result.context);
         this.assertGeneration(generation);
-        return contact;
+        if (!input.isCurrent() || input.signal?.aborted) throw new Error('Discovery lookup is no longer current');
+        markKeyTransparencyVerifiedMaterial(input.material, input.ownerUsername, input.peerUsername, contact);
+        await savePersistedDiscoveryMaterial(input.ownerUsername, input.peerUsername, input.material, {
+          rootCommitment: contact.rootCommitment,
+          version: contact.version,
+        });
+        this.assertGeneration(generation);
+        await this.persistAuthorizations(input.ownerUsername);
+        this.assertGeneration(generation);
       } finally {
         monitored?.discoveryEncryptionKey.fill(0);
       }
     });
+  }
+
+  private async runRecordStoreOperation<T>(
+    context: CurrentServerContext,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof KeyTransparencyRecordStoreCorruptionError) await this.recordIncident(context);
+      throw error;
+    }
   }
 
   private async runMonitorStoreOperation<T>(
@@ -785,14 +828,15 @@ class KeyTransparencyClient {
       existing.generation === generation
     ) return existing.promise;
 
-    const promise = (async (): Promise<number> => {
+    const promise = this.enqueue(async (): Promise<number> => {
+      if (generation !== this.generation) return 0;
       const context = await captureCurrentServerContext();
       if (await this.hasIncident(context)) return 0;
       const snapshot = await readKeyTransparencyAuthorizations(context, ownerUsername);
       await assertCurrentServerContext(context);
       if (generation !== this.generation || this.securityIncidentActive) return 0;
       return importKeyTransparencyAuthorizations(ownerUsername, snapshot);
-    })();
+    });
     this.authorizationRestore = { ownerUsername, generation, promise };
     try {
       const restored = await promise;
@@ -809,7 +853,7 @@ class KeyTransparencyClient {
   }
 
   // Persist the current authorizations/revocations for this account
-  async persistAuthorizations(ownerUsername: string): Promise<void> {
+  private async persistAuthorizations(ownerUsername: string): Promise<void> {
     if (this.securityIncidentActive) {
       return;
     }
@@ -908,7 +952,6 @@ class KeyTransparencyClient {
       wipeAnonymousToken(token);
     }
   }
-
 
   private async registerOwnIdentity(
     context: CurrentServerContext,
@@ -1058,8 +1101,8 @@ class KeyTransparencyClient {
               input.accountRoot.sign,
               recovery,
             );
-          } catch (e) {
-            console.log(`[KT-DIAG ${new Date().toISOString()}] registerOwnIdentity THREW`, { owner: input.ownerUsername, error: e instanceof Error ? e.message : String(e) });
+          } catch {
+            // The request can fail after the server committed it. Check the verified state below.
           }
           verified = await this.queryStateUnlocked(input.ownerUsername, input.discoveryEncryptionKey, generation);
           if (!verified.contact) {
@@ -1214,7 +1257,7 @@ class KeyTransparencyClient {
           this.scheduleContactMonitor(
             ownerUsername,
             generation,
-            Math.floor(baseInterval * (0.75 + randomUnit() * 0.5)),
+            Math.floor(baseInterval * (0.75 + PostQuantumRandom.randomUnit() * 0.5)),
           );
         })
         .catch(() => {
@@ -1237,7 +1280,7 @@ class KeyTransparencyClient {
             this.scheduleCoverMonitor(
               ownerUsername,
               generation,
-              COVER_MONITOR_MIN_INTERVAL_MS + randomUnit() * COVER_MONITOR_JITTER_MS,
+              COVER_MONITOR_MIN_INTERVAL_MS + PostQuantumRandom.randomUnit() * COVER_MONITOR_JITTER_MS,
             );
           }
         });
@@ -1271,7 +1314,7 @@ class KeyTransparencyClient {
         authenticatedNow - oldest < CONTACT_MONITOR_SWEEP_MS
       ) return targets.length;
       const candidates = targets.filter((target) => target.lastCheckedAt === oldest);
-      const target = candidates[Math.floor(randomUnit() * candidates.length)];
+      const target = candidates[Math.floor(PostQuantumRandom.randomUnit() * candidates.length)];
       const verified = await this.queryStateUnlocked(
         ownerUsername,
         target.discoveryEncryptionKey,
@@ -1281,7 +1324,7 @@ class KeyTransparencyClient {
         await this.recordIncident(verified.context);
         throw new Error('Monitored key-transparency contact disappeared');
       }
-      await this.revokeChangedMonitoredRoot(ownerUsername, target, verified.contact);
+      await this.revokeChangedMonitoredRoot(verified.context, ownerUsername, target, verified.contact);
       const contact = verified.contact;
       await this.runWarningStoreOperation(
         verified.context,
@@ -1319,7 +1362,7 @@ class KeyTransparencyClient {
       () => listKeyTransparencyMonitorTargets(context, ownerUsername),
     );
     const selected = targets.length > 0
-      ? targets[Math.floor(randomUnit() * targets.length)]
+      ? targets[Math.floor(PostQuantumRandom.randomUnit() * targets.length)]
       : null;
     const discoveryKey = selected?.discoveryEncryptionKey.slice() ?? new Uint8Array(32);
     if (!selected) crypto.getRandomValues(discoveryKey);
@@ -1330,7 +1373,7 @@ class KeyTransparencyClient {
           await this.recordIncident(verified.context);
           throw new Error('Covered key-transparency contact disappeared');
         }
-        await this.revokeChangedMonitoredRoot(ownerUsername, selected, verified.contact);
+        await this.revokeChangedMonitoredRoot(verified.context, ownerUsername, selected, verified.contact);
         const contact = verified.contact;
         await this.runWarningStoreOperation(
           verified.context,
@@ -1361,10 +1404,18 @@ class KeyTransparencyClient {
   }
 
   private async revokeChangedMonitoredRoot(
+    context: CurrentServerContext,
     ownerUsername: string,
-    target: { peer: string; rootCommitment: string },
+    target: { peer: string; rootCommitment: string; version: number },
     contact: VerifiedKeyTransparencyContactState,
   ): Promise<void> {
+    if (
+      contact.version < target.version ||
+      (contact.version === target.version && contact.rootCommitment !== target.rootCommitment)
+    ) {
+      await this.recordIncident(context);
+      throw new Error('Verified key-transparency history conflicts with the trusted peer state');
+    }
     if (target.rootCommitment === contact.rootCommitment) return;
     revokeKeyTransparencyPeerAuthorization(ownerUsername, target.peer, contact);
 
@@ -1394,11 +1445,11 @@ class KeyTransparencyClient {
     this.stopContactMonitoring();
     this.monitorOwner = normalized;
     const generation = this.generation;
-    this.scheduleContactMonitor(normalized, generation, 30_000 + randomUnit() * 90_000);
+    this.scheduleContactMonitor(normalized, generation, 30_000 + PostQuantumRandom.randomUnit() * 90_000);
     this.scheduleCoverMonitor(
       normalized,
       generation,
-      COVER_MONITOR_MIN_INTERVAL_MS + randomUnit() * COVER_MONITOR_JITTER_MS,
+      COVER_MONITOR_MIN_INTERVAL_MS + PostQuantumRandom.randomUnit() * COVER_MONITOR_JITTER_MS,
     );
   }
 
@@ -1528,7 +1579,7 @@ class KeyTransparencyClient {
           }
         }
         if (attempt + 1 < GOSSIP_AUDIT_ATTEMPTS) {
-          await new Promise((resolve) => setTimeout(resolve, GOSSIP_AUDIT_RETRY_MS));
+          await sleep(GOSSIP_AUDIT_RETRY_MS);
         }
       }
       if (generation === this.generation) {

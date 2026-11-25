@@ -1,5 +1,11 @@
 import type { StoredUser } from '../types/database-types';
-import { CERT_CLOCK_SKEW_MS, MAX_KNOWN_PEERS } from '../constants';
+import {
+  CERT_CLOCK_SKEW_MS,
+  MAX_KNOWN_PEERS,
+  KNOWN_USER_FINGERPRINT_REGEX,
+  USER_RECORD_KEYS,
+  KNOWN_USER_UUID_V4_REGEX,
+} from '../constants';
 import {
   hasPrototypePollutionKeys,
   isCanonicalAuthUsername,
@@ -11,26 +17,15 @@ import {
   isValidX25519PublicKeyBase64,
 } from '../utils/messaging-validators';
 
-const USER_RECORD_KEYS = new Set([
-  'hybridPublicKeys',
-  'id',
-  'identityBundleFingerprint',
-  'identityRootFingerprint',
-  'peerCertificateFingerprint',
-  'peerCertificateVerifiedAt',
-  'username',
-]);
 const HYBRID_KEY_FIELDS = [
   'dilithiumPublicBase64',
   'kyberPublicBase64',
   'x25519PublicBase64',
 ].sort().join(',');
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const FINGERPRINT = /^[a-f0-9]{64}$/;
 
 function optionalFingerprint(value: unknown, field: string): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !FINGERPRINT.test(value)) {
+  if (typeof value !== 'string' || !KNOWN_USER_FINGERPRINT_REGEX.test(value)) {
     throw new Error(`Invalid known-peer ${field}`);
   }
   return value;
@@ -46,7 +41,7 @@ function normalizeKnownUser(value: unknown, ownerUsername: string): StoredUser {
 
   const id = value.id;
   const username = value.username;
-  if (typeof id !== 'string' || !UUID_V4.test(id)) {
+  if (typeof id !== 'string' || !KNOWN_USER_UUID_V4_REGEX.test(id)) {
     throw new Error('Invalid known-peer ID');
   }
   if (!isCanonicalAuthUsername(username) || username === ownerUsername) {

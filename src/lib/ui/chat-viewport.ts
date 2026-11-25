@@ -1,5 +1,6 @@
 /** Keep reverse scrolling thread attached to the composer across IME and
  * native image layout changes without pulling readers out of older history. */
+import { CHAT_VIEWPORT_MATH_MAX_MINIMUM } from '../constants';
 export function attachChatViewport(root: HTMLElement, viewport: HTMLElement, composer: HTMLElement) {
   const stack = root.querySelector<HTMLElement>('.qorc-message-stack');
   let pinned = true;
@@ -63,12 +64,12 @@ export function attachChatViewport(root: HTMLElement, viewport: HTMLElement, com
       onResize();
       return;
     }
-    pinned = Math.max(0, -viewport.scrollTop) <= 24;
+    pinned = Math.max(0, -viewport.scrollTop) <= CHAT_VIEWPORT_MATH_MAX_MINIMUM;
     viewport.style.overflowAnchor = pinned ? 'none' : previousAnchor;
   };
   
   const onComposerPointer = () => {
-    pinned = Math.max(0, -viewport.scrollTop) <= 24;
+    pinned = Math.max(0, -viewport.scrollTop) <= CHAT_VIEWPORT_MATH_MAX_MINIMUM;
     focusPin = pinned;
   };
   const onFocus = () => { focusPin = pinned; measure(); schedule(); };

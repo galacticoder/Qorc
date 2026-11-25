@@ -5931,7 +5931,12 @@ html:not(.qorc-mobile) :is(.login-brand-mark, .signup-brand-mark) .qorc-brand-lo
 
 .welcome-advanced-toggle:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
   color: var(--welcome-text);
-  background: var(--qorc-icon-button-hover);
+  background: var(--qorc-option-hover);
+}
+
+.welcome-advanced-toggle[data-qorc-pressed] {
+  opacity: 1 !important;
+  scale: 1 !important;
 }
 
 .welcome-advanced-toggle svg {

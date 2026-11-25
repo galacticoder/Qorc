@@ -1,3 +1,17 @@
+import {
+  MAX_JPEG_SCANS,
+  MAX_JPEG_SEGMENTS,
+  MAX_WEBP_CHUNKS,
+  JPEG_SOF_MARKERS,
+  SUPPORTED_JPEG_SOF_MARKERS,
+  IMAGE_CONTAINER_VALIDATION_BYTES_LENGTH_MINIMUM,
+  IMAGE_CONTAINER_VALIDATION_SEGMENT_LENGTH_MINIMUM,
+  IMAGE_CONTAINER_VALIDATION_COMPONENT_COUNT_EXPECTED,
+  IMAGE_CONTAINER_VALIDATION_CHUNK_DATA_LENGTH_MINIMUM,
+  IMAGE_CONTAINER_VALIDATION_WEBP_LOSSLESS_DIMENSIONS_CHUNK_DATA_LENGTH_MINIMUM,
+  IMAGE_CONTAINER_VALIDATION_VALIDATE_WEBP_CONTAINER_BYTES_LENGTH_MINIMUM,
+  IMAGE_CONTAINER_VALIDATION_EXTENDED_DATA_LENGTH_EXPECTED,
+} from '../constants';
 import { dimensionsWithinLimits } from '../../../shared/image-png.js';
 import { asciiMatchesAt } from '../../../shared/bytes.js';
 
@@ -13,15 +27,6 @@ export interface ImageDimensionLimits {
     maxHeight: number;
     maxPixels: number;
 }
-
-const JPEG_SOF_MARKERS = new Set([
-    0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
-    0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf
-]);
-const SUPPORTED_JPEG_SOF_MARKERS = new Set([0xc0, 0xc2]);
-const MAX_JPEG_SEGMENTS = 512;
-const MAX_JPEG_SCANS = 16;
-const MAX_WEBP_CHUNKS = 4;
 
 function readUint24LE(bytes: Uint8Array, offset: number): number {
     return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
@@ -43,7 +48,7 @@ export function validateJpegContainer(
     dimensionError = 'Decoded image dimensions exceed limit'
 ): ImageDimensions {
     const subject = `${errorNoun.charAt(0).toUpperCase()}${errorNoun.slice(1)}`;
-    if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    if (bytes.length < IMAGE_CONTAINER_VALIDATION_BYTES_LENGTH_MINIMUM || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
         throw new Error(`Invalid ${errorNoun}`);
     }
 
@@ -83,14 +88,14 @@ export function validateJpegContainer(
             if (!SUPPORTED_JPEG_SOF_MARKERS.has(marker) || dimensions) {
                 throw new Error(`Unsupported or duplicate ${errorNoun} frame header`);
             }
-            if (segmentLength < 11 || bytes[offset + 2] !== 8) {
+            if (segmentLength < IMAGE_CONTAINER_VALIDATION_SEGMENT_LENGTH_MINIMUM || bytes[offset + 2] !== 8) {
                 throw new Error(`Invalid ${errorNoun} frame header`);
             }
             const height = (bytes[offset + 3] << 8) | bytes[offset + 4];
             const width = (bytes[offset + 5] << 8) | bytes[offset + 6];
             const componentCount = bytes[offset + 7];
             if (
-                (componentCount !== 1 && componentCount !== 3) ||
+                (componentCount !== 1 && componentCount !== IMAGE_CONTAINER_VALIDATION_COMPONENT_COUNT_EXPECTED) ||
                 segmentLength !== 8 + (3 * componentCount)
             ) {
                 throw new Error(`Invalid ${errorNoun} component layout`);
@@ -200,7 +205,7 @@ interface WebpChunk {
 function webpLossyDimensions(bytes: Uint8Array, chunk: WebpChunk): ImageDimensions {
     const offset = chunk.dataOffset;
     if (
-        chunk.dataLength < 10 ||
+        chunk.dataLength < IMAGE_CONTAINER_VALIDATION_CHUNK_DATA_LENGTH_MINIMUM ||
         (bytes[offset] & 1) !== 0 ||
         !asciiMatchesAt(bytes, offset + 3, String.fromCharCode(0x9d, 0x01, 0x2a))
     ) {
@@ -214,7 +219,7 @@ function webpLossyDimensions(bytes: Uint8Array, chunk: WebpChunk): ImageDimensio
 
 function webpLosslessDimensions(bytes: Uint8Array, chunk: WebpChunk): ImageDimensions {
     const offset = chunk.dataOffset;
-    if (chunk.dataLength < 5 || bytes[offset] !== 0x2f || (bytes[offset + 4] & 0xe0) !== 0) {
+    if (chunk.dataLength < IMAGE_CONTAINER_VALIDATION_WEBP_LOSSLESS_DIMENSIONS_CHUNK_DATA_LENGTH_MINIMUM || bytes[offset] !== 0x2f || (bytes[offset + 4] & 0xe0) !== 0) {
         throw new Error('Invalid image WebP lossless frame');
     }
     return {
@@ -225,7 +230,7 @@ function webpLosslessDimensions(bytes: Uint8Array, chunk: WebpChunk): ImageDimen
 
 export function validateWebpContainer(bytes: Uint8Array, limits: ImageDimensionLimits): ImageDimensions {
     if (
-        bytes.length < 30 ||
+        bytes.length < IMAGE_CONTAINER_VALIDATION_VALIDATE_WEBP_CONTAINER_BYTES_LENGTH_MINIMUM ||
         !asciiMatchesAt(bytes, 0, 'RIFF') ||
         !asciiMatchesAt(bytes, 8, 'WEBP') ||
         readUint32LE(bytes, 4) + 8 !== bytes.length
@@ -262,7 +267,7 @@ export function validateWebpContainer(bytes: Uint8Array, limits: ImageDimensionL
     } else if (chunks[0].type === 'VP8X') {
         const extended = chunks[0];
         if (
-            extended.dataLength !== 10 ||
+            extended.dataLength !== IMAGE_CONTAINER_VALIDATION_EXTENDED_DATA_LENGTH_EXPECTED ||
             (bytes[extended.dataOffset] & ~0x10) !== 0 ||
             bytes[extended.dataOffset + 1] !== 0 ||
             bytes[extended.dataOffset + 2] !== 0 ||

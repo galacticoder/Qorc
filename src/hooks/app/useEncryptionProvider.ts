@@ -28,22 +28,19 @@ import {
 import {
   AUTH_USERNAME_REGEX,
   MAX_SIGNAL_PAYLOAD_JSON_BYTES,
+  DEFERRABLE_DISCOVERY_WAIT_MS,
+  DISCOVERY_REFRESH_FAILURE_TTL_MS,
+  MAX_DISCOVERY_PEER_CACHE_ENTRIES,
+  USE_ENCRYPTION_PROVIDER_TIMEOUT_MS,
+  USE_ENCRYPTION_PROVIDER_LAST_ATTEMPT_MINIMUM,
+  DEFERRABLE_SIGNAL_TYPES,
 } from '../../lib/constants';
 import { hasPrototypePollutionKeys, isPlainObject, sanitizeMessageId } from '../../lib/sanitizers';
-import { rememberPeerDetectionKey } from '../../lib/spool/detection-key';
 import { clearPersistedDiscoveryMaterial } from '../../lib/discovery/persisted-discovery-material';
 import { createBoundedMapSetter } from '../../lib/utils/message-state-limits';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 import { DISCOVERY_LOOKUP_TIMEOUT_MS } from '../../../shared/anonymous-transfer-policy.js';
 
-const DISCOVERY_REFRESH_FAILURE_TTL_MS = 30 * 1000;
-const DEFERRABLE_SIGNAL_TYPES: ReadonlySet<string> = new Set([
-  'typing-start',
-  'typing-stop',
-]);
-
-const DEFERRABLE_DISCOVERY_WAIT_MS = 1500;
-const MAX_DISCOVERY_PEER_CACHE_ENTRIES = 300;
 const signalPayloadEncoder = new TextEncoder();
 
 const setBoundedPeerEntry = createBoundedMapSetter(MAX_DISCOVERY_PEER_CACHE_ENTRIES);
@@ -93,9 +90,6 @@ export function useEncryptionProvider({
   const activeAccountRef = useRef<string | null>(null);
 
   const rememberDiscoveryMaterial = (peer: string, material: any): void => {
-    const owner = activeAccountRef.current;
-    if (owner === null) throw new Error('Discovery material owner is unavailable');
-    rememberPeerDetectionKey(owner, String(peer), material.spoolDetectionKey);
     setBoundedPeerEntry(discoveryCacheRef.current, peer, material);
   };
 
@@ -128,7 +122,7 @@ export function useEncryptionProvider({
     }
   }, [isLoggedIn, loginUsernameRef, loginUsernameRef.current]);
 
-  const waitForSessionReady = (peer: string, timeoutMs = 8000): Promise<void> => {
+  const waitForSessionReady = (peer: string, timeoutMs = USE_ENCRYPTION_PROVIDER_TIMEOUT_MS): Promise<void> => {
     if (!peer) return Promise.resolve();
     if (!preKeyPendingRef.current.has(peer)) return Promise.resolve();
 
@@ -270,7 +264,7 @@ export function useEncryptionProvider({
         discoveryResultMemoRef.current.delete(normalizedPeer);
       } else {
         const lastAttempt = discoveryAttemptRef.current.get(normalizedPeer) || 0;
-        if (now - lastAttempt < 15000) {
+        if (now - lastAttempt < USE_ENCRYPTION_PROVIDER_LAST_ATTEMPT_MINIMUM) {
           const cached = discoveryCacheRef.current.get(peer) || discoveryCacheRef.current.get(normalizedPeer);
           if (cached) return cached;
           return null;

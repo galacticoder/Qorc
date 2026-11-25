@@ -1,7 +1,9 @@
+import {
+  READ_ONLY_TRANSFER_RATE_CHECK_INTERVAL_MS,
+  READ_ONLY_TRANSFER_RATE_WINDOW_MS,
+  READ_ONLY_TRANSFER_ATTEMPT_MINIMUM,
+} from '../constants';
 import { anonymousBodyTimeoutMs } from '../../../shared/anonymous-transfer-policy.js';
-
-const RATE_CHECK_INTERVAL_MS = 5_000;
-const RATE_WINDOW_MS = 30_000;
 
 export interface AnonymousReadSpeedReference {
   responseBytes: number;
@@ -17,7 +19,7 @@ export async function transferAnonymousRead<T>(
   speedReference?: AnonymousReadSpeedReference,
 ): Promise<T> {
   const transferBudgetMs = anonymousBodyTimeoutMs(responseBytes);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < READ_ONLY_TRANSFER_ATTEMPT_MINIMUM; attempt++) {
     signal.throwIfAborted();
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -32,8 +34,8 @@ export async function transferAnonymousRead<T>(
       const now = performance.now();
       const elapsed = now - startedAt;
       samples.push({ at: now, bytes: receivedBytes });
-      while (samples.length > 1 && samples[1].at <= now - RATE_WINDOW_MS) samples.shift();
-      if (elapsed < RATE_WINDOW_MS) return;
+      while (samples.length > 1 && samples[1].at <= now - READ_ONLY_TRANSFER_RATE_WINDOW_MS) samples.shift();
+      if (elapsed < READ_ONLY_TRANSFER_RATE_WINDOW_MS) return;
       const baseline = samples[0];
       let recent = baseline;
       for (const sample of samples) {
@@ -43,7 +45,7 @@ export async function transferAnonymousRead<T>(
       const requiredRate = (responseBytes - receivedBytes) / remainingMs;
       const windowRate = (receivedBytes - baseline.bytes) / Math.max(1, now - baseline.at);
       const recentRate = (receivedBytes - recent.bytes) / Math.max(1, now - recent.at);
-      const idle = now - lastByteAt >= RATE_WINDOW_MS;
+      const idle = now - lastByteAt >= READ_ONLY_TRANSFER_RATE_WINDOW_MS;
       const referenceRate = speedReference?.responseBytes === responseBytes &&
         Number.isFinite(speedReference.bytesPerMs) && speedReference.bytesPerMs > 0
         ? speedReference.bytesPerMs
@@ -51,13 +53,13 @@ export async function transferAnonymousRead<T>(
       const batchOutlier = referenceRate > 0 &&
         windowRate < referenceRate / 4 && recentRate < referenceRate / 4 &&
         (responseBytes - receivedBytes) / Math.max(windowRate, recentRate) >
-          responseBytes / referenceRate + RATE_WINDOW_MS;
+          responseBytes / referenceRate + READ_ONLY_TRANSFER_RATE_WINDOW_MS;
       if (idle || (windowRate < requiredRate && recentRate < requiredRate) || batchOutlier) {
         const reason = idle ? 'stalled' : batchOutlier ? 'slower than completed batch reads' : 'too slow';
         slowTransfer = new Error(`Anonymous download ${reason}: received ${receivedBytes}/${responseBytes} bytes after ${Math.round(elapsed)} ms${batchOutlier ? ` (recent ${Math.round(recentRate * 1000 / 1024)} KiB/s, completed ${Math.round(referenceRate * 1000 / 1024)} KiB/s)` : ''}`);
         controller.abort();
       }
-    }, RATE_CHECK_INTERVAL_MS);
+    }, READ_ONLY_TRANSFER_RATE_CHECK_INTERVAL_MS);
     try {
       const result = await request(controller.signal, (bytes) => {
         if (!Number.isSafeInteger(bytes) || bytes < receivedBytes || bytes > responseBytes) return;

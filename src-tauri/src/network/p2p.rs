@@ -1,5 +1,57 @@
 //! P2P Transport Handler
 
+use crate::constants::p2p::{
+    AUDIO_LANE_ACTIVE_COUNT,
+    AUDIO_LANE_BIND_TIMEOUT_SECS,
+    AUDIO_LANE_PROBE_INTERVAL_SECS,
+    AUDIO_LANE_PROBE_TIMEOUT_SECS,
+    AUDIO_LANE_RETRY_BASE_SECS,
+    AUDIO_LANE_RETRY_MAX_SECS,
+    AUDIO_LANE_SWITCH_CONFIRMATIONS,
+    AUDIO_LANE_SWITCH_MIN_GAIN_MS,
+    AUDIO_LANE_SWITCH_MIN_GAIN_PERCENT,
+    AUDIO_LANE_TARGET_COUNT,
+    AUTHENTICATION_TIMEOUT_SECS,
+    COMMAND_RESPONSE_GRACE_SECS,
+    ENDPOINT_CLOSE_TIMEOUT_SECS,
+    FRAME_BODY_BASE_TIMEOUT_SECS,
+    FRAME_BODY_MAX_TIMEOUT_SECS,
+    FRAME_BODY_MIN_BYTES_PER_SECOND,
+    HANDSHAKE_SESSION_ID_BYTES,
+    INBOUND_PRESSURE_RETRY_MS,
+    MAX_AUTHENTICATED_PAYLOAD_BYTES,
+    MAX_CONCURRENT_DIALS,
+    MAX_FRAME_BYTES,
+    MAX_INBOUND_BUFFERED_BYTES,
+    MAX_INBOUND_BUFFERED_FRAMES,
+    MAX_OUTBOUND_QUEUED_BYTES,
+    MAX_OUTBOUND_QUEUED_FRAMES,
+    MAX_P2P_ALIASES,
+    MAX_P2P_CONNECTIONS,
+    MAX_PENDING_AUDIO_LANES,
+    MAX_PENDING_CONTROL_COMMANDS,
+    MAX_PENDING_INCOMING_HANDSHAKES,
+    MAX_PREAUTH_BYTES_PER_CONNECTION,
+    MAX_PREAUTH_FRAMES_PER_CONNECTION,
+    MAX_PREAUTH_FRAME_BYTES,
+    MAX_PROTOCOL_ERRORS,
+    MAX_STREAM_ID_BYTES,
+    MAX_UNAUTHENTICATED_CONNECTIONS,
+    ONION_AUDIO_VIRTUAL_PORT,
+    ONION_DIAL_TIMEOUT_SECS,
+    ONION_PUBLISH_RETRY_MAX_SECS,
+    ONION_PUBLISH_RETRY_SECS,
+    ONION_VIRTUAL_PORT,
+    P2P_EVENT_CHANNEL_CAPACITY,
+    PER_CONNECTION_REALTIME_SEND_QUEUE,
+    PER_CONNECTION_SEND_QUEUE,
+    REQUEST_TIMEOUT_SECS,
+    ROTATE_RESPONSE_TIMEOUT_SECS,
+    SEND_TIMEOUT_SECS,
+    STREAM_ID_SUFFIX_MAX_BYTES,
+    STREAM_ID_SUFFIX_MIN_BYTES,
+};
+use crate::validation::is_lowercase_hex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -12,28 +64,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-const ONION_VIRTUAL_PORT: u16 = 9_735;
-const ONION_AUDIO_VIRTUAL_PORT: u16 = 9_736;
-const ONION_DIAL_TIMEOUT_SECS: u64 = 45;
-const ONION_PUBLISH_RETRY_SECS: u64 = 5;
-const ONION_PUBLISH_RETRY_MAX_SECS: u64 = 120;
 const AUDIO_LANE_TOKEN_BYTES: usize = 32;
-const AUDIO_LANE_TARGET_COUNT: usize = 4;
-const AUDIO_LANE_ACTIVE_COUNT: usize = 1;
-const AUDIO_LANE_SWITCH_MIN_GAIN_MS: u64 = 75;
-const AUDIO_LANE_SWITCH_MIN_GAIN_PERCENT: u64 = 10;
-const AUDIO_LANE_SWITCH_CONFIRMATIONS: u8 = 3;
 const AUDIO_LANE_FRAME_DATA: u8 = 1;
 const AUDIO_LANE_FRAME_PING: u8 = 2;
 const AUDIO_LANE_FRAME_PONG: u8 = 3;
 const AUDIO_LANE_FRAME_READY: u8 = 4;
 const AUDIO_LANE_FRAME_HEADER_BYTES: usize = 9;
-const AUDIO_LANE_PROBE_INTERVAL_SECS: u64 = 2;
-const AUDIO_LANE_PROBE_TIMEOUT_SECS: u64 = 6;
-const AUDIO_LANE_BIND_TIMEOUT_SECS: u64 = 10;
-const AUDIO_LANE_RETRY_BASE_SECS: u64 = 5;
-const AUDIO_LANE_RETRY_MAX_SECS: u64 = 60;
-const MAX_PENDING_AUDIO_LANES: usize = 64;
 
 enum AudioLaneFrame<'a> {
     Data { frame_id: u64, data: &'a [u8] },
@@ -448,15 +484,10 @@ async fn connect_onion_audio_peer(
 
 use crate::error::{QorcError, QorcResult};
 
-const REQUEST_TIMEOUT_SECS: u64 = ONION_DIAL_TIMEOUT_SECS + 15;
 const _: () = assert!(
     REQUEST_TIMEOUT_SECS > ONION_DIAL_TIMEOUT_SECS,
     "dial command deadline must outlast the dial it waits on"
 );
-const SEND_TIMEOUT_SECS: u64 = 10;
-const FRAME_BODY_BASE_TIMEOUT_SECS: u64 = 15;
-const FRAME_BODY_MIN_BYTES_PER_SECOND: usize = 4 * 1024;
-const FRAME_BODY_MAX_TIMEOUT_SECS: u64 = 120;
 
 fn frame_body_timeout(frame_bytes: usize) -> std::time::Duration {
     let transfer_seconds = frame_bytes
@@ -469,19 +500,6 @@ fn frame_body_timeout(frame_bytes: usize) -> std::time::Duration {
             .min(FRAME_BODY_MAX_TIMEOUT_SECS),
     )
 }
-const ENDPOINT_CLOSE_TIMEOUT_SECS: u64 = 5;
-const AUTHENTICATION_TIMEOUT_SECS: u64 = 120;
-const COMMAND_RESPONSE_GRACE_SECS: u64 = 2;
-const ROTATE_RESPONSE_TIMEOUT_SECS: u64 = 30;
-const MAX_PROTOCOL_ERRORS: u8 = 3;
-const MAX_CONCURRENT_DIALS: usize = 16;
-const MAX_PENDING_INCOMING_HANDSHAKES: usize = 32;
-const MAX_UNAUTHENTICATED_CONNECTIONS: usize = 16;
-const PER_CONNECTION_SEND_QUEUE: usize = 64;
-const PER_CONNECTION_REALTIME_SEND_QUEUE: usize = 5;
-const MAX_PREAUTH_FRAMES_PER_CONNECTION: usize = 12;
-const MAX_PREAUTH_BYTES_PER_CONNECTION: usize = 256 * 1024;
-const MAX_PREAUTH_FRAME_BYTES: usize = 24 * 1024;
 const ML_KEM_1024_BYTES: usize = 1568;
 const ML_DSA_87_PUBLIC_KEY_BYTES: usize = 2592;
 const ML_DSA_87_SIGNATURE_BYTES: usize = 4627;
@@ -497,10 +515,6 @@ fn inbound_frame_limit(authenticated: bool) -> usize {
 
 static INBOUND_BUFFERED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static INBOUND_BUFFERED_FRAMES: AtomicUsize = AtomicUsize::new(0);
-const MAX_INBOUND_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_INBOUND_BUFFERED_FRAMES: usize = 1024;
-pub const P2P_EVENT_CHANNEL_CAPACITY: usize = MAX_INBOUND_BUFFERED_FRAMES + (MAX_P2P_ALIASES * 2);
-const INBOUND_PRESSURE_RETRY_MS: u64 = 25;
 
 pub fn release_inbound_bytes(n: usize) {
     if n == 0 {
@@ -545,9 +559,6 @@ fn try_reserve_inbound_bytes(n: usize) -> bool {
         }
     }
 }
-
-pub(crate) const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const MAX_AUTHENTICATED_PAYLOAD_BYTES: usize = 3 * ((MAX_FRAME_BYTES - 2) / 4);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -658,13 +669,6 @@ fn is_canonical_base64_payload(value: &str) -> bool {
     }
 }
 
-fn parse_authenticated_frame(buf: &[u8]) -> Option<Vec<u8>> {
-    if buf == br#"{"type":"__keepalive"}"# {
-        return Some(buf.to_vec());
-    }
-    is_valid_authenticated_frame(buf).then(|| buf.to_vec())
-}
-
 fn is_valid_authenticated_frame(buf: &[u8]) -> bool {
     if buf == br#"{"type":"__keepalive"}"# {
         return true;
@@ -673,7 +677,7 @@ fn is_valid_authenticated_frame(buf: &[u8]) -> bool {
         return false;
     }
     let id_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-    if id_len == 0 || id_len > 96 || 2 + id_len >= buf.len() {
+    if id_len == 0 || id_len > MAX_STREAM_ID_BYTES || 2 + id_len >= buf.len() {
         return false;
     }
     let Some(stream_id) = std::str::from_utf8(&buf[2..2 + id_len]).ok() else {
@@ -685,10 +689,8 @@ fn is_valid_authenticated_frame(buf: &[u8]) -> bool {
     matches!(
         stream_type,
         "message" | "call-audio" | "call-video" | "call-telemetry" | "call-screen"
-    ) && (16..=64).contains(&suffix.len())
-        && suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    ) && (STREAM_ID_SUFFIX_MIN_BYTES..=STREAM_ID_SUFFIX_MAX_BYTES).contains(&suffix.len())
+        && is_lowercase_hex(suffix)
 }
 
 fn is_realtime_audio_frame(buf: &[u8]) -> bool {
@@ -784,10 +786,7 @@ fn is_allowed_preauth_frame(value: &serde_json::Value) -> bool {
 
     match string_field("sessionId") {
         Some(session_id)
-            if session_id.len() == 32
-                && session_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+            if session_id.len() == HANDSHAKE_SESSION_ID_BYTES && is_lowercase_hex(session_id) => {}
         _ => return false,
     }
 
@@ -825,21 +824,18 @@ fn is_allowed_preauth_frame(value: &serde_json::Value) -> bool {
     }
 }
 
-fn parse_preauthentication_frame(buf: &[u8]) -> Option<Vec<u8>> {
-    let shape = serde_json::from_slice::<PreauthenticationWireShape>(buf).ok()?;
-    if !shape.has_exact_variant_shape() {
-        return None;
-    }
-    let value = serde_json::from_slice::<serde_json::Value>(buf).ok()?;
-    is_allowed_preauth_frame(&value).then(|| buf.to_vec())
+fn is_valid_preauthentication_frame(buf: &[u8]) -> bool {
+    let Ok(shape) = serde_json::from_slice::<PreauthenticationWireShape>(buf) else {
+        return false;
+    };
+    shape.has_exact_variant_shape()
+        && serde_json::from_slice::<serde_json::Value>(buf)
+            .is_ok_and(|value| is_allowed_preauth_frame(&value))
 }
 
 static OUTBOUND_QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static OUTBOUND_QUEUED_FRAMES: AtomicUsize = AtomicUsize::new(0);
-const MAX_OUTBOUND_QUEUED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_OUTBOUND_QUEUED_FRAMES: usize = 1024;
 static PENDING_CONTROL_COMMANDS: AtomicUsize = AtomicUsize::new(0);
-const MAX_PENDING_CONTROL_COMMANDS: usize = 1024;
 
 fn release_outbound_bytes(n: usize) {
     let _ = OUTBOUND_QUEUED_FRAMES.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
@@ -1022,9 +1018,6 @@ fn validate_connection_id(connection_id: &str) -> QorcResult<()> {
     }
     Ok(())
 }
-
-const MAX_P2P_CONNECTIONS: usize = 64;
-const MAX_P2P_ALIASES: usize = MAX_P2P_CONNECTIONS * 4;
 
 fn build_private_endpoint_url(onion_host: &str) -> String {
     format!("onion://{}", onion_host)
@@ -1934,55 +1927,54 @@ impl IrohWorker {
                         });
                         continue;
                     }
-                    match if authenticated_at_frame_start {
-                        parse_authenticated_frame(&buf)
+                    let valid = if authenticated_at_frame_start {
+                        is_valid_authenticated_frame(&buf)
                     } else {
-                        parse_preauthentication_frame(&buf)
-                    } {
-                        Some(data) => {
-                            let authenticated_now =
-                                authenticated_connections.read().contains(&connection_token);
-                            if authenticated_now != authenticated_at_frame_start {
-                                release_inbound_bytes(buf.len());
-                                continue;
-                            }
-                            if !authenticated_now {
-                                preauth_frames = preauth_frames.saturating_add(1);
-                                preauth_bytes = preauth_bytes.saturating_add(buf.len());
-                                if buf.len() > MAX_PREAUTH_FRAME_BYTES
-                                    || preauth_frames > MAX_PREAUTH_FRAMES_PER_CONNECTION
-                                    || preauth_bytes > MAX_PREAUTH_BYTES_PER_CONNECTION
-                                {
-                                    release_inbound_bytes(buf.len());
-                                    warn!(
-                                        "[P2P-RECV] Closing peer after invalid pre-authentication traffic"
-                                    );
-                                    break;
-                                }
-                            }
-                            protocol_errors = 0;
-                            let byte_len = buf.len();
-                            if event_tx
-                                .send(WorkerEvent::Message {
-                                    connection_id: connection_id.clone(),
-                                    connection_token,
-                                    data,
-                                    byte_len,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                release_inbound_bytes(byte_len);
-                                break;
-                            }
+                        is_valid_preauthentication_frame(&buf)
+                    };
+                    let byte_len = buf.len();
+                    if !valid {
+                        release_inbound_bytes(byte_len);
+                        protocol_errors = protocol_errors.saturating_add(1);
+                        if protocol_errors >= MAX_PROTOCOL_ERRORS {
+                            break;
                         }
-                        None => {
-                            release_inbound_bytes(buf.len());
-                            protocol_errors = protocol_errors.saturating_add(1);
-                            if protocol_errors >= MAX_PROTOCOL_ERRORS {
-                                break;
-                            }
+                        continue;
+                    }
+
+                    let authenticated_now =
+                        authenticated_connections.read().contains(&connection_token);
+                    if authenticated_now != authenticated_at_frame_start {
+                        release_inbound_bytes(byte_len);
+                        continue;
+                    }
+                    if !authenticated_now {
+                        preauth_frames = preauth_frames.saturating_add(1);
+                        preauth_bytes = preauth_bytes.saturating_add(byte_len);
+                        if byte_len > MAX_PREAUTH_FRAME_BYTES
+                            || preauth_frames > MAX_PREAUTH_FRAMES_PER_CONNECTION
+                            || preauth_bytes > MAX_PREAUTH_BYTES_PER_CONNECTION
+                        {
+                            release_inbound_bytes(byte_len);
+                            warn!(
+                                "[P2P-RECV] Closing peer after invalid pre-authentication traffic"
+                            );
+                            break;
                         }
+                    }
+                    protocol_errors = 0;
+                    if event_tx
+                        .send(WorkerEvent::Message {
+                            connection_id: connection_id.clone(),
+                            connection_token,
+                            data: buf,
+                            byte_len,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        release_inbound_bytes(byte_len);
+                        break;
                     }
                 }
 
@@ -2519,7 +2511,7 @@ impl IrohWorker {
                     .recv_frame(|| (MAX_FRAME_BYTES + AUDIO_LANE_FRAME_HEADER_BYTES, true))
                     .await
                 {
-                    Ok((frame, true)) => {
+                    Ok((mut frame, true)) => {
                         let byte_len = frame.len();
                         match parse_audio_lane_frame(&frame) {
                             Some(AudioLaneFrame::Data { frame_id, data })
@@ -2530,12 +2522,13 @@ impl IrohWorker {
                                     release_inbound_bytes(byte_len);
                                     continue;
                                 }
-                                let data = data.to_vec();
+                                frame.copy_within(AUDIO_LANE_FRAME_HEADER_BYTES.., 0);
+                                frame.truncate(byte_len - AUDIO_LANE_FRAME_HEADER_BYTES);
                                 if event_tx
                                     .send(WorkerEvent::Message {
                                         connection_id: connection_id.clone(),
                                         connection_token,
-                                        data,
+                                        data: frame,
                                         byte_len,
                                     })
                                     .await
@@ -2983,7 +2976,7 @@ impl IrohWorker {
                 {
                     is_valid_authenticated_frame(&data)
                 } else {
-                    parse_preauthentication_frame(&data).is_some()
+                    is_valid_preauthentication_frame(&data)
                 };
                 if !protocol_frame_is_valid {
                     let _ = resp.send(P2PSendResult {

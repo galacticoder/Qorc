@@ -1,3 +1,4 @@
+import { EXPECTED_AUTH_TOKEN_BYTES, POST_QUANTUM_WORKER_DATA_KEY_LENGTH_EXPECTED } from '../constants';
 import * as argon2 from "argon2-wasm";
 import { ml_kem1024 as kyber } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
@@ -12,7 +13,7 @@ import { wipeBinaryValues } from './wipe';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { AES_GCM_NONCE_BYTES, HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 
-let AUTH_TOKEN = new Uint8Array(32);
+const AUTH_TOKEN = new Uint8Array(EXPECTED_AUTH_TOKEN_BYTES);
 crypto.getRandomValues(AUTH_TOKEN);
 
 // Initialize worker with token
@@ -201,7 +202,7 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
       }
       case 'aead.encrypt': {
         if (!data.plaintext || !(data.plaintext instanceof Uint8Array)) throw new Error('plaintext required');
-        if (!data.key || !(data.key instanceof Uint8Array) || data.key.length !== 32) throw new Error('32-byte key required');
+        if (!data.key || !(data.key instanceof Uint8Array) || data.key.length !== POST_QUANTUM_WORKER_DATA_KEY_LENGTH_EXPECTED) throw new Error('32-byte key required');
 
         const encNonce: Uint8Array = (data.explicitNonce && data.explicitNonce instanceof Uint8Array)
           ? data.explicitNonce
@@ -265,7 +266,7 @@ self.addEventListener('message', async (event: MessageEvent<any>) => {
       }
       case 'aead.decrypt': {
         if (!data.ciphertext || !(data.ciphertext instanceof Uint8Array)) throw new Error('ciphertext required');
-        if (!data.key || !(data.key instanceof Uint8Array) || data.key.length !== 32) throw new Error('32-byte key required');
+        if (!data.key || !(data.key instanceof Uint8Array) || data.key.length !== POST_QUANTUM_WORKER_DATA_KEY_LENGTH_EXPECTED) throw new Error('32-byte key required');
         if (!data.nonce || !(data.nonce instanceof Uint8Array) || data.nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) throw new Error(`Nonce must be ${POST_QUANTUM_AEAD_NONCE_BYTES} bytes`);
         if (!data.tag || !(data.tag instanceof Uint8Array) || data.tag.length !== HASH_OUTPUT_BYTES) throw new Error(`Tag must be ${HASH_OUTPUT_BYTES} bytes`);
 

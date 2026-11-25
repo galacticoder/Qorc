@@ -1,3 +1,4 @@
+import { PostQuantumRandom } from "../../lib/cryptography/random";
 import React, { useCallback, useEffect, useRef } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import websocketClient from "../../lib/websocket/websocket";
@@ -25,7 +26,43 @@ import {
   AUTH_USERNAME_REGEX,
   MESSAGE_RATE_LIMIT_WINDOW_MS,
   MESSAGE_RATE_LIMIT_MAX,
-} from "../../lib/constants";
+  FIRST_CONTACT_DISCOVERY_BUDGET_MAX,
+  FIRST_CONTACT_DISCOVERY_BUDGET_WINDOW_MS,
+  FIRST_CONTACT_VERIFY_MAX_AGE_MS,
+  FIRST_CONTACT_VERIFY_MAX_ATTEMPTS,
+  FIRST_CONTACT_VERIFY_MAX_ENTRIES,
+  MESSAGE_DEDUP_CACHE_MAX,
+  NATIVE_PENDING_RECOVERY_MAX_RETRY_MS,
+  NATIVE_PENDING_RECOVERY_MIN_RETRY_MS,
+  P2P_SESSION_RESET_COOLDOWN_MS,
+  PENDING_CONTROL_ATTEMPT_INTERVAL_MS,
+  PENDING_CONTROL_MAX_AGE_MS,
+  PENDING_CONTROL_MAX_ATTEMPTS,
+  PENDING_CONTROL_MAX_ENTRIES,
+  PENDING_CONTROL_TERMINAL_MAX_ENTRIES,
+  PREKEY_IDENTITY_VERIFY_RETRY_MS,
+  SEALED_DECAP_NEG_CACHE_MAX,
+  SENDER_VERIFY_INLINE_WAIT_MS,
+  SENDER_VERIFY_PARK_MAX_BYTES,
+  SENDER_VERIFY_PARK_MAX_KEYS,
+  SENDER_VERIFY_PARK_MAX_PARKS,
+  SENDER_VERIFY_PARK_MAX_PER_SENDER,
+  SENDER_VERIFY_PARK_MAX_SENDERS,
+  SENDER_VERIFY_PARK_RETRY_DELAY_MS,
+  USE_ENCRYPTED_MESSAGE_HANDLER_INTERVAL_MS,
+  USE_ENCRYPTED_MESSAGE_HANDLER_PRESENTED_IDENTITY_LENGTH_EXPECTED,
+  USE_ENCRYPTED_MESSAGE_HANDLER_KEYS_LENGTH_EXPECTED,
+  USE_ENCRYPTED_MESSAGE_HANDLER_ENCRYPTED_MESSAGE_PENDING_ID_LENGTH_EXPECTED,
+  USE_ENCRYPTED_MESSAGE_HANDLER_ENCRYPTED_MESSAGE_SENDER_IDENTITY_KEY_LENGTH_EXPECTED,
+  USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPT_RATE_WINDOW_START_LIMIT,
+  USE_ENCRYPTED_MESSAGE_HANDLER_SIGNAL_DECRYPT_RATE_REF_SIZE_LIMIT,
+  USE_ENCRYPTED_MESSAGE_HANDLER_RATE_WINDOW_START_LIMIT,
+  USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPT_RATE_COUNT_LIMIT,
+  USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPTED_SIGNAL_PENDING_ID_LENGTH_EXPECTED,
+  USE_ENCRYPTED_MESSAGE_HANDLER_ACKNOWLEDGED_PENDING_DECRYPTS_REF_SIZE_LIMIT,
+  SIGNAL_TYPE_VALUES,
+  SIGNAL_SESSION_RESET_RETRY_MS,
+} from '../../lib/constants';
 import {
   dispatchReadReceiptEvent,
   dispatchDeliveryReceiptEvent,
@@ -69,31 +106,6 @@ import { awaitPeerIdentityRevocation } from '../../lib/key-transparency/revocati
 import { resolveTrustedPeerHybridPublicKeys } from '../../lib/utils/signal-bundle-utils';
 import { detectionTagForProbe } from '../../lib/spool/detection-key';
 import { loadConsumedSpoolProbeCache } from '../../lib/spool/consumed-probe-cache';
-
-const P2P_SESSION_RESET_COOLDOWN_MS = 10 * 1000;
-const SEALED_DECAP_NEG_CACHE_MAX = 20000;
-const MESSAGE_DEDUP_CACHE_MAX = 20000;
-const PENDING_CONTROL_MAX_ENTRIES = 64;
-const PENDING_CONTROL_MAX_ATTEMPTS = 3;
-const PENDING_CONTROL_MAX_AGE_MS = 2 * 60 * 1000;
-const PENDING_CONTROL_ATTEMPT_INTERVAL_MS = 30 * 1000;
-const PENDING_CONTROL_TERMINAL_MAX_ENTRIES = 512;
-const FIRST_CONTACT_VERIFY_MAX_ENTRIES = 64;
-const FIRST_CONTACT_VERIFY_MAX_ATTEMPTS = 3;
-const FIRST_CONTACT_VERIFY_MAX_AGE_MS = 2 * 60 * 1000;
-const FIRST_CONTACT_DISCOVERY_BUDGET_MAX = 4;
-const FIRST_CONTACT_DISCOVERY_BUDGET_WINDOW_MS = 60 * 1000;
-const SENDER_VERIFY_INLINE_WAIT_MS = 5 * 1000;
-const SENDER_VERIFY_PARK_MAX_SENDERS = 16;
-const SENDER_VERIFY_PARK_MAX_PER_SENDER = 32;
-const SENDER_VERIFY_PARK_MAX_KEYS = 512;
-const SENDER_VERIFY_PARK_MAX_BYTES = 8 * 1024 * 1024;
-const SENDER_VERIFY_PARK_MAX_PARKS = 3;
-const SENDER_VERIFY_PARK_RETRY_DELAY_MS = 20 * 1000;
-const PREKEY_IDENTITY_VERIFY_RETRY_MS = 30 * 1000;
-const NATIVE_PENDING_RECOVERY_MIN_RETRY_MS = 3 * 1000;
-const NATIVE_PENDING_RECOVERY_MAX_RETRY_MS = 5 * 60 * 1000;
-const SIGNAL_TYPE_VALUES: ReadonlySet<string> = new Set(Object.values(SignalType));
 
 type ReplayDeliveryReceipt = Readonly<{
   peerUsername: string;
@@ -383,7 +395,7 @@ export function useEncryptedMessageHandler(
 
     const now = Date.now();
     const lastReset = resetCooldownRef.current.get(peerUsername) || 0;
-    if (now - lastReset < 3000) return 'retry';
+    if (now - lastReset < SIGNAL_SESSION_RESET_RETRY_MS) return 'retry';
 
     const counter = resetCounterRef.current.get(peerUsername);
     if (
@@ -503,7 +515,7 @@ export function useEncryptedMessageHandler(
           preKeyIdentityVerifyAttemptsRef.current.delete(candidate);
         }
       }
-    }, 10000);
+    }, USE_ENCRYPTED_MESSAGE_HANDLER_INTERVAL_MS);
 
     return () => {
       clearInterval(cacheCleanupInterval);
@@ -937,7 +949,7 @@ export function useEncryptedMessageHandler(
           if (abortIfStale()) return 'pending';
           if (
             typeof presentedIdentity !== 'string' ||
-            presentedIdentity.length !== 44 ||
+            presentedIdentity.length !== USE_ENCRYPTED_MESSAGE_HANDLER_PRESENTED_IDENTITY_LENGTH_EXPECTED ||
             !/^[A-Za-z0-9+/]{44}$/.test(presentedIdentity)
           ) return 'reject';
 
@@ -1047,19 +1059,19 @@ export function useEncryptedMessageHandler(
         if (isNativePendingReplay) {
           const keys = Object.keys(encryptedMessage);
           if (
-            keys.length !== 9 ||
+            keys.length !== USE_ENCRYPTED_MESSAGE_HANDLER_KEYS_LENGTH_EXPECTED ||
             !keys.every((key) => [
               'type', 'pendingId', 'from', 'senderIdentityKey',
               'identityRootFingerprint', 'identityBundleFingerprint',
               'transportMessageId', 'applicationType', 'plaintext'
             ].includes(key)) ||
             typeof encryptedMessage.pendingId !== 'string' ||
-            encryptedMessage.pendingId.length !== 44 ||
+            encryptedMessage.pendingId.length !== USE_ENCRYPTED_MESSAGE_HANDLER_ENCRYPTED_MESSAGE_PENDING_ID_LENGTH_EXPECTED ||
             typeof encryptedMessage.from !== 'string' ||
             encryptedMessage.from !== encryptedMessage.from.trim().toLowerCase() ||
             !AUTH_USERNAME_REGEX.test(encryptedMessage.from) ||
             typeof encryptedMessage.senderIdentityKey !== 'string' ||
-            encryptedMessage.senderIdentityKey.length !== 44 ||
+            encryptedMessage.senderIdentityKey.length !== USE_ENCRYPTED_MESSAGE_HANDLER_ENCRYPTED_MESSAGE_SENDER_IDENTITY_KEY_LENGTH_EXPECTED ||
             !/^[A-Za-z0-9+/]{44}$/.test(encryptedMessage.senderIdentityKey) ||
             typeof encryptedMessage.identityRootFingerprint !== 'string' ||
             !/^[a-f0-9]{64}$/.test(encryptedMessage.identityRootFingerprint) ||
@@ -1224,7 +1236,6 @@ export function useEncryptedMessageHandler(
             if (sealedNegKey && sealedDecapNegCacheRef.current.has(sealedNegKey)) {
               return;
             }
-
 
             if (sealedEnvelope?.version === PROTOCOL_KEYS.SEALED_ENVELOPE_PROTOCOL) {
               try {
@@ -1609,23 +1620,23 @@ export function useEncryptedMessageHandler(
               windowStart: decryptRateNow,
               count: 0
             };
-            if (decryptRateNow - decryptRate.windowStart > 10_000) {
+            if (decryptRateNow - decryptRate.windowStart > USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPT_RATE_WINDOW_START_LIMIT) {
               decryptRate.windowStart = decryptRateNow;
               decryptRate.count = 0;
             }
             decryptRate.count += 1;
             signalDecryptRateRef.current.set(senderUsername, decryptRate);
-            if (signalDecryptRateRef.current.size > 512) {
+            if (signalDecryptRateRef.current.size > USE_ENCRYPTED_MESSAGE_HANDLER_SIGNAL_DECRYPT_RATE_REF_SIZE_LIMIT) {
               for (const [peer, rate] of signalDecryptRateRef.current) {
-                if (decryptRateNow - rate.windowStart > 10_000) signalDecryptRateRef.current.delete(peer);
+                if (decryptRateNow - rate.windowStart > USE_ENCRYPTED_MESSAGE_HANDLER_RATE_WINDOW_START_LIMIT) signalDecryptRateRef.current.delete(peer);
               }
-              while (signalDecryptRateRef.current.size > 512) {
+              while (signalDecryptRateRef.current.size > USE_ENCRYPTED_MESSAGE_HANDLER_SIGNAL_DECRYPT_RATE_REF_SIZE_LIMIT) {
                 const oldest = signalDecryptRateRef.current.keys().next().value;
                 if (typeof oldest !== 'string') break;
                 signalDecryptRateRef.current.delete(oldest);
               }
             }
-            if (decryptRate.count > 64) {
+            if (decryptRate.count > USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPT_RATE_COUNT_LIMIT) {
               if (options.__status) options.__status.notReady = true;
               return;
             }
@@ -1732,7 +1743,7 @@ export function useEncryptedMessageHandler(
 
             signalRatchetCommitted = true;
 
-            if (typeof decryptedSignal.pending_id === 'string' && decryptedSignal.pending_id.length === 44) {
+            if (typeof decryptedSignal.pending_id === 'string' && decryptedSignal.pending_id.length === USE_ENCRYPTED_MESSAGE_HANDLER_DECRYPTED_SIGNAL_PENDING_ID_LENGTH_EXPECTED) {
               nativePendingDecryptIds.add(decryptedSignal.pending_id);
               nativePendingDecryptOwner = currentUser;
               if (options.__status) options.__status.durablyStaged = true;
@@ -2132,7 +2143,7 @@ export function useEncryptedMessageHandler(
             if (abortIfStale()) return;
             for (const pendingId of nativePendingDecryptIds) {
               acknowledgedPendingDecryptsRef.current.add(pendingId);
-              if (acknowledgedPendingDecryptsRef.current.size > 4096) {
+              if (acknowledgedPendingDecryptsRef.current.size > USE_ENCRYPTED_MESSAGE_HANDLER_ACKNOWLEDGED_PENDING_DECRYPTS_REF_SIZE_LIMIT) {
                 const oldest = acknowledgedPendingDecryptsRef.current.values().next().value;
                 if (oldest !== undefined) acknowledgedPendingDecryptsRef.current.delete(oldest);
               }
@@ -2257,7 +2268,7 @@ export function useEncryptedMessageHandler(
         NATIVE_PENDING_RECOVERY_MIN_RETRY_MS,
         Math.floor(ceiling * 0.75),
       );
-      const random = crypto.getRandomValues(new Uint32Array(1))[0] / 0x1_0000_0000;
+      const random = PostQuantumRandom.randomUnit();
       const delay = floor + Math.floor(random * Math.max(1, ceiling - floor + 1));
       retryTimer = setTimeout(() => { retryTimer = null; void recover(); }, delay);
     };

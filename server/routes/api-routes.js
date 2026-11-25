@@ -1,3 +1,4 @@
+import { SpoolIndexUpdates } from '../pir/tag-index-updates.js';
 import express from 'express';
 import {
   getPaddedDiscoveryBuckets,
@@ -98,6 +99,8 @@ const ANONYMOUS_OPERATION_ROUTES = Object.freeze({
   [KEY_TRANSPARENCY_APPEND_AUDIENCE]: Object.freeze({ method: 'POST', path: '/key-transparency/append' }),
   [KEY_TRANSPARENCY_SYNC_AUDIENCE]: Object.freeze({ method: 'POST', path: '/key-transparency/sync' }),
   'oprf/evaluate': Object.freeze({ method: 'POST', path: '/oprf/evaluate' }),
+  'spool/tag-index-base': Object.freeze({ method: 'GET', path: '/spool/tag-index-base' }),
+  'spool/tag-index-update': Object.freeze({ method: 'GET', path: '/spool/tag-index-update' }),
   'spool/tag-index': Object.freeze({ method: 'GET', path: '/spool/tag-index' }),
   'spool/pir': Object.freeze({ method: 'POST', path: '/spool/pir' })
 });
@@ -196,6 +199,25 @@ function keyTransparencyPowExpiresAt(epoch) {
   return (epoch + 1) * KEY_TRANSPARENCY_POW_EPOCH_MS;
 }
 
+
+const spoolIndexUpdates = new SpoolIndexUpdates();
+for (const operation of ['base', 'update']) {
+  router.get(`/spool/tag-index-${operation}`, async (req, res) => {
+    if (!hasExactPlainObjectKeys(req.body, [])) return fail(res, 400, 'invalid_spool_tag_index_request');
+    if (!spoolTagIndexRateLimiter()) return fail(res, 503, 'spool_tag_index_busy');
+    try {
+      const current = readReadyPirTagIndex();
+      const { base, update } = spoolIndexUpdates.read(current);
+      const payload = operation === 'update' ? update : {
+        ok: true, protocol: SPOOL_TAG_PROTOCOL, pirLayout: SPOOL_PIR_LAYOUT,
+        epoch: base.epoch, count: base.tags.length, tags: base.tags.join(''), probes: base.probes.join(''),
+      };
+      return res.status(200).json(payload);
+    } catch {
+      return fail(res, 503, 'spool_tag_index_unavailable');
+    }
+  });
+}
 
 // whole tag index identical for every caller
 router.get('/spool/tag-index', async (req, res) => {

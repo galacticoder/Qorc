@@ -1,5 +1,11 @@
 //! Tor Manager
 
+use crate::constants::tor::{
+    CONTROL_READ_FAILURE_THRESHOLD, DEFAULT_CONTROL_PORT, DEFAULT_SOCKS_PORT, MAX_CONFIG_SIZE,
+    MAX_CONTROL_LINE_BYTES, MAX_CONTROL_RESPONSE_LINES, MAX_TOR_ARCHIVE_DEPTH,
+    MAX_TOR_ARCHIVE_ENTRIES, MAX_TOR_ARCHIVE_PATH_BYTES, MAX_TOR_BUNDLE_BYTES,
+    MAX_TOR_EXTRACTED_BYTES, PORT_SCAN_RANGE, TOR_KEEPALIVE_PERIOD_SECS,
+};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
@@ -30,19 +36,7 @@ mod embedded {
 #[cfg(target_os = "android")]
 mod android;
 
-const DEFAULT_SOCKS_PORT: u16 = 9050;
-const DEFAULT_CONTROL_PORT: u16 = 9051;
-const PORT_SCAN_RANGE: u16 = 100;
-const MAX_CONFIG_SIZE: usize = 50000;
-const MAX_TOR_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_TOR_EXTRACTED_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_TOR_ARCHIVE_ENTRIES: usize = 4096;
-const MAX_TOR_ARCHIVE_PATH_BYTES: usize = 1024;
-const MAX_TOR_ARCHIVE_DEPTH: usize = 16;
-const MAX_CONTROL_LINE_BYTES: usize = 8 * 1024;
-const MAX_CONTROL_RESPONSE_LINES: usize = 64;
 const CONTROL_COOKIE_FILE: &str = "control_auth_cookie";
-const CONTROL_READ_FAILURE_THRESHOLD: u32 = 3;
 pub fn is_valid_onion_service_id(id: &str) -> bool {
     id.len() == 56
         && id
@@ -50,7 +44,6 @@ pub fn is_valid_onion_service_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
-const TOR_KEEPALIVE_PERIOD_SECS: u32 = 60;
 const TRANSPORT_DIR: &str = "pluggable_transports";
 const DEFAULT_TRANSPORT: &str = "lyrebird";
 const BUNDLE_MARKER_FILE: &str = ".bundle-version";

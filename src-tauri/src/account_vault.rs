@@ -1,5 +1,10 @@
 //! Native ownership of account secrets
 
+use crate::validation::{is_canonical_auth_username, is_hex_256};
+use crate::constants::account::{
+    ARGON_ITERATIONS, ARGON_LANES, ARGON_MEMORY_KIB, MAX_CREDENTIAL_BYTES, MAX_VAULT_JSON_CHARS,
+    TOKEN_VAULT_MAX_PLAINTEXT_BYTES,
+};
 use std::sync::Arc;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -28,7 +33,6 @@ const VAULT_SALT_BYTES: usize = 32;
 const VAULT_NONCE_BYTES: usize = 24;
 const VAULT_TAG_BYTES: usize = 16;
 const ML_DSA_87_PUBLIC_BYTES: usize = 2592;
-const MAX_VAULT_JSON_CHARS: usize = 24 * 1024;
 const PAYLOAD_BYTES: usize = protocol_keys::ACCOUNT_VAULT_PAYLOAD_MAGIC.len()
     + MASTER_BYTES
     + ML_KEM_SEED_BYTES
@@ -36,13 +40,7 @@ const PAYLOAD_BYTES: usize = protocol_keys::ACCOUNT_VAULT_PAYLOAD_MAGIC.len()
     + X25519_SECRET_BYTES
     + ML_DSA_SEED_BYTES
     + ML_DSA_SEED_BYTES;
-const MAX_CREDENTIAL_BYTES: usize = 4096;
 const TOKEN_VAULT_VERSION: u8 = 1;
-const TOKEN_VAULT_MAX_PLAINTEXT_BYTES: usize = 7 * 1024 * 1024;
-
-const ARGON_MEMORY_KIB: u32 = 512 * 1024;
-const ARGON_ITERATIONS: u32 = 6;
-const ARGON_LANES: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -145,7 +143,7 @@ impl AccountSession {
         server_scope: &str,
         vault_kind: &str,
     ) -> QorcResult<Zeroizing<[u8; 32]>> {
-        if !valid_account_owner(server_scope) || !valid_token_vault_kind(vault_kind) {
+        if !is_hex_256(server_scope) || !valid_token_vault_kind(vault_kind) {
             return Err(QorcError::InvalidArgument(
                 "Invalid token-vault server scope".to_string(),
             ));
@@ -168,7 +166,7 @@ impl AccountSession {
         server_scope: &str,
         vault_kind: &str,
     ) -> QorcResult<String> {
-        if !valid_account_owner(server_scope) || !valid_token_vault_kind(vault_kind) {
+        if !is_hex_256(server_scope) || !valid_token_vault_kind(vault_kind) {
             return Err(QorcError::InvalidArgument(
                 "Invalid token-vault server scope".to_string(),
             ));
@@ -325,7 +323,7 @@ impl AccountSession {
         purpose: &str,
         counter: u16,
     ) -> QorcResult<String> {
-        if !valid_account_owner(server_scope) || !matches!(purpose, "id" | "padding") {
+        if !is_hex_256(server_scope) || !matches!(purpose, "id" | "padding") {
             return Err(QorcError::InvalidArgument(
                 "Invalid discovery publication context".to_string(),
             ));
@@ -354,27 +352,12 @@ fn sign_ml_dsa(seed: &[u8; ML_DSA_SEED_BYTES], message: &[u8]) -> QorcResult<Vec
     Ok(bytes)
 }
 
-fn valid_account_owner(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 fn valid_token_vault_kind(value: &str) -> bool {
     matches!(value, "working" | "resume")
 }
 
-fn valid_username(value: &str) -> bool {
-    (3..=100).contains(&value.len())
-        && value == value.trim().to_lowercase()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        })
-}
-
 fn storage_key(account_owner: &str) -> QorcResult<String> {
-    if !valid_account_owner(account_owner) {
+    if !is_hex_256(account_owner) {
         return Err(QorcError::InvalidArgument(
             "Invalid native account owner".to_string(),
         ));
@@ -398,7 +381,7 @@ fn credential_input(
     password: &str,
     passphrase: &str,
 ) -> QorcResult<Zeroizing<Vec<u8>>> {
-    if !valid_username(username)
+    if !is_canonical_auth_username(username)
         || password.is_empty()
         || passphrase.is_empty()
         || password.len() > MAX_CREDENTIAL_BYTES
@@ -653,7 +636,7 @@ pub async fn create(
             "Native account vault already exists".to_string(),
         ));
     }
-    if !valid_username(&username) {
+    if !is_canonical_auth_username(&username) {
         return Err(QorcError::InvalidArgument(
             "Invalid native account username".to_string(),
         ));
@@ -768,7 +751,7 @@ pub async fn unlock(
     if persisted.version != VAULT_VERSION
         || persisted.account_owner != account_owner
         || persisted.username != username
-        || !valid_username(&persisted.username)
+        || !is_canonical_auth_username(&persisted.username)
     {
         return Err(QorcError::DecryptionFailed(
             "Invalid native account vault".to_string(),

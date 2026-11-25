@@ -1,27 +1,19 @@
+import {
+  CALL_TELEMETRY_PROBE_INTERVAL_MS,
+  CALL_TELEMETRY_PROBE_TIMEOUT_MS,
+  CALL_TELEMETRY_PROBE_ID_BYTES,
+  CALL_TELEMETRY_CAMERA_STATE,
+  CALL_TELEMETRY_KEY_FRAME_REQUEST,
+  CALL_TELEMETRY_PROBE_RESPONSE_BYTES,
+  CALL_TELEMETRY_PROBE_REQUEST_BYTES,
+  CALL_TELEMETRY_PROBE_RESPONSE,
+  CALL_TELEMETRY_PROBE_REQUEST,
+  CALL_KEY_FRAME_REQUEST_COOLDOWN_MS,
+  CALL_TELEMETRY_MAX_CLOCK_OFFSET_MS,
+} from '../constants';
 import { PostQuantumRandom } from '../cryptography/random';
 import type { CallState } from '../types/calling-types';
 import type { SecureConnection, SecureStream } from './secure-transport';
-import type { CallAudioPlayout } from './call-audio-playout';
-import type {
-    VisualAdaptationState,
-    VisualDecoderState,
-    VisualEncoderState,
-    VisualPipelineEvent,
-} from './call-video-codec';
-
-export type CallTelemetryMediaKind = 'audio' | 'video' | 'screen';
-
-const PROBE_REQUEST = 1;
-const PROBE_RESPONSE = 2;
-const KEY_FRAME_REQUEST = 3;
-const CAMERA_STATE = 4;
-const PROBE_ID_BYTES = 8;
-const PROBE_REQUEST_BYTES = 17;
-const PROBE_RESPONSE_BYTES = 33;
-const PROBE_INTERVAL_MS = 2_000;
-const PROBE_TIMEOUT_MS = 8_000;
-const LOG_INTERVAL_MS = 5_000;
-const EVENT_LOOP_SAMPLE_INTERVAL_MS = 250;
 
 type ProbeRequest = {
     type: 'request';
@@ -49,166 +41,12 @@ type CameraState = {
 
 export type CallTelemetryProbe = ProbeRequest | ProbeResponse | KeyFrameRequest | CameraState;
 
-type SampleSummary = {
-    latest: number | null;
-    average: number | null;
-    p95: number | null;
-    maximum: number | null;
-};
-
-type AudioPlayoutState = ReturnType<CallAudioPlayout['snapshot']> & {
-    nativeQueuedMs: number;
-    nativeUnderruns: number;
-    nativeUnderrunMs: number;
-};
-
-type MediaInterval = {
-    sourceFrames: number;
-    sourceDrops: number;
-    txFrames: number;
-    txBytes: number;
-    rxFrames: number;
-    rxBytes: number;
-    admittedFrames: number;
-    decodedFrames: number;
-    renderedFrames: number;
-    discontinuities: number;
-    keyFrameRequests: number;
-    keyFrameRequestsReceived: number;
-    captureDrops: number;
-    sendErrors: number;
-    receiveErrors: number;
-    renderDrops: number;
-    writeMs: number[];
-    encodeMs: number[];
-    sendAgeMs: number[];
-    renderAgeMs: number[];
-    decodeMs: number[];
-    arrivalGapMs: number[];
-    arrivalJitterMs: number[];
-    capturePullMs: number[];
-    captureSourceAgeMs: number[];
-    captureDecodeMs: number[];
-    capturePrepareMs: number[];
-};
-
-type MediaTotals = {
-    sourceFrames: number;
-    sourceDrops: number;
-    txFrames: number;
-    txBytes: number;
-    rxFrames: number;
-    rxBytes: number;
-    admittedFrames: number;
-    decodedFrames: number;
-    renderedFrames: number;
-    discontinuities: number;
-    keyFrameRequests: number;
-    keyFrameRequestsReceived: number;
-    captureDrops: number;
-    sendErrors: number;
-    receiveErrors: number;
-    renderDrops: number;
-};
-
 type PendingProbe = {
     id: string;
     sentAt: number;
     startedAt: number;
     timeoutId: ReturnType<typeof setTimeout>;
 };
-
-type VisualRendererState = {
-    animationFramePending: boolean;
-    framePending: boolean;
-    queuedFrames: number;
-    buffering: boolean;
-    sourceIntervalMs: number;
-    scheduledDelayMs: number;
-    lastFrameQueuedAt: number;
-    lastAnimationCallbackAt: number;
-    replacedFrames: number;
-    canvasWidth: number;
-    canvasHeight: number;
-};
-
-const mediaKinds: CallTelemetryMediaKind[] = ['audio', 'video', 'screen'];
-
-function monotonicNow(): number {
-    return performance.now();
-}
-
-function round(value: number): number {
-    return Math.round(value * 10) / 10;
-}
-
-function summarize(samples: number[]): SampleSummary {
-    if (samples.length === 0) {
-        return { latest: null, average: null, p95: null, maximum: null };
-    }
-    const sorted = samples.slice().sort((left, right) => left - right);
-    const sum = samples.reduce((total, sample) => total + sample, 0);
-    const p95Index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
-    return {
-        latest: round(samples[samples.length - 1]),
-        average: round(sum / samples.length),
-        p95: round(sorted[p95Index]),
-        maximum: round(sorted[sorted.length - 1])
-    };
-}
-
-function createMediaInterval(): MediaInterval {
-    return {
-        sourceFrames: 0,
-        sourceDrops: 0,
-        txFrames: 0,
-        txBytes: 0,
-        rxFrames: 0,
-        rxBytes: 0,
-        admittedFrames: 0,
-        decodedFrames: 0,
-        renderedFrames: 0,
-        discontinuities: 0,
-        keyFrameRequests: 0,
-        keyFrameRequestsReceived: 0,
-        captureDrops: 0,
-        sendErrors: 0,
-        receiveErrors: 0,
-        renderDrops: 0,
-        writeMs: [],
-        encodeMs: [],
-        sendAgeMs: [],
-        renderAgeMs: [],
-        decodeMs: [],
-        arrivalGapMs: [],
-        arrivalJitterMs: [],
-        capturePullMs: [],
-        captureSourceAgeMs: [],
-        captureDecodeMs: [],
-        capturePrepareMs: []
-    };
-}
-
-function createMediaTotals(): MediaTotals {
-    return {
-        sourceFrames: 0,
-        sourceDrops: 0,
-        txFrames: 0,
-        txBytes: 0,
-        rxFrames: 0,
-        rxBytes: 0,
-        admittedFrames: 0,
-        decodedFrames: 0,
-        renderedFrames: 0,
-        discontinuities: 0,
-        keyFrameRequests: 0,
-        keyFrameRequestsReceived: 0,
-        captureDrops: 0,
-        sendErrors: 0,
-        receiveErrors: 0,
-        renderDrops: 0
-    };
-}
 
 function idBytesToHex(bytes: Uint8Array): string {
     let value = '';
@@ -218,7 +56,7 @@ function idBytesToHex(bytes: Uint8Array): string {
 
 function writeProbeId(target: Uint8Array, id: string): void {
     if (!/^[a-f0-9]{16}$/.test(id)) throw new Error('Invalid call telemetry probe ID');
-    for (let index = 0; index < PROBE_ID_BYTES; index += 1) {
+    for (let index = 0; index < CALL_TELEMETRY_PROBE_ID_BYTES; index += 1) {
         target[1 + index] = Number.parseInt(id.slice(index * 2, index * 2 + 2), 16);
     }
 }
@@ -241,15 +79,15 @@ function writeTimestamp(view: DataView, offset: number, value: number): void {
 export function encodeCallTelemetryProbe(probe: CallTelemetryProbe): Uint8Array {
     if (probe.type === 'camera-state') {
         if (typeof probe.enabled !== 'boolean') throw new Error('Invalid call camera state');
-        return Uint8Array.of(CAMERA_STATE, probe.enabled ? 1 : 0);
+        return Uint8Array.of(CALL_TELEMETRY_CAMERA_STATE, probe.enabled ? 1 : 0);
     }
     if (probe.type === 'key-frame-request') {
-        return Uint8Array.of(KEY_FRAME_REQUEST, probe.kind === 'video' ? 1 : 2);
+        return Uint8Array.of(CALL_TELEMETRY_KEY_FRAME_REQUEST, probe.kind === 'video' ? 1 : 2);
     }
     const response = probe.type === 'response';
-    const frame = new Uint8Array(response ? PROBE_RESPONSE_BYTES : PROBE_REQUEST_BYTES);
+    const frame = new Uint8Array(response ? CALL_TELEMETRY_PROBE_RESPONSE_BYTES : CALL_TELEMETRY_PROBE_REQUEST_BYTES);
     const view = new DataView(frame.buffer);
-    frame[0] = response ? PROBE_RESPONSE : PROBE_REQUEST;
+    frame[0] = response ? CALL_TELEMETRY_PROBE_RESPONSE : CALL_TELEMETRY_PROBE_REQUEST;
     writeProbeId(frame, probe.id);
     writeTimestamp(view, 9, probe.sentAt);
     if (response) {
@@ -264,27 +102,27 @@ export function encodeCallTelemetryProbe(probe: CallTelemetryProbe): Uint8Array 
 
 export function decodeCallTelemetryProbe(frame: Uint8Array): CallTelemetryProbe {
     if (!(frame instanceof Uint8Array)) throw new Error('Invalid call telemetry probe');
-    if (frame[0] === CAMERA_STATE) {
+    if (frame[0] === CALL_TELEMETRY_CAMERA_STATE) {
         if (frame.byteLength !== 2 || (frame[1] !== 0 && frame[1] !== 1)) {
             throw new Error('Invalid call camera state');
         }
         return { type: 'camera-state', enabled: frame[1] === 1 };
     }
-    if (frame[0] === KEY_FRAME_REQUEST) {
+    if (frame[0] === CALL_TELEMETRY_KEY_FRAME_REQUEST) {
         if (frame.byteLength !== 2 || (frame[1] !== 1 && frame[1] !== 2)) {
             throw new Error('Invalid call telemetry key-frame request');
         }
         return { type: 'key-frame-request', kind: frame[1] === 1 ? 'video' : 'screen' };
     }
-    const response = frame[0] === PROBE_RESPONSE;
+    const response = frame[0] === CALL_TELEMETRY_PROBE_RESPONSE;
     if (
-        (frame[0] !== PROBE_REQUEST && !response) ||
-        frame.byteLength !== (response ? PROBE_RESPONSE_BYTES : PROBE_REQUEST_BYTES)
+        (frame[0] !== CALL_TELEMETRY_PROBE_REQUEST && !response) ||
+        frame.byteLength !== (response ? CALL_TELEMETRY_PROBE_RESPONSE_BYTES : CALL_TELEMETRY_PROBE_REQUEST_BYTES)
     ) {
         throw new Error('Invalid call telemetry probe');
     }
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-    const id = idBytesToHex(frame.subarray(1, 1 + PROBE_ID_BYTES));
+    const id = idBytesToHex(frame.subarray(1, 1 + CALL_TELEMETRY_PROBE_ID_BYTES));
     const sentAt = readTimestamp(view, 9);
     if (!response) return { type: 'request', id, sentAt };
     const receivedAt = readTimestamp(view, 17);
@@ -294,40 +132,15 @@ export function decodeCallTelemetryProbe(frame: Uint8Array): CallTelemetryProbe 
 }
 
 export class CallTelemetry {
-    private readonly startedAt = monotonicNow();
-    private intervalStartedAt = this.startedAt;
-    private readonly interval = new Map<CallTelemetryMediaKind, MediaInterval>();
-    private readonly totals = new Map<CallTelemetryMediaKind, MediaTotals>();
-    private readonly lastArrivalAt = new Map<CallTelemetryMediaKind, number>();
-    private readonly lastCaptureAt = new Map<CallTelemetryMediaKind, number>();
-    private readonly lastArrivalGap = new Map<CallTelemetryMediaKind, number>();
-    private readonly arrivalJitter = new Map<CallTelemetryMediaKind, number>();
-    private readonly visualState = new Map<'video' | 'screen', VisualAdaptationState>();
-    private readonly visualEncoderState = new Map<'video' | 'screen', VisualEncoderState>();
-    private readonly visualDecoderState = new Map<'video' | 'screen', VisualDecoderState>();
-    private readonly visualRendererState = new Map<'video' | 'screen', VisualRendererState>();
-    private audioPlayoutState: AudioPlayoutState | null = null;
     private readonly lastKeyFrameRequestAt = new Map<'video' | 'screen', number>();
-    private readonly rttSamples: number[] = [];
-    private readonly eventLoopLagSamples: number[] = [];
     private latestRttMs: number | null = null;
     private remoteClockOffsetMs: number | null = null;
-    private lifetimeRttMinMs: number | null = null;
-    private lifetimeRttMaxMs: number | null = null;
-    private probeFailures = 0;
-    private totalProbeFailures = 0;
-    private protocolErrors = 0;
     private pendingProbe: PendingProbe | null = null;
     private probeTimer: ReturnType<typeof setInterval> | null = null;
-    private logTimer: ReturnType<typeof setInterval> | null = null;
-    private eventLoopTimer: ReturnType<typeof setInterval> | null = null;
-    private nextEventLoopSampleAt = 0;
-    private reporting = false;
+    private started = false;
     private stopped = false;
 
     constructor(
-        private readonly callId: string,
-        private readonly direction: CallState['direction'],
         private readonly callType: CallState['type'],
         private readonly connection: SecureConnection,
         private readonly stream: SecureStream,
@@ -335,42 +148,26 @@ export class CallTelemetry {
         private readonly onCameraState: (enabled: boolean) => void,
         private readonly isCameraEnabled: () => boolean
     ) {
-        for (const kind of mediaKinds) {
-            this.interval.set(kind, createMediaInterval());
-            this.totals.set(kind, createMediaTotals());
-        }
         void this.receiveLoop();
     }
 
     start(): void {
-        if (this.reporting || this.stopped) return;
-        this.reporting = true;
+        if (this.started || this.stopped) return;
+        this.started = true;
         void this.sendProbe();
         void this.sendCameraState();
         this.probeTimer = setInterval(() => {
             void this.sendProbe();
             void this.sendCameraState();
-        }, PROBE_INTERVAL_MS);
-        this.nextEventLoopSampleAt = monotonicNow() + EVENT_LOOP_SAMPLE_INTERVAL_MS;
-        this.eventLoopTimer = setInterval(() => {
-            const now = monotonicNow();
-            this.eventLoopLagSamples.push(Math.max(0, now - this.nextEventLoopSampleAt));
-            this.nextEventLoopSampleAt = now + EVENT_LOOP_SAMPLE_INTERVAL_MS;
-        }, EVENT_LOOP_SAMPLE_INTERVAL_MS);
-        this.logTimer = setInterval(() => this.emit(false), LOG_INTERVAL_MS);
+        }, CALL_TELEMETRY_PROBE_INTERVAL_MS);
     }
 
     stop(): void {
         if (this.stopped) return;
         this.stopped = true;
         if (this.probeTimer) clearInterval(this.probeTimer);
-        if (this.logTimer) clearInterval(this.logTimer);
-        if (this.eventLoopTimer) clearInterval(this.eventLoopTimer);
         this.probeTimer = null;
-        this.logTimer = null;
-        this.eventLoopTimer = null;
-        this.clearPendingProbe(false);
-        if (this.reporting) this.emit(true);
+        this.clearPendingProbe();
     }
 
     async sendCameraState(): Promise<void> {
@@ -378,318 +175,19 @@ export class CallTelemetry {
         const frame = encodeCallTelemetryProbe({ type: 'camera-state', enabled: this.isCameraEnabled() });
         try {
             await this.stream.write(frame);
-        } catch {
-            if (!this.stopped) this.noteProbeFailure();
-        } finally {
+        } catch { } finally {
             frame.fill(0);
         }
     }
 
-    noteSend(kind: CallTelemetryMediaKind, bytes: number, writeMs: number): void {
-        const interval = this.interval.get(kind)!;
-        const totals = this.totals.get(kind)!;
-        interval.txFrames += 1;
-        interval.txBytes += Math.max(0, bytes);
-        totals.txFrames += 1;
-        totals.txBytes += Math.max(0, bytes);
-        if (Number.isFinite(writeMs) && writeMs >= 0) interval.writeMs.push(writeMs);
-    }
-
-    noteCaptureDrop(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.captureDrops += 1;
-        this.totals.get(kind)!.captureDrops += 1;
-    }
-
-    noteSourceFrame(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.sourceFrames += 1;
-        this.totals.get(kind)!.sourceFrames += 1;
-    }
-
-    noteSourceDrop(kind: 'video' | 'screen', count: number): void {
-        if (!Number.isSafeInteger(count) || count <= 0) return;
-        this.interval.get(kind)!.sourceDrops += count;
-        this.totals.get(kind)!.sourceDrops += count;
-    }
-
-    noteCaptureTiming(
-        kind: 'video' | 'screen',
-        stage: 'pull' | 'sourceAge' | 'decode' | 'prepare',
-        milliseconds: number,
-    ): void {
-        if (!Number.isFinite(milliseconds) || milliseconds < 0) return;
-        const interval = this.interval.get(kind)!;
-        if (stage === 'pull') interval.capturePullMs.push(milliseconds);
-        else if (stage === 'sourceAge') interval.captureSourceAgeMs.push(milliseconds);
-        else if (stage === 'decode') interval.captureDecodeMs.push(milliseconds);
-        else interval.capturePrepareMs.push(milliseconds);
-    }
-
-    noteEncode(kind: CallTelemetryMediaKind, encodeMs: number): void {
-        if (Number.isFinite(encodeMs) && encodeMs >= 0) {
-            this.interval.get(kind)!.encodeMs.push(encodeMs);
-        }
-    }
-
-    noteFrameSent(kind: 'video' | 'screen', capturedAt: number): void {
-        const age = Date.now() - capturedAt;
-        if (Number.isFinite(age) && age >= 0 && age <= 300_000) {
-            this.interval.get(kind)!.sendAgeMs.push(age);
-        }
-    }
-
-    noteFrameRendered(kind: 'video' | 'screen', capturedAt: number): void {
-        this.interval.get(kind)!.renderedFrames += 1;
-        this.totals.get(kind)!.renderedFrames += 1;
-        const age = Date.now() - capturedAt + (this.remoteClockOffsetMs ?? 0);
-        if (Number.isFinite(age) && age >= 0 && age <= 300_000) {
-            this.interval.get(kind)!.renderAgeMs.push(age);
-        }
-    }
-
-    noteVisualState(kind: 'video' | 'screen', state: VisualAdaptationState): void {
-        this.visualState.set(kind, { ...state });
-    }
-
-    noteVisualEncoderState(kind: 'video' | 'screen', state: VisualEncoderState): void {
-        this.visualEncoderState.set(kind, { ...state });
-    }
-
-    noteVisualDecoderState(kind: 'video' | 'screen', state: VisualDecoderState): void {
-        this.visualDecoderState.set(kind, { ...state });
-    }
-
-    noteVisualRendererState(kind: 'video' | 'screen', state: VisualRendererState): void {
-        this.visualRendererState.set(kind, { ...state });
-    }
-
-    noteVisualPipelineEvent(
-        kind: 'video' | 'screen',
-        side: 'sender' | 'receiver',
-        event: VisualPipelineEvent,
-    ): void {
-        console.warn(`[CALL-PIPELINE] ${JSON.stringify({
-            callId: this.callId.slice(0, 12),
-            elapsedMs: Math.round(monotonicNow() - this.startedAt),
-            kind,
-            side,
-            ...event,
-            visualLanes: this.connection.getAudioLaneTelemetry(),
-        })}`);
-    }
-
-    noteSendError(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.sendErrors += 1;
-        this.totals.get(kind)!.sendErrors += 1;
-    }
-
-    noteReceive(kind: CallTelemetryMediaKind, bytes: number, capturedAt?: number): void {
-        const interval = this.interval.get(kind)!;
-        const totals = this.totals.get(kind)!;
-        interval.rxFrames += 1;
-        interval.rxBytes += Math.max(0, bytes);
-        totals.rxFrames += 1;
-        totals.rxBytes += Math.max(0, bytes);
-
-        const now = monotonicNow();
-        const previousArrival = this.lastArrivalAt.get(kind);
-        if (previousArrival !== undefined) {
-            const gap = Math.max(0, now - previousArrival);
-            interval.arrivalGapMs.push(gap);
-            const previousGap = this.lastArrivalGap.get(kind);
-            const previousCapture = this.lastCaptureAt.get(kind);
-            const hasCaptureTimestamp = typeof capturedAt === 'number' && Number.isFinite(capturedAt);
-            const captureGap = hasCaptureTimestamp && previousCapture !== undefined
-                ? Math.max(0, capturedAt - previousCapture)
-                : undefined;
-            if (captureGap !== undefined || previousGap !== undefined) {
-                const variation = Math.abs(gap - (captureGap ?? previousGap!));
-                const currentJitter = this.arrivalJitter.get(kind) ?? 0;
-                const nextJitter = currentJitter + (variation - currentJitter) / 16;
-                this.arrivalJitter.set(kind, nextJitter);
-                interval.arrivalJitterMs.push(nextJitter);
-            }
-            this.lastArrivalGap.set(kind, gap);
-        }
-        this.lastArrivalAt.set(kind, now);
-        if (typeof capturedAt === 'number' && Number.isFinite(capturedAt)) {
-            this.lastCaptureAt.set(kind, capturedAt);
-        }
-    }
-
-    noteDecode(kind: CallTelemetryMediaKind, decodeMs: number): void {
-        if (Number.isFinite(decodeMs) && decodeMs >= 0) {
-            this.interval.get(kind)!.decodeMs.push(decodeMs);
-        }
-    }
-
-    noteDecoderAdmitted(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.admittedFrames += 1;
-        this.totals.get(kind)!.admittedFrames += 1;
-    }
-
-    noteDecoded(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.decodedFrames += 1;
-        this.totals.get(kind)!.decodedFrames += 1;
-    }
-
-    noteDiscontinuity(kind: 'video' | 'screen'): void {
-        this.interval.get(kind)!.discontinuities += 1;
-        this.totals.get(kind)!.discontinuities += 1;
-    }
-
-    noteAudioPlayout(state: AudioPlayoutState): void {
-        this.audioPlayoutState = { ...state };
-    }
-
     requestKeyFrame(kind: 'video' | 'screen'): void {
-        this.noteDiscontinuity(kind);
         if (!this.stream.writable || this.stopped) return;
-        const now = monotonicNow();
+        const now = performance.now();
         const previous = this.lastKeyFrameRequestAt.get(kind);
-        if (previous !== undefined && now - previous < 2_000) return;
+        if (previous !== undefined && now - previous < CALL_KEY_FRAME_REQUEST_COOLDOWN_MS) return;
         this.lastKeyFrameRequestAt.set(kind, now);
-        this.interval.get(kind)!.keyFrameRequests += 1;
-        this.totals.get(kind)!.keyFrameRequests += 1;
         const frame = encodeCallTelemetryProbe({ type: 'key-frame-request', kind });
         void this.stream.write(frame).catch(() => { }).finally(() => frame.fill(0));
-    }
-
-    noteReceiveError(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.receiveErrors += 1;
-        this.totals.get(kind)!.receiveErrors += 1;
-    }
-
-    noteRenderDrop(kind: CallTelemetryMediaKind): void {
-        this.interval.get(kind)!.renderDrops += 1;
-        this.totals.get(kind)!.renderDrops += 1;
-    }
-
-    snapshot(final = false): Record<string, unknown> {
-        const now = monotonicNow();
-        const windowMs = Math.max(1, now - this.intervalStartedAt);
-        const windowSeconds = windowMs / 1_000;
-        const media: Record<string, unknown> = {};
-
-        for (const kind of mediaKinds) {
-            const current = this.interval.get(kind)!;
-            const total = this.totals.get(kind)!;
-            const renderer = kind === 'audio' ? null : this.visualRendererState.get(kind);
-            media[kind] = {
-                sourceFps: round(current.sourceFrames / windowSeconds),
-                txFps: round(current.txFrames / windowSeconds),
-                txKbps: round((current.txBytes * 8) / 1_000 / windowSeconds),
-                rxFps: round(current.rxFrames / windowSeconds),
-                rxKbps: round((current.rxBytes * 8) / 1_000 / windowSeconds),
-                admittedFps: round(current.admittedFrames / windowSeconds),
-                decodedFps: round(current.decodedFrames / windowSeconds),
-                renderedFps: round(current.renderedFrames / windowSeconds),
-                writeMs: summarize(current.writeMs),
-                encodeMs: summarize(current.encodeMs),
-                sendAgeMs: summarize(current.sendAgeMs),
-                renderAgeMs: summarize(current.renderAgeMs),
-                decodeMs: summarize(current.decodeMs),
-                arrivalGapMs: summarize(current.arrivalGapMs),
-                arrivalJitterMs: summarize(current.arrivalJitterMs),
-                capturePullMs: summarize(current.capturePullMs),
-                captureSourceAgeMs: summarize(current.captureSourceAgeMs),
-                captureDecodeMs: summarize(current.captureDecodeMs),
-                capturePrepareMs: summarize(current.capturePrepareMs),
-                sourceDrops: current.sourceDrops,
-                captureDrops: current.captureDrops,
-                sendErrors: current.sendErrors,
-                receiveErrors: current.receiveErrors,
-                renderDrops: current.renderDrops,
-                discontinuities: current.discontinuities,
-                keyFrameRequests: current.keyFrameRequests,
-                keyFrameRequestsReceived: current.keyFrameRequestsReceived,
-                visualState: kind === 'audio'
-                    ? null
-                    : this.visualState.get(kind) ?? null,
-                encoderState: kind === 'audio'
-                    ? null
-                    : this.visualEncoderState.get(kind) ?? null,
-                decoderState: kind === 'audio'
-                    ? null
-                    : this.visualDecoderState.get(kind) ?? null,
-                rendererState: kind === 'audio'
-                    ? this.audioPlayoutState
-                    : !renderer
-                    ? null
-                    : {
-                        animationFramePending: renderer.animationFramePending,
-                        framePending: renderer.framePending,
-                        queuedFrames: renderer.queuedFrames,
-                        buffering: renderer.buffering,
-                        sourceIntervalMs: round(renderer.sourceIntervalMs),
-                        scheduledDelayMs: round(renderer.scheduledDelayMs),
-                        lastFrameQueuedAgoMs: renderer.lastFrameQueuedAt > 0
-                            ? Math.max(0, Math.round(now - renderer.lastFrameQueuedAt))
-                            : null,
-                        lastAnimationCallbackAgoMs: renderer.lastAnimationCallbackAt > 0
-                            ? Math.max(0, Math.round(now - renderer.lastAnimationCallbackAt))
-                            : null,
-                        replacedFrames: renderer.replacedFrames,
-                        canvasWidth: renderer.canvasWidth,
-                        canvasHeight: renderer.canvasHeight,
-                    },
-                totals: { ...total }
-            };
-        }
-
-        const rtt = summarize(this.rttSamples);
-        const estimatedOneWayMs = this.latestRttMs === null ? null : round(this.latestRttMs / 2);
-        const result = {
-            phase: final ? 'final' : 'sample',
-            callId: this.callId.slice(0, 12),
-            direction: this.direction,
-            callType: this.callType,
-            elapsedMs: Math.round(now - this.startedAt),
-            sampleWindowMs: Math.round(windowMs),
-            runtime: {
-                eventLoopLagMs: summarize(this.eventLoopLagSamples),
-                visibilityState: document.visibilityState,
-            },
-            transport: {
-                state: this.connection.state,
-                telemetryStreamAvailable: true,
-                rttMs: {
-                    ...rtt,
-                    latest: this.latestRttMs === null ? null : round(this.latestRttMs),
-                    lifetimeMinimum: this.lifetimeRttMinMs === null ? null : round(this.lifetimeRttMinMs),
-                    lifetimeMaximum: this.lifetimeRttMaxMs === null ? null : round(this.lifetimeRttMaxMs)
-                },
-                estimatedOneWayMs,
-                remoteClockOffsetMs: this.remoteClockOffsetMs === null
-                    ? null
-                    : round(this.remoteClockOffsetMs),
-                probeFailures: this.probeFailures,
-                totalProbeFailures: this.totalProbeFailures,
-                telemetryProtocolErrors: this.protocolErrors,
-                audioLanes: this.connection.getAudioLaneTelemetry(),
-                connectionAgeMs: this.connection.connectedAt === null
-                    ? null
-                    : Math.max(0, Date.now() - this.connection.connectedAt),
-                lastActivityAgoMs: this.connection.lastActivity > 0
-                    ? Math.max(0, Date.now() - this.connection.lastActivity)
-                    : null
-            },
-            media
-        };
-
-        this.resetInterval(now);
-        return result;
-    }
-
-    private emit(final: boolean): void {
-        console.log(`[CALL-TELEMETRY] ${JSON.stringify(this.snapshot(final))}`);
-    }
-
-    private resetInterval(now: number): void {
-        this.intervalStartedAt = now;
-        for (const kind of mediaKinds) this.interval.set(kind, createMediaInterval());
-        this.rttSamples.length = 0;
-        this.eventLoopLagSamples.length = 0;
-        this.probeFailures = 0;
     }
 
     private async receiveLoop(): Promise<void> {
@@ -702,8 +200,6 @@ export class CallTelemetry {
                         if (this.callType !== 'video') throw new Error('Camera state on an audio call');
                         this.onCameraState(probe.enabled);
                     } else if (probe.type === 'key-frame-request') {
-                        this.interval.get(probe.kind)!.keyFrameRequestsReceived += 1;
-                        this.totals.get(probe.kind)!.keyFrameRequestsReceived += 1;
                         this.onKeyFrameRequest(probe.kind);
                     } else if (probe.type === 'request') {
                         const receivedAt = Date.now();
@@ -723,35 +219,32 @@ export class CallTelemetry {
                         this.acceptProbeResponse(probe);
                     }
                 } catch {
-                    this.protocolErrors += 1;
                 } finally {
                     frame.fill(0);
                 }
             }
-        } catch {
-            if (!this.stopped) this.noteProbeFailure();
-        }
+        } catch { }
     }
 
     private async sendProbe(): Promise<void> {
-        if (!this.reporting || this.stopped || this.stream.closed) return;
+        if (!this.started || this.stopped || this.stream.closed) return;
         if (this.pendingProbe) return;
 
-        const randomId = PostQuantumRandom.randomBytes(PROBE_ID_BYTES);
+        const randomId = PostQuantumRandom.randomBytes(CALL_TELEMETRY_PROBE_ID_BYTES);
         const id = idBytesToHex(randomId);
         randomId.fill(0);
         const sentAt = Date.now();
         const request = encodeCallTelemetryProbe({ type: 'request', id, sentAt });
         const timeoutId = setTimeout(() => {
             if (this.pendingProbe?.id !== id) return;
-            this.clearPendingProbe(true);
-        }, PROBE_TIMEOUT_MS);
-        this.pendingProbe = { id, sentAt, startedAt: monotonicNow(), timeoutId };
+            this.clearPendingProbe();
+        }, CALL_TELEMETRY_PROBE_TIMEOUT_MS);
+        this.pendingProbe = { id, sentAt, startedAt: performance.now(), timeoutId };
 
         try {
             await this.stream.write(request);
         } catch {
-            if (this.pendingProbe?.id === id) this.clearPendingProbe(true);
+            if (this.pendingProbe?.id === id) this.clearPendingProbe();
         } finally {
             request.fill(0);
         }
@@ -760,10 +253,10 @@ export class CallTelemetry {
     private acceptProbeResponse(response: ProbeResponse): void {
         const pending = this.pendingProbe;
         if (!pending || response.id !== pending.id || response.sentAt !== pending.sentAt) return;
-        const elapsed = Math.max(0, monotonicNow() - pending.startedAt);
+        const elapsed = Math.max(0, performance.now() - pending.startedAt);
         const remoteProcessing = Math.max(0, response.repliedAt - response.receivedAt);
         if (remoteProcessing > elapsed + 1_000) {
-            this.clearPendingProbe(true);
+            this.clearPendingProbe();
             return;
         }
         const rttMs = Math.max(0, elapsed - Math.min(elapsed, remoteProcessing));
@@ -772,21 +265,14 @@ export class CallTelemetry {
             (response.receivedAt - response.sentAt) +
             (response.repliedAt - responseArrivedAt)
         ) / 2;
-        if (Number.isFinite(clockOffsetMs) && Math.abs(clockOffsetMs) <= 300_000) {
+        if (Number.isFinite(clockOffsetMs) && Math.abs(clockOffsetMs) <= CALL_TELEMETRY_MAX_CLOCK_OFFSET_MS) {
             this.remoteClockOffsetMs = this.remoteClockOffsetMs === null
                 ? clockOffsetMs
                 : (this.remoteClockOffsetMs * 7 + clockOffsetMs) / 8;
         }
         this.latestRttMs = rttMs;
         this.connection.updatePrimaryPathRtt(rttMs);
-        this.lifetimeRttMinMs = this.lifetimeRttMinMs === null
-            ? rttMs
-            : Math.min(this.lifetimeRttMinMs, rttMs);
-        this.lifetimeRttMaxMs = this.lifetimeRttMaxMs === null
-            ? rttMs
-            : Math.max(this.lifetimeRttMaxMs, rttMs);
-        this.rttSamples.push(rttMs);
-        this.clearPendingProbe(false);
+        this.clearPendingProbe();
     }
 
     getLatestRttMs(): number | null {
@@ -803,15 +289,9 @@ export class CallTelemetry {
         return Number.isFinite(age) ? Math.max(0, age) : null;
     }
 
-    private clearPendingProbe(failed: boolean): void {
+    private clearPendingProbe(): void {
         if (!this.pendingProbe) return;
         clearTimeout(this.pendingProbe.timeoutId);
         this.pendingProbe = null;
-        if (failed) this.noteProbeFailure();
-    }
-
-    private noteProbeFailure(): void {
-        this.probeFailures += 1;
-        this.totalProbeFailures += 1;
     }
 }

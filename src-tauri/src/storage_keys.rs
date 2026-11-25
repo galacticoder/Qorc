@@ -8,6 +8,7 @@ pub const KEY_TRANSPARENCY_INCIDENT_PREFIX: &str = "kt-incident:";
 pub const KEY_TRANSPARENCY_MONITOR_PREFIX: &str = "kt-monitors:";
 pub const KEY_TRANSPARENCY_RECORD_PREFIX: &str = "kt-records:";
 pub const KEY_TRANSPARENCY_WARNING_PREFIX: &str = "kt-warnings:";
+pub const LAST_AUTH_ACCOUNT_PREFIX: &str = "last-auth-account:";
 pub const LAST_AUTH_DISPLAY_PREFIX: &str = "last-auth-display:";
 pub const LAST_AUTH_USER_PREFIX: &str = "last-auth-user:";
 pub const NATIVE_ACCOUNT_VAULT_PREFIX: &str = "native-account-vault:";
@@ -49,8 +50,7 @@ pub const RENDERER_EXACT_KEYS: &[&str] = &[
 pub const RENDERER_SCOPED_PREFIXES: &[&str] = &[
     SERVER_PQ_PIN_PREFIX,
     PRIVACY_PASS_TOKEN_PREFIX,
-    LAST_AUTH_USER_PREFIX,
-    LAST_AUTH_DISPLAY_PREFIX,
+    LAST_AUTH_ACCOUNT_PREFIX,
     PRIVATE_AUTH_SLOT_PREFIX,
     REGISTRATION_ATTEMPT_PREFIX,
     PEER_CERTIFICATE_PREFIX,

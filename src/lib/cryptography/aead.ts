@@ -3,6 +3,7 @@
  * Dual-layer encryption: AES-256-GCM + XChaCha20-Poly1305 + BLAKE3 MAC
  */
 
+import { AEAD_INPUT_KEY_LENGTH_EXPECTED, AEAD_KEY_LENGTH_EXPECTED } from '../constants';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -24,7 +25,7 @@ export class PostQuantumAEAD {
   }
 
   private static deriveDoubleKey(inputKey: Uint8Array): { k1: Uint8Array; k2: Uint8Array; macKey: Uint8Array } {
-    if (inputKey.length !== 32) {
+    if (inputKey.length !== AEAD_INPUT_KEY_LENGTH_EXPECTED) {
       throw new Error('Input key must be 32 bytes');
     }
     let expanded: Uint8Array | null = null;
@@ -59,7 +60,7 @@ export class PostQuantumAEAD {
     additionalData?: Uint8Array,
     explicitNonce?: Uint8Array
   ): { ciphertext: Uint8Array; nonce: Uint8Array; tag: Uint8Array } {
-    if (key.length !== 32) {
+    if (key.length !== AEAD_KEY_LENGTH_EXPECTED) {
       throw new Error('PostQuantumAEAD requires a 32-byte key');
     }
     if (explicitNonce && explicitNonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {
@@ -126,7 +127,7 @@ export class PostQuantumAEAD {
     key: Uint8Array,
     additionalData?: Uint8Array
   ): Uint8Array {
-    if (key.length !== 32) {
+    if (key.length !== AEAD_KEY_LENGTH_EXPECTED) {
       throw new Error('PostQuantumAEAD requires a 32-byte key');
     }
     if (nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {

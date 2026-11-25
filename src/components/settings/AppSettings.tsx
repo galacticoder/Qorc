@@ -42,6 +42,10 @@ import {
   MAX_EVENT_TYPE_LENGTH,
   MAX_EVENT_USERNAME_LENGTH,
   MAX_PROFILE_IMAGE_SIZE,
+  APP_SETTINGS_MICROPHONES_LENGTH_LIMIT,
+  APP_SETTINGS_SPEAKERS_LENGTH_LIMIT,
+  APP_SETTINGS_CAMERAS_LENGTH_LIMIT,
+  APP_SETTINGS_HANDLE_COPY_USERNAME_TIMEOUT_MS,
 } from '../../lib/constants';
 import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../ui/UserAvatar';
@@ -433,7 +437,7 @@ export const AppSettings = React.memo(function AppSettings({
         const [microphones, speakers, cameras] = await Promise.all([
           nativeMicrophone.devices(), nativeMicrophone.outputDevices(), nativeCamera.devices(),
         ]);
-        if (microphones.length > 64 || speakers.length > 64 || cameras.length > 32) throw new Error('Invalid media device list');
+        if (microphones.length > APP_SETTINGS_MICROPHONES_LENGTH_LIMIT || speakers.length > APP_SETTINGS_SPEAKERS_LENGTH_LIMIT || cameras.length > APP_SETTINGS_CAMERAS_LENGTH_LIMIT) throw new Error('Invalid media device list');
         setMicDevices(microphones.map(device => ({ deviceId: device.device_id, label: device.label })));
         setSpeakerDevices(speakers.map(device => ({ deviceId: device.device_id, label: device.label })));
         setCameraDevices(cameras.map(device => ({ deviceId: device.device_id, label: device.label })));
@@ -555,7 +559,7 @@ export const AppSettings = React.memo(function AppSettings({
     try {
       await copyTextToClipboard(copyUsername);
       setCopiedUsername(true);
-      window.setTimeout(() => setCopiedUsername(false), 900);
+      window.setTimeout(() => setCopiedUsername(false), APP_SETTINGS_HANDLE_COPY_USERNAME_TIMEOUT_MS);
     } catch {
       toast.error('Could not copy username');
     }

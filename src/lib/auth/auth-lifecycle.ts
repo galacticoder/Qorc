@@ -1,3 +1,4 @@
+import { AUTH_LIFECYCLE_MAX_VISITED } from '../constants';
 export class StaleAuthOperationError extends Error {
   constructor() {
     super('Authentication operation is no longer current');
@@ -28,7 +29,7 @@ export function wipeStaleAuthResult(value: unknown): void {
   const pending: unknown[] = [value];
   const seen = new Set<object>();
   let visited = 0;
-  const maxVisited = 16_384;
+  const maxVisited = AUTH_LIFECYCLE_MAX_VISITED;
 
   while (pending.length > 0 && visited < maxVisited) {
     const current = pending.pop();

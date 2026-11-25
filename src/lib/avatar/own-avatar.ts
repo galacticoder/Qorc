@@ -1,14 +1,12 @@
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { EventType } from '../types/event-types';
-import { MAX_AVATAR_DIMENSION } from '../constants';
+import { MAX_AVATAR_DIMENSION, MAX_AVATAR_SOURCE_DIMENSION } from '../constants';
 import type { AvatarData, AvatarSystemState } from '../types/avatar-types';
 import {
     validateImageData,
     compressImage,
     hashAvatarData
 } from '../utils/avatar-utils';
-
-const MAX_AVATAR_SOURCE_DIMENSION = 8192;
 
 // Set own avatar
 export async function setOwnAvatar(

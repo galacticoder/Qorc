@@ -1,0 +1,6 @@
+export const MAX_SPOOL_PEER_DETECTION_KEYS = 512;
+export const CONSUMED_PROBE_TTL_MS = 24 * 60 * 60 * 1000;
+export const MAX_CONSUMED_PROBES = 32_768;
+export const MAX_SPOOL_PROBE_CACHE_CHARS = 4 * 1024 * 1024;
+export const MAX_SPOOL_PROBE_CACHE_ACCOUNTS = 4;
+export const MAX_TESTED_PROBES = 32_768;

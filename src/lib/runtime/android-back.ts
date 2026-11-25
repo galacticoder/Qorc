@@ -1,4 +1,5 @@
-export const ANDROID_BACK_EVENT = 'qorc:android-back';
+import { ANDROID_BACK_EVENT } from '../constants';
+export { ANDROID_BACK_EVENT } from "../constants/native-bridge";
 type BackHandler = { callback: () => boolean; priority: number };
 const handlers: BackHandler[] = [];
 let installed = false;

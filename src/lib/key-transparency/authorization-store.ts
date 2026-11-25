@@ -1,4 +1,10 @@
 import {
+  MAX_STORED_AUTHORIZATIONS,
+  AUTHORIZED_KEYS,
+  REVOKED_KEYS,
+  VERIFIED_AUTHORIZATION_PROTOCOL,
+} from '../constants';
+import {
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
   exactPlainObject,
   isKeyTransparencyHash,
@@ -20,21 +26,6 @@ import { keyTransparencyStoreKey } from './store-key';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { SESSION_FINGERPRINT_RE } from '../../../shared/patterns.js';
-
-const MAX_STORED_AUTHORIZATIONS = 2048;
-const AUTHORIZED_KEYS = [
-  'dilithiumPublicBase64',
-  'identityBundleFingerprint',
-  'identityRootFingerprint',
-  'kyberPublicBase64',
-  'peer',
-  'peerCertificateFingerprint',
-  'rootCommitment',
-  'verifiedAt',
-  'version',
-  'x25519PublicBase64',
-];
-const REVOKED_KEYS = ['peer', 'rootCommitment', 'version'];
 
 const enqueue = createStoreLock();
 
@@ -138,7 +129,8 @@ function parseStore(raw: string | null): KeyTransparencyAuthorizationSnapshot {
   const value = parsed as { protocol?: unknown; authorized?: unknown; revoked?: unknown };
   if (
     !exactPlainObject(value, ['authorized', 'protocol', 'revoked']) ||
-    value.protocol !== PROTOCOL_KEYS.KEY_TRANSPARENCY_AUTHORIZATION_STORE ||
+    (value.protocol !== VERIFIED_AUTHORIZATION_PROTOCOL &&
+      value.protocol !== PROTOCOL_KEYS.KEY_TRANSPARENCY_AUTHORIZATION_STORE) ||
     !Array.isArray(value.authorized) ||
     !Array.isArray(value.revoked) ||
     value.authorized.length > MAX_STORED_AUTHORIZATIONS ||
@@ -168,7 +160,10 @@ function parseStore(raw: string | null): KeyTransparencyAuthorizationSnapshot {
     seen.add(entry.peer);
     authorized.push(entry);
   }
-  return { authorized, revoked };
+  return {
+    authorized: value.protocol === VERIFIED_AUTHORIZATION_PROTOCOL ? authorized : [],
+    revoked,
+  };
 }
 
 export async function readKeyTransparencyAuthorizations(
@@ -206,7 +201,7 @@ export async function writeKeyTransparencyAuthorizations(
       .slice()
       .sort((left, right) => left.peer.localeCompare(right.peer));
     const serialized = JSON.stringify({
-      protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_AUTHORIZATION_STORE,
+      protocol: VERIFIED_AUTHORIZATION_PROTOCOL,
       authorized,
       revoked,
     });

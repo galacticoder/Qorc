@@ -1,18 +1,23 @@
 import {
   AUTH_USERNAME_REGEX,
   USERNAME_REGEX,
+  USERNAME_DISPLAY_MAX_LENGTH,
   MAX_CONTENT_LENGTH,
   MAX_USERNAME_LENGTH,
   UNSAFE_FILENAME_CHARS_REGEX,
   WHITESPACE_COLLAPSE_REGEX,
   CONTROL_CHARS_REGEX,
   NEWLINE_REGEX,
+  MAX_SANITIZED_MESSAGE_LENGTH,
+  CLIPBOARD_CONTROL_CHARS_REGEX,
+  DEFAULT_EVENT_PAYLOAD_KEYS,
+  SANITIZERS_MAX_LENGTH,
+  SANITIZERS_SANITIZE_FILENAME_MAX_LENGTH,
+  SANITIZERS_ID_LENGTH_LIMIT,
 } from './constants';
 import { SignalType } from './types/signal-types';
 
-const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
-
-type AllowedKey = typeof DEFAULT_ALLOWED_KEYS[number];
+type AllowedKey = typeof DEFAULT_EVENT_PAYLOAD_KEYS[number];
 
 interface TextSanitizeOptions {
   maxLength?: number;
@@ -20,7 +25,7 @@ interface TextSanitizeOptions {
 }
 
 export const sanitizeTextInput = (input: string, options: TextSanitizeOptions = {}): string => {
-  const { maxLength = 256, allowNewlines = true } = options;
+  const { maxLength = SANITIZERS_MAX_LENGTH, allowNewlines = true } = options;
 
   let sanitized = input.normalize('NFKC');
   sanitized = sanitized.replace(CONTROL_CHARS_REGEX, '');
@@ -38,11 +43,10 @@ export const sanitizeTextInput = (input: string, options: TextSanitizeOptions = 
 
 // Sanitize message content
 export const sanitizeMessage = (input: string): string => {
-  const MAX_LENGTH = 10000;
 
   let sanitized = input.normalize('NFC').trim();
-  if (sanitized.length > MAX_LENGTH) {
-    sanitized = sanitized.slice(0, MAX_LENGTH);
+  if (sanitized.length > MAX_SANITIZED_MESSAGE_LENGTH) {
+    sanitized = sanitized.slice(0, MAX_SANITIZED_MESSAGE_LENGTH);
   }
 
   sanitized = sanitized
@@ -58,7 +62,7 @@ export const sanitizeMessage = (input: string): string => {
 };
 
 export const sanitizeEventPayload = (detail: Record<string, unknown>, allowedKeys?: string[]): Record<string, unknown> => {
-  const allowed = new Set<string>(allowedKeys?.length ? allowedKeys : DEFAULT_ALLOWED_KEYS);
+  const allowed = new Set<string>(allowedKeys?.length ? allowedKeys : DEFAULT_EVENT_PAYLOAD_KEYS);
   const sanitized: Record<string, unknown> = {};
 
   for (const key of Object.keys(detail)) {
@@ -81,7 +85,7 @@ export const sanitizeEventPayload = (detail: Record<string, unknown>, allowedKey
   return sanitized;
 };
 
-export const sanitizeFilename = (name: string, maxLength: number = 128): string => {
+export const sanitizeFilename = (name: string, maxLength: number = SANITIZERS_SANITIZE_FILENAME_MAX_LENGTH): string => {
   if (typeof name !== 'string') return SignalType.FILE;
 
   let out = name.normalize('NFKC');
@@ -173,6 +177,13 @@ export const isCanonicalAuthUsername = (value: unknown): value is string => (
   AUTH_USERNAME_REGEX.test(value)
 );
 
+export function isValidDisplayName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= USERNAME_DISPLAY_MAX_LENGTH &&
+    value.search(CONTROL_CHARS_REGEX) === -1;
+}
+
 export const canonicalAuthUsername = (value: unknown, label: string): string => {
   if (!isCanonicalAuthUsername(value)) throw new Error(`Invalid ${label}`);
   return value;
@@ -186,7 +197,7 @@ export const canonicalAuthUsernameOrNull = (value: unknown): string | null => (
 // Sanitize message ID values
 export const sanitizeMessageId = (id: unknown): string | undefined => {
   if (!id || typeof id !== 'string') return undefined;
-  if (id !== id.trim() || id.length > 256) return undefined;
+  if (id !== id.trim() || id.length > SANITIZERS_ID_LENGTH_LIMIT) return undefined;
   return /^[A-Za-z0-9._~:+/=-]+$/.test(id) ? id : undefined;
 };
 
@@ -195,7 +206,7 @@ export const sanitizeEventUsername = (value: unknown, maxLen: number): string | 
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed || trimmed.length > maxLen) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  const cleaned = trimmed.replace(CONTROL_CHARS_REGEX, '');
   if (!cleaned) return null;
   return cleaned.slice(0, maxLen);
 };
@@ -205,7 +216,7 @@ export const sanitizeContent = (value: string | undefined) => {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-  const normalized = trimmed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+  const normalized = trimmed.replace(CLIPBOARD_CONTROL_CHARS_REGEX, '');
   return normalized.slice(0, MAX_CONTENT_LENGTH);
 };
 
@@ -223,7 +234,7 @@ export const sanitizeUiText = (value: unknown, maxLen: number): string | null =>
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  const cleaned = trimmed.replace(CONTROL_CHARS_REGEX, '');
   if (!cleaned) return null;
   return cleaned.slice(0, maxLen);
 };
@@ -233,7 +244,7 @@ export const sanitizeEventText = (value: unknown, maxLen: number): string | null
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  const cleaned = trimmed.replace(CONTROL_CHARS_REGEX, '');
   if (!cleaned) return null;
   return cleaned.slice(0, maxLen);
 };

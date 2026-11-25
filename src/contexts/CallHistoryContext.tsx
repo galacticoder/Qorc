@@ -2,7 +2,13 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { syncEncryptedStorage } from '../lib/database/encrypted-storage';
 import { STORAGE_KEYS } from '../lib/database/storage-keys';
 import { isValidCallingUsername } from '../lib/utils/calling-utils';
-import { CALL_LOG_SEGMENT_SIZE, SEGMENT_UNLOAD_IDLE_MS } from '../lib/constants';
+import {
+  CALL_LOG_SEGMENT_SIZE,
+  SEGMENT_UNLOAD_IDLE_MS,
+  MAX_CALL_DURATION_SECONDS,
+  MAX_CALL_HISTORY_ENTRIES,
+  UUID_V4_REGEX,
+} from '../lib/constants';
 
 export interface CallLogEntry {
     id: string;
@@ -28,9 +34,6 @@ interface CallHistoryContextType {
 }
 
 const CallHistoryContext = createContext<CallHistoryContextType | undefined>(undefined);
-const MAX_CALL_HISTORY_ENTRIES = 500;
-const MAX_CALL_DURATION_SECONDS = 30 * 24 * 60 * 60;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isValidCallLogEntry(value: unknown): value is CallLogEntry {
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
@@ -42,7 +45,7 @@ function isValidCallLogEntry(value: unknown): value is CallLogEntry {
         keys !== 'direction,duration,id,peerUsername,startTime,status,type') {
         return false;
     }
-    return typeof entry.id === 'string' && UUID_RE.test(entry.id) &&
+    return typeof entry.id === 'string' && UUID_V4_REGEX.test(entry.id) &&
         typeof entry.peerUsername === 'string' &&
         entry.peerUsername === entry.peerUsername.trim().toLowerCase() &&
         isValidCallingUsername(entry.peerUsername) &&
@@ -179,7 +182,7 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }, [saveLogs, applyPage]);
 
     const deleteLog = useCallback((id: string) => {
-        if (!UUID_RE.test(id)) return;
+        if (!UUID_V4_REGEX.test(id)) return;
         const updated = readStoredLogs().filter(log => log.id !== id);
         saveLogs(updated);
         applyPage(updated, loadedCountRef.current);

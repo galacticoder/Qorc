@@ -1,3 +1,4 @@
+import { USE_AUTH_TIMEOUT_MS } from '../../lib/constants';
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
@@ -469,7 +470,7 @@ export const useAuth = () => {
         if (!authLifecycle.isCurrent(operation)) return;
         setTokenValidationInProgress(false);
         setAuthStatus('');
-      }, 45000);
+      }, USE_AUTH_TIMEOUT_MS);
     }
     return () => clearTimeout(timeout);
   }, [authLifecycle, tokenValidationGeneration, tokenValidationInProgress, setTokenValidationInProgress]);

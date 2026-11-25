@@ -3,6 +3,7 @@
  * Controlled creation, zeroing, and tracking of sensitive memory
  */
 
+import { SECURE_MEMORY_MAX_BUFFER_SIZE, SECURE_MEMORY_MAX_RANDOM_FILL_BYTES } from '../constants';
 let cachedCrypto: Crypto | null = null;
 
 function resolveCrypto(): Crypto {
@@ -21,13 +22,11 @@ function resolveCrypto(): Crypto {
 
 export class SecureMemory {
   private static readonly allocatedBuffers = new WeakSet<Uint8Array>();
-  private static readonly MAX_BUFFER_SIZE = 1_048_576;
-  private static readonly MAX_RANDOM_FILL_BYTES = 65_536;
 
   private static fillRandom(buffer: Uint8Array, crypto: Crypto): void {
-    for (let offset = 0; offset < buffer.length; offset += this.MAX_RANDOM_FILL_BYTES) {
+    for (let offset = 0; offset < buffer.length; offset += SECURE_MEMORY_MAX_RANDOM_FILL_BYTES) {
       crypto.getRandomValues(
-        buffer.subarray(offset, Math.min(offset + this.MAX_RANDOM_FILL_BYTES, buffer.length)),
+        buffer.subarray(offset, Math.min(offset + SECURE_MEMORY_MAX_RANDOM_FILL_BYTES, buffer.length)),
       );
     }
   }
@@ -38,8 +37,8 @@ export class SecureMemory {
       throw new Error('Invalid buffer size');
     }
     
-    if (size > this.MAX_BUFFER_SIZE) {
-      throw new Error(`Buffer size exceeds maximum ${this.MAX_BUFFER_SIZE} bytes`);
+    if (size > SECURE_MEMORY_MAX_BUFFER_SIZE) {
+      throw new Error(`Buffer size exceeds maximum ${SECURE_MEMORY_MAX_BUFFER_SIZE} bytes`);
     }
     
     const buffer = new Uint8Array(size);

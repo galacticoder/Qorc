@@ -1,3 +1,4 @@
+import { BUNDLE_REQUEST_COOLDOWN_MS } from '../../lib/constants';
 import { EventType } from '../../lib/types/event-types';
 import { signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
@@ -25,7 +26,7 @@ export const requestBundleOnce = async (
   const forceRefreshDiscovery = options?.forceRefreshDiscovery === true;
   const now = Date.now();
   const last = keyRequestCacheRef.current.get(peerUsername) || 0;
-  if (!force && (now - last < 1200)) return;
+  if (!force && (now - last < BUNDLE_REQUEST_COOLDOWN_MS)) return;
 
   const inflight = inFlightBundleRequestsRef.current.get(peerUsername);
   if (inflight) {

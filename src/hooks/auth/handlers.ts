@@ -1,3 +1,4 @@
+import { sleep } from '../../lib/runtime/sleep';
 import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
@@ -33,7 +34,12 @@ import {
   PASSPHRASE_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
   PASSWORD_MIN_LENGTH,
-} from "../../lib/constants";
+  TOKEN_VAULT_MAX_TOKENS,
+  HANDLERS_WORKER_HASH_LENGTH_EXPECTED,
+  HANDLERS_CANDIDATE_BLINDED_ELEMENT_LENGTH_EXPECTED,
+  HANDLERS_ATTEMPT_MINIMUM,
+  HANDLERS_CREATE_HANDLE_ACCOUNT_SUBMIT_DELAY_MS,
+} from '../../lib/constants';
 import { PROTOCOL_KEYS } from '../../lib/config/protocol-keys';
 import { STORAGE_PREFIXES } from '../../lib/database/storage-keys';
 import { ACCOUNT_AUTH_PURPOSE } from '../../lib/config/audiences';
@@ -44,8 +50,6 @@ import {
   PRIVATE_AUTH_PIR_RECORD_BYTES,
 } from '../../../shared/private-auth-protocol.js';
 import { UUID_V4_RE } from '../../../shared/patterns.js';
-
-const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 function privateAuthRequestCommitment(
   blindedElement: Uint8Array,
@@ -91,7 +95,7 @@ async function deriveCompositeSecret(username: string, password: string, passphr
       hashLen: 32
     });
     workerHash = result.hash instanceof Uint8Array ? result.hash : null;
-    if (!workerHash || workerHash.length !== 32) {
+    if (!workerHash || workerHash.length !== HANDLERS_WORKER_HASH_LENGTH_EXPECTED) {
       throw new Error('Authentication KDF returned an invalid result');
     }
     return new Uint8Array(workerHash);
@@ -300,7 +304,7 @@ export const createHandleAccountSubmit = (
     initializeKeys: () => Promise<void>;
     attemptAuthRecovery: () => Promise<boolean>;
     isLocalRecovery: () => boolean;
-    storeAuthenticationState: (username: string, originalUsername?: string) => Promise<void>;
+    storeAuthenticationState: (username: string, displayName: string, assertCurrent: () => void) => Promise<void>;
     lifecycle: AuthLifecycle;
   }
 ) => {
@@ -475,7 +479,7 @@ export const createHandleAccountSubmit = (
       const ppClient = new PrivacyPassClient(ACCOUNT_AUTH_PURPOSE);
       try {
         setters.setAuthStatus("Initializing OPAQUE...");
-        await awaitCurrent(yieldToEventLoop());
+        await awaitCurrent(sleep(0));
         compositeSecret = await awaitCurrent(deriveCompositeSecret(trimmedUsername, password, passphrase));
 
         if (mode === "register") {
@@ -487,13 +491,13 @@ export const createHandleAccountSubmit = (
           let registrationFinalize: any = null;
           try {
           setters.setAuthStatus("Blinding credentials...");
-          await awaitCurrent(yieldToEventLoop());
+          await awaitCurrent(sleep(0));
 
           const registrationStart = await awaitCurrent(opaqueClient.startRegistration(compositeSecret));
           registrationBlindedElement = registrationStart.blindedElement;
 
           setters.setAuthStatus("Requesting registration proof...");
-          await awaitCurrent(yieldToEventLoop());
+          await awaitCurrent(sleep(0));
 
           let registrationPreflightSolution: string | undefined;
           let serverResponse: any = null;
@@ -532,7 +536,7 @@ export const createHandleAccountSubmit = (
             throw new Error('Registration preflight could not be completed');
           }
           setters.setAuthStatus("Creating envelope...");
-          await awaitCurrent(yieldToEventLoop());
+          await awaitCurrent(sleep(0));
 
           // Finish registration
           decodedRegistrationResponse = OPAQUEClientHelpers.decodeResponse(serverResponse, {
@@ -594,8 +598,8 @@ export const createHandleAccountSubmit = (
 
           await unlockNativeAccountForTokens();
 
-          pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
-          if (pendingRegistrationTokens.length > 0 && pendingRegistrationTokens.length !== 250) {
+          pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(TOKEN_VAULT_MAX_TOKENS));
+          if (pendingRegistrationTokens.length > 0 && pendingRegistrationTokens.length !== TOKEN_VAULT_MAX_TOKENS) {
             for (const token of pendingRegistrationTokens) {
               token.tokenSecret?.fill(0);
               token.blindingFactor?.fill(0);
@@ -607,16 +611,16 @@ export const createHandleAccountSubmit = (
           }
           if (pendingRegistrationTokens.length === 0) {
             setters.setAuthStatus("Generating anonymous tokens...");
-            await awaitCurrent(yieldToEventLoop());
-            const generatedTokens = await awaitCurrent(ppClient.generateTokenBatch(250));
+            await awaitCurrent(sleep(0));
+            const generatedTokens = await awaitCurrent(ppClient.generateTokenBatch(TOKEN_VAULT_MAX_TOKENS));
             registrationBlindedTokens = generatedTokens.blindedTokens;
             registrationTokenSecrets = generatedTokens.tokenSecrets;
             await awaitCurrent(tokenVault.replaceTokens(registrationTokenSecrets));
-            pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
+            pendingRegistrationTokens = await awaitCurrent(tokenVault.getPendingTokens(TOKEN_VAULT_MAX_TOKENS));
           }
           if (
-            pendingRegistrationTokens.length !== 250 ||
-            pendingRegistrationTokens.some((candidate) => candidate.blindedElement?.length !== 32)
+            pendingRegistrationTokens.length !== TOKEN_VAULT_MAX_TOKENS ||
+            pendingRegistrationTokens.some((candidate) => candidate.blindedElement?.length !== HANDLERS_CANDIDATE_BLINDED_ELEMENT_LENGTH_EXPECTED)
           ) {
             throw new Error('Anonymous token issuance state unavailable');
           }
@@ -659,7 +663,9 @@ export const createHandleAccountSubmit = (
           const authResult = await awaitCurrent(finalizationWaiter.promise);
 
           if (authResult?.serverEntryRequired) {
-            await awaitCurrent(helpers.storeAuthenticationState(trimmedUsername, displayUsername));
+            await awaitCurrent(helpers.storeAuthenticationState(
+                trimmedUsername, displayUsername, () => helpers.lifecycle.assertCurrent(operation),
+              ));
             return;
           }
 
@@ -707,7 +713,7 @@ export const createHandleAccountSubmit = (
           let pendingAccountTokens: any[] = [];
           try {
             setters.setAuthStatus("Preparing anonymous lookup...");
-            await awaitCurrent(yieldToEventLoop());
+            await awaitCurrent(sleep(0));
 
             const privateAuthStorageId = computePrivateAuthStorageId(
               trimmedUsername,
@@ -739,7 +745,7 @@ export const createHandleAccountSubmit = (
             }
 
             setters.setAuthStatus("Generating private query...");
-            await awaitCurrent(yieldToEventLoop());
+            await awaitCurrent(sleep(0));
 
             const loginStart = await awaitCurrent(opaqueClient.startLogin(compositeSecret));
             loginBlindedElement = loginStart.blindedElement;
@@ -809,7 +815,7 @@ export const createHandleAccountSubmit = (
                 let sent = false;
                 let lastSendError: unknown = null;
                 let roundAuthChannelBinding: string | null = null;
-                for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+                for (let attempt = 0; attempt < HANDLERS_ATTEMPT_MINIMUM && !sent; attempt++) {
                   const ready = await awaitCurrent(websocketClient.waitUntilReady(45000, operation.signal));
                   if (!ready) {
                     lastSendError = new Error('Connection not ready. Please try again.');
@@ -833,7 +839,7 @@ export const createHandleAccountSubmit = (
                   } catch (sendError) {
                     if (isStaleAuthOperation(sendError)) throw sendError;
                     lastSendError = sendError;
-                    await awaitCurrent(new Promise(resolve => setTimeout(resolve, 500)));
+                    await awaitCurrent(sleep(HANDLERS_CREATE_HANDLE_ACCOUNT_SUBMIT_DELAY_MS));
                   }
                 }
                 if (!sent) {
@@ -881,7 +887,7 @@ export const createHandleAccountSubmit = (
             loginServerNonce = decodedResponse.serverNonce;
 
             setters.setAuthStatus("Decrypting record...");
-            await awaitCurrent(yieldToEventLoop());
+            await awaitCurrent(sleep(0));
 
             if (!loginAuthChannelBinding) {
               throw new Error('Private authentication channel binding is unavailable');
@@ -918,8 +924,8 @@ export const createHandleAccountSubmit = (
             // Unlock local native account before loading or replacing token pool
             await unlockNativeAccountForTokens();
 
-            pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
-            if (pendingAccountTokens.length > 0 && pendingAccountTokens.length !== 250) {
+            pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(TOKEN_VAULT_MAX_TOKENS));
+            if (pendingAccountTokens.length > 0 && pendingAccountTokens.length !== TOKEN_VAULT_MAX_TOKENS) {
               for (const token of pendingAccountTokens) {
                 token.tokenSecret?.fill(0);
                 token.blindingFactor?.fill(0);
@@ -930,7 +936,7 @@ export const createHandleAccountSubmit = (
               await awaitCurrent(tokenVault.discardPendingTokens());
             }
             if (pendingAccountTokens.length === 0) {
-              const generated = await awaitCurrent(ppClient.generateTokenBatch(250));
+              const generated = await awaitCurrent(ppClient.generateTokenBatch(TOKEN_VAULT_MAX_TOKENS));
               try {
                 await awaitCurrent(tokenVault.replaceTokens(generated.tokenSecrets));
               } finally {
@@ -942,11 +948,11 @@ export const createHandleAccountSubmit = (
                   token.unblindedToken?.fill(0);
                 }
               }
-              pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(250));
+              pendingAccountTokens = await awaitCurrent(tokenVault.getPendingTokens(TOKEN_VAULT_MAX_TOKENS));
             }
             if (
-              pendingAccountTokens.length !== 250 ||
-              pendingAccountTokens.some((candidate) => candidate.blindedElement?.length !== 32)
+              pendingAccountTokens.length !== TOKEN_VAULT_MAX_TOKENS ||
+              pendingAccountTokens.some((candidate) => candidate.blindedElement?.length !== HANDLERS_CANDIDATE_BLINDED_ELEMENT_LENGTH_EXPECTED)
             ) {
               throw new Error('Anonymous token issuance state unavailable');
             }
@@ -977,7 +983,9 @@ export const createHandleAccountSubmit = (
             setters.setUsername(displayUsername);
 
             if (authResult?.serverEntryRequired) {
-              await awaitCurrent(helpers.storeAuthenticationState(trimmedUsername, displayUsername));
+              await awaitCurrent(helpers.storeAuthenticationState(
+                trimmedUsername, displayUsername, () => helpers.lifecycle.assertCurrent(operation),
+              ));
               return;
             }
 

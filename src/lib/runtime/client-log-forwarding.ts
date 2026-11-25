@@ -1,11 +1,12 @@
+import {
+  CLIENT_LOG_FLUSH_INTERVAL_MS,
+  CLIENT_LOG_MAX_BATCH_LINES,
+  CLIENT_LOG_MAX_LINE_CHARS,
+  CLIENT_LOG_MAX_PENDING_LINES,
+} from '../constants';
 import { invoke } from '@tauri-apps/api/core';
 
 type ForwardedConsoleLevel = 'LOG' | 'INFO' | 'WARN' | 'ERROR';
-
-const MAX_LINE_CHARS = 32 * 1024;
-const MAX_PENDING_LINES = 1_000;
-const MAX_BATCH_LINES = 32;
-const FLUSH_INTERVAL_MS = 100;
 
 const pending: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -56,11 +57,11 @@ function makeLine(level: ForwardedConsoleLevel, args: readonly unknown[]): strin
     const line = `[${new Date().toISOString()}] [${level}] ${body}`
         .replace(/\r/g, '\\r')
         .replace(/\n/g, '\\n');
-    if (line.length <= MAX_LINE_CHARS) return line;
-    return `${line.slice(0, MAX_LINE_CHARS)} [truncated]`;
+    if (line.length <= CLIENT_LOG_MAX_LINE_CHARS) return line;
+    return `${line.slice(0, CLIENT_LOG_MAX_LINE_CHARS)} [truncated]`;
 }
 
-function scheduleFlush(delay = FLUSH_INTERVAL_MS): void {
+function scheduleFlush(delay = CLIENT_LOG_FLUSH_INTERVAL_MS): void {
     if (flushTimer !== null || flushing || pending.length === 0) return;
     flushTimer = setTimeout(() => {
         flushTimer = null;
@@ -71,26 +72,26 @@ function scheduleFlush(delay = FLUSH_INTERVAL_MS): void {
 async function flush(): Promise<void> {
     if (flushing || pending.length === 0) return;
     flushing = true;
-    const entries = pending.splice(0, MAX_BATCH_LINES);
+    const entries = pending.splice(0, CLIENT_LOG_MAX_BATCH_LINES);
     let failed = false;
     try {
         await invoke<boolean>('forward_client_logs', { entries });
     } catch {
         failed = true;
         pending.unshift(...entries);
-        if (pending.length > MAX_PENDING_LINES) pending.splice(0, pending.length - MAX_PENDING_LINES);
+        if (pending.length > CLIENT_LOG_MAX_PENDING_LINES) pending.splice(0, pending.length - CLIENT_LOG_MAX_PENDING_LINES);
     } finally {
         flushing = false;
         if (pending.length > 0) {
-            scheduleFlush(failed ? 1_000 : pending.length >= MAX_BATCH_LINES ? 0 : FLUSH_INTERVAL_MS);
+            scheduleFlush(failed ? 1_000 : pending.length >= CLIENT_LOG_MAX_BATCH_LINES ? 0 : CLIENT_LOG_FLUSH_INTERVAL_MS);
         }
     }
 }
 
 function enqueue(level: ForwardedConsoleLevel, args: readonly unknown[]): void {
     pending.push(makeLine(level, args));
-    if (pending.length > MAX_PENDING_LINES) pending.splice(0, pending.length - MAX_PENDING_LINES);
-    if (pending.length >= MAX_BATCH_LINES) {
+    if (pending.length > CLIENT_LOG_MAX_PENDING_LINES) pending.splice(0, pending.length - CLIENT_LOG_MAX_PENDING_LINES);
+    if (pending.length >= CLIENT_LOG_MAX_BATCH_LINES) {
         if (flushTimer !== null) clearTimeout(flushTimer);
         flushTimer = null;
         void flush();
@@ -112,7 +113,7 @@ export function installClientLogForwarding(): void {
         const original = console[method].bind(console);
         console[method] = (...args: unknown[]) => {
             original(...args);
-            if (args[0] === '[CALL-DIAG]' || args[0] === '[WS-CONNECT-DIAG]') {
+            if (args[0] === '[WS-CONNECT-DIAG]') {
                 const entry = makeLine(level, args);
                 void invoke<boolean>('forward_client_logs', { entries: [entry] })
                     .catch(() => enqueue(level, args));

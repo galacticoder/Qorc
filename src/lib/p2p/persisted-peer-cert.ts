@@ -1,3 +1,9 @@
+import {
+  MAX_PEER_CERT_WRITE_TAILS,
+  MAX_PERSISTED_CERT_CHARS,
+  PERSISTED_PEER_ENDPOINT_KEYS,
+  PERSISTED_PEER_CERTIFICATE_KEYS,
+} from '../constants';
 import type { PeerCertificateBundle } from '../types/p2p-types';
 import { storage } from '../tauri-bindings';
 import { validatePeerCertificateBundle } from '../utils/peer-certificate-utils';
@@ -8,10 +14,6 @@ import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { ML_DSA_87_PUBLIC_KEY_BYTES } from '../../../shared/crypto-sizes.js';
-
-const MAX_PERSISTED_CERT_CHARS = 64 * 1024;
-const PERSISTED_RECORD_KEYS = ['cert', 'endpoint', 'protocol'];
-const PERSISTED_ENDPOINT_KEYS = new Set(['announcedAt', 'endpointUrl', 'signerPublicKeyBase64']);
 
 export interface PersistedPeerEndpoint {
   endpointUrl: string;
@@ -42,7 +44,7 @@ const validatePersistedEndpoint = (value: unknown): PersistedPeerEndpoint | null
     throw new Error('Invalid persisted peer endpoint');
   }
   const candidate = value as Record<string, unknown>;
-  if (Object.keys(candidate).some((key) => !PERSISTED_ENDPOINT_KEYS.has(key))) {
+  if (Object.keys(candidate).some((key) => !PERSISTED_PEER_ENDPOINT_KEYS.has(key))) {
     throw new Error('Persisted peer endpoint contains unexpected fields');
   }
   const parsed = parseP2PEndpointUrl(
@@ -63,8 +65,6 @@ const validatePersistedEndpoint = (value: unknown): PersistedPeerEndpoint | null
 };
 
 const writeTails = new Map<string, Promise<void>>();
-
-const MAX_WRITE_TAILS = 512;
 
 async function updateRecord(
   owner: string,
@@ -91,7 +91,7 @@ async function updateRecord(
   });
   const tail = write.then(() => { }, () => { });
   writeTails.set(tailKey, tail);
-  if (writeTails.size > MAX_WRITE_TAILS) {
+  if (writeTails.size > MAX_PEER_CERT_WRITE_TAILS) {
     const oldest = writeTails.keys().next().value;
     if (oldest !== undefined && oldest !== tailKey) writeTails.delete(oldest);
   }
@@ -112,7 +112,7 @@ async function readRecord(key: string, peer: string): Promise<PersistedPeerRecor
     throw new Error('Invalid persisted peer record');
   }
   const candidate = parsed as Record<string, unknown>;
-  if (Object.keys(candidate).sort().join(',') !== PERSISTED_RECORD_KEYS.join(',')) {
+  if (Object.keys(candidate).sort().join(',') !== PERSISTED_PEER_CERTIFICATE_KEYS.join(',')) {
     throw new Error('Invalid persisted peer record shape');
   }
   if (candidate.protocol !== PROTOCOL_KEYS.PEER_CERTIFICATE_STORE) {

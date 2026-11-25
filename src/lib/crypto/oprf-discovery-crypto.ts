@@ -2,14 +2,27 @@
  * OPRF-Based Discovery Cryptography
  */
 
+import {
+  DISCOVERY_BLOB_SELECTOR_BYTES,
+  DISCOVERY_BLOB_HEADER_BYTES,
+  DISCOVERY_BLOB_MAX_JSON_BYTES,
+  DISCOVERY_BLOB_PLAINTEXT_BYTES,
+  DISCOVERY_BLOB_WIRE_BYTES,
+  DISCOVERY_BLOB_PREFIX_BASE64_CHARS,
+  DISCOVERY_BLOB_PREFIX_BYTES,
+  DISCOVERY_BLOB_REQUIRED_KEYS,
+  DISCOVERY_BLOB_OPTIONAL_KEYS,
+  DISCOVERY_DETECTION_KEY_RE,
+  OPRF_DISCOVERY_CRYPTO_ENCRYPTION_KEY_LENGTH_EXPECTED,
+} from '../constants';
 import { ristretto255_oprf } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import type { PeerCertificateBundle } from '../types/p2p-types';
 import type { AvatarRef } from './avatar-blob-crypto';
+import { isValidAvatarRef } from '../avatar/avatar-ref';
 import type { CertifiedPeerBundle } from '../types/identity-types';
-import { SPOOL_DETECTION_KEY_BYTES } from '../../../shared/spool-tag-protocol.js';
 import { canonicalBase64Shape } from '../../../shared/canonical-base64.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { hasPrototypePollutionKeys } from '../sanitizers';
@@ -21,7 +34,7 @@ import {
   constantTimeBytesEqual,
   hexToBytes as decodeHex,
 } from '../../../shared/bytes.js';
-import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
+import { HASH_OUTPUT_BYTES, POST_QUANTUM_AEAD_NONCE_BYTES } from '../../../shared/crypto-sizes.js';
 
 export { DISCOVERY_BLOB_BASE64_CHARS } from '../constants';
 
@@ -63,29 +76,44 @@ export interface OPRFDiscoveryBlob {
     };
 }
 
-const DISCOVERY_BLOB_WIRE_BYTES = (DISCOVERY_BLOB_BASE64_CHARS / 4) * 3;
-const DISCOVERY_BLOB_SELECTOR_BYTES = 24;
-const DISCOVERY_BLOB_PREFIX_BYTES = POST_QUANTUM_AEAD_NONCE_BYTES + DISCOVERY_BLOB_SELECTOR_BYTES;
-const DISCOVERY_BLOB_PREFIX_BASE64_CHARS = (DISCOVERY_BLOB_PREFIX_BYTES / 3) * 4;
-const DISCOVERY_BLOB_HEADER_BYTES = 4;
-const DISCOVERY_BLOB_PLAINTEXT_BYTES = DISCOVERY_BLOB_WIRE_BYTES -
-    DISCOVERY_BLOB_PREFIX_BYTES -
-    HASH_OUTPUT_BYTES -
-    POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-const DISCOVERY_BLOB_REQUIRED_KEYS = [
-    'certifiedPeerBundle',
-    'fullBundle',
-    'keyTransparencyTransition',
-    'spoolDetectionKey',
-];
-const DISCOVERY_BLOB_OPTIONAL_KEYS = [
-    'avatarRef',
-];
-const DISCOVERY_DETECTION_KEY_RE = new RegExp(`^[a-f0-9]{${SPOOL_DETECTION_KEY_BYTES * 2}}$`);
 const strictTextDecoder = new TextDecoder('utf-8', { fatal: true });
 
+async function transformDiscoveryContent(
+    content: Uint8Array<ArrayBuffer>,
+    transform: CompressionStream | DecompressionStream,
+    limit: number,
+): Promise<Uint8Array<ArrayBuffer>> {
+    const reader = new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+            controller.enqueue(content);
+            controller.close();
+        },
+    }).pipeThrough(transform).getReader();
+    const output = new Uint8Array(limit);
+    let length = 0;
+    try {
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) return output.subarray(0, length);
+            try {
+                if (length + value.length > limit) throw new Error('Discovery identity bundle exceeds fixed PURB capacity');
+                output.set(value, length);
+                length += value.length;
+            } finally {
+                value.fill(0);
+            }
+        }
+    } catch (error) {
+        output.fill(0);
+        await reader.cancel().catch(() => {});
+        throw error;
+    } finally {
+        reader.releaseLock();
+    }
+}
+
 function deriveDiscoveryBlobSelector(encryptionKey: Uint8Array, nonce: Uint8Array): Uint8Array {
-    if (encryptionKey.length !== 32 || nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {
+    if (encryptionKey.length !== OPRF_DISCOVERY_CRYPTO_ENCRYPTION_KEY_LENGTH_EXPECTED || nonce.length !== POST_QUANTUM_AEAD_NONCE_BYTES) {
         throw new Error('Invalid discovery selector material');
     }
     const domain = new TextEncoder().encode(PROTOCOL_KEYS.DISCOVERY_BLOB_SELECTOR);
@@ -261,27 +289,31 @@ export class OPRFDiscoveryClient {
         }
     }
 
-    encryptDiscoveryBlob(
+    async encryptDiscoveryBlob(
         material: OPRFDiscoveryBlob,
         encryptionKey: Uint8Array
-    ): string {
-        const content = new TextEncoder().encode(JSON.stringify(material));
-        if (content.length + DISCOVERY_BLOB_HEADER_BYTES > DISCOVERY_BLOB_PLAINTEXT_BYTES) {
-            content.fill(0);
-            throw new Error('Discovery identity bundle exceeds fixed PURB capacity');
+    ): Promise<string> {
+        if (material.avatarRef !== undefined && !isValidAvatarRef(material.avatarRef, material.avatarRef?.hash)) {
+            throw new Error('Invalid discovery avatar reference');
         }
+        const content = new TextEncoder().encode(JSON.stringify(material));
         const plaintext = new Uint8Array(DISCOVERY_BLOB_PLAINTEXT_BYTES);
-        new DataView(plaintext.buffer).setUint32(0, content.length, true);
-        plaintext.set(content, DISCOVERY_BLOB_HEADER_BYTES);
-        const padding = plaintext.subarray(DISCOVERY_BLOB_HEADER_BYTES + content.length);
-        crypto.getRandomValues(padding);
         const nonce = crypto.getRandomValues(new Uint8Array(POST_QUANTUM_AEAD_NONCE_BYTES));
         const aad = new TextEncoder().encode(PROTOCOL_KEYS.DISCOVERY_BLOB_AAD);
         let selector: Uint8Array | null = null;
         let ciphertext: Uint8Array | null = null;
         let tag: Uint8Array | null = null;
         let combined: Uint8Array | null = null;
+        let compressed: Uint8Array | null = null;
         try {
+            if (content.length > DISCOVERY_BLOB_MAX_JSON_BYTES) {
+                throw new Error('Discovery identity bundle exceeds fixed PURB capacity');
+            }
+            compressed = await transformDiscoveryContent(content, new CompressionStream('deflate'),
+                DISCOVERY_BLOB_PLAINTEXT_BYTES - DISCOVERY_BLOB_HEADER_BYTES);
+            new DataView(plaintext.buffer).setUint32(0, compressed.length, true);
+            plaintext.set(compressed, DISCOVERY_BLOB_HEADER_BYTES);
+            crypto.getRandomValues(plaintext.subarray(DISCOVERY_BLOB_HEADER_BYTES + compressed.length));
             selector = deriveDiscoveryBlobSelector(encryptionKey, nonce);
             ({ ciphertext, tag } = PostQuantumAEAD.encrypt(plaintext, encryptionKey, aad, nonce));
             combined = new Uint8Array(nonce.length + selector.length + tag.length + ciphertext.length);
@@ -296,6 +328,7 @@ export class OPRFDiscoveryClient {
             return encoded;
         } finally {
             content.fill(0);
+            compressed?.fill(0);
             plaintext.fill(0);
             nonce.fill(0);
             aad.fill(0);
@@ -306,11 +339,10 @@ export class OPRFDiscoveryClient {
         }
     }
 
-    decryptDiscoveryBlob(
+    async decryptDiscoveryBlob(
         blobBase64: string,
-        encryptionKey: Uint8Array,
-        stats?: { selectorMatches: number }
-    ): OPRFDiscoveryBlob | null {
+        encryptionKey: Uint8Array
+    ): Promise<OPRFDiscoveryBlob | null> {
         let data: Uint8Array | null = null;
         let prefix: Uint8Array | null = null;
         let nonce: Uint8Array | null = null;
@@ -320,11 +352,9 @@ export class OPRFDiscoveryClient {
         let ciphertext: Uint8Array | null = null;
         let aad: Uint8Array | null = null;
         let plaintext: Uint8Array | null = null;
-        let content: Uint8Array | null = null;
+        let content: Uint8Array<ArrayBuffer> | null = null;
         try {
-            if (!canonicalBase64Shape(blobBase64, { exactBytes: DISCOVERY_BLOB_WIRE_BYTES })) {
-                return null;
-            }
+            if (blobBase64.length !== DISCOVERY_BLOB_BASE64_CHARS) return null;
 
             prefix = PostQuantumUtils.base64ToUint8Array(
                 blobBase64.slice(0, DISCOVERY_BLOB_PREFIX_BASE64_CHARS)
@@ -334,7 +364,7 @@ export class OPRFDiscoveryClient {
             selector = prefix.slice(POST_QUANTUM_AEAD_NONCE_BYTES);
             expectedSelector = deriveDiscoveryBlobSelector(encryptionKey, nonce);
             if (!constantTimeBytesEqual(selector, expectedSelector)) return null;
-            if (stats) stats.selectorMatches += 1;
+            if (!canonicalBase64Shape(blobBase64, { exactBytes: DISCOVERY_BLOB_WIRE_BYTES })) return null;
 
             data = PostQuantumUtils.base64ToUint8Array(blobBase64);
             if (data.length !== DISCOVERY_BLOB_WIRE_BYTES) return null;
@@ -356,10 +386,11 @@ export class OPRFDiscoveryClient {
                 contentLength < 1 ||
                 contentLength + DISCOVERY_BLOB_HEADER_BYTES > plaintext.length
             ) return null;
-            content = plaintext.slice(
-                DISCOVERY_BLOB_HEADER_BYTES,
-                DISCOVERY_BLOB_HEADER_BYTES + contentLength
-            );
+            if (!(plaintext.buffer instanceof ArrayBuffer)) return null;
+            const compressed = new Uint8Array(plaintext.buffer,
+                plaintext.byteOffset + DISCOVERY_BLOB_HEADER_BYTES, contentLength);
+            content = await transformDiscoveryContent(compressed, new DecompressionStream('deflate'),
+                DISCOVERY_BLOB_MAX_JSON_BYTES);
             const parsed = JSON.parse(strictTextDecoder.decode(content));
             if (
                 !parsed ||
@@ -381,6 +412,8 @@ export class OPRFDiscoveryClient {
             if (typeof detectionKey !== 'string' || !DISCOVERY_DETECTION_KEY_RE.test(detectionKey)) {
                 return null;
             }
+            const avatarRef = (parsed as OPRFDiscoveryBlob).avatarRef;
+            if (avatarRef !== undefined && !isValidAvatarRef(avatarRef, avatarRef?.hash)) return null;
             const transition = (parsed as OPRFDiscoveryBlob).keyTransparencyTransition;
             if (
                 !transition ||
@@ -412,6 +445,5 @@ function hexToBytes(hex: string, expectedBytes: number): Uint8Array {
     if (!bytes) throw new Error('Invalid hexadecimal value');
     return bytes;
 }
-
 
 export const oprfDiscoveryClient = new OPRFDiscoveryClient();

@@ -53,12 +53,23 @@ The discovery plaintext contains only the peer's Signal prekey bundle, certified
 identity chain, and optional encrypted-avatar reference. Routing identifiers and
 avatar bytes are not part of the record.
 
-The client pads this plaintext to a fixed capacity and encrypts it with the
-OPRF-derived key. Every wire record is exactly `DISCOVERY_BLOB_BASE64_CHARS`,
-131,072 canonical base64 characters, encoding exactly 98,304 bytes of
-ciphertext. The encrypted true length is inside the ciphertext. A server cannot
+The client compresses the complete JSON bundle with deflate, pads it to a fixed
+capacity, and encrypts it with the OPRF-derived key. Every wire record is exactly
+`DISCOVERY_BLOB_WIRE_BYTES`, 45,054 bytes, represented by
+`DISCOVERY_BLOB_BASE64_CHARS`, 60,072 canonical base64 characters. The compressed
+length is inside the ciphertext. The original JSON and decompressed output have
+bounded sizes. A server cannot
 decrypt the bundle or distinguish valid records from random cover records by
 shape.
+
+Avatar references require 32-byte lowercase hexadecimal blob IDs and hashes,
+a canonical Base64 32-byte key, and the fixed WebP MIME type. These bounds apply
+before publication and after authenticated decryption.
+
+Client and server use one current record size and response class. Deploy them
+together and have clients republish their records. Other record sizes are
+rejected. The four isolated queries, 64 records per bucket, and uniform padding
+are unchanged.
 
 On lookup, the client decrypts candidate records locally and rejects any record
 that fails exact schema validation, certified identity validation, handle
@@ -99,7 +110,7 @@ publishing. A publication has one exact wire shape:
     "publishId": "<64 lowercase hex characters>",
     "bucketIds": [0, 1, 2, 3, 4, 5]
   },
-  "encryptedBlob": "<exactly 131072 canonical base64 characters>"
+  "encryptedBlob": "<exactly 60072 canonical base64 characters>"
 }
 ```
 
@@ -196,7 +207,7 @@ Code:
 
 ## Avoiding The Lookup
 
-A lookup is expensive , four requests of one 6160 KiB bucket each, 64 blobs per
+A lookup is expensive , four requests of one 2832 KiB bucket each, 64 blobs per
 bucket, with latency depending on the Tor path, so the result is saved per peer and
 reused when it is provably still current.
 
@@ -278,7 +289,7 @@ Before decryption, the outer route exposes only request timing and an 8 KiB
 request class for discovery operations. The destination server decrypts the
 operation and therefore still learns whether it is evaluating OPRF, serving a
 manifest, or serving a bucket, plus the operation body described above. A bucket
-response is always 6,307,840 bytes, 6160 KiB, and a manifest/OPRF response is
+response is always 2,899,968 bytes, 2832 KiB, and a manifest/OPRF response is
 always 24 KiB, so the response class remains observable to the network path.
 
 The three cover lookup buckets hide which single requested bucket is real from

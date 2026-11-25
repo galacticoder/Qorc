@@ -1,13 +1,18 @@
 import { SecureDB } from './secureDB';
 import { hasPrototypePollutionKeys } from '../sanitizers';
-import { STORAGE_RATE_LIMIT_WINDOW_MS, STORAGE_RATE_LIMIT_MAX_OPS } from '../constants';
+import {
+  CONTROL_CHARS_REGEX,
+  STORAGE_RATE_LIMIT_WINDOW_MS,
+  STORAGE_RATE_LIMIT_MAX_OPS,
+  ENCRYPTED_STORAGE_KEY_LENGTH_LIMIT,
+} from '../constants';
 import { STORAGE_KEYS, STORAGE_STORES } from './storage-keys';
 
 const validateKey = (key: string): void => {
-  if (typeof key !== 'string' || key.length === 0 || key.length > 256) {
+  if (typeof key !== 'string' || key.length === 0 || key.length > ENCRYPTED_STORAGE_KEY_LENGTH_LIMIT) {
     throw new Error('Invalid storage key');
   }
-  if (/[\x00-\x1F\x7F]/.test(key)) {
+  if (key.search(CONTROL_CHARS_REGEX) !== -1) {
     throw new Error('Storage key contains invalid control characters');
   }
   if (['__proto__', 'constructor', 'prototype'].includes(key)) {

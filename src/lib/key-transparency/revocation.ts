@@ -1,8 +1,7 @@
+import { MAX_REVOCATION_STATES } from '../constants';
 import { signal } from '../tauri-bindings';
 import { canonicalAuthUsername } from '../sanitizers';
 import { keyTransparencyPeerKey } from './peer-key';
-
-const MAX_REVOCATION_STATES = 2048;
 
 type RevocationState = {
   complete: boolean;

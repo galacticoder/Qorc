@@ -2,13 +2,16 @@
  * SQLite KV wrapper
  */
 
+import {
+  SQLITE_KV_MAX_MUTATION_DELETIONS,
+  SQLITE_KV_ACCOUNT_NAMESPACE_VALUE_LENGTH_LIMIT,
+} from '../constants';
 import { database } from '../tauri-bindings';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { STORAGE_KEY_DOMAINS } from './storage-keys';
 import { bytesToHex } from '../../../shared/bytes.js';
 
 export class SQLiteKV {
-  private static readonly MAX_MUTATION_DELETIONS = 2_048;
   private readonly namespace: string;
   private readonly assertCurrent: () => void;
 
@@ -22,7 +25,7 @@ export class SQLiteKV {
       typeof value !== 'string' ||
       value !== value.trim().toLowerCase() ||
       !value ||
-      value.length > 120 ||
+      value.length > SQLITE_KV_ACCOUNT_NAMESPACE_VALUE_LENGTH_LIMIT ||
       /[^a-z0-9._-]/.test(value)
     ) {
       throw new Error('Invalid database owner');
@@ -81,9 +84,9 @@ export class SQLiteKV {
     this.assertCurrent();
     const fullStore = `${this.namespace}_${store}`;
     if (keys.length === 0) return 0;
-    for (let offset = 0; offset < keys.length; offset += SQLiteKV.MAX_MUTATION_DELETIONS) {
+    for (let offset = 0; offset < keys.length; offset += SQLITE_KV_MAX_MUTATION_DELETIONS) {
       this.assertCurrent();
-      const batch = keys.slice(offset, offset + SQLiteKV.MAX_MUTATION_DELETIONS);
+      const batch = keys.slice(offset, offset + SQLITE_KV_MAX_MUTATION_DELETIONS);
       await database.mutateSecure([], batch.map((key) => ({ store: fullStore, key })));
       this.assertCurrent();
     }
@@ -93,6 +96,7 @@ export class SQLiteKV {
   async mutate(
     writes: Array<{ store: string; key: string; value: Uint8Array }>,
     deletions: Array<{ store: string; key: string }>,
+    nativeContent?: { delete?: string[]; evict?: string[] },
   ): Promise<void> {
     this.assertCurrent();
     const committed = await database.mutateSecure(
@@ -105,6 +109,7 @@ export class SQLiteKV {
         store: `${this.namespace}_${store}`,
         key,
       })),
+      nativeContent,
     );
     this.assertCurrent();
     if (!committed) throw new Error('Database quota exceeded');

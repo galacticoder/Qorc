@@ -2,6 +2,13 @@
  * Displays a Rust rendered private message image
  */
 
+import {
+  SECURE_CANVAS_TEXT_MAX_WIDTH,
+  SECURE_CANVAS_TEXT_FONT_SIZE,
+  SECURE_CANVAS_TEXT_ATTEMPT_MINIMUM,
+  SECURE_CANVAS_TEXT_ATTEMPT_EXPECTED,
+  NATIVE_MESSAGE_RENDER_RETRY_STEP_MS,
+} from '../../../lib/constants';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { nativeMessageContent } from '../../../lib/tauri-bindings';
 import { useDevicePixelRatio } from '../../../hooks/useDevicePixelRatio';
@@ -24,8 +31,8 @@ export interface SecureCanvasTextProps {
 export const SecureCanvasText = memo(function SecureCanvasText({
     messageId,
     contentVersion,
-    maxWidth = 400,
-    fontSize = 14,
+    maxWidth = SECURE_CANVAS_TEXT_MAX_WIDTH,
+    fontSize = SECURE_CANVAS_TEXT_FONT_SIZE,
     color = 'inherit',
     singleLine = false,
     maxLines = 0,
@@ -68,7 +75,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
         }
         let cancelled = false;
         const render = async (): Promise<void> => {
-            for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
+            for (let attempt = 0; attempt < SECURE_CANVAS_TEXT_ATTEMPT_MINIMUM && !cancelled; attempt += 1) {
                 try {
                     const rendered = await nativeMessageContent.render(
                         messageId,
@@ -95,8 +102,8 @@ export const SecureCanvasText = memo(function SecureCanvasText({
                     onRenderedRef.current?.();
                     return;
                 } catch {
-                    if (attempt === 4) return;
-                    await new Promise((resolve) => window.setTimeout(resolve, 50 * (attempt + 1)));
+                    if (attempt === SECURE_CANVAS_TEXT_ATTEMPT_EXPECTED) return;
+                    await new Promise((resolve) => window.setTimeout(resolve, NATIVE_MESSAGE_RENDER_RETRY_STEP_MS * (attempt + 1)));
                 }
             }
         };

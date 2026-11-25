@@ -1,4 +1,7 @@
+use crate::validation::is_hex_256;
+use crate::constants::database::MAX_KEYS;
 use crate::{account_vault::AccountSession, state::AppState, storage::SecureStorage};
+use crate::storage_keys::{LAST_AUTH_ACCOUNT_PREFIX, LAST_AUTH_DISPLAY_PREFIX, LAST_AUTH_USER_PREFIX};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
 use std::{
@@ -9,7 +12,6 @@ use tauri::State;
 
 const PREFIX: &str = "native-local-account-data:";
 const PENDING_KEY: &str = "native-pending-local-account-deletions";
-const MAX_KEYS: usize = 32_768;
 const CACHE_PREFIXES: &[&str] = &[
     "kt-authorizations:",
     "kt-contact:",
@@ -81,21 +83,14 @@ struct Inventory {
     deleting: bool,
 }
 
-fn hex_id(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 pub(crate) fn is_account_cache_key(key: &str) -> bool {
     CACHE_PREFIXES
         .iter()
-        .any(|prefix| key.strip_prefix(prefix).is_some_and(hex_id))
+        .any(|prefix| key.strip_prefix(prefix).is_some_and(is_hex_256))
 }
 
 fn inventory_key(owner: &str) -> Result<String, String> {
-    if !hex_id(owner) {
+    if !is_hex_256(owner) {
         return Err("Invalid local account owner".into());
     }
     Ok(format!("{PREFIX}{owner}"))
@@ -136,7 +131,7 @@ async fn load(storage: &SecureStorage, owner: &str) -> Result<Option<Inventory>,
         serde_json::from_str(&raw).map_err(|_| "Local account inventory is invalid")?;
     if inventory.version != 1
         || inventory.owner != owner
-        || !hex_id(&inventory.database_id)
+        || !is_hex_256(&inventory.database_id)
         || inventory.keys.len() > MAX_KEYS
         || inventory.keys.iter().any(|key| !valid_inventory_entry(key))
     {
@@ -151,11 +146,12 @@ fn valid_inventory_entry(key: &str) -> bool {
             "native-token-vault:",
             "private_auth_slot_",
             "registration_attempt_",
-            "last-auth-user:",
-            "last-auth-display:",
+            LAST_AUTH_ACCOUNT_PREFIX,
+            LAST_AUTH_USER_PREFIX,
+            LAST_AUTH_DISPLAY_PREFIX,
         ]
         .iter()
-        .any(|prefix| key.strip_prefix(prefix).is_some_and(hex_id))
+        .any(|prefix| key.strip_prefix(prefix).is_some_and(is_hex_256))
 }
 
 async fn save(storage: &SecureStorage, inventory: &Inventory) -> Result<(), String> {
@@ -187,11 +183,11 @@ async fn pending(storage: &SecureStorage) -> Result<BTreeMap<String, Inventory>,
             .sum::<usize>()
             > MAX_KEYS
         || entries.iter().any(|(owner, entry)| {
-            !hex_id(owner)
+            !is_hex_256(owner)
                 || owner != &entry.owner
                 || entry.version != 1
                 || !entry.deleting
-                || !hex_id(&entry.database_id)
+                || !is_hex_256(&entry.database_id)
                 || entry.keys.iter().any(|key| !valid_inventory_entry(key))
         })
     {
@@ -344,7 +340,7 @@ async fn include_account_credentials(
     server_scope: &str,
     inventory: &mut Inventory,
 ) -> Result<(), String> {
-    if !hex_id(server_scope)
+    if !is_hex_256(server_scope)
         || scoped(
             "",
             "qorc-local-account-scope",
@@ -370,7 +366,11 @@ async fn include_account_credentials(
                 .map_err(|error| error.safe_message())?,
         );
     }
-    let last_user = format!("last-auth-user:{server_scope}");
+    let marker_key = format!("{LAST_AUTH_ACCOUNT_PREFIX}{server_scope}");
+    if account_marker_username(storage, &marker_key).await?.as_deref() == Some(session.username()) {
+        inventory.keys.insert(marker_key);
+    }
+    let last_user = format!("{LAST_AUTH_USER_PREFIX}{server_scope}");
     if storage
         .get_text(&last_user)
         .await
@@ -381,9 +381,19 @@ async fn include_account_credentials(
         inventory.keys.insert(last_user);
         inventory
             .keys
-            .insert(format!("last-auth-display:{server_scope}"));
+            .insert(format!("{LAST_AUTH_DISPLAY_PREFIX}{server_scope}"));
     }
     Ok(())
+}
+
+async fn account_marker_username(storage: &SecureStorage, key: &str) -> Result<Option<String>, String> {
+    #[derive(Deserialize)]
+    struct AccountMarker {
+        username: String,
+    }
+    let raw = storage.get_text(key).await.map_err(|error| error.safe_message())?;
+    Ok(raw.and_then(|raw| serde_json::from_str::<AccountMarker>(&raw).ok())
+        .map(|marker| marker.username))
 }
 
 async fn finish(storage: &SecureStorage, inventory: &Inventory) -> Result<(), String> {
@@ -391,6 +401,19 @@ async fn finish(storage: &SecureStorage, inventory: &Inventory) -> Result<(), St
         return Err("Local account deletion was not confirmed".into());
     }
     for key in &inventory.keys {
+        let _marker_guard = if let Some(server_scope) = key.strip_prefix(LAST_AUTH_ACCOUNT_PREFIX) {
+            let guard = crate::commands::storage::SECURE_MUTATION_LOCK.lock().await;
+            let Some(username) = account_marker_username(storage, key).await? else {
+                continue;
+            };
+            let owner = scoped("", "qorc-local-account-scope", server_scope, &[&username]);
+            if owner != inventory.owner {
+                continue;
+            }
+            Some(guard)
+        } else {
+            None
+        };
         storage
             .remove_item(key)
             .await
@@ -478,7 +501,7 @@ async fn clear(state: &AppState, owner: &str, server_scope: &str) -> Result<bool
         return Err("The active account changed".into());
     }
     if let Some(session) = initial.as_ref() {
-        if !hex_id(server_scope)
+        if !is_hex_256(server_scope)
             || scoped(
                 "",
                 "qorc-local-account-scope",

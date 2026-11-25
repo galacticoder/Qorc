@@ -21,28 +21,26 @@ import {
   CONVERSATION_WARM_MESSAGE_COUNT,
   MAX_CONVERSATION_STORED_MESSAGES,
   MAX_FILE_SIZE,
+  MAX_CONVERSATION_BATCH_WRITES,
+  MAX_CONVERSATION_INPUT_MESSAGES,
+  MAX_CONVERSATION_MUTATION_DELETIONS,
+  MAX_EPHEMERAL_LIST_ITEMS,
+  MAX_SEGMENT_INDEX,
+  MAX_DATE_TIMESTAMP,
+  MAX_TIMER_DELAY_MS,
+  SEGMENT_INDEX_DIGITS,
+  CONVERSATION_METADATA_KEYS,
+  SECURE_DB_STORE_BYTES_LENGTH_LIMIT,
+  SECURE_DB_KEY_BYTES_LENGTH_LIMIT,
+  SECURE_DB_ADDITIONAL_DELETES_LENGTH_LIMIT,
+  SECURE_DB_LIMIT,
+  SECURE_DB_MAX_COUNT,
+  SECURE_DB_ENTRY_LENGTH_MINIMUM,
+  SECURE_DB_APPEND_EPHEMERAL_LIST_VALUE_LENGTH_MINIMUM,
 } from '../constants';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEYS, STORAGE_PREFIXES, STORAGE_STORES } from './storage-keys';
 import { bytesToHex } from '../../../shared/bytes.js';
-
-const MAX_CONVERSATION_INPUT_MESSAGES = MAX_CONVERSATION_STORED_MESSAGES + 500;
-const MAX_CONVERSATION_BATCH_WRITES = 511;
-const MAX_EPHEMERAL_LIST_ITEMS = 500;
-const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
-const CONVERSATION_METADATA_KEYS = new Set([
-  'firstSegment',
-  'isPinned',
-  'lastMessage',
-  'lastReadTimestamp',
-  'lastSegment',
-  'peerUsername',
-  'pinnedAt',
-]);
-
-const MAX_SEGMENT_INDEX = 2 ** 40;
-const SEGMENT_INDEX_DIGITS = 13;
 
 function isValidTimestamp(value: unknown): value is number {
   return (
@@ -62,9 +60,8 @@ interface PreparedConversationWrite {
   lastSegment: number;
   last: StoredMessage;
   evictedFileIds: string[];
+  evictedContentIds: string[];
 }
-
-const MAX_CONVERSATION_MUTATION_DELETIONS = 2_048;
 
 function isFileMessage(message: StoredMessage): boolean {
   return (
@@ -191,7 +188,7 @@ export class SecureDB {
     try {
       if (
         !store || !key ||
-        storeBytes.length > 256 || keyBytes.length > 256 ||
+        storeBytes.length > SECURE_DB_STORE_BYTES_LENGTH_LIMIT || keyBytes.length > SECURE_DB_KEY_BYTES_LENGTH_LIMIT ||
         /[\u0000-\u001f\u007f-\u009f]/.test(store) ||
         /[\u0000-\u001f\u007f-\u009f]/.test(key)
       ) {
@@ -600,10 +597,13 @@ export class SecureDB {
     }
 
     const retainedIds = new Set(prepared.map((message) => message.id!));
+    const evicted = msgs.filter((message) => !retainedIds.has(message.id!));
     const evictedFileIds = Array.from(new Set(
-      msgs
-        .filter((message) => isFileMessage(message) && !retainedIds.has(message.id!))
-        .map((message) => message.id!)
+      evicted.filter(isFileMessage).map((message) => message.id!)
+    ));
+    const retainedContentIds = new Set(prepared.map((message) => message.secureContentId));
+    const evictedContentIds = evicted.flatMap(({ secureContentId }) => (
+      secureContentId && !retainedContentIds.has(secureContentId) ? [secureContentId] : []
     ));
     return {
       peer,
@@ -620,6 +620,7 @@ export class SecureDB {
       lastSegment,
       last: prepared[prepared.length - 1],
       evictedFileIds,
+      evictedContentIds,
     };
   }
 
@@ -634,7 +635,7 @@ export class SecureDB {
       .map(({ peer }) => peer);
     if (
       writes.length > MAX_CONVERSATION_BATCH_WRITES ||
-      writes.length + relationshipPeers.length + additionalWrites.length + additionalDeletes.length + 1 > 512
+      writes.length + relationshipPeers.length + additionalWrites.length + additionalDeletes.length + 1 > SECURE_DB_ADDITIONAL_DELETES_LENGTH_LIMIT
     ) {
       throw new Error('Conversation write batch limit exceeded');
     }
@@ -658,14 +659,16 @@ export class SecureDB {
       throw new Error('Conversation relationship marker collision');
     }
     const evictedFileIds = Array.from(new Set(writes.flatMap(({ evictedFileIds: ids }) => ids)));
+    const evictedContentIds = Array.from(new Set(writes.flatMap(({ evictedContentIds: ids }) => ids)));
     if (
       evictedFileIds.length > MAX_CONVERSATION_MUTATION_DELETIONS ||
+      evictedContentIds.length > MAX_CONVERSATION_MUTATION_DELETIONS ||
       evictedFileIds.some((fileId) => (
         additionalTargets.has(`files\0${fileId}`) ||
         additionalDeleteTargets.has(`files\0${fileId}`)
       ))
     ) {
-      throw new Error('Conversation file cleanup limit exceeded');
+      throw new Error('Conversation cleanup limit exceeded');
     }
 
     let encryptedMetadata: Uint8Array | null = null;
@@ -733,6 +736,7 @@ export class SecureDB {
           ...evictedFileIds.map((key) => ({ store: STORAGE_STORES.FILES, key })),
           ...additionalDeletes,
         ],
+        evictedContentIds.length ? { evict: evictedContentIds } : undefined,
       );
       for (const { peer, segments, deletedSegments } of writes) {
         for (const { index, signature } of segments) {
@@ -1350,7 +1354,7 @@ export class SecureDB {
   }
 
   // Load conversation messages
-  async loadConversationMessages(peerUsername: string, limit = 50, offset = 0): Promise<StoredMessage[]> {
+  async loadConversationMessages(peerUsername: string, limit = SECURE_DB_LIMIT, offset = 0): Promise<StoredMessage[]> {
     if (
       !isCanonicalAuthUsername(peerUsername) || peerUsername === this.username ||
       !Number.isSafeInteger(limit) || limit <= 0 || limit > CONVERSATION_SEGMENT_SIZE ||
@@ -1483,7 +1487,7 @@ export class SecureDB {
     }
   }
 
-  // Delete the conversation, its compact index entry, and locally retained file payloads
+  // Delete the conversation and its locally retained text and file payloads together.
   async deleteConversationMessages(peerUsername: string): Promise<number> {
     if (!isCanonicalAuthUsername(peerUsername) || peerUsername === this.username) {
       throw new Error('Invalid conversation peer');
@@ -1500,6 +1504,9 @@ export class SecureDB {
       const fileIds = conv
         .filter(isFileMessage)
         .map((message) => message.id!);
+      const nativeContentIds = [...new Set(conv.flatMap((message) => (
+        message.secureContentId ? [message.secureContentId] : []
+      )))];
       const layout = await this.conversationLayout(peerUsername);
       const segmentKeys: string[] = [];
       if (layout) {
@@ -1514,6 +1521,7 @@ export class SecureDB {
             ...segmentKeys.map((key) => ({ store: STORAGE_STORES.MESSAGE_CONVERSATIONS, key })),
             ...fileIds.map((key) => ({ store: STORAGE_STORES.FILES, key })),
           ],
+          { delete: nativeContentIds },
         );
       } finally {
         encryptedMetadata.fill(0);
@@ -1528,6 +1536,32 @@ export class SecureDB {
   async loadUsers(): Promise<StoredUser[]> {
     const users = (await this.loadEncryptedArray<StoredUser>(STORAGE_KEYS.USERS, 'load-users')) ?? [];
     return normalizeKnownUsers(users, this.username);
+  }
+
+  async listLinkPreviewCacheKeys(): Promise<string[]> {
+    return (await this.kv()).keysForStore(STORAGE_STORES.LINK_PREVIEWS);
+  }
+
+  async removeUnindexedLinkPreviews(keys: string[]): Promise<void> {
+    await (await this.kv()).deleteMany(STORAGE_STORES.LINK_PREVIEWS, keys);
+  }
+
+  async mutateLinkPreviewCache(
+    index: unknown,
+    deletedKeys: string[],
+    record?: { key: string; value: unknown },
+  ): Promise<void> {
+    const store = STORAGE_STORES.LINK_PREVIEWS;
+    const indexKey: string = STORAGE_KEYS.LINK_PREVIEW_INDEX;
+    const writes = [{ store, key: indexKey, value: await this.encryptData(index, store, indexKey) }];
+    try {
+      if (record) {
+        writes.push({ store, key: record.key, value: await this.encryptData(record.value, store, record.key) });
+      }
+      await (await this.kv()).mutate(writes, deletedKeys.map(key => ({ store, key })));
+    } finally {
+      for (const write of writes) write.value.fill(0);
+    }
   }
 
   // Store ephemeral data
@@ -1610,12 +1644,12 @@ export class SecureDB {
   }
 
   // Append to ephemeral list
-  async appendEphemeralList(storeName: string, listKey: string, entry: number | string, maxCount = 500, ttl?: number): Promise<(number | string)[]> {
+  async appendEphemeralList(storeName: string, listKey: string, entry: number | string, maxCount = SECURE_DB_MAX_COUNT, ttl?: number): Promise<(number | string)[]> {
     if (!Number.isSafeInteger(maxCount) || maxCount <= 0 || maxCount > MAX_EPHEMERAL_LIST_ITEMS) {
       throw new Error('Invalid ephemeral list limit');
     }
     const validEntry = (
-      (typeof entry === 'string' && entry.length > 0 && entry.length <= 256 && !/[\u0000-\u001f\u007f]/.test(entry)) ||
+      (typeof entry === 'string' && entry.length > 0 && entry.length <= SECURE_DB_ENTRY_LENGTH_MINIMUM && !/[\u0000-\u001f\u007f]/.test(entry)) ||
       (typeof entry === 'number' && Number.isSafeInteger(entry))
     );
     if (!validEntry) throw new Error('Invalid ephemeral list entry');
@@ -1628,7 +1662,7 @@ export class SecureDB {
       const list = (existing ?? []) as unknown[];
       if (list.length > maxCount || list.some((value) => (
         !(
-          (typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)) ||
+          (typeof value === 'string' && value.length > 0 && value.length <= SECURE_DB_APPEND_EPHEMERAL_LIST_VALUE_LENGTH_MINIMUM && !/[\u0000-\u001f\u007f]/.test(value)) ||
           (typeof value === 'number' && Number.isSafeInteger(value))
         )
       ))) {
@@ -1715,22 +1749,29 @@ export class SecureDB {
         const kv = await this.kv();
         const candidates = await kv.selectorsByStorePrefix(STORAGE_PREFIXES.EPHEMERAL);
         const toDeleteByStore = new Map<string, string[]>();
+        let unreadableRecords = 0;
 
         for (const { store, key } of candidates) {
-          const value = await kv.getBinary(store, key);
-          if (!value) continue;
+          let value: Uint8Array | null = null;
+          let data: EphemeralData;
           try {
-            const data = this.validateEphemeralData(await this.decryptData(value, store, key));
-            if (now >= data.expiresAt && data.autoDelete) {
-              const arr = toDeleteByStore.get(store) || [];
-              arr.push(key);
-              toDeleteByStore.set(store, arr);
-              if (arr.length >= SECURE_DB_MAX_EPHEMERAL_BATCH) {
-                await kv.deleteMany(store, arr.splice(0, arr.length));
-              }
-            }
+            value = await kv.getBinary(store, key);
+            if (!value) continue;
+            data = this.validateEphemeralData(await this.decryptData(value, store, key));
+          } catch {
+            if (this.disposed) return;
+            unreadableRecords += 1;
+            continue;
           } finally {
-            value.fill(0);
+            value?.fill(0);
+          }
+          if (now >= data.expiresAt && data.autoDelete) {
+            const keys = toDeleteByStore.get(store) ?? [];
+            keys.push(key);
+            toDeleteByStore.set(store, keys);
+            if (keys.length >= SECURE_DB_MAX_EPHEMERAL_BATCH) {
+              await kv.deleteMany(store, keys.splice(0, keys.length));
+            }
           }
         }
 
@@ -1738,6 +1779,9 @@ export class SecureDB {
           if (keys.length) {
             await kv.deleteMany(store, keys);
           }
+        }
+        if (unreadableRecords > 0) {
+          throw new Error('Some temporary records could not be checked for expiry');
         }
       });
     } finally {

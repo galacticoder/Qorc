@@ -6,7 +6,14 @@ import {
   isCanonicalAuthUsername,
   sanitizeMessageId,
 } from "../../lib/sanitizers";
-import { MAX_TOTAL_CHUNKS, DEFAULT_CHUNK_SIZE_SMALL, MAX_FILE_SIZE } from '../../lib/constants';
+import {
+  MAX_TOTAL_CHUNKS,
+  DEFAULT_CHUNK_SIZE_SMALL,
+  MAX_FILE_SIZE,
+  FILE_CHUNK_KEYS,
+  CHUNK_VALIDATION_PAYLOAD_FILENAME_LENGTH_MINIMUM,
+  CHUNK_VALIDATION_PAYLOAD_CHUNK_MAC_LENGTH_EXPECTED,
+} from '../../lib/constants';
 import { SignalType } from '../../lib/types/signal-types';
 import { enforceConcurrentLimit, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { FileChunkPayload, ExtendedFileState } from "../../lib/types/file-types";
@@ -33,25 +40,6 @@ export interface ChunkValidationResult {
 
 export type NewTransferValidation = 'valid' | 'busy' | 'invalid';
 
-const FILE_CHUNK_KEYS = [
-  'chunkData',
-  'chunkIndex',
-  'chunkMac',
-  'chunkSize',
-  'envelope',
-  'fileId',
-  'fileSize',
-  'fileTransferId',
-  'filename',
-  'from',
-  'isLastChunk',
-  'messageId',
-  'recoveryProbe',
-  'timestamp',
-  'to',
-  'totalChunks',
-  'type',
-] as const;
 
 // Validate incoming payload structure
 export const validatePayload = (payload: any): payload is FileChunkPayload => {
@@ -69,12 +57,12 @@ export const validatePayload = (payload: any): payload is FileChunkPayload => {
     payload.fileTransferId === payload.fileId &&
     typeof payload.filename === 'string' &&
     payload.filename.length > 0 &&
-    payload.filename.length <= 128 &&
+    payload.filename.length <= CHUNK_VALIDATION_PAYLOAD_FILENAME_LENGTH_MINIMUM &&
     sanitizeFilename(payload.filename, 128) === payload.filename &&
     typeof payload.fileSize === 'number' &&
     typeof payload.chunkSize === 'number' &&
     typeof payload.chunkMac === 'string' &&
-    payload.chunkMac.length === 44 &&
+    payload.chunkMac.length === CHUNK_VALIDATION_PAYLOAD_CHUNK_MAC_LENGTH_EXPECTED &&
     /^[A-Za-z0-9+/]{43}=$/.test(payload.chunkMac) &&
     typeof payload.isLastChunk === 'boolean' &&
     payload.isLastChunk === (chunkIndex === totalChunks - 1) &&

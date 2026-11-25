@@ -1,5 +1,10 @@
 import type { Message } from '../../components/chat/messaging/types';
-import { MAX_LOCAL_EMOJI_LENGTH } from '../constants';
+import {
+  MAX_LOCAL_EMOJI_LENGTH,
+  CONTROL_CLOCK_SKEW_MS,
+  CONTROL_OPERATION_ID_RE,
+  MAX_CONTROL_OPERATION_TIMESTAMP_MS,
+} from '../constants';
 import {
   hasPrototypePollutionKeys,
   isCanonicalAuthUsername,
@@ -8,8 +13,6 @@ import {
   sanitizeNonEmptyText,
 } from '../sanitizers';
 
-const CONTROL_OPERATION_ID_RE = /^op:([0-9]{13}):([a-f0-9]{32})$/;
-const CONTROL_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const compareActors = (left: { actor: string }, right: { actor: string }): number => (
   left.actor === right.actor ? 0 : left.actor < right.actor ? -1 : 1
 );
@@ -26,7 +29,7 @@ export type MessageControlOutcome = Readonly<{
 }>;
 
 export function createControlOperationId(now = Date.now()): string {
-  if (!Number.isSafeInteger(now) || now <= 0 || now > 9_999_999_999_999) {
+  if (!Number.isSafeInteger(now) || now <= 0 || now > MAX_CONTROL_OPERATION_TIMESTAMP_MS) {
     throw new Error('Invalid control operation timestamp');
   }
   return `op:${String(now).padStart(13, '0')}:${crypto.randomUUID().replace(/-/g, '')}`;

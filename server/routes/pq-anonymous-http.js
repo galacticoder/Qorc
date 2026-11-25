@@ -51,6 +51,7 @@ import {
   ANONYMOUS_HTTP_RESPONSE_SIGNATURE_OFFSET,
   ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES,
   ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES,
+  ANONYMOUS_HTTP_RESPONSE_TAG_UPDATE_BYTES,
   ANONYMOUS_HTTP_RESPONSE_TAG_OFFSET,
   ANONYMOUS_HTTP_WIRE_VERSION,
 } from '../../shared/anonymous-http-layout.js';
@@ -86,6 +87,8 @@ const REQUEST_BODY_PARSE_TYPES = new Set([
 ]);
 
 const OPERATION_POLICY = Object.freeze({
+  'spool/tag-index-base': Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 3, responseBytes: ANONYMOUS_HTTP_RESPONSE_TAG_INDEX_BYTES }),
+  'spool/tag-index-update': Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 7, responseBytes: ANONYMOUS_HTTP_RESPONSE_TAG_UPDATE_BYTES }),
   [AVATAR_BLOB_GET_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 2, responseBytes: ANONYMOUS_HTTP_RESPONSE_AVATAR_BYTES }),
   [AVATAR_BLOB_PUT_AUDIENCE]: Object.freeze({ requestClass: 2, requestBytes: ANONYMOUS_HTTP_REQUEST_LARGE_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),
   [AVATAR_POOL_AUDIENCE]: Object.freeze({ requestClass: 1, requestBytes: ANONYMOUS_HTTP_REQUEST_SMALL_BYTES, responseClass: 1, responseBytes: ANONYMOUS_HTTP_RESPONSE_SMALL_BYTES }),

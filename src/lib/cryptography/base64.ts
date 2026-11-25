@@ -2,12 +2,13 @@
  * Base64 Encoding/Decoding Utilities
  */
 
+import { BASE64_CHUNK_SIZE } from '../constants';
 const textEncoder = new TextEncoder();
 
 export class Base64 {
   static arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
     const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    const chunkSize = 8192;
+    const chunkSize = BASE64_CHUNK_SIZE;
     if (bytes.length <= chunkSize) {
       return btoa(String.fromCharCode.apply(null, Array.from(bytes)));
     }

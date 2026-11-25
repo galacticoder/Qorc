@@ -10,7 +10,17 @@ import { PostQuantumAEAD } from './aead';
 import { PostQuantumRandom } from './random';
 import { SecureMemory } from './secure-memory';
 import { HashingService } from './hashing';
-import { CERT_CLOCK_SKEW_MS, HYBRID_ENVELOPE_MAX_AGE_MS, HYBRID_ENVELOPE_MAX_OUTER_CIPHERTEXT_BYTES, HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES } from '../constants';
+import {
+  CERT_CLOCK_SKEW_MS,
+  HYBRID_ENVELOPE_MAX_AGE_MS,
+  HYBRID_ENVELOPE_MAX_OUTER_CIPHERTEXT_BYTES,
+  HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES,
+  HYBRID_ROUTING_TYPES,
+  INNER_SALT_BYTES,
+  HYBRID_ALGORITHMS,
+  OUTER_SALT_BYTES,
+  OUTER_TAG_BYTES,
+} from '../constants';
 import type {
   DecryptOptions,
   RoutingHeader,
@@ -40,16 +50,6 @@ import { concatUint8Arrays } from '../../../shared/bytes.js';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
-const OUTER_SALT_BYTES = 32;
-const OUTER_TAG_BYTES = 16;
-const INNER_SALT_BYTES = 32;
-const HYBRID_ROUTING_TYPES = new Set<string>(['libsignal-message', SignalType.FILE_MESSAGE_CHUNK]);
-const HYBRID_ALGORITHMS = Object.freeze({
-  outer: 'ML-KEM-1024',
-  inner: 'X25519',
-  aead: 'AES-256-GCM+XChaCha20-Poly1305',
-  mac: 'BLAKE3-256'
-});
 
 type HybridPublicHeader = Pick<HybridEnvelope, 'version' | 'routing' | 'algorithms' | 'kemCiphertext'>;
 
@@ -436,6 +436,7 @@ export class Hybrid {
     options?: DecryptOptions
   ): Promise<HybridDecryptionResult> {
     let stage = 'sender-key-validation';
+    let payload: Uint8Array | undefined;
     const senderPublic = checkUint8Array(
       ownKeys?.senderDilithiumPublicKey,
       'senderDilithiumPublicKey',
@@ -445,9 +446,8 @@ export class Hybrid {
       stage = 'native-envelope-decryption';
       const native = await account.decryptHybrid(envelope, senderPublicBase64);
       stage = 'native-plaintext-decoding';
-      const payload = Base64.base64ToUint8Array(native.payloadBase64);
+      payload = Base64.base64ToUint8Array(native.payloadBase64);
       if (payload.length !== native.routing.size || payload.length > HYBRID_ENVELOPE_MAX_PLAINTEXT_BYTES) {
-        payload.fill(0);
         throw new Error('Native hybrid plaintext length mismatch');
       }
       let payloadText: string | undefined;
@@ -468,6 +468,7 @@ export class Hybrid {
         senderDilithiumPublicKey: senderPublicBase64,
       };
     } catch {
+      payload?.fill(0);
       throw new Error(`${stage}: hybrid receive failed`);
     } finally {
       senderPublic.fill(0);

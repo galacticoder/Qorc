@@ -1,5 +1,6 @@
 // Transport Abstraction Layer
 
+import { MAX_MESSAGE_FRAME_SIZE, FRAME_OVERHEAD, NOISE_FRAME_OVERHEAD } from '../constants';
 import { SignalType } from '../types/signal-types';
 import {
   POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES,
@@ -265,10 +266,6 @@ export function decodeFrame(frame: Uint8Array): EncryptedFrame {
 }
 
 // Frame constants
-export const TRANSPORT_FRAME_HEADER_SIZE = 12;
-export const FRAME_OVERHEAD = TRANSPORT_FRAME_HEADER_SIZE + HASH_OUTPUT_BYTES;
-export const NOISE_FRAME_OVERHEAD = FRAME_OVERHEAD + POST_QUANTUM_AEAD_CIPHERTEXT_OVERHEAD_BYTES;
-
-// Maximum frame sizes
-export const MAX_MESSAGE_FRAME_SIZE = 4 * 1024 * 1024;
-export const MAX_CALL_FRAME_SIZE = 2 * 1024 * 1024;
+export { TRANSPORT_FRAME_HEADER_SIZE } from "../constants/transport";
+export { FRAME_OVERHEAD } from "../constants/transport";
+export { NOISE_FRAME_OVERHEAD } from "../constants/transport";

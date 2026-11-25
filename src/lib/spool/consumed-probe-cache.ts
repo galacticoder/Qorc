@@ -1,3 +1,9 @@
+import {
+  CONSUMED_PROBE_TTL_MS,
+  MAX_CONSUMED_PROBES,
+  MAX_SPOOL_PROBE_CACHE_ACCOUNTS,
+  MAX_SPOOL_PROBE_CACHE_CHARS,
+} from '../constants';
 import { isSpoolProbeHex } from '../../../shared/spool-tag-protocol.js';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
@@ -5,11 +11,6 @@ import { canonicalAuthUsername, hasExactKeys, isPlainObject } from '../sanitizer
 import { getCurrentLocalAccountScope } from '../security/local-account-scope';
 import { deriveScopedStorageKey } from '../security/scoped-storage-key';
 import { storage } from '../tauri-bindings';
-
-const CONSUMED_PROBE_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_CONSUMED_PROBES = 32_768;
-const MAX_SERIALIZED_CHARS = 4 * 1024 * 1024;
-const MAX_ACCOUNT_STATES = 4;
 
 type ProbeEntries = Map<string, number>;
 
@@ -23,7 +24,7 @@ interface AccountState {
 export interface ConsumedSpoolProbeCache {
   readonly scope: string;
   readonly probes: ReadonlySet<string>;
-  remember(probes: readonly string[]): Promise<void>;
+  remember(probes: readonly string[], signal?: AbortSignal): Promise<void>;
 }
 
 const states = new Map<string, AccountState>();
@@ -43,7 +44,7 @@ function prune(entries: ProbeEntries, now: number): void {
 function parseSnapshot(raw: string | null, now: number): ProbeEntries {
   const entries: ProbeEntries = new Map();
   if (raw === null) return entries;
-  if (raw.length === 0 || raw.length > MAX_SERIALIZED_CHARS) {
+  if (raw.length === 0 || raw.length > MAX_SPOOL_PROBE_CACHE_CHARS) {
     throw new Error('Consumed spool probe cache is corrupt');
   }
   try {
@@ -79,15 +80,13 @@ function serializeSnapshot(entries: ProbeEntries): string {
     entries: [...entries.entries()]
       .sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0])),
   });
-  if (serialized.length > MAX_SERIALIZED_CHARS) {
+  if (serialized.length > MAX_SPOOL_PROBE_CACHE_CHARS) {
     throw new Error('Consumed spool probe cache is too large');
   }
   return serialized;
 }
 
-async function cacheKey(owner: string): Promise<string> {
-  const normalized = canonicalAuthUsername(owner, 'spool probe cache owner');
-  const accountScope = await getCurrentLocalAccountScope(normalized);
+function cacheKey(accountScope: string): string {
   return deriveScopedStorageKey(
     STORAGE_PREFIXES.SPOOL_CONSUMED_PROBES,
     STORAGE_KEY_DOMAINS.SPOOL_CONSUMED_PROBES,
@@ -108,7 +107,7 @@ function stateFor(key: string): AccountState {
     states.delete(key);
   }
   states.set(key, state);
-  while (states.size > MAX_ACCOUNT_STATES) {
+  while (states.size > MAX_SPOOL_PROBE_CACHE_ACCOUNTS) {
     const oldest = states.keys().next().value;
     if (oldest === undefined || oldest === key) break;
     states.delete(oldest);
@@ -134,8 +133,10 @@ async function rememberInState(
   key: string,
   state: AccountState,
   probes: readonly string[],
+  signal?: AbortSignal,
 ): Promise<void> {
   await loadState(key, state);
+  signal?.throwIfAborted();
   const now = Date.now();
   prune(state.entries, now);
   for (const probe of probes) {
@@ -147,6 +148,7 @@ async function rememberInState(
   }
   prune(state.entries, now);
   const write = state.writeTail.catch(() => undefined).then(async () => {
+    signal?.throwIfAborted();
     prune(state.entries, Date.now());
     const serialized = serializeSnapshot(state.entries);
     if (!await storage.set(key, serialized) || await storage.get(key) !== serialized) {
@@ -160,13 +162,18 @@ async function rememberInState(
 export async function loadConsumedSpoolProbeCache(
   owner: string,
 ): Promise<ConsumedSpoolProbeCache> {
-  const key = await cacheKey(owner);
+  const normalized = canonicalAuthUsername(owner, 'spool probe cache owner');
+  return loadConsumedSpoolProbeCacheForScope(await getCurrentLocalAccountScope(normalized));
+}
+
+export async function loadConsumedSpoolProbeCacheForScope(accountScope: string): Promise<ConsumedSpoolProbeCache> {
+  const key = cacheKey(accountScope);
   const state = stateFor(key);
   await loadState(key, state);
   prune(state.entries, Date.now());
   return {
     scope: key,
     probes: new Set(state.entries.keys()),
-    remember: (probes) => rememberInState(key, state, probes),
+    remember: (probes, signal) => rememberInState(key, state, probes, signal),
   };
 }

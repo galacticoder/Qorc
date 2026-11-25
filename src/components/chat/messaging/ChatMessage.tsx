@@ -1,3 +1,8 @@
+import {
+  CHAT_MESSAGE_TIMEOUT_MS,
+  CHAT_MESSAGE_HANDLE_DOWNLOAD_TIMEOUT_MS,
+  CHAT_MESSAGE_GROUP_INTERVAL_MS,
+} from '../../../lib/constants';
 import React, { useRef, useMemo, useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
 import { format } from "date-fns";
@@ -94,7 +99,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
     if (before.sender !== after.sender || before.recipient !== after.recipient) return false;
     if (!(before.timestamp instanceof Date) || !(after.timestamp instanceof Date)) return false;
     const gap = after.timestamp.getTime() - before.timestamp.getTime();
-    return Number.isFinite(gap) && gap >= 0 && gap <= 3 * 60 * 1000;
+    return Number.isFinite(gap) && gap >= 0 && gap <= CHAT_MESSAGE_GROUP_INTERVAL_MS;
   };
   const groupedBefore = sameRun(previousMessage, message);
   const groupedAfter = sameRun(message, nextMessage);
@@ -110,7 +115,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
   useEffect(() => setShowSentTime(false), [message.id]);
   useEffect(() => {
     if (!showSentTime) return;
-    const timeout = window.setTimeout(() => setShowSentTime(false), 3000);
+    const timeout = window.setTimeout(() => setShowSentTime(false), CHAT_MESSAGE_TIMEOUT_MS);
     return () => window.clearTimeout(timeout);
   }, [showSentTime, message.id]);
   const { openPicker, openPickerOrigin, closePicker, isPickerOpen } = useEmojiPicker();
@@ -257,7 +262,7 @@ export const ChatMessage = React.memo<ChatMessageProps>(({ message, smartReceipt
         downloadCooldownRef.current = null;
         pendingDownloadRef.current = false;
         setIsDownloaded(false);
-      }, 3000);
+      }, CHAT_MESSAGE_HANDLE_DOWNLOAD_TIMEOUT_MS);
     } catch (error) {
       if (generation !== downloadGenerationRef.current) return;
       console.error('Failed to download file:', error);

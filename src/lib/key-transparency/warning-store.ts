@@ -1,3 +1,4 @@
+import { KEY_TRANSPARENCY_MAX_WARNINGS, KEY_TRANSPARENCY_WARNING_KEYS } from '../constants';
 import { useEffect, useState } from 'react';
 
 import {
@@ -23,15 +24,6 @@ import {
 } from './store-serialization';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
-
-const WARNING_KEYS = [
-  'activatesAtEpoch',
-  'label',
-  'peer',
-  'pendingRootCommitment',
-  'version',
-];
-const MAX_WARNINGS = 2048;
 
 export interface KeyTransparencyRecoveryWarning {
   peer: string;
@@ -84,7 +76,7 @@ function parseWarning(value: unknown): KeyTransparencyRecoveryWarning {
     corruptWarningStore('Stored key-transparency warning is corrupt');
   }
   if (
-    !exactPlainObject(warning, WARNING_KEYS) ||
+    !exactPlainObject(warning, KEY_TRANSPARENCY_WARNING_KEYS) ||
     peer !== warning.peer ||
     !isKeyTransparencyLabel(warning.label) ||
     !Number.isSafeInteger(warning.version) ||
@@ -101,7 +93,7 @@ function parseWarningStore(raw: string | null): KeyTransparencyRecoveryWarning[]
   const result = parseProtocolCollectionStore(raw, {
     protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_WARNING_STORE,
     collectionKey: 'warnings',
-    maxEntries: MAX_WARNINGS,
+    maxEntries: KEY_TRANSPARENCY_MAX_WARNINGS,
     parseEntry: parseWarning,
     corrupt: corruptWarningStore,
     parseError: 'Stored key-transparency warnings are corrupt',
@@ -189,7 +181,7 @@ export const keyTransparencyWarningStore = {
       } else {
         warnings.delete(normalized);
       }
-      if (warnings.size > MAX_WARNINGS) throw new Error('Too many key-transparency warnings');
+      if (warnings.size > KEY_TRANSPARENCY_MAX_WARNINGS) throw new Error('Too many key-transparency warnings');
       await persist(expectedGeneration);
       emit();
     });

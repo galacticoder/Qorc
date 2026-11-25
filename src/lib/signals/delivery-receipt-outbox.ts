@@ -1,6 +1,15 @@
+import {
+  DELIVERY_RECEIPT_CLOCK_SKEW_MS,
+  DELIVERY_RECEIPT_OUTBOX_RETRY_INTERVAL_MS,
+  DURABLE_RECEIPT_OUTBOX_TTL_MS,
+  MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES,
+  MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES_PER_PEER,
+  SENT_RECEIPT_RETENTION_MS,
+} from '../constants';
 import { isCanonicalAuthUsername, sanitizeMessageId } from '../sanitizers';
 import { receiptBatcher } from '../../hooks/message-handling/receipt-batcher';
 import { EventType } from '../types/event-types';
+import { blockingSystem } from '../blocking/blocking-system';
 
 type DeliveryReceiptEntry = {
   peerUsername: string;
@@ -13,13 +22,6 @@ type DeliveryReceiptPersistence = {
   load: () => Promise<unknown>;
   save: (entries: DeliveryReceiptEntry[]) => Promise<void>;
 };
-
-const MAX_OUTBOX_ENTRIES = 500;
-const MAX_OUTBOX_ENTRIES_PER_PEER = 64;
-const DURABLE_RECEIPT_OUTBOX_TTL_MS = 12 * 60 * 60 * 1000;
-const SENT_RECEIPT_RETENTION_MS = 30 * 60 * 1000;
-const RETRY_INTERVAL_MS = 30 * 1000;
-const CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 function entryKey(peerUsername: string, messageId: string): string {
   return `${peerUsername.length}:${peerUsername}${messageId}`;
@@ -37,12 +39,12 @@ function isValidEntry(value: unknown, now = Date.now()): value is DeliveryReceip
     sanitizeMessageId(candidate.messageId) !== candidate.messageId ||
     !Number.isSafeInteger(candidate.createdAt) ||
     candidate.createdAt! <= 0 ||
-    candidate.createdAt! > now + CLOCK_SKEW_MS
+    candidate.createdAt! > now + DELIVERY_RECEIPT_CLOCK_SKEW_MS
   ) return false;
   if (candidate.sentAt !== undefined && (
     !Number.isSafeInteger(candidate.sentAt) ||
     candidate.sentAt < candidate.createdAt! ||
-    candidate.sentAt > now + CLOCK_SKEW_MS
+    candidate.sentAt > now + DELIVERY_RECEIPT_CLOCK_SKEW_MS
   )) return false;
   return true;
 }
@@ -61,8 +63,8 @@ class DeliveryReceiptOutbox {
   private restoreRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    receiptBatcher.addFlushListener((account, peer, deliveredIds) => {
-      void this.markSent(account, peer, deliveredIds);
+    receiptBatcher.addFlushListener((account, peer, deliveredIds, readIds) => {
+      void this.markSent(account, peer, [...deliveredIds, ...readIds]);
     });
   }
 
@@ -105,6 +107,7 @@ class DeliveryReceiptOutbox {
     this.persistence = persistence;
     this.entries.clear();
     this.persistenceTail = Promise.resolve();
+    this.clearRetryTimer();
     this.clearRestoreRetryTimer();
     receiptBatcher.setActiveAccount(null);
     if (this.activeAccount === account) this.startRestore();
@@ -123,7 +126,7 @@ class DeliveryReceiptOutbox {
       if (!this.isCurrent(account, generation, persistence)) return;
 
       const candidates = Array.isArray(raw) ? raw : null;
-      let valid = candidates !== null && candidates.length <= MAX_OUTBOX_ENTRIES;
+      let valid = candidates !== null && candidates.length <= MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES;
       const restored = new Map<string, DeliveryReceiptEntry>();
       if (valid && candidates) {
         for (const candidate of candidates) {
@@ -146,7 +149,7 @@ class DeliveryReceiptOutbox {
       }
 
       this.entries = restored;
-      const pruned = this.pruneExpired();
+      const pruned = this.pruneEntries();
       this.restoreState = 'ready';
       if (pruned) await this.persistSnapshot();
       if (!this.isCurrent(account, generation, persistence)) return;
@@ -171,7 +174,7 @@ class DeliveryReceiptOutbox {
       if (this.restoreState === 'failed' && this.isCurrent(account, generation, persistence)) {
         this.startRestore();
       }
-    }, RETRY_INTERVAL_MS);
+    }, DELIVERY_RECEIPT_OUTBOX_RETRY_INTERVAL_MS);
   }
 
   private isCurrent(
@@ -185,13 +188,13 @@ class DeliveryReceiptOutbox {
       this.generation === generation;
   }
 
-  private pruneExpired(now = Date.now()): boolean {
+  private pruneEntries(now = Date.now()): boolean {
     let changed = false;
     for (const [key, entry] of this.entries) {
       const expired = entry.sentAt !== undefined
         ? now - entry.sentAt >= SENT_RECEIPT_RETENTION_MS
         : now - entry.createdAt >= DURABLE_RECEIPT_OUTBOX_TTL_MS;
-      if (expired) {
+      if (expired || blockingSystem.isBlockedSync(entry.peerUsername)) {
         this.entries.delete(key);
         changed = true;
       }
@@ -214,12 +217,12 @@ class DeliveryReceiptOutbox {
     for (const entry of this.entries.values()) {
       if (entry.peerUsername === peerUsername) peerCount += 1;
     }
-    while (peerCount >= MAX_OUTBOX_ENTRIES_PER_PEER && this.evictSentHistory(peerUsername)) {
+    while (peerCount >= MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES_PER_PEER && this.evictSentHistory(peerUsername)) {
       peerCount -= 1;
     }
-    while (this.entries.size >= MAX_OUTBOX_ENTRIES && this.evictSentHistory()) {
+    while (this.entries.size >= MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES && this.evictSentHistory()) {
     }
-    return peerCount < MAX_OUTBOX_ENTRIES_PER_PEER && this.entries.size < MAX_OUTBOX_ENTRIES;
+    return peerCount < MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES_PER_PEER && this.entries.size < MAX_DELIVERY_RECEIPT_OUTBOX_ENTRIES;
   }
 
   private persistSnapshot(): Promise<void> {
@@ -242,20 +245,35 @@ class DeliveryReceiptOutbox {
     return write;
   }
 
-  private async checkReady(account: string): Promise<void> {
-    if (!isCanonicalAuthUsername(account) || account !== this.activeAccount || account !== this.persistenceOwner) {
+  private async checkReady(account: string): Promise<number> {
+    const persistence = this.persistence;
+    const generation = this.generation;
+    if (!isCanonicalAuthUsername(account) || !persistence || !this.isCurrent(account, generation, persistence)) {
       throw new Error('Delivery receipt account is not current');
     }
     await this.restorePromise;
-    if (account !== this.activeAccount || this.restoreState !== 'ready') {
+    if (!this.isCurrent(account, generation, persistence) || this.restoreState !== 'ready') {
       throw new Error('Delivery receipt outbox is unavailable');
     }
+    return generation;
+  }
+
+  async purgePeer(account: string, peerUsername: string): Promise<void> {
+    const generation = await this.checkReady(account);
+    if (generation !== this.generation) throw new Error('Delivery receipt account changed');
+    for (const [key, entry] of this.entries) {
+      if (entry.peerUsername === peerUsername) this.entries.delete(key);
+    }
+
+    await this.persistSnapshot();
+    this.scheduleRetry();
   }
 
   async queueDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
     if (!isCanonicalAuthUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
-    await this.checkReady(account);
-    this.pruneExpired();
+    const generation = await this.checkReady(account);
+    if (generation !== this.generation || blockingSystem.isBlockedSync(peerUsername)) return false;
+    this.pruneEntries();
     const key = entryKey(peerUsername, messageId);
     if (!this.hasCapacity(peerUsername, key)) return false;
     const existing = this.entries.get(key);
@@ -265,42 +283,43 @@ class DeliveryReceiptOutbox {
       messageId,
       createdAt: existing?.createdAt ?? Date.now()
     });
-    await this.persistSnapshot();
-    if (account !== this.activeAccount) return false;
-    receiptBatcher.queueDelivery(account, peerUsername, messageId);
-    this.scheduleRetry();
-    return true;
+    return this.queuePersistedDelivery(account, peerUsername, messageId, generation);
   }
 
   async requeueKnownDelivery(account: string, peerUsername: string, messageId: string): Promise<boolean> {
     if (!isCanonicalAuthUsername(peerUsername) || sanitizeMessageId(messageId) !== messageId) return false;
-    await this.checkReady(account);
-    this.pruneExpired();
+    const generation = await this.checkReady(account);
+    if (generation !== this.generation || blockingSystem.isBlockedSync(peerUsername)) return false;
+    this.pruneEntries();
     const key = entryKey(peerUsername, messageId);
     const existing = this.entries.get(key);
     if (!existing) return false;
     const { sentAt: _sentAt, ...pendingEntry } = existing;
     this.entries.delete(key);
     this.entries.set(key, pendingEntry);
+    return this.queuePersistedDelivery(account, peerUsername, messageId, generation);
+  }
+
+  private async queuePersistedDelivery(account: string, peerUsername: string, messageId: string, generation: number): Promise<boolean> {
     await this.persistSnapshot();
-    if (account !== this.activeAccount) return false;
-    receiptBatcher.queueDelivery(account, peerUsername, messageId);
+    const entry = this.entries.get(entryKey(peerUsername, messageId));
+    if (generation !== this.generation || !entry || blockingSystem.isBlockedSync(peerUsername)) return false;
+    if (entry.sentAt === undefined) receiptBatcher.queueDelivery(account, peerUsername, messageId);
     this.scheduleRetry();
     return true;
   }
 
   private async markSent(account: string, peerUsername: string, messageIds: string[]): Promise<void> {
-    if (account !== this.activeAccount || !isCanonicalAuthUsername(peerUsername)) return;
-    await this.restorePromise;
-    if (account !== this.activeAccount || this.restoreState !== 'ready') return;
+    if (account !== this.activeAccount || this.restoreState !== 'ready' ||
+        !isCanonicalAuthUsername(peerUsername) || blockingSystem.isBlockedSync(peerUsername)) return;
     const now = Date.now();
     let changed = false;
     for (const messageId of messageIds) {
       const key = entryKey(peerUsername, messageId);
       const entry = this.entries.get(key);
-      if (!entry) continue;
+      if (!entry || entry.sentAt !== undefined) continue;
       this.entries.delete(key);
-      this.entries.set(key, { ...entry, sentAt: now });
+      this.entries.set(key, { ...entry, sentAt: Math.max(now, entry.createdAt) });
       changed = true;
     }
     if (changed) await this.persistSnapshot().catch(() => { });
@@ -311,7 +330,7 @@ class DeliveryReceiptOutbox {
     const account = this.activeAccount;
     if (!account || this.restoreState !== 'ready') return;
     for (const entry of this.entries.values()) {
-      if (entry.sentAt === undefined) {
+      if (entry.sentAt === undefined && !blockingSystem.isBlockedSync(entry.peerUsername)) {
         receiptBatcher.queueDelivery(account, entry.peerUsername, entry.messageId);
       }
     }
@@ -337,7 +356,7 @@ class DeliveryReceiptOutbox {
       earliestSentExpiry = Math.min(earliestSentExpiry, entry.sentAt + SENT_RECEIPT_RETENTION_MS);
     }
     const delay = hasPending
-      ? RETRY_INTERVAL_MS
+      ? DELIVERY_RECEIPT_OUTBOX_RETRY_INTERVAL_MS
       : Math.max(1_000, earliestSentExpiry - now);
     const dueAt = now + delay;
     if (this.retryTimer && this.retryTimerDueAt !== null && this.retryTimerDueAt <= dueAt) return;
@@ -347,7 +366,7 @@ class DeliveryReceiptOutbox {
       this.retryTimer = null;
       this.retryTimerDueAt = null;
       if (account !== this.activeAccount || generation !== this.generation) return;
-      if (this.pruneExpired()) void this.persistSnapshot().catch(() => { });
+      if (this.pruneEntries()) void this.persistSnapshot().catch(() => { });
       this.queuePendingEntries();
     }, delay);
   }

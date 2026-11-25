@@ -2,19 +2,17 @@
  * OPAQUE Protocol Client
  */
 
+import {
+  OPAQUE_CLIENT_MAGIC_LENGTH_EXPECTED,
+  OPAQUE_CLIENT_DECODE_RESPONSE_VALUE_LENGTH_LIMIT,
+} from '../constants';
 import { Base64 } from './base64';
 import { PostQuantumWorker } from './worker-bridge';
 import { computeBlindUserId } from '../utils/auth-utils';
-import {
-  PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-  PRIVATE_AUTH_PIR_RECORD_BYTES,
-} from '../../../shared/private-auth-protocol.js';
+import { PRIVATE_AUTH_PIR_RECORD_BYTES } from '../../../shared/private-auth-protocol.js';
 import { PRIVATE_AUTH_PIR_RECORD_MAGIC } from '../../../shared/protocol-keys.js';
 
 // OPAQUE configuration
-const OPAQUE_CONFIG = {
-    PRIVATE_AUTH_ANONYMITY_SET_SIZE,
-};
 
 /**
  * OPAQUE Client
@@ -173,7 +171,7 @@ export const OPAQUEClientHelpers = {
         if (record.length !== PRIVATE_AUTH_PIR_RECORD_BYTES) {
             throw new Error('Invalid private-auth record');
         }
-        let validMagic = magic.length === 8;
+        let validMagic = magic.length === OPAQUE_CLIENT_MAGIC_LENGTH_EXPECTED;
         for (let index = 0; index < magic.length; index += 1) {
             validMagic = validMagic && record[index] === magic[index];
         }
@@ -214,7 +212,7 @@ export const OPAQUEClientHelpers = {
             for (const [key, value] of Object.entries(data)) {
                 const expectedLength = uint8Fields[key];
                 if (expectedLength !== undefined) {
-                    if (typeof value !== 'string' || value.length === 0 || value.length > 4096) {
+                    if (typeof value !== 'string' || value.length === 0 || value.length > OPAQUE_CLIENT_DECODE_RESPONSE_VALUE_LENGTH_LIMIT) {
                         throw new Error(`Invalid ${key} encoding`);
                     }
                     const bytes = Base64.base64ToUint8Array(value);
@@ -241,4 +239,4 @@ export const OPAQUEClientHelpers = {
     },
 };
 
-export { OPAQUE_CONFIG };
+export { OPAQUE_CONFIG } from '../constants/cryptography';

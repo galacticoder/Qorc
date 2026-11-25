@@ -1,3 +1,12 @@
+import {
+  SIGNED_UPDATE_KEYS,
+  KEY_TRANSPARENCY_UPDATE_AUTHORIZATION_KEYS,
+  LABEL_DOMAIN,
+  KEY_COMMITMENT_DOMAIN,
+  SIGNER_KEY_ID_DOMAIN,
+  EPOCH_LABEL_DOMAIN,
+  CRYPTO_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED,
+} from '../constants';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 
@@ -12,15 +21,9 @@ import {
   keyTransparencySignedUpdate,
 } from '../../../shared/key-transparency-protocol.js';
 import { Base64, decodeCanonicalBase64 } from '../cryptography/base64';
-import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { ML_DSA_87_PUBLIC_KEY_BYTES, ML_DSA_87_SIGNATURE_BYTES } from '../../../shared/crypto-sizes.js';
 import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
 import { bytesToHex, concatUint8Arrays } from '../../../shared/bytes.js';
-
-const LABEL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_LABEL);
-const EPOCH_LABEL_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_EPOCH_LABEL);
-const KEY_COMMITMENT_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_KEY_COMMITMENT);
-const SIGNER_KEY_ID_DOMAIN = new TextEncoder().encode(PROTOCOL_KEYS.KEY_TRANSPARENCY_SIGNER_KEY);
 
 export type KeyTransparencyEventKind =
   | 'register'
@@ -49,28 +52,6 @@ export interface KeyTransparencyAuthorization {
   rootPublicKey: string | null;
   rootSignature: string | null;
 }
-
-const SIGNED_UPDATE_KEYS = [
-  'kind',
-  'label',
-  'pendingRootCommitment',
-  'previousRootCommitment',
-  'protocol',
-  'recoveryActivatesAt',
-  'recoveryCommitment',
-  'recoveryRequestEpoch',
-  'rootCommitment',
-  'version',
-];
-
-const AUTHORIZATION_KEYS = [
-  'previousRootPublicKey',
-  'previousRootSignature',
-  'recoveryPublicKey',
-  'recoverySignature',
-  'rootPublicKey',
-  'rootSignature',
-];
 
 function hashWithDomain(domain: Uint8Array, bytes: Uint8Array): Uint8Array {
   const hasher = sha3_512.create();
@@ -121,13 +102,13 @@ function assertSignedUpdate(value: unknown): asserts value is KeyTransparencySig
 function assertAuthorization(value: unknown): asserts value is KeyTransparencyAuthorization {
   const authorization = value as KeyTransparencyAuthorization;
   if (
-    !exactPlainObject(authorization, AUTHORIZATION_KEYS) ||
+    !exactPlainObject(authorization, KEY_TRANSPARENCY_UPDATE_AUTHORIZATION_KEYS) ||
     Object.values(authorization).some((entry) => entry !== null && typeof entry !== 'string')
   ) throw new Error('Invalid key-transparency authorization');
 }
 
 export function deriveKeyTransparencyLabel(discoveryEncryptionKey: Uint8Array): string {
-  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== 32) {
+  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== CRYPTO_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED) {
     throw new Error('Invalid key-transparency discovery key');
   }
   return hashHex(LABEL_DOMAIN, discoveryEncryptionKey);
@@ -291,7 +272,7 @@ export function deriveKeyTransparencyEpochLabel(
   discoveryEncryptionKey: Uint8Array,
   epoch: number,
 ): string {
-  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== 32) {
+  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== CRYPTO_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED) {
     throw new Error('Invalid key-transparency discovery key');
   }
   if (!Number.isSafeInteger(epoch) || epoch < 0) {

@@ -3,7 +3,11 @@ import { cn } from '../../../lib/utils/shared-utils';
 import { Play, Pause, Mic, LoaderCircle } from 'lucide-react';
 import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
 import type { SecureDB } from '../../../lib/database/secureDB';
-import { MAX_VOICE_NOTE_DURATION_SECONDS } from '../../../lib/constants';
+import {
+  MAX_VOICE_NOTE_DURATION_SECONDS,
+  MEDIA_DURATION_TOLERANCE_SECONDS,
+  VOICE_MESSAGE_WAVEFORM_BARS,
+} from '../../../lib/constants';
 import { isSafeFileUrl, parseCurrentVoiceNoteFilename } from '../../../lib/utils/file-utils';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import { registerVoicePlayback } from '../../../lib/utils/voice-playback';
@@ -19,9 +23,7 @@ interface VoiceMessageProps {
   loadFile: boolean;
 }
 
-const WAVEFORM_BARS = 48;
-const MEDIA_DURATION_TOLERANCE_SECONDS = 1;
-const DEFAULT_WAVEFORM = Array.from({ length: WAVEFORM_BARS }, (_, index) => (
+const DEFAULT_WAVEFORM = Array.from({ length: VOICE_MESSAGE_WAVEFORM_BARS }, (_, index) => (
   0.2 + Math.abs(Math.sin((index + 1) * 1.37)) * 0.62
 ));
 

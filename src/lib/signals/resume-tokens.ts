@@ -1,3 +1,4 @@
+import { RESUME_POOL_TARGET } from '../constants';
 import { account } from '../tauri-bindings';
 import {
   PrivacyPassClient,
@@ -11,7 +12,6 @@ import { tokenVault } from '../database/token-vault';
 import { wipeAnonymousToken, wipeAnonymousTokens } from '../cryptography/wipe';
 import { ACCOUNT_AUTH_PURPOSE } from '../config/audiences';
 
-const RESUME_POOL_TARGET = 32;
 let poolMutationTail: Promise<void> = Promise.resolve();
 let poolLifecycleToken: object = {};
 

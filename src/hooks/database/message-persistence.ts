@@ -3,6 +3,7 @@ import type { SecureDB } from '../../lib/database/secureDB';
 import {
   CONVERSATION_WARM_MESSAGE_COUNT,
   DB_MAX_PENDING_MESSAGES,
+  MESSAGE_PERSISTENCE_LIMIT,
 } from '../../lib/constants';
 import { mergeReceipts } from '../../lib/utils/database-utils';
 
@@ -88,7 +89,7 @@ export const loadConversationMessages = async (
   secureDB: SecureDB,
   peerUsername: string,
   currentUser: string,
-  limit: number = 50,
+  limit: number = MESSAGE_PERSISTENCE_LIMIT,
   offset: number = 0
 ): Promise<Message[]> => {
   const messages = await secureDB.loadConversationMessages(peerUsername, limit, offset);

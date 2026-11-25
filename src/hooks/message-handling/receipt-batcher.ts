@@ -1,6 +1,12 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
-import { AUTH_USERNAME_REGEX, RECEIPT_BATCH_WINDOW_MS, MAX_RECEIPT_BATCH_IDS } from '../../lib/constants';
+import {
+  AUTH_USERNAME_REGEX,
+  RECEIPT_BATCH_WINDOW_MS,
+  MAX_RECEIPT_BATCH_IDS,
+  MAX_RECEIPT_BATCH_PEERS,
+  RECEIPT_BATCH_MAX_FLUSH_ATTEMPTS,
+} from '../../lib/constants';
 import { sanitizeMessageId } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
 
@@ -11,9 +17,6 @@ type PeerBatch = {
   attempts: Map<string, number>;
   flushing: boolean;
 };
-
-const MAX_FLUSH_ATTEMPTS = 5;
-const MAX_BATCHED_PEERS = 256;
 
 type FlushListener = (account: string, peer: string, deliveredIds: string[], readIds: string[]) => void;
 
@@ -57,7 +60,7 @@ export class ReceiptBatcher {
   private getBatch(peer: string): PeerBatch | null {
     let batch = this.peers.get(peer);
     if (!batch) {
-      if (this.peers.size >= MAX_BATCHED_PEERS) return null;
+      if (this.peers.size >= MAX_RECEIPT_BATCH_PEERS) return null;
       batch = { delivered: new Set(), read: new Set(), timer: null, attempts: new Map(), flushing: false };
       this.peers.set(peer, batch);
     }
@@ -152,7 +155,7 @@ export class ReceiptBatcher {
           continue;
         }
         const n = (batch.attempts.get(k) || 0) + 1;
-        if (n < MAX_FLUSH_ATTEMPTS) batch.attempts.set(k, n);
+        if (n < RECEIPT_BATCH_MAX_FLUSH_ATTEMPTS) batch.attempts.set(k, n);
         else {
           batch.attempts.delete(k);
           batch.delivered.delete(id);
@@ -165,7 +168,7 @@ export class ReceiptBatcher {
           continue;
         }
         const n = (batch.attempts.get(k) || 0) + 1;
-        if (n < MAX_FLUSH_ATTEMPTS) batch.attempts.set(k, n);
+        if (n < RECEIPT_BATCH_MAX_FLUSH_ATTEMPTS) batch.attempts.set(k, n);
         else {
           batch.attempts.delete(k);
           batch.read.delete(id);

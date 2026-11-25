@@ -75,6 +75,7 @@ export const useBlockStatus = (
       const detail = exactEventDetail(event, ['isBlocked', 'username']);
       if (!detail || !isCanonicalAuthUsername(detail.username)) return;
       if (typeof detail.isBlocked !== 'boolean' || detail.username !== peer) return;
+      requestGenerationRef.current += 1;
       setIsBlocked(detail.isBlocked);
     };
 

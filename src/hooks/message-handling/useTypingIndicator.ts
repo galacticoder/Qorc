@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { SignalType } from '../../lib/types/signal-types';
-import { TYPING_STOP_DELAY, MIN_TYPING_INTERVAL } from '../../lib/constants';
+import {
+  TYPING_STOP_DELAY,
+  MIN_TYPING_INTERVAL,
+  USE_TYPING_INDICATOR_CURRENT_USERNAME_LENGTH_LIMIT,
+} from '../../lib/constants';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import { getSessionApi } from '../../lib/utils/message-sending-utils';
 
@@ -10,7 +14,7 @@ export function useTypingIndicator(
   currentUsername: string,
   selectedConversation?: string,
 ) {
-  if (!currentUsername || typeof currentUsername !== 'string' || currentUsername.trim().length === 0 || currentUsername.length > 128) {
+  if (!currentUsername || typeof currentUsername !== 'string' || currentUsername.trim().length === 0 || currentUsername.length > USE_TYPING_INDICATOR_CURRENT_USERNAME_LENGTH_LIMIT) {
     throw new Error('[TypingIndicator] Invalid currentUsername');
   }
 
@@ -20,10 +24,10 @@ export function useTypingIndicator(
   selectedPeerRef.current = selectedConversation;
 
   const activeTypingRef = useRef<ActiveTypingPeer | null>(null);
-  const wantsTypingRef = useRef(false);
+  const typingIntentRef = useRef<ActiveTypingPeer | null>(null);
   const lastTypingStartSentRef = useRef(0);
   const typingQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const startQueuedRef = useRef(false);
+  const queuedStartRef = useRef<ActiveTypingPeer | null>(null);
   const stopQueuedRef = useRef(new Set<string>());
   const timeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -63,20 +67,18 @@ export function useTypingIndicator(
     target: ActiveTypingPeer,
   ): Promise<boolean> => {
     if (accountRef.current !== target.account) return false;
-    if (kind === 'start' && selectedPeerRef.current !== target.peer) return false;
+    if (kind === 'start' && (selectedPeerRef.current !== target.peer || typingIntentRef.current !== target)) return false;
 
     const sessionCheck = await getSessionApi().hasSession({
       selfUsername: target.account,
       peerUsername: target.peer,
     }).catch(() => null);
     if (!sessionCheck?.hasSession || accountRef.current !== target.account) return false;
-    if (kind === 'start' && selectedPeerRef.current !== target.peer) return false;
+    if (kind === 'start' && (selectedPeerRef.current !== target.peer || typingIntentRef.current !== target)) return false;
 
     const type = kind === 'start' ? SignalType.TYPING_START : SignalType.TYPING_STOP;
     const result = await unifiedSignalTransport.send(target.peer, {}, type);
-    return result.success &&
-      accountRef.current === target.account &&
-      (kind === 'stop' || selectedPeerRef.current === target.peer);
+    return result.success && accountRef.current === target.account;
   }, []);
 
   const stopTypingFor = useCallback(async (target: ActiveTypingPeer): Promise<void> => {
@@ -93,7 +95,7 @@ export function useTypingIndicator(
   }, [sendTypingSignal]);
 
   const sendTypingStop = useCallback((target = activeTypingRef.current): Promise<void> => {
-    wantsTypingRef.current = false;
+    typingIntentRef.current = null;
     if (!target) return Promise.resolve();
     const key = `${target.account}\0${target.peer}`;
     if (stopQueuedRef.current.has(key)) return typingQueueRef.current;
@@ -107,16 +109,13 @@ export function useTypingIndicator(
     });
   }, [enqueueTypingTask, stopTypingFor]);
 
-  const sendTypingStart = useCallback((): Promise<void> => {
-    if (startQueuedRef.current) return typingQueueRef.current;
-    startQueuedRef.current = true;
+  const sendTypingStart = useCallback((target: ActiveTypingPeer): Promise<void> => {
+    if (queuedStartRef.current === target) return typingQueueRef.current;
+    queuedStartRef.current = target;
     return enqueueTypingTask(async () => {
       try {
-        const target = {
-          account: accountRef.current,
-          peer: selectedPeerRef.current || '',
-        };
-        if (!target.peer || !wantsTypingRef.current) return;
+        if (typingIntentRef.current !== target || selectedPeerRef.current !== target.peer ||
+            accountRef.current !== target.account) return;
 
         const active = activeTypingRef.current;
         if (active && (active.account !== target.account || active.peer !== target.peer)) {
@@ -136,7 +135,7 @@ export function useTypingIndicator(
           if (sent) {
             activeTypingRef.current = target;
             if (
-              wantsTypingRef.current &&
+              typingIntentRef.current === target &&
               accountRef.current === target.account &&
               selectedPeerRef.current === target.peer
             ) {
@@ -148,20 +147,26 @@ export function useTypingIndicator(
         } catch {
         }
       } finally {
-        startQueuedRef.current = false;
+        if (queuedStartRef.current === target) queuedStartRef.current = null;
       }
     });
   }, [enqueueTypingTask, sendTypingSignal, stopTypingFor]);
 
   const handleLocalTyping = useCallback(() => {
-    if (!selectedPeerRef.current) return;
-    wantsTypingRef.current = true;
-    void sendTypingStart();
+    const peer = selectedPeerRef.current;
+    if (!peer) return;
+    const account = accountRef.current;
+    const previous = typingIntentRef.current;
+    const target = previous?.account === account && previous.peer === peer ? previous : { account, peer };
+    typingIntentRef.current = target;
+    void sendTypingStart(target);
     setManagedTimeout('stop', () => { void sendTypingStop(); }, TYPING_STOP_DELAY);
   }, [sendTypingStart, sendTypingStop, setManagedTimeout]);
 
   const handleConversationChange = useCallback(() => {
+    if (typingIntentRef.current && typingIntentRef.current.peer === selectedPeerRef.current) return;
     clearManagedTimeout('stop');
+    typingIntentRef.current = null;
     const active = activeTypingRef.current;
     if (active && active.peer !== selectedPeerRef.current) {
       void sendTypingStop(active);
@@ -175,10 +180,10 @@ export function useTypingIndicator(
 
   useEffect(() => {
     clearAllTimeouts();
-    wantsTypingRef.current = false;
+    typingIntentRef.current = null;
     activeTypingRef.current = null;
     lastTypingStartSentRef.current = 0;
-    startQueuedRef.current = false;
+    queuedStartRef.current = null;
     stopQueuedRef.current.clear();
   }, [currentUsername, clearAllTimeouts]);
 

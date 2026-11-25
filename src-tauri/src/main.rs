@@ -21,12 +21,14 @@ mod audio_codec;
 mod audio_playback;
 mod camera_capture;
 mod commands;
+mod constants;
 mod crypto;
 mod database;
 mod error;
 mod hybrid_native;
 mod json_bounds;
 mod link_preview;
+mod media_utils;
 mod message_content;
 mod microphone_capture;
 mod network;
@@ -39,6 +41,7 @@ mod storage;
 mod storage_keys;
 mod system;
 mod tor;
+mod validation;
 
 use state::AppState;
 
@@ -151,7 +154,6 @@ fn init_logging() {
         "qorc_lib::audio_playback=info",
         "qorc_lib::commands::message_content=info",
         "qorc_lib::link_preview=info",
-        "qorc_call_diag=info",
         "pulseaudio::client::reactor=off",
         "libsignal_protocol::session_management=off",
         "netlink_packet_route=error",
@@ -256,54 +258,28 @@ pub fn run() {
                     };
                     let wv = webview.inner();
                     wv.connect_permission_request(|_wv, req| {
-                        info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-callback-enter");
                         if let Some(media_request) =
                             req.downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
                         {
                             let requests_audio = media_request.is_for_audio_device();
                             let requests_video = media_request.is_for_video_device();
-                            info!(
-                                target: "qorc_call_diag",
-                                requests_audio,
-                                requests_video,
-                                "[CALL-DIAG] webkit-media-request-classified"
-                            );
-                            info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-display-check-before");
                             let is_display = unsafe {
                                 webkit2gtk::ffi::webkit_user_media_permission_is_for_display_device(
                                     media_request.to_glib_none().0,
                                 ) != 0
                             };
-                            info!(
-                                target: "qorc_call_diag",
-                                is_display,
-                                "[CALL-DIAG] webkit-display-check-after"
-                            );
                             let allowed = is_display
                                 || crate::commands::system::consume_media_permission_lease(
                                     requests_audio,
                                     requests_video,
                                 );
-                            info!(
-                                target: "qorc_call_diag",
-                                requests_audio,
-                                requests_video,
-                                is_display,
-                                allowed,
-                                "[CALL-DIAG] webkit-permission-decision"
-                            );
                             if allowed {
-                                info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-allow-before");
                                 req.allow();
-                                info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-allow-after");
                             } else {
-                                info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-deny-before");
                                 req.deny();
-                                info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-deny-after");
                             }
                             true
                         } else {
-                            info!(target: "qorc_call_diag", "[CALL-DIAG] webkit-permission-non-media");
                             false
                         }
                     });
@@ -566,8 +542,8 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
             }
         }
     }
-    let (ws_tx, mut ws_rx) = mpsc::channel(network::websocket::WS_EVENT_CHANNEL_CAPACITY);
-    let (ws_binary_tx, ws_binary_rx) = mpsc::channel(network::websocket::WS_EVENT_CHANNEL_CAPACITY);
+    let (ws_tx, mut ws_rx) = mpsc::channel(constants::websocket::WS_EVENT_CHANNEL_CAPACITY);
+    let (ws_binary_tx, ws_binary_rx) = mpsc::channel(constants::websocket::WS_EVENT_CHANNEL_CAPACITY);
     ws_handler.set_event_handler(ws_tx);
     ws_handler.set_binary_handler(ws_binary_tx);
     let ws_handler_for_bridge = Arc::downgrade(&ws_handler);
@@ -614,7 +590,7 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
 
     // Initialize P2P transport handler
     let p2p_handler = network::p2p::init().await?;
-    let (p2p_tx, p2p_rx) = mpsc::channel(network::p2p::P2P_EVENT_CHANNEL_CAPACITY);
+    let (p2p_tx, p2p_rx) = mpsc::channel(constants::p2p::P2P_EVENT_CHANNEL_CAPACITY);
     p2p_handler.set_event_handler(p2p_tx);
     *state.p2p_handler.write() = Some(p2p_handler);
     *state.p2p_event_receiver.lock().await = Some(p2p_rx);

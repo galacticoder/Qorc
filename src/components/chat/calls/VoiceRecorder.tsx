@@ -1,14 +1,18 @@
 import { useState, useRef, useEffect } from 'react';
-import { MAX_VOICE_NOTE_BYTES, MAX_VOICE_NOTE_DURATION_SECONDS } from '../../../lib/constants';
+import {
+  MAX_VOICE_NOTE_BYTES,
+  MAX_VOICE_NOTE_DURATION_SECONDS,
+  VOICE_RECORDER_LEVEL_HISTORY_SIZE,
+  MICROPHONE_PERMISSION_ERROR,
+  VOICE_RECORDER_START_RECORDING_INTERVAL_MS,
+  VOICE_RECORDER_START_RECORDING_ON_CANCEL_TIMEOUT_MS,
+} from '../../../lib/constants';
 import { Square, Play, Pause, Trash2, SendHorizontal } from 'lucide-react';
 import { requireNativeMediaAccess } from '../../../lib/tauri-bindings';
 import { isValidMediaDeviceId } from '../../../lib/utils/calling-utils';
 import { formatClockDurationSeconds } from '../../../lib/utils/date-utils';
 import { registerVoicePlayback } from '../../../lib/utils/voice-playback';
 import { readAppSettings } from '../../../lib/ui/app-settings';
-
-const LEVEL_HISTORY_SIZE = 96;
-const MICROPHONE_PERMISSION_ERROR = 'Microphone permission is required';
 
 const isMicrophonePermissionError = (error: unknown): boolean => {
   const name = error instanceof Error ? error.name : '';
@@ -55,7 +59,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const recordedBytesRef = useRef(0);
   const recordingRejectedRef = useRef(false);
   const visualizerSamplesRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
-  const levelHistoryRef = useRef<number[]>(Array.from({ length: LEVEL_HISTORY_SIZE }, () => 0));
+  const levelHistoryRef = useRef<number[]>(Array.from({ length: VOICE_RECORDER_LEVEL_HISTORY_SIZE }, () => 0));
   const smoothedLevelRef = useRef(0);
   const lastLevelSampleRef = useRef(0);
 
@@ -102,7 +106,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       meterSinkRef.current = null;
     }
     visualizerSamplesRef.current = null;
-    levelHistoryRef.current = Array.from({ length: LEVEL_HISTORY_SIZE }, () => 0);
+    levelHistoryRef.current = Array.from({ length: VOICE_RECORDER_LEVEL_HISTORY_SIZE }, () => 0);
     smoothedLevelRef.current = 0;
     lastLevelSampleRef.current = 0;
     if (audioContextRef.current) {
@@ -350,7 +354,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       setIsRecording(true);
       isRecordingRef.current = true;
       setDuration(0);
-      levelHistoryRef.current = Array.from({ length: LEVEL_HISTORY_SIZE }, () => 0);
+      levelHistoryRef.current = Array.from({ length: VOICE_RECORDER_LEVEL_HISTORY_SIZE }, () => 0);
       smoothedLevelRef.current = 0;
       lastLevelSampleRef.current = 0;
 
@@ -365,7 +369,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         const elapsedMs = Date.now() - recordStartRef.current;
         setDuration(Math.min(Math.floor(elapsedMs / 1000), MAX_VOICE_NOTE_DURATION_SECONDS));
         if (elapsedMs >= MAX_VOICE_NOTE_DURATION_SECONDS * 1000) stopAtLimit();
-      }, 250);
+      }, VOICE_RECORDER_START_RECORDING_INTERVAL_MS);
       limitTimeoutRef.current = setTimeout(
         stopAtLimit,
         MAX_VOICE_NOTE_DURATION_SECONDS * 1000,
@@ -379,7 +383,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       setError(permissionDenied ? MICROPHONE_PERMISSION_ERROR : 'Failed to access microphone');
       cleanup();
       if (permissionDenied) {
-        permissionDismissTimeoutRef.current = setTimeout(onCancel, 3_000);
+        permissionDismissTimeoutRef.current = setTimeout(onCancel, VOICE_RECORDER_START_RECORDING_ON_CANCEL_TIMEOUT_MS);
       }
     }
   };

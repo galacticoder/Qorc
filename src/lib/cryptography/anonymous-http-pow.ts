@@ -1,3 +1,4 @@
+import { POW_MAX_DIFFICULTY_BITS } from '../constants';
 import { Base64 } from './base64';
 import { solvePowChallenge } from './proof-of-work';
 
@@ -28,7 +29,7 @@ export async function createAnonymousHttpPow(
   abortSignal?: AbortSignal,
 ): Promise<AnonymousHttpPow> {
   if (!/^[a-z0-9-]{8,64}$/.test(domain)) throw new Error('Invalid proof-of-work domain');
-  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 28) {
+  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > POW_MAX_DIFFICULTY_BITS) {
     throw new Error('Invalid proof-of-work difficulty');
   }
   if (parts.some((part) => typeof part !== 'string' || part.includes('\0'))) {

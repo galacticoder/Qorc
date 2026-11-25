@@ -2,6 +2,7 @@
  * P2P Transport
  */
 
+import { sleep } from '../runtime/sleep';
 import { EventType } from '../types/event-types';
 import { SignalType } from '../types/signal-types';
 import { p2p, events } from '../tauri-bindings';
@@ -38,8 +39,6 @@ import {
     IncomingMessage,
     PeerIdentity,
     AudioLaneTelemetry,
-    MAX_MESSAGE_FRAME_SIZE,
-    MAX_CALL_FRAME_SIZE,
     NOISE_FRAME_OVERHEAD
 } from './secure-transport';
 import {
@@ -48,6 +47,46 @@ import {
   P2P_KEEPALIVE_INTERVAL_MS,
   P2P_MAX_STREAMS_PER_CONNECTION,
   P2P_STUCK_STATE_TIMEOUT_MS,
+  AUDIO_LANE_HOLD_RTT_CEILING_MS,
+  AUDIO_LANE_MIN_RTT_GAIN_MS,
+  AUDIO_LANE_MIN_RTT_GAIN_RATIO,
+  AUDIO_LANE_PATH_SWITCH_CONFIRMATIONS,
+  INITIAL_BRIDGE_CONNECT_ATTEMPTS,
+  INITIAL_BRIDGE_RETRY_DELAY_MS,
+  MAX_BRIDGE_MESSAGE_QUEUE,
+  MAX_BRIDGE_MESSAGE_QUEUE_BYTES,
+  MAX_CALL_FRAME_SIZE,
+  MAX_CERT_REQUESTS_PER_MINUTE,
+  MAX_CERT_REQUEST_TIMESTAMPS,
+  MAX_INBOUND_BRIDGE_EVENT_BYTES,
+  MAX_INBOUND_BRIDGE_EVENT_QUEUE,
+  MAX_KNOWN_IDENTITIES,
+  MAX_MESSAGE_FRAME_SIZE,
+  MAX_P2P_CONNECTIONS,
+  MAX_PENDING_INCOMING_FRAMES,
+  MAX_PENDING_READS,
+  MAX_STREAM_BUFFERED_BYTES,
+  MAX_STREAM_BUFFERED_FRAMES,
+  MAX_STREAM_ID_BYTES,
+  MAX_USERNAME_ALIASES,
+  MAX_VISUAL_QUEUE_FRAMES,
+  NATIVE_BRIDGE_RAW_MAX_BYTES,
+  STREAM_ID_REGEX,
+  ALLOWED_STREAM_TYPES,
+  BRIDGE_PEER_ID_REGEX,
+  P2P_TRANSPORT_BYTES_LENGTH_MINIMUM,
+  P2P_TRANSPORT_PAYLOAD_LENGTH_LIMIT,
+  P2P_TRANSPORT_DECRYPT_FAILURE_COUNT_LIMIT,
+  P2P_TRANSPORT_FRAME_BYTES_MINIMUM,
+  P2P_TRANSPORT_FRAME_BYTES_LIMIT,
+  P2P_TRANSPORT_JSON_FRAME_BYTES_MINIMUM,
+  P2P_TRANSPORT_JSON_FRAME_BYTES_LIMIT,
+  P2P_TRANSPORT_PROTOCOL_VIOLATION_COUNT_LIMIT,
+  P2P_TRANSPORT_START_CONTROL_MESSAGE_READER_DATA_LENGTH_LIMIT,
+  P2P_TRANSPORT_PENDING_INBOUND_TRUST_SIZE_LIMIT,
+  P2P_TRANSPORT_RESTORE_INBOUND_PEER_TRUST_TIMEOUT_MS,
+  P2P_TRANSPORT_PEER_CERT_REQUEST_WINDOW_STARTED_AT_LIMIT,
+  P2P_CERT_REQUEST_COOLDOWN_MS,
 } from '../constants';
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
@@ -60,25 +99,7 @@ import { SecureMemory } from '../cryptography/secure-memory';
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
-const MAX_STREAM_ID_BYTES = 96;
-const NATIVE_BRIDGE_RAW_MAX_BYTES = 4 * 1024 * 1024;
-const MAX_VISUAL_QUEUE_FRAMES = 6;
-const INITIAL_BRIDGE_CONNECT_ATTEMPTS = 2;
-const INITIAL_BRIDGE_RETRY_DELAY_MS = 250;
-const AUDIO_LANE_MIN_RTT_GAIN_MS = 50;
-const AUDIO_LANE_MIN_RTT_GAIN_RATIO = 0.1;
-const AUDIO_LANE_PATH_SWITCH_CONFIRMATIONS = 3;
-const AUDIO_LANE_HOLD_RTT_CEILING_MS = 60_000;
-const STREAM_ID_REGEX = /^(message|call-audio|call-video|call-telemetry|call-screen):[a-f0-9]{16,64}$/;
-const ALLOWED_STREAM_TYPES = new Set<string>([
-    SignalType.MESSAGE,
-    'call-audio',
-    'call-video',
-    'call-telemetry',
-    'call-screen'
-]);
 
-const BRIDGE_PEER_ID_REGEX = /^(?:[a-z2-7]{56}\.onion|inbound:(?:0|[1-9][0-9]{0,19}))$/i;
 const isNativeConnectionToken = (value: unknown): value is number => (
     Number.isSafeInteger(value) && (value as number) > 0
 );
@@ -126,7 +147,7 @@ function parseNativeP2PBridgeEnvelope(value: unknown): any {
         : value instanceof Uint8Array
             ? value
             : null;
-    if (!bytes || bytes.length < 15) throw new Error('Invalid native P2P bridge envelope');
+    if (!bytes || bytes.length < P2P_TRANSPORT_BYTES_LENGTH_MINIMUM) throw new Error('Invalid native P2P bridge envelope');
     if (
         bytes[0] !== 0x51 ||
         bytes[1] !== 0x50 ||
@@ -145,7 +166,7 @@ function parseNativeP2PBridgeEnvelope(value: unknown): any {
     if (kind === 1 && payload.length === 0) {
         return { type: '__p2p_connected', connectionId, connectionToken: token };
     }
-    if (kind === 2 && payload.length >= 4) {
+    if (kind === 2 && payload.length >= P2P_TRANSPORT_PAYLOAD_LENGTH_LIMIT) {
         const payloadView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         const reasonLength = payloadView.getUint16(2, false);
         if (4 + reasonLength !== payload.length) throw new Error('Invalid native P2P close event');
@@ -185,7 +206,6 @@ class P2PStream implements SecureStream {
     private _closed: boolean = false;
     private readonly maxReceiveQueueFrames: number;
     private readonly maxReceiveQueueBytes: number;
-    private readonly MAX_PENDING_READS = 64;
     private pendingEncryptedFrames: Uint8Array[] = [];
     private pendingEncryptedBytes: number = 0;
     private decryptProcessing: boolean = false;
@@ -321,7 +341,7 @@ class P2PStream implements SecureStream {
             return next;
         }
 
-        if (this.readResolvers.length >= this.MAX_PENDING_READS) {
+        if (this.readResolvers.length >= MAX_PENDING_READS) {
             throw new Error('Too many pending P2P stream reads');
         }
 
@@ -560,7 +580,7 @@ class P2PStream implements SecureStream {
                             console.warn('[P2P-RECV] authenticated frame decryption failed', {
                                 frameSize: frame.byteLength
                             });
-                            if (!this.session.isValid() || this.decryptFailureCount >= 3) {
+                            if (!this.session.isValid() || this.decryptFailureCount >= P2P_TRANSPORT_DECRYPT_FAILURE_COUNT_LIMIT) {
                                 void this.transport.close('P2P session failure');
                                 stopBatch = true;
                             }
@@ -573,7 +593,7 @@ class P2PStream implements SecureStream {
                     processedSinceYield++;
                     if (processedSinceYield >= 3) {
                         processedSinceYield = 0;
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                        await sleep(0);
                     }
                 }
             }
@@ -628,20 +648,15 @@ class P2PConnection implements SecureConnection {
     private stateUpdatedAt: number = Date.now();
     private role: 'responder' | 'auto' = 'auto';
     private pendingIncomingFrames: Uint8Array[] = [];
-    private readonly MAX_PENDING_INCOMING_FRAMES = 8;
     private pendingIncomingFrameBytes: number = 0;
     private pendingIncomingFlushDraining: boolean = false;
 
     private bridgeMessageQueue: Array<{ message: any; checkHandshake: boolean; byteLength: number }> = [];
     private bridgeMessageQueueBytes: number = 0;
     private bridgeQueueDraining: boolean = false;
-    private readonly MAX_BRIDGE_MESSAGE_QUEUE = 128;
-    private readonly MAX_BRIDGE_MESSAGE_QUEUE_BYTES = 8 * 1024 * 1024;
     private streamBufferedFrames = 0;
     private streamBufferedBytes = 0;
     private protocolViolationCount = 0;
-    private readonly MAX_STREAM_BUFFERED_FRAMES = 512;
-    private readonly MAX_STREAM_BUFFERED_BYTES = 16 * 1024 * 1024;
 
     constructor(
         peerId: string,
@@ -664,8 +679,8 @@ class P2PConnection implements SecureConnection {
         if (
             !Number.isSafeInteger(byteLength) ||
             byteLength <= 0 ||
-            this.streamBufferedFrames >= this.MAX_STREAM_BUFFERED_FRAMES ||
-            this.streamBufferedBytes + byteLength > this.MAX_STREAM_BUFFERED_BYTES
+            this.streamBufferedFrames >= MAX_STREAM_BUFFERED_FRAMES ||
+            this.streamBufferedBytes + byteLength > MAX_STREAM_BUFFERED_BYTES
         ) return false;
         this.streamBufferedFrames += 1;
         this.streamBufferedBytes += byteLength;
@@ -1011,7 +1026,7 @@ class P2PConnection implements SecureConnection {
         let responderPromise!: Promise<void>;
         responderPromise = (async () => {
             try {
-                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                await sleep(0);
                 this.assertBridgeContextCurrent(context);
                 await this.waitForInitiatorHandshakeAndRespond();
             } catch (err) {
@@ -1038,9 +1053,9 @@ class P2PConnection implements SecureConnection {
         const byteLength = this.estimateBridgeMessageBytes(message);
         if (
             byteLength <= 0 ||
-            byteLength > this.MAX_BRIDGE_MESSAGE_QUEUE_BYTES ||
-            this.bridgeMessageQueue.length >= this.MAX_BRIDGE_MESSAGE_QUEUE ||
-            this.bridgeMessageQueueBytes + byteLength > this.MAX_BRIDGE_MESSAGE_QUEUE_BYTES
+            byteLength > MAX_BRIDGE_MESSAGE_QUEUE_BYTES ||
+            this.bridgeMessageQueue.length >= MAX_BRIDGE_MESSAGE_QUEUE ||
+            this.bridgeMessageQueueBytes + byteLength > MAX_BRIDGE_MESSAGE_QUEUE_BYTES
         ) {
             void this.close('P2P bridge message queue overflow').catch(() => { });
             return;
@@ -1058,7 +1073,7 @@ class P2PConnection implements SecureConnection {
         try {
             return JSON.stringify(message)?.length ?? 0;
         } catch {
-            return this.MAX_BRIDGE_MESSAGE_QUEUE_BYTES + 1;
+            return MAX_BRIDGE_MESSAGE_QUEUE_BYTES + 1;
         }
     }
 
@@ -1382,7 +1397,7 @@ class P2PConnection implements SecureConnection {
     }
 
     private prepareKeyConfirmation(frame: Uint8Array): Record<string, string> {
-        if (!this.session || frame.byteLength < 44 || frame.byteLength > 512) {
+        if (!this.session || frame.byteLength < P2P_TRANSPORT_FRAME_BYTES_MINIMUM || frame.byteLength > P2P_TRANSPORT_FRAME_BYTES_LIMIT) {
             throw new Error('Invalid P2P key confirmation frame');
         }
         return {
@@ -1409,7 +1424,7 @@ class P2PConnection implements SecureConnection {
         ) return null;
 
         if (json.frame instanceof Uint8Array) {
-            if (json.frame.byteLength < 44 || json.frame.byteLength > 512) return null;
+            if (json.frame.byteLength < P2P_TRANSPORT_JSON_FRAME_BYTES_MINIMUM || json.frame.byteLength > P2P_TRANSPORT_JSON_FRAME_BYTES_LIMIT) return null;
             return {
                 version: PROTOCOL_KEYS.NOISE_PROTOCOL,
                 type: 'confirm',
@@ -1429,8 +1444,8 @@ class P2PConnection implements SecureConnection {
         try {
             const frame = PostQuantumUtils.base64ToUint8Array(json.frame);
             if (
-                frame.byteLength < 44 ||
-                frame.byteLength > 512 ||
+                frame.byteLength < P2P_TRANSPORT_FRAME_BYTES_MINIMUM ||
+                frame.byteLength > P2P_TRANSPORT_FRAME_BYTES_LIMIT ||
                 Base64.arrayBufferToBase64(frame) !== json.frame
             ) {
                 frame.fill(0);
@@ -1861,7 +1876,7 @@ class P2PConnection implements SecureConnection {
             return;
         }
         if (
-            this.pendingIncomingFrames.length >= this.MAX_PENDING_INCOMING_FRAMES ||
+            this.pendingIncomingFrames.length >= MAX_PENDING_INCOMING_FRAMES ||
             this.pendingIncomingFrameBytes + incomingSize > NATIVE_BRIDGE_RAW_MAX_BYTES
         ) {
             void this.close('P2P pre-session queue overflow').catch(() => { });
@@ -1901,7 +1916,7 @@ class P2PConnection implements SecureConnection {
                     processedSinceYield++;
                     if (processedSinceYield >= 4) {
                         processedSinceYield = 0;
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                        await sleep(0);
                     }
                 }
             }
@@ -1915,7 +1930,7 @@ class P2PConnection implements SecureConnection {
 
     private noteProtocolViolation(reason: string): void {
         this.protocolViolationCount += 1;
-        if (this.protocolViolationCount >= 3) {
+        if (this.protocolViolationCount >= P2P_TRANSPORT_PROTOCOL_VIOLATION_COUNT_LIMIT) {
             void this.close(reason).catch(() => { });
         }
     }
@@ -2680,7 +2695,6 @@ class P2PConnection implements SecureConnection {
                         throw new Error('P2P recipient does not match local identity');
                     }
 
-
                     this.owner.dispatchMessage({
                         from,
                         to,
@@ -2704,9 +2718,9 @@ class P2PConnection implements SecureConnection {
                 }
 
                 processedSinceYield++;
-                if (processedSinceYield >= 8 || data.length > 32 * 1024) {
+                if (processedSinceYield >= 8 || data.length > P2P_TRANSPORT_START_CONTROL_MESSAGE_READER_DATA_LENGTH_LIMIT) {
                     processedSinceYield = 0;
-                    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                    await sleep(0);
                 }
             }
         } catch {
@@ -2749,7 +2763,7 @@ class P2PConnection implements SecureConnection {
                     processedSinceYield++;
                     if (processedSinceYield >= 8) {
                         processedSinceYield = 0;
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                        await sleep(0);
                     }
                 }
             }
@@ -2810,12 +2824,6 @@ export class P2PTransport implements SecureTransport {
     } | null = null;
     private localEndpointPromise: Promise<string | undefined> | null = null;
 
-    private readonly MAX_USERNAME_ALIASES = 500;
-    private readonly MAX_KNOWN_IDENTITIES = 500;
-    private readonly MAX_CERT_REQUEST_TIMESTAMPS = 200;
-    private readonly MAX_CERT_REQUESTS_PER_MINUTE = 12;
-    private readonly MAX_CONNECTIONS = 64;
-
     private bridgeEventUnlisten: UnlistenFn | null = null;
     private inboundBridgeEventQueue: Array<{
         data: any;
@@ -2823,10 +2831,8 @@ export class P2PTransport implements SecureTransport {
         generation: number;
     }> = [];
     private inboundBridgeEventDraining: boolean = false;
-    private readonly MAX_INBOUND_BRIDGE_EVENT_QUEUE = 1024;
     private inboundBridgeEventCount = 0;
     private inboundBridgeEventBytes = 0;
-    private readonly MAX_INBOUND_BRIDGE_EVENT_BYTES = 16 * 1024 * 1024;
     private pendingInboundTrust = new Map<string, { connectionToken: number; cancel: () => void }>();
 
     private isOpaqueBridgeId(value: string): boolean {
@@ -3019,7 +3025,7 @@ export class P2PTransport implements SecureTransport {
         const next = current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
         this.peerIdentityEpochs.delete(peerId);
         this.peerIdentityEpochs.set(peerId, next);
-        while (this.peerIdentityEpochs.size > this.MAX_KNOWN_IDENTITIES) {
+        while (this.peerIdentityEpochs.size > MAX_KNOWN_IDENTITIES) {
             const oldest = this.peerIdentityEpochs.keys().next().value as string | undefined;
             if (!oldest) break;
             this.peerIdentityEpochs.delete(oldest);
@@ -3048,7 +3054,7 @@ export class P2PTransport implements SecureTransport {
         try {
             return JSON.stringify(data)?.length ?? 0;
         } catch {
-            return this.MAX_INBOUND_BRIDGE_EVENT_BYTES + 1;
+            return MAX_INBOUND_BRIDGE_EVENT_BYTES + 1;
         }
     }
 
@@ -3063,7 +3069,7 @@ export class P2PTransport implements SecureTransport {
         if (data.type === '__p2p_connected') return;
 
         const size = this.estimateBridgeEventBytes(data);
-        if (!Number.isSafeInteger(size) || size <= 0 || size > this.MAX_INBOUND_BRIDGE_EVENT_BYTES) {
+        if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_INBOUND_BRIDGE_EVENT_BYTES) {
             const connectionId = data.connectionId;
             const connectionToken = data.connectionToken;
             if (
@@ -3078,8 +3084,8 @@ export class P2PTransport implements SecureTransport {
 
         const isClosedEvent = data.type === '__p2p_closed';
         const isOverLimit = () =>
-            this.inboundBridgeEventCount >= this.MAX_INBOUND_BRIDGE_EVENT_QUEUE ||
-            this.inboundBridgeEventBytes + size > this.MAX_INBOUND_BRIDGE_EVENT_BYTES;
+            this.inboundBridgeEventCount >= MAX_INBOUND_BRIDGE_EVENT_QUEUE ||
+            this.inboundBridgeEventBytes + size > MAX_INBOUND_BRIDGE_EVENT_BYTES;
 
         if (isClosedEvent && isOverLimit()) {
             try {
@@ -3139,7 +3145,7 @@ export class P2PTransport implements SecureTransport {
                     processedSinceYield++;
                     if (processedSinceYield >= 4) {
                         processedSinceYield = 0;
-                        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                        await sleep(0);
                     }
                 }
             }
@@ -3157,7 +3163,7 @@ export class P2PTransport implements SecureTransport {
         const existing = this.pendingInboundTrust.get(connectionId);
         if (existing?.connectionToken === connectionToken) return;
         existing?.cancel();
-        if (this.pendingInboundTrust.size >= 32) {
+        if (this.pendingInboundTrust.size >= P2P_TRANSPORT_PENDING_INBOUND_TRUST_SIZE_LIMIT) {
             void p2p.disconnect(connectionId, connectionToken).catch(() => { });
             return;
         }
@@ -3179,7 +3185,7 @@ export class P2PTransport implements SecureTransport {
         const timer = setTimeout(() => {
             pending.cancel();
             void p2p.disconnect(connectionId, connectionToken).catch(() => { });
-        }, 10_000);
+        }, P2P_TRANSPORT_RESTORE_INBOUND_PEER_TRUST_TIMEOUT_MS);
         this.pendingInboundTrust.set(connectionId, pending);
         const isCurrent = () => (
             this.pendingInboundTrust.get(connectionId) === pending &&
@@ -3323,9 +3329,9 @@ export class P2PTransport implements SecureTransport {
                 if (connection) {
                 } else if (existingForPeer) {
                     connection = existingForPeer;
-                } else if (this.connections.size >= this.MAX_CONNECTIONS) {
+                } else if (this.connections.size >= MAX_P2P_CONNECTIONS) {
                     console.warn('[P2P-RECV] DROP: connection cap reached; refusing new inbound peer', {
-                        cap: this.MAX_CONNECTIONS
+                        cap: MAX_P2P_CONNECTIONS
                     });
                     void p2p.disconnect(connectionId, connectionToken).catch(() => { });
                     return;
@@ -3731,8 +3737,8 @@ export class P2PTransport implements SecureTransport {
                     }
 
                     assertCurrent();
-                    if (new Set(this.connections.values()).size >= this.MAX_CONNECTIONS) {
-                        throw new Error(`Maximum P2P connections reached (${this.MAX_CONNECTIONS})`);
+                    if (new Set(this.connections.values()).size >= MAX_P2P_CONNECTIONS) {
+                        throw new Error(`Maximum P2P connections reached (${MAX_P2P_CONNECTIONS})`);
                     }
                     const connection = new P2PConnection(
                         peerKey,
@@ -3941,8 +3947,8 @@ export class P2PTransport implements SecureTransport {
     }
 
     private pruneStaleMaps(): void {
-        if (this.usernameAliases.size > this.MAX_USERNAME_ALIASES) {
-            let toRemove = this.usernameAliases.size - this.MAX_USERNAME_ALIASES;
+        if (this.usernameAliases.size > MAX_USERNAME_ALIASES) {
+            let toRemove = this.usernameAliases.size - MAX_USERNAME_ALIASES;
             for (const key of this.usernameAliases.keys()) {
                 if (toRemove <= 0) break;
                 if (!this.connections.has(key)) {
@@ -3953,8 +3959,8 @@ export class P2PTransport implements SecureTransport {
             }
         }
         
-        if (this.knownPeerIdentities.size > this.MAX_KNOWN_IDENTITIES) {
-            let toRemove = this.knownPeerIdentities.size - this.MAX_KNOWN_IDENTITIES;
+        if (this.knownPeerIdentities.size > MAX_KNOWN_IDENTITIES) {
+            let toRemove = this.knownPeerIdentities.size - MAX_KNOWN_IDENTITIES;
             for (const key of this.knownPeerIdentities.keys()) {
                 if (toRemove <= 0) break;
                 if (!this.connections.has(key)) {
@@ -3964,8 +3970,8 @@ export class P2PTransport implements SecureTransport {
             }
         }
         
-        if (this.peerCertRequestTimestamps.size > this.MAX_CERT_REQUEST_TIMESTAMPS) {
-            let toRemove = this.peerCertRequestTimestamps.size - this.MAX_CERT_REQUEST_TIMESTAMPS;
+        if (this.peerCertRequestTimestamps.size > MAX_CERT_REQUEST_TIMESTAMPS) {
+            let toRemove = this.peerCertRequestTimestamps.size - MAX_CERT_REQUEST_TIMESTAMPS;
             for (const key of this.peerCertRequestTimestamps.keys()) {
                 if (toRemove <= 0) break;
                 if (!this.connections.has(key)) {
@@ -4266,7 +4272,7 @@ export class P2PTransport implements SecureTransport {
             this.knownPeerIdentities.delete(previousEndpointId);
         }
 
-        if (this.authenticatedEndpoints.size >= this.MAX_KNOWN_IDENTITIES && !this.authenticatedEndpoints.has(peerId)) {
+        if (this.authenticatedEndpoints.size >= MAX_KNOWN_IDENTITIES && !this.authenticatedEndpoints.has(peerId)) {
             const oldest = this.authenticatedEndpoints.keys().next().value;
             if (oldest !== undefined) this.evictAuthenticatedEndpoint(oldest);
         }
@@ -4305,14 +4311,14 @@ export class P2PTransport implements SecureTransport {
         if (!this.isSafePeerId(appPeerId)) return;
         const now = Date.now();
         const last = this.peerCertRequestTimestamps.get(appPeerId) || 0;
-        if (now - last < 30_000) return;
-        if (now - this.peerCertRequestWindow.startedAt >= 60_000) {
+        if (now - last < P2P_CERT_REQUEST_COOLDOWN_MS) return;
+        if (now - this.peerCertRequestWindow.startedAt >= P2P_TRANSPORT_PEER_CERT_REQUEST_WINDOW_STARTED_AT_LIMIT) {
             this.peerCertRequestWindow = { startedAt: now, count: 0 };
         }
-        if (this.peerCertRequestWindow.count >= this.MAX_CERT_REQUESTS_PER_MINUTE) return;
+        if (this.peerCertRequestWindow.count >= MAX_CERT_REQUESTS_PER_MINUTE) return;
         this.peerCertRequestWindow.count++;
         if (
-            this.peerCertRequestTimestamps.size >= this.MAX_CERT_REQUEST_TIMESTAMPS &&
+            this.peerCertRequestTimestamps.size >= MAX_CERT_REQUEST_TIMESTAMPS &&
             !this.peerCertRequestTimestamps.has(appPeerId)
         ) {
             const oldest = this.peerCertRequestTimestamps.keys().next().value;

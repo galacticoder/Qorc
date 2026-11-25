@@ -1,13 +1,16 @@
-import { USERNAME_DISPLAY_MAX_LENGTH, SECURE_DB_BLOCKED_MIME_TYPES, MAX_FILE_SIZE } from '../constants';
+import {
+  SECURE_DB_BLOCKED_MIME_TYPES,
+  MAX_FILE_SIZE,
+  DATABASE_UTILS_FILE_ID_LENGTH_LIMIT,
+} from '../constants';
+import { isValidDisplayName } from '../sanitizers';
 import type { MessageReceipt } from '../../components/chat/messaging/types';
 
 // Sanitize username for database operations
 export const sanitizeDbUsername = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > USERNAME_DISPLAY_MAX_LENGTH) return null;
-  if (/[\x00-\x1F\x7F]/.test(trimmed)) return null;
-  return trimmed;
+  return isValidDisplayName(trimmed) ? trimmed : null;
 };
 
 // Validate file data
@@ -22,7 +25,7 @@ export const validateFileData = (data: ArrayBuffer | Blob, fileId: string): void
     throw new Error('File is empty');
   }
 
-  if (!fileId || typeof fileId !== 'string' || fileId.length === 0 || fileId.length > 255) {
+  if (!fileId || typeof fileId !== 'string' || fileId.length === 0 || fileId.length > DATABASE_UTILS_FILE_ID_LENGTH_LIMIT) {
     throw new Error('Invalid file ID');
   }
 

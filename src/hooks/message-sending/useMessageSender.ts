@@ -1,3 +1,12 @@
+import {
+  MAX_CONCURRENT_SESSION_PREFETCHES,
+  MAX_DELIVERED_OPERATION_TOMBSTONES,
+  MAX_DURABLE_SEND_RETRY_ATTEMPTS,
+  RETRY_REHYDRATE_DELAY_MS,
+  USE_MESSAGE_SENDER_SCHEDULE_TIMEOUT_MS,
+  USE_MESSAGE_SENDER_INTERVAL_MS,
+  SESSION_BUNDLE_REQUEST_COOLDOWN_MS,
+} from '../../lib/constants';
 import React, { useCallback, useRef, useEffect } from 'react';
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
@@ -19,7 +28,7 @@ import { createSessionReadyHandler, createSessionResetRetryHandler } from './han
 import { buildMessagePayload, dispatchLocalEvents, storeUnacknowledgedMessage, requestBundleForRetry } from './send';
 import {
   enqueueRetry,
-  isPendingRetryExpired,
+  hasExpiredRetries,
   loadRetryQueue,
   persistRetryQueue,
   pinRetryEntry,
@@ -39,11 +48,8 @@ import {
   isControlOperationId,
 } from '../../lib/messages/message-controls';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
-
-const MAX_DURABLE_SEND_RETRY_ATTEMPTS = 2;
-const MAX_CONCURRENT_SESSION_PREFETCHES = 16;
-const MAX_DELIVERED_OPERATION_TOMBSTONES = 1000;
-const RETRY_REHYDRATE_DELAY_MS = 5000;
+import { deliveryReceiptOutbox } from '../../lib/signals/delivery-receipt-outbox';
+import { purgeQueuedReceiptsForPeer } from './useMessageReceipts';
 
 const retryOperationKey = (peer: string, operationId: string): string => (
   `${peer.length}:${peer}${operationId}`
@@ -67,11 +73,13 @@ export function useMessageSender(
   const pendingRetryMessagesRef = useRef<Map<string, PendingRetryMessage[]>>(new Map());
   const retryRehydratedRef = useRef(false);
   const drainingPeersRef = useRef<Set<string>>(new Set());
+  const deletingPeersRef = useRef(new Map<string, object>());
   const inFlightOperationsRef = useRef<Map<string, { done: Promise<void>; resolve: () => void }>>(new Map());
   const deliveredOperationsRef = useRef<Map<string, number>>(new Map());
   const retryPersistenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryRehydrateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryRehydrateOwnerRef = useRef<object | null>(null);
+  const retryRestorePromiseRef = useRef<Promise<void> | null>(null);
   useEffect(() => {
     const account = isLoggedIn
       ? canonicalAuthUsernameOrNull(currentUsername || loginUsernameRef.current)
@@ -83,14 +91,16 @@ export function useMessageSender(
     sessionPrefetchMap.current.clear();
     lastSessionBundleReqTsRef.current.clear();
     releaseRetryMap(pendingRetryMessagesRef.current);
-    pendingRetryMessagesRef.current.clear();
+    pendingRetryMessagesRef.current = new Map();
     drainingPeersRef.current.clear();
+    deletingPeersRef.current.clear();
     deliveredOperationsRef.current.clear();
     if (retryPersistenceTimerRef.current) clearTimeout(retryPersistenceTimerRef.current);
     retryPersistenceTimerRef.current = null;
     if (retryRehydrateTimerRef.current) clearTimeout(retryRehydrateTimerRef.current);
     retryRehydrateTimerRef.current = null;
     retryRehydrateOwnerRef.current = null;
+    retryRestorePromiseRef.current = null;
     for (const operation of inFlightOperationsRef.current.values()) operation.resolve();
     inFlightOperationsRef.current.clear();
     retryRehydratedRef.current = false;
@@ -109,7 +119,7 @@ export function useMessageSender(
         if (!isCurrent()) return;
         void persistRetryQueue(secureDBRef, pendingRetryMessagesRef.current, isCurrent)
           .catch(() => { if (isCurrent()) schedule(); });
-      }, 5000);
+      }, USE_MESSAGE_SENDER_SCHEDULE_TIMEOUT_MS);
     };
     schedule();
   }, [loginUsernameRef, secureDBRef]);
@@ -125,14 +135,12 @@ export function useMessageSender(
         canonicalAuthUsernameOrNull(loginUsernameRef.current) === account
       );
       if (!isCurrent()) return;
-      const hasExpired = Array.from(pendingRetryMessagesRef.current.values())
-        .some((entries) => entries.some((entry) => isPendingRetryExpired(entry)));
-      if (!hasExpired) return;
+      if (!hasExpiredRetries(pendingRetryMessagesRef.current)) return;
       void persistRetryQueue(secureDBRef, pendingRetryMessagesRef.current, isCurrent)
         .catch(() => {
           if (isCurrent()) scheduleRetryPersistence(account!, generation);
         });
-    }, 10_000);
+    }, USE_MESSAGE_SENDER_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [currentUsername, loginUsernameRef, scheduleRetryPersistence, secureDBRef]);
 
@@ -171,6 +179,34 @@ export function useMessageSender(
     }
     await persistRetryQueue(secureDBRef, pendingRetryMessagesRef.current, isCurrent);
   }, [loginUsernameRef, secureDBRef]);
+
+  const deleteConversationWithSendCleanup = useCallback(async (peer: string, deleteConversation: () => Promise<void>) => {
+    const account = activeAccountRef.current;
+    const generation = accountGenerationRef.current;
+    const db = secureDBRef.current;
+    const isCurrent = () => !!account && account === activeAccountRef.current &&
+      account === canonicalAuthUsernameOrNull(loginUsernameRef.current) &&
+      generation === accountGenerationRef.current && db === secureDBRef.current;
+    if (!account || !db || !isCurrent()) throw new Error('Conversation account is unavailable');
+    if (deletingPeersRef.current.has(peer)) return;
+
+    const deletion = {};
+    deletingPeersRef.current.set(peer, deletion);
+    try {
+      const prefix = retryOperationKey(peer, '');
+      await Promise.all([
+        retryRestorePromiseRef.current,
+        ...Array.from(inFlightOperationsRef.current, ([key, flight]) => key.startsWith(prefix) ? flight.done : null),
+      ]);
+      if (!isCurrent() || !retryRehydratedRef.current) throw new Error('Message retry queue is unavailable');
+      await db.clearAllUnacknowledgedMessagesForPeer(peer);
+      if (!isCurrent()) return;
+      await clearPendingRetriesForPeer(peer, account, generation);
+      if (isCurrent()) await deleteConversation();
+    } finally {
+      if (deletingPeersRef.current.get(peer) === deletion) deletingPeersRef.current.delete(peer);
+    }
+  }, [clearPendingRetriesForPeer, loginUsernameRef, secureDBRef]);
 
   const handleSendMessage = useCallback(
     async (user: UserWithKeys, content: string, replyTo?: string | { id: string; sender?: string; content?: string }, messageSignalType?: string, originalMessageId?: string, editMessageId?: string, retryId?: string) => {
@@ -235,6 +271,12 @@ export function useMessageSender(
       const operationId = suppliedRetryId || (isMutation
         ? createControlOperationId(timestamp)
         : messageId);
+      if (deletingPeersRef.current.has(recipientUsername)) {
+        if (suppliedRetryId) return;
+        throw new Error('Conversation deletion is in progress');
+      }
+      if (suppliedRetryId && !pendingRetryMessagesRef.current.get(recipientUsername)
+        ?.some((entry) => entry.retryId === suppliedRetryId)) return;
       const editTargetId = isEditMessage ? (suppliedEditId || targetMessageId) : suppliedEditId;
       const operationKey = retryOperationKey(recipientUsername, operationId);
       const existingFlight = inFlightOperationsRef.current.get(operationKey);
@@ -573,7 +615,7 @@ export function useMessageSender(
     if (!isCurrent()) return;
     if (has?.hasSession) return;
     const now = Date.now();
-    if (now - (lastSessionBundleReqTsRef.current.get(peer) || 0) < 3000) return;
+    if (now - (lastSessionBundleReqTsRef.current.get(peer) || 0) < SESSION_BUNDLE_REQUEST_COOLDOWN_MS) return;
     recordSessionRequest(lastSessionBundleReqTsRef.current, peer, now);
 
     if (sessionPrefetchMap.current.has(peer)) {
@@ -635,7 +677,7 @@ export function useMessageSender(
       if (!isCurrent() || retryRehydrateTimerRef.current) return;
       retryRehydrateTimerRef.current = setTimeout(() => {
         retryRehydrateTimerRef.current = null;
-        void restore();
+        retryRestorePromiseRef.current = restore();
       }, RETRY_REHYDRATE_DELAY_MS);
     };
 
@@ -703,10 +745,13 @@ export function useMessageSender(
       }
     };
 
-    void restore();
+    retryRestorePromiseRef.current = restore();
     return () => {
       cancelled = true;
-      if (retryRehydrateOwnerRef.current === owner) retryRehydrateOwnerRef.current = null;
+      if (retryRehydrateOwnerRef.current === owner) {
+        retryRehydrateOwnerRef.current = null;
+        retryRestorePromiseRef.current = null;
+      }
       if (retryRehydrateTimerRef.current) clearTimeout(retryRehydrateTimerRef.current);
       retryRehydrateTimerRef.current = null;
     };
@@ -719,15 +764,19 @@ export function useMessageSender(
       if (!account || activeAccountRef.current !== account) {
         throw new Error('Message retry cleanup account is unavailable');
       }
-      try {
-        await clearPendingRetriesForPeer(peer, account, generation);
-      } catch (error) {
+      purgeQueuedReceiptsForPeer(peer);
+      const [retries, receipts] = await Promise.allSettled([
+        clearPendingRetriesForPeer(peer, account, generation),
+        deliveryReceiptOutbox.purgePeer(account, peer),
+      ]);
+      if (retries.status === 'rejected') {
         if (
           generation === accountGenerationRef.current &&
           activeAccountRef.current === account
         ) scheduleRetryPersistence(account, generation);
-        throw error;
+        throw retries.reason;
       }
+      if (receipts.status === 'rejected') throw receipts.reason;
     });
   }, [
     clearPendingRetriesForPeer, currentUsername, loginUsernameRef,
@@ -823,7 +872,8 @@ export function useMessageSender(
       pendingRetryMessagesRef,
       secureDBRef,
       activeAccountRef,
-      accountGenerationRef
+      accountGenerationRef,
+      deletingPeersRef,
     );
 
     window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady as EventListener);
@@ -834,5 +884,5 @@ export function useMessageSender(
     };
   }, [handleSendMessage, secureDBRef]);
 
-  return { handleSendMessage, prefetchSessionForPeer };
+  return { handleSendMessage, prefetchSessionForPeer, deleteConversationWithSendCleanup };
 }

@@ -78,7 +78,13 @@ selectively accelerated for one victim without forking the log.
 
 A client stores its last verified epoch, entry count, and root. On sync it
 fetches deltas since that epoch, folds them, and compares against the signed
-head. A client with no local state syncs **from the log's genesis epoch**, which
+head. Partial pages stay in memory until the fold reproduces the signed head.
+If the sync fails or runs out of pages, it cannot advance the checkpoint or
+authorize a contact. The checkpoint keeps the latest epoch open so the next
+sync can reread it as new records arrive. Exact replays are allowed, but
+conflicting records trigger a security incident.
+
+A client with no verified checkpoint syncs **from the log's genesis epoch**, which
 the signed head reports, not from epoch 0, which would mean walking every hour
 since 1970. There is no trusted-recent-head shortcut: the fold begins at
 the fixed genesis root with entry count 0, so a server that understates its

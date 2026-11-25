@@ -1,5 +1,8 @@
 //! Native cryptographic work used by authenticated client protocols.
 
+use crate::constants::auth_pow::{
+    AUTH_POW_MAX_BATCH_ITERATIONS, AUTH_POW_MAX_DIFFICULTY, AUTH_POW_MAX_PENDING,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,11 +11,8 @@ use tokio::sync::Semaphore;
 
 const AUTH_POW_SEED_BYTES: usize = 16;
 const AUTH_POW_NONCE_BYTES: usize = 8;
-const AUTH_POW_MAX_DIFFICULTY: u8 = 28;
-const AUTH_POW_MAX_BATCH_ITERATIONS: u32 = 1_000_000;
 static AUTH_POW_WORKER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static AUTH_POW_PENDING: AtomicUsize = AtomicUsize::new(0);
-const AUTH_POW_MAX_PENDING: usize = 64;
 
 struct PendingGuard;
 impl Drop for PendingGuard {

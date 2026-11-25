@@ -2,6 +2,7 @@
  * WebSocket Message Handler
  */
 
+import { MESSAGE_HANDLER_MESSAGE_TYPE_LENGTH_LIMIT } from '../constants';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import type { MessageHandler } from '../types/websocket-types';
 
@@ -49,7 +50,7 @@ export class WebSocketMessageHandler {
       const message = data;
 
       if (typeof message.type === 'string') {
-        if (message.type.length > 100) {
+        if (message.type.length > MESSAGE_HANDLER_MESSAGE_TYPE_LENGTH_LIMIT) {
           return;
         }
 

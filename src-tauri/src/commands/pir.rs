@@ -1,5 +1,6 @@
 //! Client side PIR driven through `qorc-pir-client` sidecar
 
+use crate::constants::pir::{MAX_BATCH_QUERIES, MAX_ENTRY_BYTES, MAX_FRAME_BYTES, MAX_RECORDS};
 use std::io::{Read, Write};
 use std::process::Child;
 use std::sync::Mutex;
@@ -16,11 +17,6 @@ const OP_DISCARD: u8 = 3;
 const OP_QUERY_BATCH: u8 = 4;
 const OP_DECODE_BATCH: u8 = 5;
 const STATUS_OK: u8 = 0;
-
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RECORDS: u32 = 1 << 20;
-const MAX_ENTRY_BYTES: u32 = 1 << 20;
-const MAX_BATCH_QUERIES: usize = 16;
 
 static SIDECAR: Mutex<Option<Child>> = Mutex::new(None);
 

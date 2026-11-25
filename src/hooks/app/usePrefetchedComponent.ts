@@ -1,3 +1,4 @@
+import { USE_PREFETCHED_COMPONENT_RUN_TIMEOUT_MS } from '../../lib/constants';
 import { useEffect, useRef, useState } from 'react';
 
 type IdleCallback = (callback: () => void, options?: { timeout: number }) => number;
@@ -22,7 +23,7 @@ export function usePrefetchedComponent<T>(load: () => Promise<T>, enabled: boole
 
     const requestIdle = (window as unknown as { requestIdleCallback?: IdleCallback }).requestIdleCallback;
     const cancelIdle = (window as unknown as { cancelIdleCallback?: CancelIdleCallback }).cancelIdleCallback;
-    const handle = requestIdle ? requestIdle(run, { timeout: 1500 }) : window.setTimeout(run, 200);
+    const handle = requestIdle ? requestIdle(run, { timeout: 1500 }) : window.setTimeout(run, USE_PREFETCHED_COMPONENT_RUN_TIMEOUT_MS);
 
     return () => {
       cancelled = true;

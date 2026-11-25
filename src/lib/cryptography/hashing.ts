@@ -1,3 +1,4 @@
+import { HASHING_KEY_LENGTH_EXPECTED, HASHING_EXPECTED_MAC_LENGTH_EXPECTED } from '../constants';
 import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
 import { SecureMemory } from './secure-memory';
 
@@ -7,7 +8,7 @@ export class HashingService {
     if (!(key instanceof Uint8Array)) throw new Error('Key must be Uint8Array');
 
     let normalizedKey = key;
-    if (key.length !== 32) normalizedKey = nobleBlake3(key, { dkLen: 32 });
+    if (key.length !== HASHING_KEY_LENGTH_EXPECTED) normalizedKey = nobleBlake3(key, { dkLen: 32 });
     try {
       const keyedHash = nobleBlake3.create({ key: normalizedKey });
       keyedHash.update(message);
@@ -22,7 +23,7 @@ export class HashingService {
     key: Uint8Array,
     expectedMac: Uint8Array,
   ): Promise<boolean> {
-    if (!(expectedMac instanceof Uint8Array) || expectedMac.length !== 32) return false;
+    if (!(expectedMac instanceof Uint8Array) || expectedMac.length !== HASHING_EXPECTED_MAC_LENGTH_EXPECTED) return false;
     const computedMac = await this.generateBlake3Mac(message, key);
     try {
       return SecureMemory.constantTimeCompare(computedMac, expectedMac);

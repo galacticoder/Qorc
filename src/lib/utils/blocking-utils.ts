@@ -1,17 +1,23 @@
+import {
+  CONTROL_CHARS_REGEX,
+  HEX_PATTERN,
+  BLOCKING_UTILS_USERNAME_LENGTH_MINIMUM,
+  BLOCKING_UTILS_USERNAME_LENGTH_LIMIT,
+} from '../constants';
 // Validate username format
 export const validateUsername = (username: string): void => {
-  if (typeof username !== 'string' || username.length < 3 || username.length > 128) {
+  if (typeof username !== 'string' || username.length < BLOCKING_UTILS_USERNAME_LENGTH_MINIMUM || username.length > BLOCKING_UTILS_USERNAME_LENGTH_LIMIT) {
     throw new Error('Invalid username');
   }
 
-  if (/[\x00-\x1F\x7F]/.test(username)) {
+  if (username.search(CONTROL_CHARS_REGEX) !== -1) {
     throw new Error('Username contains invalid control characters');
   }
 
-  const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
+  const isPseudonym = HEX_PATTERN.test(username);
 
   if (isPseudonym) {
-    if (username.length > 128) {
+    if (username.length > BLOCKING_UTILS_USERNAME_LENGTH_LIMIT) {
       throw new Error('Invalid pseudonymized username length');
     }
     return;

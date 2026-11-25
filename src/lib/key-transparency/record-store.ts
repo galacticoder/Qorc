@@ -1,4 +1,13 @@
 import {
+  KEY_TRANSPARENCY_CHUNK_EPOCHS,
+  KEY_TRANSPARENCY_MAX_RECORDS_PER_CHUNK,
+  KEY_TRANSPARENCY_MAX_RECORD_CHUNKS,
+  KEY_TRANSPARENCY_MAX_TRANSITION_CHARS,
+  VERIFIED_LOG_SCOPE,
+  KEY_TRANSPARENCY_RECORD_ENTRY_KEYS,
+  RECORD_STORE_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED,
+} from '../constants';
+import {
   KEY_TRANSPARENCY_MAX_LOG_SIZE,
   exactPlainObject,
   isKeyTransparencyHash,
@@ -19,13 +28,6 @@ import { parseProtocolCollectionStore } from './store-serialization';
 import { PROTOCOL_KEYS } from '../config/protocol-keys';
 import { STORAGE_KEYS, STORAGE_KEY_DOMAINS, STORAGE_PREFIXES } from '../database/storage-keys';
 import { KEY_TRANSPARENCY_PROTOCOL } from '../../../shared/protocol-keys.js';
-
-
-export const KEY_TRANSPARENCY_CHUNK_EPOCHS = 720;
-const MAX_RECORDS_PER_CHUNK = 65_536;
-const MAX_CHUNKS = Math.ceil(KEY_TRANSPARENCY_MAX_LOG_SIZE / 1024);
-const RECORD_ENTRY_KEYS = ['epoch', 'epochLabel', 'recordHash', 'version'];
-const MAX_TRANSITION_CHARS = 64 * 1024;
 
 const enqueue = createStoreLock();
 
@@ -55,6 +57,10 @@ function storageKey(accountScope: string, suffix: string): string {
   );
 }
 
+function verifiedLogKey(accountScope: string, suffix: string): string {
+  return storageKey(accountScope, `${VERIFIED_LOG_SCOPE}:${suffix}`);
+}
+
 export function keyTransparencyChunkIndex(epoch: number): number {
   return Math.floor(epoch / KEY_TRANSPARENCY_CHUNK_EPOCHS);
 }
@@ -62,7 +68,7 @@ export function keyTransparencyChunkIndex(epoch: number): number {
 function parseEntry(value: unknown): StoredKeyTransparencyRecord {
   const entry = value as StoredKeyTransparencyRecord;
   if (
-    !exactPlainObject(entry, RECORD_ENTRY_KEYS) ||
+    !exactPlainObject(entry, KEY_TRANSPARENCY_RECORD_ENTRY_KEYS) ||
     !Number.isSafeInteger(entry.epoch) ||
     entry.epoch < 0 ||
     !isKeyTransparencyLabel(entry.epochLabel) ||
@@ -77,7 +83,7 @@ function parseChunk(raw: string | null): StoredKeyTransparencyRecord[] {
   return parseProtocolCollectionStore(raw, {
     protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_RECORD_STORE,
     collectionKey: 'records',
-    maxEntries: MAX_RECORDS_PER_CHUNK,
+    maxEntries: KEY_TRANSPARENCY_MAX_RECORDS_PER_CHUNK,
     parseEntry,
     corrupt: corruptRecordStore,
     parseError: 'Stored key-transparency record chunk is corrupt',
@@ -90,7 +96,7 @@ export async function loadKeyTransparencyCheckpoint(
   ownerUsername: string,
 ): Promise<KeyTransparencyCheckpoint | null> {
   const accountScope = deriveLocalAccountScope(context, normalizeOwner(ownerUsername));
-  const raw = await storage.get(storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_CHECKPOINT));
+  const raw = await storage.get(verifiedLogKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_CHECKPOINT));
   await assertCurrentServerContext(context);
   if (raw === null) return null;
   let parsed: unknown;
@@ -123,7 +129,9 @@ export async function commitKeyTransparencyDelta(
   context: CurrentServerContext,
   ownerUsername: string,
   records: StoredKeyTransparencyRecord[],
+  fromEpoch: number,
   checkpoint: KeyTransparencyCheckpoint,
+  assertGeneration: () => void,
 ): Promise<void> {
   const owner = normalizeOwner(ownerUsername);
   await enqueue(async () => {
@@ -131,28 +139,54 @@ export async function commitKeyTransparencyDelta(
     const byChunk = new Map<number, StoredKeyTransparencyRecord[]>();
     for (const record of records) {
       const index = keyTransparencyChunkIndex(record.epoch);
-      if (index >= MAX_CHUNKS) throw new Error('Key-transparency epoch is out of range');
+      if (index >= KEY_TRANSPARENCY_MAX_RECORD_CHUNKS) throw new Error('Key-transparency epoch is out of range');
       const bucket = byChunk.get(index);
       if (bucket) bucket.push(record); else byChunk.set(index, [record]);
     }
 
-    for (const [index, appended] of byChunk) {
-      const key = storageKey(accountScope, `chunk:${index}`);
+    const firstChunk = keyTransparencyChunkIndex(fromEpoch);
+    const lastChunk = keyTransparencyChunkIndex(checkpoint.epoch);
+    const writes = new Map<string, string>();
+    for (let index = firstChunk; index <= lastChunk; index++) {
+      const appended = byChunk.get(index) ?? [];
+      const key = verifiedLogKey(accountScope, `chunk:${index}`);
       const existing = parseChunk(await storage.get(key));
       await assertCurrentServerContext(context);
-      const seen = new Set(existing.map((entry) => `${entry.epoch}\0${entry.epochLabel}`));
+      assertGeneration();
+      const recordKey = (entry: StoredKeyTransparencyRecord) => `${entry.epoch}\0${entry.epochLabel}`;
+      const seen = new Map(existing.map(entry => [recordKey(entry), entry]));
+      if (seen.size !== existing.length) corruptRecordStore('Stored key-transparency records contain duplicates');
+      const received = new Set<string>();
       const merged = [...existing];
       for (const record of appended) {
-        if (seen.has(`${record.epoch}\0${record.epochLabel}`)) continue;
-        merged.push(record);
+        const id = recordKey(record);
+        if (received.has(id)) corruptRecordStore('Verified key-transparency delta contains duplicate records');
+        received.add(id);
+        const previous = seen.get(id);
+        if (previous && (previous.recordHash !== record.recordHash || previous.version !== record.version)) {
+          corruptRecordStore('Verified key-transparency record conflicts with storage');
+        }
+        if (!previous) merged.push(record);
       }
-      if (merged.length > MAX_RECORDS_PER_CHUNK) {
+      if (existing.some(entry => entry.epoch >= fromEpoch && entry.epoch <= checkpoint.epoch && !received.has(recordKey(entry)))) {
+        corruptRecordStore('Verified key-transparency delta omits a stored record');
+      }
+      if (merged.length > KEY_TRANSPARENCY_MAX_RECORDS_PER_CHUNK) {
         throw new Error('Key-transparency record chunk is full');
       }
-      const serialized = JSON.stringify({
-        protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_RECORD_STORE,
-        records: merged,
-      });
+      if (merged.length > existing.length) {
+        writes.set(key, JSON.stringify({
+          protocol: PROTOCOL_KEYS.KEY_TRANSPARENCY_RECORD_STORE,
+          records: merged,
+        }));
+      }
+    }
+
+    // Check every chunk before writing any. A retry after an interrupted write
+    // can reuse exact records, and the checkpoint only advances once all writes succeed.
+    for (const [key, serialized] of writes) {
+      await assertCurrentServerContext(context);
+      assertGeneration();
       if (!await storage.set(key, serialized)) {
         throw new Error('Key-transparency records could not be persisted');
       }
@@ -164,7 +198,9 @@ export async function commitKeyTransparencyDelta(
       entryCount: checkpoint.entryCount,
       rootHash: checkpoint.rootHash,
     });
-    const checkpointKey = storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_CHECKPOINT);
+    const checkpointKey = verifiedLogKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_CHECKPOINT);
+    await assertCurrentServerContext(context);
+    assertGeneration();
     if (
       !await storage.set(checkpointKey, checkpointValue) ||
       await storage.get(checkpointKey) !== checkpointValue
@@ -180,7 +216,7 @@ export async function findKeyTransparencyRecordsForContact(
   discoveryEncryptionKey: Uint8Array,
   throughEpoch: number,
 ): Promise<StoredKeyTransparencyRecord[]> {
-  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== 32) {
+  if (!(discoveryEncryptionKey instanceof Uint8Array) || discoveryEncryptionKey.length !== RECORD_STORE_DISCOVERY_ENCRYPTION_KEY_LENGTH_EXPECTED) {
     throw new Error('Invalid key-transparency discovery key');
   }
   if (!Number.isSafeInteger(throughEpoch) || throughEpoch < 0) {
@@ -191,7 +227,7 @@ export async function findKeyTransparencyRecordsForContact(
   const matches: StoredKeyTransparencyRecord[] = [];
 
   for (let index = 0; index <= lastChunk; index += 1) {
-    const chunk = parseChunk(await storage.get(storageKey(accountScope, `chunk:${index}`)));
+    const chunk = parseChunk(await storage.get(verifiedLogKey(accountScope, `chunk:${index}`)));
     await assertCurrentServerContext(context);
     if (chunk.length === 0) continue;
     
@@ -223,7 +259,7 @@ export async function saveKeyTransparencyTransition(
   await enqueue(async () => {
     const accountScope = deriveLocalAccountScope(context, owner);
     const serialized = JSON.stringify(transition);
-    if (serialized.length > MAX_TRANSITION_CHARS) {
+    if (serialized.length > KEY_TRANSPARENCY_MAX_TRANSITION_CHARS) {
       throw new Error('Key-transparency transition is too large');
     }
     if (!await storage.set(storageKey(accountScope, `transition:${recordHash}`), serialized)) {
@@ -243,7 +279,7 @@ export async function loadKeyTransparencyTransition(
   const raw = await storage.get(storageKey(accountScope, `transition:${recordHash}`));
   await assertCurrentServerContext(context);
   if (raw === null) return null;
-  if (raw.length > MAX_TRANSITION_CHARS) {
+  if (raw.length > KEY_TRANSPARENCY_MAX_TRANSITION_CHARS) {
     corruptRecordStore('Stored key-transparency transition is corrupt');
   }
   try {
@@ -262,7 +298,7 @@ export async function saveOwnKeyTransparencyTransition(
   await enqueue(async () => {
     const accountScope = deriveLocalAccountScope(context, owner);
     const serialized = JSON.stringify(transition);
-    if (serialized.length > MAX_TRANSITION_CHARS) {
+    if (serialized.length > KEY_TRANSPARENCY_MAX_TRANSITION_CHARS) {
       throw new Error('Key-transparency transition is too large');
     }
     if (!await storage.set(storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_OWN_TRANSITION), serialized)) {
@@ -280,7 +316,7 @@ export async function loadOwnKeyTransparencyTransition(
   const raw = await storage.get(storageKey(accountScope, STORAGE_KEYS.KEY_TRANSPARENCY_OWN_TRANSITION));
   await assertCurrentServerContext(context);
   if (raw === null) return null;
-  if (raw.length > MAX_TRANSITION_CHARS) {
+  if (raw.length > KEY_TRANSPARENCY_MAX_TRANSITION_CHARS) {
     corruptRecordStore('Stored key-transparency transition is corrupt');
   }
   try {
