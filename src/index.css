@@ -319,6 +319,7 @@ textarea::placeholder {
   --qorc-select-shadow: 0 8px 24px rgba(17, 24, 39, .14);
   --qorc-conversation-card-bg: var(--qorc-control-bg);
   --qorc-conversation-card-hover-bg: var(--qorc-control-hover);
+  --qorc-conversation-row-hover-bg: color-mix(in srgb, var(--qorc-accent) 8%, transparent);
   --qorc-text: #17131f;
   --qorc-muted-text: #6f6475;
   --qorc-soft-text: #7c7281;
@@ -355,6 +356,7 @@ textarea::placeholder {
   --qorc-select-shadow: 0 8px 24px rgba(0, 0, 0, .32);
   --qorc-conversation-card-bg: rgb(10, 10, 10);
   --qorc-conversation-card-hover-bg: rgb(11, 11, 11);
+  --qorc-conversation-row-hover-bg: var(--qorc-control-bg);
   --qorc-text: hsl(var(--foreground));
   --qorc-muted-text: hsl(var(--muted-foreground));
   --qorc-soft-text: #8e8e93;
@@ -1511,13 +1513,8 @@ html.qorc-mobile *::-webkit-scrollbar {
 .qorc-app-shell.is-mobile .qorc-call-log-skeleton-row { min-height: 88px; grid-template-columns: 48px minmax(0, 1fr) 58px; gap: 14px; padding: 16px 12px; }
 .qorc-app-shell.is-mobile .qorc-call-log-skeleton-avatar { width: 48px; height: 48px; }
 
-.qorc-call-log-swipe.qorc-conversation-swipe,
-.qorc-call-log-swipe .qorc-conversation-swipe-content {
-  background: var(--qorc-bg);
-}
-
-.qorc-call-log-swipe .qorc-conversation-swipe-actions {
-  background: var(--qorc-control-bg);
+.qorc-call-log-swipe.qorc-conversation-swipe > .qorc-conversation-swipe-actions > .qorc-conversation-tiny-btn.qorc-call-log-delete {
+  background: transparent !important;
 }
 
 .qorc-call-log-delete.qorc-conversation-tiny-btn,
@@ -2051,12 +2048,7 @@ html.light .qorc-conversation-empty-lines span,
 
 .qorc-conversation-item:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
 .qorc-call-log-row:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
-  background: color-mix(in srgb, var(--qorc-accent) 8%, transparent);
-}
-
-.dark .qorc-conversation-item:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]),
-.dark .qorc-call-log-row:is(:hover:where(html:not([data-qorc-touch]) *), :active, [data-qorc-pressed]) {
-  background: #101015;
+  background: var(--qorc-conversation-row-hover-bg);
 }
 
 .qorc-conversation-item.is-selected,
@@ -2326,6 +2318,20 @@ html.light .qorc-conversation-empty-lines span,
 
 .qorc-conversation-swipe.is-dragging .qorc-conversation-swipe-content {
   transition: none;
+}
+
+:is(.qorc-conversation-list-swipe, .qorc-call-log-swipe) {
+  background: transparent;
+  transition: background .18s ease;
+}
+
+:is(.qorc-conversation-list-swipe, .qorc-call-log-swipe):is(.is-open, .is-dragging, :hover:where(html:not([data-qorc-touch]) *), :active, :has([data-qorc-pressed])) {
+  background: var(--qorc-conversation-row-hover-bg);
+}
+
+:is(.qorc-conversation-list-swipe, .qorc-call-log-swipe) > .qorc-conversation-swipe-content,
+:is(.qorc-conversation-list-swipe, .qorc-call-log-swipe) > .qorc-conversation-swipe-content > :is(.qorc-conversation-item, .qorc-call-log-row) {
+  background: transparent;
 }
 
 .qorc-conversation-list.is-mobile .qorc-conversation-item {
@@ -3219,6 +3225,10 @@ html.qorc-mobile .qorc-cm-screen .qorc-cm-scroll-inner { padding-bottom: max(20p
 }
 
 .qorc-more-btn[data-state="open"] { background: var(--qorc-icon-button-hover) !important; color: var(--qorc-text) !important; }
+
+.qorc-conversation-list-swipe > .qorc-conversation-swipe-actions > .qorc-conversation-tiny-btn.qorc-more-btn {
+  background: transparent !important;
+}
 
 .qorc-toolbar.has-mobile-back {
   gap: 4px;

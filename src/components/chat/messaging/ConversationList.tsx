@@ -129,7 +129,7 @@ const ConversationItem = memo<ConversationItemProps>(({
     />;
 
   return (
-    <ConversationSwipeRow enabled={mobile} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions} actionWidth={64}>
+    <ConversationSwipeRow enabled={mobile} open={actionsOpen} onOpenChange={setActionsOpen} actions={actions} actionWidth={64} className="qorc-conversation-list-swipe">
     <div
       className={cn(
         "qorc-conversation-item group",
